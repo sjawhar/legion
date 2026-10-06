@@ -203,16 +203,14 @@ func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T)
 }
 
 // jj refuses to snapshot a new file over snapshot.max-new-file-size (1MiB by default), leaving it
-// untracked with exit 0 and a warning rather than an error, under its default
-// snapshot.auto-track = "all()" (jj help -k config): every other new file is auto-tracked, so
-// "Untracked paths:" on `jj status`'s own stdout is never printed except for a refusal. Without
-// snapshotOverrides' snapshot.max-new-file-size=0 and the untrackedPaths check that follows it, @
-// would stay empty of a 2MiB uncommitted file and the push-safety check would read the workspace
-// clean and remove it; either defense alone keeps it (the override commits the file, so
-// unpushedRevset's own reachability check then keeps it; untrackedPaths would keep it directly if
-// jj ever left it untracked despite the override), so this proves the end-to-end outcome without
-// binding the test to which one engaged. TestUntrackedPathsReadsJJsOwnSection below proves the
-// parser itself against jj's documented output shape, independent of this override.
+// untracked with exit 0 and a warning rather than an error: @ would stay empty of a 2MiB
+// uncommitted file and the push-safety check would read the workspace clean and remove it.
+// snapshotOverrides deliberately leaves the size limit at its default (raising or disabling it
+// would let this very pass write a worker's oversized file into the shared clone's object store
+// it exists to shrink), so untrackedPaths, reading jj's own "Untracked paths:" section off the
+// real `jj status` this runs — never a hand-written stdout string, so a jj release that changes
+// that section's wording or shape turns this test red rather than leaving the parser's own test
+// passing against a string the real tool no longer prints — is the one thing that catches it.
 func TestRemoveFinishedKeepsAWorkspaceWhoseSnapshotLeftALargeFileUntracked(t *testing.T) {
 	run := newLocalRunner(t)
 	req := provisionRequest(t)
@@ -232,36 +230,8 @@ func TestRemoveFinishedKeepsAWorkspaceWhoseSnapshotLeftALargeFileUntracked(t *te
 	if _, err := os.Stat(ws.Dir); err != nil {
 		t.Fatalf("workspace removed, want it kept: %v", err)
 	}
-	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") {
-		t.Errorf("logged %v, want one line naming WIDGETS-42 kept", logged)
-	}
-}
-
-// untrackedPaths reads exactly the shape jj status --color=never prints (confirmed against the
-// pinned jj, 0.45.1-sami): the literal line "Untracked paths:", then one "? <path>" per path,
-// ending at the first line that is not one (jj follows the section with the working-copy summary
-// lines). A status with nothing left untracked prints no such header at all.
-func TestUntrackedPathsReadsJJsOwnSection(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		stdout string
-		want   []string
-	}{
-		{"no untracked section", "Working copy changes:\nA tracked.txt\nWorking copy  (@) : abc def\n", nil},
-		{"one untracked path", "Working copy changes:\nA tracked.txt\nUntracked paths:\n? large.bin\nWorking copy  (@) : abc def\n", []string{"large.bin"}},
-		{"more than one, nothing else tracked", "Untracked paths:\n? a.bin\n? b.bin\nWorking copy  (@) : abc def\n", []string{"a.bin", "b.bin"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := untrackedPaths(tc.stdout)
-			if len(got) != len(tc.want) {
-				t.Fatalf("untrackedPaths = %v, want %v", got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("untrackedPaths = %v, want %v", got, tc.want)
-				}
-			}
-		})
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], "large.bin") {
+		t.Errorf("logged %v, want one line naming WIDGETS-42 kept and large.bin untracked", logged)
 	}
 }
 

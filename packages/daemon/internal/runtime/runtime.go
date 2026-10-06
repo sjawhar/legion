@@ -111,11 +111,21 @@ func (k Known) Validate() error {
 	return nil
 }
 
+// RemovableWorkspace is one sibling of a tree the daemon has judged safe to remove by lifecycle
+// alone (dispatch://LEGION-583): Issue it belongs to, and MergedHead, the merged pull request's
+// head commit when it merged, empty for one that never did — GitHub deletes a squash merge's
+// branch, so that commit carries no remote bookmark of its own, and workspace-init's push-safety
+// check needs the head to tell that commit from one that was never pushed at all. internal/runtime
+// is as low as this type can live: internal/workspace already imports internal/runtime for its
+// credential helper's GitIdentity, so the reverse import internal/workspace's own type would need
+// is a cycle; internal/workspace uses this type directly instead of a type of its own.
+type RemovableWorkspace struct {
+	Issue      string `json:"issue"`
+	MergedHead string `json:"mergedHead,omitempty"`
+}
+
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
-// working on, and the environment, secrets, and prompt it starts with. The claim token travels
-// with the process because the runtime addresses the agent's connection by it — `Suspend` and
-// `Release` send a shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it
-// could not be matched to the claim it belongs to.
+// working on, and the environment, secrets, and prompt it starts with.
 //
 // Nothing in it is a place on one runtime's disk. Repository is the issue's repository, the zero
 // Repository for a configuration with none, and each runtime locates the issue's
@@ -129,16 +139,6 @@ func (k Known) Validate() error {
 // alone, for a runtime that provisions each claim's workspace in its own pod to remove from the
 // tree volume before this launch's own provisioning (dispatch://LEGION-583); nil for a runtime
 // that does not (ProvisionsWorkspaces false).
-//
-// RemovableWorkspace, the element of RemovableWorkspaces, mirrors workspace.RemovalCandidate
-// (internal/runtime cannot import internal/workspace: workspace imports runtime's GitIdentity for
-// its credential helper). The sandbox runtime converts one to the other when it builds
-// workspace-init's env.
-type RemovableWorkspace struct {
-	Issue      string
-	MergedHead string
-}
-
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string

@@ -210,26 +210,41 @@ function splitShellCommands(command: string): string[][] | undefined {
   return commands;
 }
 
-/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: `legion`
- * (or a path ending `/legion`, the worker-bin shim's absolute path) appears anywhere in words --
- * never only as the first word, the same tradeoff jjLogRewriteInvocation makes for `jj` -- so a
- * prefix before it (`time legion push`, `timeout 600 legion push`, an env assignment word such as
- * `FOO=1 legion push`, a leading `!` or `if`, which splitShellCommands's naive split leaves as a
- * word of the same simple command ahead of a `;`) still counts, and the word immediately after
- * that first mention is `push`. */
+/** The index of the first word that is name itself or ends `/name` (an absolute-path shim, e.g.
+ * the worker-bin `jj` or `legion`) and whose immediately following words equal, in order, every
+ * word of sequence ([] means no required follow-up: the bare first-mention search
+ * jjLogRewriteInvocation uses, which then scans the rest of the words itself). A later mention
+ * is tried when an earlier one's sequence does not match (`legion gh -- legion push`: the first
+ * `legion` is not followed by `push`, the second is), and neither looks only at words[0], so a
+ * prefix before the command name (`time`, `timeout 600`, an env assignment such as `FOO=1`, a
+ * leading `!` or `if`, which splitShellCommands's naive split leaves attached ahead of a `;`)
+ * never hides it. Shared by jjLogRewriteInvocation, isPushInvocation, and the handoff-complete
+ * rule's own invocation matcher. */
+function commandMatch(words: readonly string[], name: string, sequence: readonly string[]): number {
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    if (word !== name && !word?.endsWith(`/${name}`)) continue;
+    if (sequence.every((expected, offset) => words[index + 1 + offset] === expected)) return index;
+  }
+  return -1;
+}
+
+/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: a
+ * `legion` (or `.../legion`) mention immediately followed by `push`. */
 function isPushInvocation(words: readonly string[]): boolean {
-  const legion = words.findIndex((word) => word === "legion" || word.endsWith("/legion"));
-  return legion !== -1 && words[legion + 1] === "push";
+  return commandMatch(words, "legion", ["push"]) !== -1;
 }
 
 /** Whether a bash command's tokenised simple commands include a `legion push` invocation --
  * `legion push`, `cd … && legion push`, a pipeline's last segment -- so the tool_call hook mints
  * its grant with the longer pushTTL (dispatch://LEGION-583): jj's own working-copy snapshot before
- * the network push can outrun the ordinary sixty seconds on a near-full tree volume. Undefined (an
- * unterminated quote) is judged not a push: the ordinary grant is the safe default, since missing
+ * the network push can outrun the ordinary sixty seconds on a near-full tree volume. Not a string
+ * (a tool call that is not `bash`, so its `input.command` carries no shell command at all) or an
+ * unterminated quote is judged not a push: the ordinary grant is the safe default, since missing
  * a genuine push here costs only the grant expiring before it, which `legion push` already fails
  * loudly on. */
-function commandRunsPush(command: string): boolean {
+function commandRunsPush(command: unknown): boolean {
+  if (typeof command !== "string") return false;
   const commands = splitShellCommands(command);
   return commands !== undefined && commands.some(isPushInvocation);
 }
@@ -252,7 +267,7 @@ interface PaneRule {
  * with them (the spec's tradeoff: one rephrase), while `-m "undo this"` is a different word and
  * stays allowed. `undo`/`abandon` count anywhere; `restore`/`revert` only beside `op`/`operation`. */
 function jjLogRewriteInvocation(words: readonly string[]): string | undefined {
-  const jj = words.findIndex((word) => word === "jj" || word.endsWith("/jj"));
+  const jj = commandMatch(words, "jj", []);
   if (jj === -1) return undefined;
   const args = words.slice(jj + 1);
   const rewritesLog =
@@ -288,12 +303,7 @@ const LEGION_HANDOFF_COMPLETE: PaneRule = {
     LEGION_HANDOFF_COMPLETE_MENTION.test(text) ? "legion handoff complete" : undefined,
   // Both CLIs take `handoff` straight after the program and `complete` straight after `handoff`.
   invocation: (words) => {
-    const legion = words.findIndex(
-      (word, index) =>
-        (word === "legion" || word.endsWith("/legion")) &&
-        words[index + 1] === "handoff" &&
-        words[index + 2] === "complete"
-    );
+    const legion = commandMatch(words, "legion", ["handoff", "complete"]);
     return legion === -1 ? undefined : words.slice(legion).join(" ");
   },
   refusal: (attempt) =>
@@ -597,7 +607,7 @@ export default function legionExtension(pi: PiApi): void {
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
-        push: toolCall.toolName === "bash" && commandRunsPush(String(toolCall.input.command ?? "")),
+        push: toolCall.toolName === "bash" && commandRunsPush(toolCall.input.command),
       })
     );
   });

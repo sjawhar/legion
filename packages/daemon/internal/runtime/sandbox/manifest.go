@@ -124,9 +124,9 @@ type launch struct {
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
 	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
-	// removableWorkspacesJSON is spec.RemovableWorkspaces JSON-encoded as
-	// []workspace.RemovalCandidate, computed once here since the encoding cannot fail (plain
-	// strings) and initEnvironment has no error to return; "" when the daemon found none.
+	// removableWorkspacesJSON is spec.RemovableWorkspaces JSON-encoded, computed once here since
+	// the encoding cannot fail (plain strings) and initEnvironment has no error to return; "" when
+	// the daemon found none.
 	removableWorkspacesJSON string
 }
 
@@ -184,11 +184,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 		l.resumeFile = spec.ResumeSessionFile
 	}
 	if len(spec.RemovableWorkspaces) > 0 {
-		candidates := make([]workspace.RemovalCandidate, len(spec.RemovableWorkspaces))
-		for i, removable := range spec.RemovableWorkspaces {
-			candidates[i] = workspace.RemovalCandidate{Issue: removable.Issue, MergedHead: removable.MergedHead}
-		}
-		encoded, err := json.Marshal(candidates)
+		encoded, err := json.Marshal(spec.RemovableWorkspaces)
 		if err != nil {
 			return launch{}, refuse("encode LEGION_REMOVABLE_WORKSPACES: %v", err)
 		}

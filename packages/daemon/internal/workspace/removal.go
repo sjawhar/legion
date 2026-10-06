@@ -7,23 +7,18 @@ import (
 	"strings"
 )
 
-// RemovalCandidate is one sibling workspace of a tree the daemon has judged safe to remove by
-// lifecycle alone: every role's claim is gone (suspended, failed, retired, or never claimed), with
-// no live pod. MergedHead is the merged pull request's head commit the daemon recorded for a
-// candidate that merged, empty for one that never did. GitHub deletes a squash merge's branch, so
-// that commit carries no remote bookmark of its own once the clone fetches the deletion;
-// RemoveFinished's push-safety check below needs the recorded head to tell that commit from one
-// that was never pushed at all (dispatch://LEGION-583).
-type RemovalCandidate struct {
-	Issue      string `json:"issue"`
-	MergedHead string `json:"mergedHead,omitempty"`
-}
-
 // unpushedRevset is RemoveFinished's push-safety check: every non-empty ancestor of the
 // workspace's own commit that is reachable from neither a remote bookmark nor, when the daemon
 // recorded one, an ancestor of mergedHead. empty() is excluded because jj always keeps an empty
 // commit at the tip of a workspace's working copy; without the exclusion every workspace would
 // show that placeholder as unreachable from anything and never be judged safe.
+//
+// remote_bookmarks() is the shared clone's own ref state, writable by any role's pane on the tree
+// volume (the same `jj config set --repo` reach snapshotOverrides guards against, applied to a
+// bookmark instead of a program): this check is what stops an ordinary slip — a candidate's
+// workspace genuinely holding a commit nothing pushed — from being deleted, not a defense against
+// a hostile role, which already has filesystem access to every sibling workspace on the volume and
+// could delete one directly.
 func unpushedRevset(workspaceName, mergedHead string) string {
 	revset := "::" + workspaceName + "@ ~ empty() ~ ::(remote_bookmarks())"
 	if mergedHead != "" {
@@ -40,33 +35,28 @@ func unpushedRevset(workspaceName, mergedHead string) string {
 // where ws.Dir no longer is, is finished rather than re-judged — it was already found safe to
 // remove, and a half-deleted tree is unsafe to snapshot. The daemon's candidate list is computed
 // from issue lifecycle alone and may still name a workspace nothing on this volume ever created.
-// log receives exactly one
-// line: what was removed, what was kept and why, or that there was nothing to do. ws is Location's,
-// which names the shared clone; issue is logged as the daemon knows it (ws.Dir's own base name is
-// lowercased for jj's workspace name, per Location).
+// log receives exactly one line: what was removed, what was kept and why, or that there was
+// nothing to do. ws is Location's, which names the shared clone; issue is logged as the daemon
+// knows it (ws.Dir's own base name is lowercased for jj's workspace name, per Location).
 //
-// Before judging anything, the check snapshots ws.Dir's own working copy (a plain `jj status`
-// there, not onClone's --ignore-working-copy, and never the shared clone's): a child parked
-// between phases can hold an edit its agent never ran a jj command over since, and without this
-// snapshot that edit is invisible to unpushedRevset's `::workspaceName@` and the workspace would
-// be judged clean and removed out from under it. The one jj command this package runs against the
-// shared clone proper without --ignore-working-copy is `jj workspace add` (createWorkspace); this
-// is the other, and the only one that runs a real snapshot over a workspace a tree agent writes
-// to directly, so it carries snapshotOverrides (config.go): without them a tree agent's own
-// `jj config set --repo` could run a hostile working-copy filter or signing program on this
-// snapshot, since that command writes the one repo config every workspace of the tree reads.
+// Before judging anything, the check snapshots ws.Dir's own working copy for real (a plain `jj
+// status` there, with snapshotOverrides (config.go), which explains what each override neutralizes
+// and why): a child parked between phases can hold an edit its agent never ran a jj command over
+// since, and without this snapshot that edit is invisible to unpushedRevset's `::workspaceName@`
+// and the workspace would be judged clean and removed out from under it. The one jj command this
+// package runs against the shared clone proper without --ignore-working-copy is `jj workspace
+// add` (createWorkspace); this is the other, and the only one that runs a real snapshot over a
+// workspace a tree agent writes to directly.
 //
-// The snapshot can still leave a path untracked rather than commit it: jj's own anti-footgun
-// limit on a new file's size (snapshot.max-new-file-size, which snapshotOverrides disables for
-// this command, so this is belt and suspenders) and any other reason jj's auto-track
-// (snapshot.auto-track = "all()" by default, so every other new path is committed) might still
-// skip a path both exit 0 and print no error — jj's own contract for "something was left out" is
-// the "Untracked paths:" header `jj status` prints on stdout (never stderr's prose, which is only
-// the human explanation and is not guaranteed stable across reasons or releases) before every
-// such path, one per line as `? <path>`. Reading that header is what untrackedPaths below does;
-// its presence means @ does not hold everything on disk, so unpushedRevset's read of @ cannot be
-// trusted to prove the workspace clean, and the workspace is kept rather than risk removing one
-// that in fact still holds unpushed work on disk.
+// The snapshot can still leave a path untracked rather than commit it (an oversized new file,
+// under snapshot.max-new-file-size, which snapshotOverrides deliberately leaves at its default):
+// jj's own contract for "something was left out" is the "Untracked paths:" header `jj status`
+// prints on stdout (never stderr's prose, which is only the human explanation and is not
+// guaranteed stable across reasons or releases) before every such path, one per line as `?
+// <path>`. Reading that header is what untrackedPaths below does; its presence means @ does not
+// hold everything on disk, so unpushedRevset's read of @ cannot be trusted to prove the workspace
+// clean, and the workspace is kept rather than risk removing one that in fact still holds unpushed
+// work on disk.
 func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, mergedHead string, log func(string)) error {
 	if !located(ws) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", ws)

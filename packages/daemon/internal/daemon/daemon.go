@@ -545,6 +545,14 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
 	repo := cfg.Projects[cfg.Project].Repo
+	// removable is nil for a runtime that does not provision each claim's workspace in its own
+	// pod (ProvisionsWorkspaces false, tmux's answer): SpawnSpec.RemovableWorkspaces then stays
+	// nil too, which specs.go's own doc comment on removable already promises, and a tmux pane's
+	// workspace-init never runs to read LEGION_REMOVABLE_WORKSPACES even if it were set.
+	var removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
+	if rt.ProvisionsWorkspaces() {
+		removable = removableWorkspaces(st.Pool(), record.NewStore(), sup, p.project)
+	}
 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
@@ -553,7 +561,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
-			removable: removableWorkspaces(st.Pool(), record.NewStore(), sup, p.project),
+			removable: removable,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,

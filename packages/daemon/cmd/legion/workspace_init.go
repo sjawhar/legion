@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"math"
@@ -20,6 +21,7 @@ import (
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -38,9 +40,9 @@ const (
 	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 	// removableWorkspacesEnv names the daemon's candidate list of sibling workspaces this pod's
-	// workspace-init may remove from the tree volume: JSON, workspace.RemovalCandidate's shape,
-	// every member of the tree whose every role's claim is gone (dispatch://LEGION-583); unset or
-	// empty removes none.
+	// workspace-init may remove from the tree volume: JSON, runtime.RemovableWorkspace's shape.
+	// internal/daemon/removable.go's removableWorkspaces is the one place that states which
+	// issues qualify; unset or empty removes none.
 	removableWorkspacesEnv = "LEGION_REMOVABLE_WORKSPACES"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands
@@ -207,7 +209,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	// remote bookmarks current: a candidate's push-safety check (workspace.RemoveFinished) reads
 	// them, and a stale view would risk nothing worse than a workspace kept one launch too long,
 	// never one removed too early (dispatch://LEGION-583).
-	removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout)
+	removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout, time.Now, removalBudget)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
 		return writeRecoveryMarker(ctx, run, provisioned.Dir, issue, fromRef)
 	}
@@ -228,43 +230,44 @@ const removalBudget = 90 * time.Second
 
 // removeFinishedWorkspaces reads removableWorkspacesEnv's candidate list and calls
 // workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
-// issue — the one this pod provisions, never the daemon's to name but skipped here too, in case it
-// ever is — and the tree's own root, which Location names for no issue so it is never a
+// issue — the one this pod provisions, never the daemon's to name but filtered out here too, in
+// case it ever is — and the tree's own root, which Location names for no issue so it is never a
 // candidate in the first place. One candidate's failure is logged and never stops the ones after
 // it or the provisioning this pod already finished; a malformed env var removes nothing.
-func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer) {
-	removeFinishedWorkspacesBudgeted(ctx, run, root, repository, issue, stdout, time.Now, removalBudget)
-}
-
-// removeFinishedWorkspacesBudgeted is removeFinishedWorkspaces with its clock and budget exposed
-// for a test.
-func removeFinishedWorkspacesBudgeted(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration) {
+//
+// The filtered candidates are rotated by issue (this pod's own, rotateCandidates below) before
+// the loop: a candidate that always sorts first in the daemon's list, and so is always the one
+// snapshotted first, would otherwise always spend the removal budget before any candidate after
+// it in that same order is ever reached, every launch. now and budget are the clock and
+// removalBudget, exposed for a test; the one production call site passes time.Now and
+// removalBudget.
+func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration) {
 	raw := os.Getenv(removableWorkspacesEnv)
 	if raw == "" {
 		return
 	}
-	var candidates []workspace.RemovalCandidate
-	if err := json.Unmarshal([]byte(raw), &candidates); err != nil {
+	var all []runtime.RemovableWorkspace
+	if err := json.Unmarshal([]byte(raw), &all); err != nil {
 		fmt.Fprintf(stdout, "workspace-init: %s is not valid JSON, removing nothing: %v\n", removableWorkspacesEnv, err)
 		return
 	}
+	var candidates []runtime.RemovableWorkspace
+	for _, candidate := range all {
+		if candidate.Issue != "" && candidate.Issue != issue {
+			candidates = append(candidates, candidate)
+		}
+	}
+	candidates = rotateCandidates(candidates, issue)
 	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }
 	deadline := now().Add(budget)
 	for i, candidate := range candidates {
-		if candidate.Issue == "" || candidate.Issue == issue {
-			continue
-		}
 		if now().After(deadline) {
-			var deferred []string
-			for _, remaining := range candidates[i:] {
-				if remaining.Issue != "" && remaining.Issue != issue {
-					deferred = append(deferred, remaining.Issue)
-				}
+			deferred := make([]string, len(candidates)-i)
+			for j, remaining := range candidates[i:] {
+				deferred[j] = remaining.Issue
 			}
-			if len(deferred) > 0 {
-				log(fmt.Sprintf("removal budget (%s) spent; deferring %d candidate(s) to the tree's next launch: %s",
-					budget, len(deferred), strings.Join(deferred, ", ")))
-			}
+			log(fmt.Sprintf("removal budget (%s) spent; deferring %d candidate(s) to the tree's next launch: %s",
+				budget, len(deferred), strings.Join(deferred, ", ")))
 			return
 		}
 		located, err := workspace.Location(root, repository, candidate.Issue)
@@ -276,6 +279,23 @@ func removeFinishedWorkspacesBudgeted(ctx context.Context, run workspace.Runner,
 			fmt.Fprintf(stdout, "workspace-init: removing %s's workspace failed, keeping it: %v\n", candidate.Issue, err)
 		}
 	}
+}
+
+// rotateCandidates rotates candidates by a deterministic offset derived from seed (the pod's own
+// issue, which differs every launch): candidates[offset:] followed by candidates[:offset], so a
+// candidate that always sorts first in the daemon's list is not always the one every pass starts
+// with, and does not always starve every candidate after it of the removal budget.
+func rotateCandidates(candidates []runtime.RemovableWorkspace, seed string) []runtime.RemovableWorkspace {
+	if len(candidates) < 2 {
+		return candidates
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(seed))
+	offset := int(h.Sum32() % uint32(len(candidates)))
+	rotated := make([]runtime.RemovableWorkspace, len(candidates))
+	n := copy(rotated, candidates[offset:])
+	copy(rotated[n:], candidates[:offset])
+	return rotated
 }
 
 // workspaceInitLockWait is LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS: a positive whole number of

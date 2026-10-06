@@ -2522,7 +2522,8 @@ describe("Legion OMP extension", () => {
     // The command itself: `legion push` alone, and as a compound command's one segment that
     // requests a push (a `cd` ahead of it, a trailing pipeline stage), and `legion` preceded by a
     // word that is not itself part of the invocation (a timing wrapper, an env assignment, a
-    // negation, or the naive splitter's own leftover `if`/`then` words ahead of a `;`).
+    // negation, or the naive splitter's own leftover `if`/`then` words ahead of a `;`), and the
+    // worker-bin shim's absolute path (`.../legion`) in place of the bare name.
     expect(await pushOf("legion push")).toBe(true);
     expect(await pushOf("cd ws && legion push")).toBe(true);
     expect(await pushOf("legion push | cat")).toBe(true);
@@ -2531,6 +2532,7 @@ describe("Legion OMP extension", () => {
     expect(await pushOf("FOO=1 legion push")).toBe(true);
     expect(await pushOf("! legion push")).toBe(true);
     expect(await pushOf("if legion push; then echo ok; fi")).toBe(true);
+    expect(await pushOf("/opt/legion/bin/legion push")).toBe(true);
     // Anything else: a different `legion` command, a compound command with no push segment, and
     // an ordinary shell command.
     expect(await pushOf("legion state")).toBe(false);
