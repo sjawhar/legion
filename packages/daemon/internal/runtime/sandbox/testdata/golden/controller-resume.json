@@ -1,0 +1,296 @@
+{
+  "apiVersion": "agents.x-k8s.io/v1beta1",
+  "kind": "Sandbox",
+  "metadata": {
+    "labels": {
+      "legion.dev/project": "legion",
+      "legion.dev/role": "controller"
+    },
+    "name": "legion-legion-controller",
+    "namespace": "legion"
+  },
+  "spec": {
+    "operatingMode": "Running",
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "karpenter.sh/do-not-disrupt": "true"
+        },
+        "labels": {
+          "legion.dev/project": "legion",
+          "legion.dev/role": "controller"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "worker-shim",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--boot-token-file",
+              "/var/run/legion/boot/LEGION_BOOT_TOKEN",
+              "--pod-safety",
+              "--",
+              "/opt/omp/bin/omp",
+              "--no-extensions",
+              "--extension",
+              "/opt/legion/pi-legion-envoy",
+              "--resume=/home/legion/.omp/profiles/legion/agent/sessions/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl",
+              "--mode",
+              "rpc",
+              "--append-system-prompt",
+              "You are the controller.\n\nLegion addressing: your role topic is `notifications.role.legion-legion-controller`.\n\nDeployment instructions."
+            ],
+            "env": [
+              {
+                "name": "LEGION_CONTROLLER",
+                "value": "1"
+              },
+              {
+                "name": "LEGION_ROLE",
+                "value": "controller"
+              },
+              {
+                "name": "LEGION_GENERATION",
+                "value": "2"
+              },
+              {
+                "name": "LEGION_PROJECT",
+                "value": "legion"
+              },
+              {
+                "name": "LEGION_DAEMON_URL",
+                "value": "http://192.0.2.250:13370"
+              },
+              {
+                "name": "LEGION_STATE_DIR",
+                "value": "/var/run/legion/state"
+              },
+              {
+                "name": "ENVOY_NATS_URL",
+                "value": "nats://192.0.2.250:4222"
+              },
+              {
+                "name": "ENVOY_URL",
+                "value": "http://192.0.2.250:9020"
+              },
+              {
+                "name": "PATH",
+                "value": "/legion/worker-bin:/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
+              },
+              {
+                "name": "PI_SHELL_PREFIX",
+                "value": "__legion_path=:$${PATH//:/::}: && __legion_path=$${__legion_path//:'/legion/worker-bin':/} && __legion_path=$${__legion_path//:'/opt/legion/bin':/} && __legion_path=$${__legion_path//::/:} && __legion_path=$${__legion_path#:} && PATH='/legion/worker-bin:/opt/legion/bin'$${__legion_path:+:$${__legion_path%:}} && unset __legion_path && hash -r &&"
+              },
+              {
+                "name": "GIT_TERMINAL_PROMPT",
+                "value": "0"
+              },
+              {
+                "name": "LEGION_GRANT_FILE",
+                "value": "/var/run/legion/state/secrets/legion-legion-controller-grant"
+              },
+              {
+                "name": "XDG_CONFIG_HOME",
+                "value": "/home/legion/.config"
+              },
+              {
+                "name": "XDG_CACHE_HOME",
+                "value": "/home/legion/.cache"
+              },
+              {
+                "name": "XDG_DATA_HOME",
+                "value": "/home/legion/.local/share"
+              },
+              {
+                "name": "XDG_STATE_HOME",
+                "value": "/home/legion/.local/state"
+              },
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              },
+              {
+                "name": "ENVOY_TOKEN_FILE",
+                "value": "/var/run/legion/boot/ENVOY_TOKEN"
+              },
+              {
+                "name": "LEGION_BOOT_TOKEN_FILE",
+                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "worker",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "tree",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/boot",
+                "name": "boot",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion"
+          }
+        ],
+        "enableServiceLinks": false,
+        "initContainers": [
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "workspace-init",
+              "controller",
+              "--root",
+              "/legion"
+            ],
+            "env": [
+              {
+                "name": "PATH",
+                "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
+              },
+              {
+                "name": "LEGION_RESUME_SESSION_FILE",
+                "value": "/legion/sessions/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl"
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "workspace-init",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              }
+            ],
+            "workingDir": "/legion"
+          }
+        ],
+        "nodeSelector": {
+          "legion.dev/pool": "legion"
+        },
+        "priorityClassName": "legion",
+        "restartPolicy": "Never",
+        "runtimeClassName": "gvisor",
+        "securityContext": {
+          "fsGroup": 1000,
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000
+        },
+        "terminationGracePeriodSeconds": 30,
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "legion.dev/pool",
+            "operator": "Equal",
+            "value": "legion"
+          }
+        ],
+        "volumes": [
+          {
+            "name": "tree",
+            "persistentVolumeClaim": {
+              "claimName": "tree-legion-legion-controller"
+            }
+          },
+          {
+            "name": "boot",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "ENVOY_TOKEN",
+                  "path": "ENVOY_TOKEN"
+                },
+                {
+                  "key": "LEGION_BOOT_TOKEN",
+                  "path": "LEGION_BOOT_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-controller-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "config"
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "labels": {
+            "legion.dev/project": "legion",
+            "legion.dev/role": "controller"
+          },
+          "name": "tree"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "20Gi"
+            }
+          },
+          "storageClassName": "gp2"
+        }
+      }
+    ]
+  }
+}

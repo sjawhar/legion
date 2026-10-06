@@ -52,7 +52,8 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 //  6. wait for the new pod, and return its uid as the incarnation.
 //
 // Steps 4 to 6 take the tree's launch turn and wait until no other pod of the tree is in
-// workspace-init (awaitTreeInitialized).
+// workspace-init (awaitTreeInitialized). The controller's launch belongs to no tree and provisions
+// nothing, so it takes no turn and mints no provisioning token.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -81,22 +82,25 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if err != nil {
 		return fail("wait out its previous pod", err)
 	}
-	release, err := r.lockTree(ctx, l.spec.Tree)
-	if err != nil {
-		return fail("take its tree's launch turn", err)
-	}
-	defer release()
-	if err := r.awaitTreeInitialized(ctx, l); err != nil {
-		return fail("wait for its tree's other pods to finish initializing", err)
-	}
-	// Minted now, not before the waits: an installation token can be handed out with minutes left.
-	// Bounded like an API call, since the tree's launch turn is held while it runs.
-	owner := l.spec.Repository.Owner()
-	minting, cancel := call(ctx)
-	provisionToken, err := r.tokens.Token(minting, owner)
-	cancel()
-	if err != nil {
-		return fail("mint the provisioning token for "+owner, err)
+	provisionToken := ""
+	if !l.controller {
+		release, err := r.lockTree(ctx, l.spec.Tree)
+		if err != nil {
+			return fail("take its tree's launch turn", err)
+		}
+		defer release()
+		if err := r.awaitTreeInitialized(ctx, l); err != nil {
+			return fail("wait for its tree's other pods to finish initializing", err)
+		}
+		// Minted now, not before the waits: an installation token can be handed out with minutes
+		// left. Bounded like an API call, since the tree's launch turn is held while it runs.
+		owner := l.spec.Repository.Owner()
+		minting, cancel := call(ctx)
+		provisionToken, err = r.tokens.Token(minting, owner)
+		cancel()
+		if err != nil {
+			return fail("mint the provisioning token for "+owner, err)
+		}
 	}
 	if err := r.writeSecret(ctx, s, l, provisionToken); err != nil {
 		return fail("write its secret", err)
@@ -272,11 +276,15 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // boot token among them, owned by the Sandbox so garbage collection deletes it with the Sandbox
 // (decision 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing
 // Secret or starts on the previous generation's token. A Secret left owned by an earlier Sandbox of
-// the same name is replaced, not updated: the collector may already be deleting it.
+// the same name is replaced, not updated: the collector may already be deleting it. The
+// controller's launch has no provisioning token, and its Secret no key for one.
 func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisionToken string) error {
 	ctx, cancel := call(ctx)
 	defer cancel()
-	data := map[string][]byte{provisionTokenKey: []byte(provisionToken)}
+	data := map[string][]byte{}
+	if !l.controller {
+		data[provisionTokenKey] = []byte(provisionToken)
+	}
 	for name, value := range l.secrets {
 		data[name] = []byte(value)
 	}
