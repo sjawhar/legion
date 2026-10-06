@@ -405,6 +405,35 @@ func RunJobsUnfetchable(ctx context.Context, pool *store.Pool, repo string, runI
 	return unfetchableAt != nil, nil
 }
 
+// ListUnfetchableRunIDs reads, among runIDs, which ones already carry a MarkRunJobsUnfetchable
+// mark, in one query -- reconcileWorkflow calls this once per pass for every completed run its
+// window found, instead of reconcileRun's own RunJobsUnfetchable point query running once per
+// completed run on every pass (Simplify's round-5 finding: the overwhelming majority of runs are
+// never marked unfetchable), the same bulk-then-loop shape ListPartialPullRequests already gives
+// reconcilePartialPullRequests and ListRunJobsForRuns gives the timeline handler.
+func ListUnfetchableRunIDs(ctx context.Context, pool *store.Pool, repo string, runIDs []int64) (map[int64]bool, error) {
+	unfetchable := make(map[int64]bool, len(runIDs))
+	if len(runIDs) == 0 {
+		return unfetchable, nil
+	}
+	rows, err := pool.Query(ctx, `
+		select run_id from delivery_runs
+		where repo = $1 and run_id = any($2) and jobs_unfetchable_at is not null
+	`, repo, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		unfetchable[id] = true
+	}
+	return unfetchable, rows.Err()
+}
+
 // ListRunJobs lists every job of one run, in no particular order (callers that need the jobs in
 // a specific order, e.g. a workflow's declared sequence, sort client-side — GitHub's own job
 // listing order is not guaranteed either).

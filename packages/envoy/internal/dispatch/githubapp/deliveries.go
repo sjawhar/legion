@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -119,6 +120,16 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("rate-limited by GitHub (status %d), next request in %s: %s", e.Status, e.Wait, e.Body)
 }
 
+// AsRateLimit is errors.As(err, &limited) collapsed to one line: delivery's reconcile.go,
+// github_prs.go and intake.go each repeated the same three-line var/errors.As idiom at every
+// point a *RateLimitError must be told apart from every other per-item failure (Simplify's
+// round-5 nit).
+func AsRateLimit(err error) (*RateLimitError, bool) {
+	var limited *RateLimitError
+	ok := errors.As(err, &limited)
+	return limited, ok
+}
+
 // RateLimit reads a rate-limited answer, as GitHub's REST rate-limit documentation describes one:
 // a 429, or a 403 with no requests remaining, a Retry-After, or a message naming a rate limit
 // (any other 403 is a refusal of that request). The wait is Retry-After's seconds, else the time
@@ -147,7 +158,7 @@ func RateLimit(status int, header http.Header, body []byte) *RateLimitError {
 // RateLimit's own *RateLimitError when the response is a GitHub rate limit, else a generic
 // "status %d: %s" error carrying the raw body. Factors the identical "check rate limit, then
 // check status" three lines delivery's GitHub fetchers (github_prs.go, github_runs.go,
-// client.go's own ListInstallationRepositories) all repeated at every call site.
+// client.go's own ListInstallationRepositoriesByID) all repeated at every call site.
 func CheckResponse(status int, header http.Header, body []byte) error {
 	if status == http.StatusOK {
 		return nil

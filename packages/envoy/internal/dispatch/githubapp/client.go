@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
@@ -110,6 +112,71 @@ type cachedToken struct {
 	expires time.Time
 }
 
+// ttlCache is a small time-bounded cache keyed by K, shared by ListInstallations (one fixed key)
+// and ListInstallationRepositoriesByID (one key per installation id) -- both independently
+// hand-rolled the identical lock/check-age/unlock-on-hit, fetch-then-lock/store/unlock shape
+// before this helper existed (Simplify's round-5 nit). A singleflight.Group collapses concurrent
+// cold-cache fetches for the same key into one network call: two goroutines racing a cold cache
+// for the same installation (plausible under the cross-installation errgroup's own concurrency,
+// Deep's round-5 note) now share one fetch's answer instead of each minting its own.
+type ttlCache[K comparable, V any] struct {
+	ttl   time.Duration
+	now   func() time.Time
+	mu    sync.Mutex
+	items map[K]ttlCacheEntry[V]
+	group singleflight.Group
+}
+
+type ttlCacheEntry[V any] struct {
+	value V
+	at    time.Time
+}
+
+func newTTLCache[K comparable, V any](ttl time.Duration, now func() time.Time) *ttlCache[K, V] {
+	return &ttlCache[K, V]{ttl: ttl, now: now, items: map[K]ttlCacheEntry[V]{}}
+}
+
+// fresh returns key's cached value when younger than ttl.
+func (c *ttlCache[K, V]) fresh(key K) (V, bool) {
+	c.mu.Lock()
+	entry, ok := c.items[key]
+	c.mu.Unlock()
+	if ok && c.now().Sub(entry.at) < c.ttl {
+		return entry.value, true
+	}
+	var zero V
+	return zero, false
+}
+
+// get returns key's cached value when fresh; otherwise it calls fetch exactly once across every
+// concurrent caller for this key (singleflight, keyed by key's string form) and caches the
+// result for the rest.
+func (c *ttlCache[K, V]) get(key K, fetch func() (V, error)) (V, error) {
+	if value, ok := c.fresh(key); ok {
+		return value, nil
+	}
+	value, err, _ := c.group.Do(fmt.Sprint(key), func() (any, error) {
+		// Re-check: a sibling caller may have already refreshed this key while this one waited
+		// to acquire the singleflight call.
+		if value, ok := c.fresh(key); ok {
+			return value, nil
+		}
+		fetched, err := fetch()
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.items[key] = ttlCacheEntry[V]{value: fetched, at: c.now()}
+		c.mu.Unlock()
+		return fetched, nil
+	})
+	if err != nil {
+		var zero V
+		return zero, err
+	}
+	return value.(V), nil
+}
+
 // Client calls the GitHub App API as the configured App. A nil *Client is the
 // valid "no app credentials yet" state: every method returns ErrNoAppKey.
 type Client struct {
@@ -123,15 +190,18 @@ type Client struct {
 	tokens map[int64]cachedToken
 	// repositories maps "owner/repo" to the installation that covers it, for RepositoryToken.
 	repositories map[string]int64
-	// installations/installationsAt cache ListInstallations' own answer: the installation list
-	// changes only when a human installs/uninstalls the App, far slower than every reconcile pass
-	// needs to re-fetch it.
-	installations   []Installation
-	installationsAt time.Time
+	// installations caches ListInstallations' own answer under one fixed key
+	// (installationsCacheKey): the installation list changes only when a human
+	// installs/uninstalls the App, far slower than every reconcile pass needs to re-fetch it.
+	installations *ttlCache[string, []Installation]
 	// installationRepos caches ListInstallationRepositoriesByID's own answer per installation id,
 	// for the same reason.
-	installationRepos map[int64]cachedRepositories
+	installationRepos *ttlCache[int64, []string]
 }
+
+// installationsCacheKey is the one key installations (a single answer, not per-installation)
+// caches under.
+const installationsCacheKey = "installations"
 
 // installationsCacheTTL bounds how long ListInstallations trusts its own cached answer before
 // asking GitHub again.
@@ -153,7 +223,7 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 	if base == "" {
 		base = defaultBase
 	}
-	return &Client{
+	c := &Client{
 		app:          *app,
 		key:          key,
 		base:         strings.TrimSuffix(base, "/"),
@@ -161,7 +231,11 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 		now:          time.Now,
 		tokens:       map[int64]cachedToken{},
 		repositories: map[string]int64{},
-	}, nil
+	}
+	nowFunc := func() time.Time { return c.now() }
+	c.installations = newTTLCache[string, []Installation](installationsCacheTTL, nowFunc)
+	c.installationRepos = newTTLCache[int64, []string](installationsCacheTTL, nowFunc)
+	return c, nil
 }
 
 func parsePrivateKey(pemText string) (*rsa.PrivateKey, error) {
@@ -305,49 +379,42 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 	if c == nil {
 		return nil, ErrNoAppKey
 	}
-	c.mu.Lock()
-	cached, cachedAt := c.installations, c.installationsAt
-	c.mu.Unlock()
-	if cached != nil && c.now().Sub(cachedAt) < installationsCacheTTL {
-		return cached, nil
-	}
-	jwt, err := c.appJWT()
-	if err != nil {
-		return nil, err
-	}
-	var installations []Installation
-	for page := 1; ; page++ {
-		target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
-		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
+	return c.installations.get(installationsCacheKey, func() ([]Installation, error) {
+		jwt, err := c.appJWT()
 		if err != nil {
-			return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+			return nil, err
 		}
-		if err := CheckResponse(status, header, body); err != nil {
-			return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+		var installations []Installation
+		for page := 1; ; page++ {
+			target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
+			body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
+			if err != nil {
+				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+			}
+			if err := CheckResponse(status, header, body); err != nil {
+				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+			}
+			var payload []installationPayload
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return nil, fmt.Errorf("decode installations (page %d): %w", page, err)
+			}
+			if len(payload) == 0 {
+				break
+			}
+			for _, entry := range payload {
+				installations = append(installations, Installation{
+					ID: entry.ID, AppSlug: entry.AppSlug, Permissions: entry.Permissions, AccountLogin: entry.Account.Login,
+				})
+			}
+			if len(installations) > maxInstallations {
+				return nil, fmt.Errorf("list installations: the App has more than %d installations", maxInstallations)
+			}
+			if len(payload) < 100 {
+				break
+			}
 		}
-		var payload []installationPayload
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, fmt.Errorf("decode installations (page %d): %w", page, err)
-		}
-		if len(payload) == 0 {
-			break
-		}
-		for _, entry := range payload {
-			installations = append(installations, Installation{
-				ID: entry.ID, AppSlug: entry.AppSlug, Permissions: entry.Permissions, AccountLogin: entry.Account.Login,
-			})
-		}
-		if len(installations) > maxInstallations {
-			return nil, fmt.Errorf("list installations: the App has more than %d installations", maxInstallations)
-		}
-		if len(payload) < 100 {
-			break
-		}
-	}
-	c.mu.Lock()
-	c.installations, c.installationsAt = installations, c.now()
-	c.mu.Unlock()
-	return installations, nil
+		return installations, nil
+	})
 }
 
 // RepositoryToken returns an installation token of the installation covering owner/repo. The
@@ -390,13 +457,6 @@ const installationRepositoriesPerPage = 100
 // ever-growing, unbounded `repo:` qualifier list on every 5-minute reconcile pass.
 const maxInstallationRepositories = 2000
 
-// cachedRepositories is one installation's repository list and when it was fetched, for
-// ListInstallationRepositoriesByID's own cache.
-type cachedRepositories struct {
-	names []string
-	at    time.Time
-}
-
 // ListInstallationRepositoriesByID lists every repository ("owner/name") installation installs
 // -- GET /installation/repositories (an installation-token endpoint, paginated), under a token
 // minted directly by id (ListInstallations already resolved the id; there is no representative
@@ -411,27 +471,13 @@ type cachedRepositories struct {
 // search's own cost by the installation count for data that changes on human timescales, not
 // every five minutes.
 func (c *Client) ListInstallationRepositoriesByID(ctx context.Context, installationID int64) ([]string, error) {
-	c.mu.Lock()
-	cached, ok := c.installationRepos[installationID]
-	c.mu.Unlock()
-	if ok && c.now().Sub(cached.at) < installationsCacheTTL {
-		return cached.names, nil
-	}
-	token, err := c.Token(ctx, installationID)
-	if err != nil {
-		return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
-	}
-	names, err := listInstallationRepositories(ctx, c, token)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	if c.installationRepos == nil {
-		c.installationRepos = map[int64]cachedRepositories{}
-	}
-	c.installationRepos[installationID] = cachedRepositories{names: names, at: c.now()}
-	c.mu.Unlock()
-	return names, nil
+	return c.installationRepos.get(installationID, func() ([]string, error) {
+		token, err := c.Token(ctx, installationID)
+		if err != nil {
+			return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
+		}
+		return listInstallationRepositories(ctx, c, token)
+	})
 }
 
 func listInstallationRepositories(ctx context.Context, c *Client, token string) ([]string, error) {

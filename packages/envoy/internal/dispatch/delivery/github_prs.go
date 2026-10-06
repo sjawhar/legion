@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
@@ -289,15 +287,16 @@ const installationSearchConcurrency = 8
 // GitHub does not let one repository belong to two installations of the same App, so a duplicate
 // should never occur, but de-duplicating costs nothing and removes any doubt.
 //
-// Installations are searched concurrently (errgroup.WithContext + SetLimit, the same pattern
-// reconcile.go's reconcilePartialPullRequests uses) through searchOneInstallation. One
-// installation's own failure never discards what every other installation already found: its
-// error is collected by name (which installation, by id and account) rather than aborting the
-// whole search, and the caller still gets back every result gathered so far alongside a non-nil
-// error naming what failed -- the pass is reported unhealthy, but nothing already found is
-// thrown away. A *githubapp.RateLimitError is the one exception: it stops every further
-// installation from starting (the ones already in flight still finish), since a rate limit is a
-// global condition on this installation token budget, not one installation's own problem.
+// Installations are searched concurrently through boundedFanOut (reconcile.go), the same
+// errgroup.WithContext+SetLimit shape reconcile.go's reconcilePartialPullRequests uses, via
+// searchOneInstallation. One installation's own failure never discards what every other
+// installation already found: its error is collected by name (which installation, by id and
+// account) rather than aborting the whole search, and the caller still gets back every result
+// gathered so far alongside a non-nil error naming what failed -- the pass is reported unhealthy,
+// but nothing already found is thrown away. A *githubapp.RateLimitError is the one exception: it
+// stops every further installation from starting (the ones already in flight still finish),
+// since a rate limit is a global condition on this installation token budget, not one
+// installation's own problem.
 func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
 	installations, err := client.ListInstallations(ctx)
 	if err != nil {
@@ -312,38 +311,29 @@ func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *git
 	var results []FetchedPullRequest
 	var failures []string
 
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(installationSearchConcurrency)
-	for _, installation := range installations {
-		if groupCtx.Err() != nil {
-			break
-		}
-		installation := installation
-		group.Go(func() error {
-			found, err := searchOneInstallation(groupCtx, client, installation, authors, since, until)
-			if err != nil {
-				var limited *githubapp.RateLimitError
-				if errors.As(err, &limited) {
-					return limited
-				}
-				mu.Lock()
-				failures = append(failures, fmt.Sprintf("installation %d (%s): %s", installation.ID, installation.AccountLogin, err))
-				mu.Unlock()
-				return nil
+	fanErr := boundedFanOut(ctx, installationSearchConcurrency, installations, func(ctx context.Context, installation githubapp.Installation) error {
+		found, err := searchOneInstallation(ctx, client, installation, authors, since, until)
+		if err != nil {
+			if limited, ok := githubapp.AsRateLimit(err); ok {
+				return limited
 			}
 			mu.Lock()
-			for _, pr := range found {
-				if !seen[pr.URL] {
-					seen[pr.URL] = true
-					results = append(results, pr)
-				}
-			}
+			failures = append(failures, fmt.Sprintf("installation %d (%s): %s", installation.ID, installation.AccountLogin, err))
 			mu.Unlock()
 			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return results, fmt.Errorf("rate-limited searching installations: %w", err)
+		}
+		mu.Lock()
+		for _, pr := range found {
+			if !seen[pr.URL] {
+				seen[pr.URL] = true
+				results = append(results, pr)
+			}
+		}
+		mu.Unlock()
+		return nil
+	})
+	if fanErr != nil {
+		return results, fmt.Errorf("rate-limited searching installations: %w", fanErr)
 	}
 	if len(failures) > 0 {
 		return results, fmt.Errorf("%d of %d installations failed: %s", len(failures), len(installations), strings.Join(failures, "; "))

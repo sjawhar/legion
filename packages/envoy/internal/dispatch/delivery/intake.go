@@ -317,8 +317,7 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest) error {
 	sessions, err := fetchSessionTrailers(ctx, github, owner, repo, number)
 	if err != nil {
-		var limited *githubapp.RateLimitError
-		if errors.As(err, &limited) {
+		if limited, ok := githubapp.AsRateLimit(err); ok {
 			return limited
 		}
 		slog.Warn("dispatch delivery: fetch session trailers", "repo", repoFull, "number", number, "error", err)

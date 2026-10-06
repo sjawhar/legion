@@ -163,13 +163,16 @@ func (r *Reconcile) windowStart(settings DeliverySettings, now time.Time) time.T
 // carries. SearchMergedPullRequestsAcrossInstallation returns both a partial result set and a
 // non-nil error when some (not every) installation failed: every result it did gather is still
 // processed here, and the search's own error plus every per-PR classify/upsert failure are
-// aggregated into one returned error, so the pass is reported unhealthy without throwing away
-// whatever this pass did manage to reconcile.
+// errors.Joined into one returned error -- not stringified into a plain errors.New, so a
+// *githubapp.RateLimitError among them still answers errors.As for a caller that needs to tell it
+// apart from an ordinary failure, the same reason reconcileWorkflow's own per-run aggregation
+// keeps its typed error with %w (Deep's and Simplify's round-5 nit) -- so the pass is reported
+// unhealthy without throwing away whatever this pass did manage to reconcile.
 func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, since, until time.Time) error {
 	found, searchErr := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until)
-	var failures []string
+	var failures []error
 	if searchErr != nil {
-		failures = append(failures, fmt.Sprintf("search merged pull requests: %s", searchErr))
+		failures = append(failures, fmt.Errorf("search merged pull requests: %w", searchErr))
 	}
 	for _, pr := range found {
 		if pr.MergedAt == nil {
@@ -178,18 +181,15 @@ func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings De
 		repoFull, err := r.searchResultRepo(pr)
 		if err != nil {
 			slog.Warn("dispatch delivery: merged-PR search result", "number", pr.Number, "error", err)
-			failures = append(failures, fmt.Sprintf("pull request #%d: %s", pr.Number, err))
+			failures = append(failures, fmt.Errorf("pull request #%d: %w", pr.Number, err))
 			continue
 		}
 		if err := r.reconcilePullRequest(ctx, settings, repoFull, pr); err != nil {
 			slog.Warn("dispatch delivery: reconcile pull request", "repo", repoFull, "number", pr.Number, "error", err)
-			failures = append(failures, fmt.Sprintf("%s#%d: %s", repoFull, pr.Number, err))
+			failures = append(failures, fmt.Errorf("%s#%d: %w", repoFull, pr.Number, err))
 		}
 	}
-	if len(failures) > 0 {
-		return errors.New(strings.Join(failures, "; "))
-	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // searchResultRepo recovers "owner/repo" from a search result's HTML URL
@@ -234,6 +234,35 @@ func (r *Reconcile) reconcilePullRequest(ctx context.Context, settings DeliveryS
 	})
 }
 
+// boundedFanOut runs fn(ctx, item) for every item in items, up to concurrency goroutines at
+// once, via errgroup.WithContext(ctx) + SetLimit: the first goroutine to return a non-nil error
+// cancels the shared context, and the loop checks it before starting each further item, so
+// nothing new launches once that happens. An item already in flight when that happens is not
+// necessarily spared either: it shares the cancelled context, so its own in-flight HTTP request
+// (there is no cheap way to cancel one already sent otherwise) can itself be aborted before
+// GitHub ever answers it -- it does not reliably run to completion the way an item started
+// before the cancellation and already past its own HTTP call does. fn decides for itself which
+// errors are the batch's own stop signal (returned) versus one item's own problem (logged and
+// swallowed inside fn, nil returned) -- this helper only runs the fan-out, never interprets fn's
+// result. reconcilePartialPullRequests and SearchMergedPullRequestsAcrossInstallation's own
+// searchOneInstallation loop each hand-rolled this identical
+// errgroup.WithContext+SetLimit+groupCtx.Err()-before-each-Go shape separately before this helper
+// existed (Simplify's round-5 finding).
+func boundedFanOut[T any](ctx context.Context, concurrency int, items []T, fn func(ctx context.Context, item T) error) error {
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(concurrency)
+	for _, item := range items {
+		if groupCtx.Err() != nil {
+			break
+		}
+		item := item
+		group.Go(func() error {
+			return fn(groupCtx, item)
+		})
+	}
+	return group.Wait()
+}
+
 // reconcilePartialConcurrency bounds how many partial pull requests reconcilePartialPullRequests
 // completes at once. Each one makes two sequential GitHub calls (FetchPullRequest, then
 // fetchSessionTrailers once merged); run one at a time, a 3,500-PR backfill (CONTRACT.md's own
@@ -248,47 +277,28 @@ const reconcilePartialConcurrency = 8
 
 // reconcilePartialPullRequests completes every stored partial row (written by intake when its
 // completing fetch failed, or by this reconcile's own merged-PR search, which never carries the
-// completing fields) with a single-pull-request fetch, up to reconcilePartialConcurrency at once.
-// Each partial row is a distinct (repo, number) key, so concurrent upserts never race each other.
-// errgroup.WithContext(ctx)'s own semantics give the redeliver.Sweeper rate-limit pattern
-// directly: SetLimit bounds concurrency, and the first goroutine to return a non-nil error (here,
-// specifically a *githubapp.RateLimitError) cancels groupCtx -- the loop checks it before
-// starting each further completion, so nothing new launches once that happens. A completion
-// already in flight when that happens is not necessarily spared either: it shares groupCtx, so
-// its own in-flight HTTP request (there is no cheap way to cancel one already sent otherwise) can
-// itself be aborted by the cancellation before GitHub ever answers it -- it does not reliably run
-// to completion the way a row started before the cancellation and already past its HTTP call
-// does. Either way that row's own result is only logged and swallowed inside
-// completePartialPullRequest below, never a second time mistaken for the batch's own stop signal.
-// Wait returns the first row's own *githubapp.RateLimitError, so the pass is reported failed and
-// last_reconcile_at does not advance past rows this pass never got to -- the next pass's overlap
-// re-reads them rather than losing them for good. Any other per-row error (a 404, a deleted
-// repository, a malformed answer) is still only logged and skipped inside
-// completePartialPullRequest, never returned: it is that one row's own problem, not a reason to
-// stop the rest of the batch.
+// completing fields) with a single-pull-request fetch, via boundedFanOut (errgroup.WithContext +
+// SetLimit(reconcilePartialConcurrency)). Each partial row is a distinct (repo, number) key, so
+// concurrent upserts never race each other. completePartialPullRequest below returns non-nil only
+// for a *githubapp.RateLimitError, which is boundedFanOut's own returned error (via
+// errgroup.Wait) here, so the pass is reported failed and last_reconcile_at does not advance past
+// rows this pass never got to -- the next pass's overlap re-reads them rather than losing them
+// for good. Any other per-row error (a 404, a deleted repository, a malformed answer) is still
+// only logged and skipped inside completePartialPullRequest, never returned: it is that one row's
+// own problem, not a reason to stop the rest of the batch.
 func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	partials, err := ListPartialPullRequests(ctx, r.pool)
 	if err != nil {
 		return fmt.Errorf("list partial pull requests: %w", err)
 	}
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(reconcilePartialConcurrency)
-	for _, pr := range partials {
-		if groupCtx.Err() != nil {
-			break
-		}
-		group.Go(func() error {
-			return r.completePartialPullRequest(groupCtx, pr)
-		})
-	}
-	if err := group.Wait(); err != nil {
+	if err := boundedFanOut(ctx, reconcilePartialConcurrency, partials, r.completePartialPullRequest); err != nil {
 		return fmt.Errorf("rate-limited completing partial pull requests: %w", err)
 	}
 	return nil
 }
 
 // completePartialPullRequest is reconcilePartialPullRequests' per-row body, run as its own
-// errgroup goroutine. Returns non-nil only for a *githubapp.RateLimitError (the signal that
+// boundedFanOut goroutine. Returns non-nil only for a *githubapp.RateLimitError (the signal that
 // stops the batch, per reconcilePartialPullRequests' own doc comment, from either FetchPullRequest
 // or completePullRequest's own session-trailer fetch); every other error is logged and swallowed
 // here, since one row's own failure must not stop any other row's completion already in flight.
@@ -304,8 +314,7 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 	}
 	fetched, err := FetchPullRequest(ctx, r.github, owner, repo, pr.Number)
 	if err != nil {
-		var limited *githubapp.RateLimitError
-		if errors.As(err, &limited) {
+		if limited, ok := githubapp.AsRateLimit(err); ok {
 			slog.Warn("dispatch delivery: stopped completing partial pull request: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited
 		}
@@ -322,8 +331,7 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 		return nil
 	}
 	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched); err != nil {
-		var limited *githubapp.RateLimitError
-		if errors.As(err, &limited) {
+		if limited, ok := githubapp.AsRateLimit(err); ok {
 			slog.Warn("dispatch delivery: stopped fetching session trailers for a partial pull request: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited
 		}
@@ -338,15 +346,31 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 // often the jobs listing, since the runs listing above it already succeeded) must not let this
 // pass report itself healthy -- runOnce's record() must see the failure so last_reconcile_at
 // does not advance past a window this pass left incompletely fetched, and the next pass's
-// smaller overlap re-reads it instead of the gap becoming permanent.
+// smaller overlap re-reads it instead of the gap becoming permanent. Reads which of this
+// window's completed runs already carry a jobs-unfetchable mark in one bulk query
+// (ListUnfetchableRunIDs) before the loop, instead of reconcileRun running its own
+// RunJobsUnfetchable point query once per completed run on every pass -- the overwhelming
+// majority of runs were never marked, and this package already bulk-fetches this way one
+// function away (ListPartialPullRequests feeding reconcilePartialPullRequests; Simplify's
+// round-5 finding).
 func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, since, until time.Time) error {
 	runs, err := ListWorkflowRuns(ctx, r.github, owner, repo, workflowPath, since, until)
 	if err != nil {
 		return fmt.Errorf("list %s workflow runs: %w", kind, err)
 	}
+	completedRunIDs := make([]int64, 0, len(runs))
+	for _, run := range runs {
+		if run.CompletedAt != nil {
+			completedRunIDs = append(completedRunIDs, run.RunID)
+		}
+	}
+	jobsUnfetchable, err := ListUnfetchableRunIDs(ctx, r.pool, repoFull, completedRunIDs)
+	if err != nil {
+		return fmt.Errorf("list unfetchable %s run jobs: %w", kind, err)
+	}
 	var failures []string
 	for _, run := range runs {
-		err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run)
+		err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run, jobsUnfetchable)
 		if err == nil {
 			continue
 		}
@@ -355,10 +379,9 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 		// A rate limit is a global condition on this installation token's budget, not one run's
 		// own problem: Rev's probe showed the un-fixed loop sending 197 of 200 requests after the
 		// first rate-limited one, each adding its own failure text to last_error (57 KB by the
-		// end). Stop here instead, preserving the typed error with %w so a caller checking
-		// errors.As for it still can, unlike every other per-run failure joined into one string.
-		var limited *githubapp.RateLimitError
-		if errors.As(err, &limited) {
+		// end). Stop here instead, preserving the typed error so a caller checking errors.As for
+		// it still can, unlike every other per-run failure joined into one string.
+		if limited, ok := githubapp.AsRateLimit(err); ok {
 			return fmt.Errorf("%d of %d %s runs attempted before a rate limit stopped the rest: %s: %w",
 				len(failures), len(runs), kind, strings.Join(failures, "; "), limited)
 		}
@@ -373,11 +396,11 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 // commit's timestamp (head_commit.timestamp, read into FetchedRun.HeadCommitAt by
 // github_runs.go's fetchedRunFromItem), unlike the live webhook envelope intake.go handles, which
 // re-verifies the whole run against GitHub rather than trusting the envelope -- and, once it has
-// concluded, its jobs. A run whose jobs listing is already marked unfetchable
-// (MarkRunJobsUnfetchable, from an earlier pass's permanent 404) is skipped rather than
-// re-fetched: the same treatment completePartialPullRequest gives an already-unfetchable pull
-// request.
-func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, run FetchedRun) error {
+// concluded, its jobs. A run whose jobs listing already carries a jobs-unfetchable mark
+// (jobsUnfetchable, reconcileWorkflow's own bulk ListUnfetchableRunIDs read, from an earlier
+// pass's permanent 404) is skipped rather than re-fetched: the same treatment
+// completePartialPullRequest gives an already-unfetchable pull request.
+func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, run FetchedRun, jobsUnfetchable map[int64]bool) error {
 	if err := UpsertRun(ctx, r.pool, DeliveryRun{
 		Repo: repoFull, RunID: run.RunID, Kind: kind, PRNumber: run.PRNumber, HeadSHA: run.HeadSHA,
 		HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
@@ -388,11 +411,7 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 	if run.CompletedAt == nil {
 		return nil
 	}
-	unfetchable, err := RunJobsUnfetchable(ctx, r.pool, repoFull, run.RunID)
-	if err != nil {
-		return fmt.Errorf("check run jobs unfetchable: %w", err)
-	}
-	if unfetchable {
+	if jobsUnfetchable[run.RunID] {
 		return nil
 	}
 	fetchedJobs, err := ListWorkflowRunJobs(ctx, r.github, owner, repo, run.RunID)

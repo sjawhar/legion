@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -8,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
 // TestReconcileCatchesAMissedPullRequest proves the plan's "a missed event appears by the next
@@ -541,5 +544,103 @@ func TestReconcilePartialPullRequestsStopsOnRateLimitInsteadOfRetryingAtFullConc
 	}
 	if after.LastError == nil {
 		t.Fatal("settings.LastError is nil, want the rate limit recorded and the pass reported failed")
+	}
+}
+
+// TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError proves the per-run rate-limit
+// stop Rev's probe drove (197 of 200 requests sent after the first limit) end to end: among
+// three completed runs in one window, the second's jobs listing answering a rate limit must stop
+// the third's jobs listing from ever being requested, the returned error must still satisfy
+// errors.As for a *githubapp.RateLimitError (not stringified away into the per-run aggregate),
+// and fail()'s own maxLastErrorLength bound still caps what reaches
+// delivery_settings.last_error. Removing reconcileWorkflow's unconditional per-run stop on a
+// rate limit (reverting to "log and keep going") makes this red: the third run's jobs endpoint
+// would be called, defeating the "no further GitHub request" assertion below.
+func TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{
+			"total_count": 3,
+			"workflow_runs": []map[string]any{
+				{
+					"id": 910, "head_sha": "cafef00d", "html_url": "https://github.com/acme/widgets/actions/runs/910",
+					"status": "completed", "conclusion": "success",
+					"run_started_at": "2024-01-01T02:00:00Z", "created_at": "2024-01-01T02:00:00Z",
+					"updated_at":    "2024-01-01T02:10:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T01:55:00Z"},
+					"pull_requests": []any{},
+				},
+				{
+					"id": 911, "head_sha": "deadbeef", "html_url": "https://github.com/acme/widgets/actions/runs/911",
+					"status": "completed", "conclusion": "success",
+					"run_started_at": "2024-01-01T03:00:00Z", "created_at": "2024-01-01T03:00:00Z",
+					"updated_at":    "2024-01-01T03:10:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T02:55:00Z"},
+					"pull_requests": []any{},
+				},
+				{
+					"id": 912, "head_sha": "f00dcafe", "html_url": "https://github.com/acme/widgets/actions/runs/912",
+					"status": "completed", "conclusion": "success",
+					"run_started_at": "2024-01-01T04:00:00Z", "created_at": "2024-01-01T04:00:00Z",
+					"updated_at":    "2024-01-01T04:10:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T03:55:00Z"},
+					"pull_requests": []any{},
+				},
+			},
+		})
+	})
+	var firstJobsCalls, secondJobsCalls, thirdJobsCalls atomic.Int32
+	fake.handle("GET /repos/acme/widgets/actions/runs/910/jobs", func(w http.ResponseWriter, r *http.Request) {
+		firstJobsCalls.Add(1)
+		mustEncode(t, w, map[string]any{"jobs": []any{}})
+	})
+	fake.handle("GET /repos/acme/widgets/actions/runs/911/jobs", func(w http.ResponseWriter, r *http.Request) {
+		secondJobsCalls.Add(1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	fake.handle("GET /repos/acme/widgets/actions/runs/912/jobs", func(w http.ResponseWriter, r *http.Request) {
+		thirdJobsCalls.Add(1)
+		mustEncode(t, w, map[string]any{"jobs": []any{}})
+	})
+	client := fake.newTestClient()
+	reconcile := NewReconcile(pool, client)
+
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", ".github/workflows/deploy.yml", DeliveryRunKindDeploy, since, until)
+	if err == nil {
+		t.Fatal("reconcileWorkflow: err = nil, want the second run's rate limit to fail the pass")
+	}
+	var limited *githubapp.RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("errors.As(err, &limited) = false, want true (the typed rate limit must survive the per-run aggregation); err = %v", err)
+	}
+
+	if firstJobsCalls.Load() != 1 {
+		t.Fatalf("first run's jobs endpoint called %d times, want 1", firstJobsCalls.Load())
+	}
+	if secondJobsCalls.Load() != 1 {
+		t.Fatalf("second (rate-limited) run's jobs endpoint called %d times, want 1", secondJobsCalls.Load())
+	}
+	if thirdJobsCalls.Load() != 0 {
+		t.Fatalf("third run's jobs endpoint called %d times, want 0: the rate limit must stop every further request", thirdJobsCalls.Load())
+	}
+
+	reconcile.fail(ctx, err)
+	settings, getErr := GetSettings(ctx, pool)
+	if getErr != nil {
+		t.Fatalf("GetSettings after fail: %v", getErr)
+	}
+	if settings.LastError == nil {
+		t.Fatal("settings.LastError is nil, want the rate limit recorded")
+	}
+	if len(*settings.LastError) > maxLastErrorLength {
+		t.Fatalf("len(settings.LastError) = %d, want capped at maxLastErrorLength (%d)", len(*settings.LastError), maxLastErrorLength)
 	}
 }
