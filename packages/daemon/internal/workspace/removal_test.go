@@ -525,3 +525,40 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileWhoseNameIsNotValidUTF8(t *tes
 		t.Errorf("logged %v, want one line naming WIDGETS-42 kept for the snapshot's stderr", logged)
 	}
 }
+
+// Every pod's own init container starts with an empty XDG_CONFIG_HOME — the daemon never reuses
+// one pod's config home in another — and a sibling's workspace is provisioned by one pod's
+// container, then later judged for removal by a different pod's (dispatch://LEGION-583). The
+// first jj command any config home ever runs against a repository (confirmed against the pinned
+// jj: `jj git clone` under one config home, `jj status` under a second, with nothing else
+// changed) writes a one-time notice to stderr naming exactly that — "Warning: Per-repo config not
+// found. Generating an empty one." plus its two explanatory lines — which the removal pass's own
+// pod sees on the very first candidate it ever touches, every single launch. A workspace fully
+// pushed is still removed despite it.
+func TestRemoveFinishedRemovesAWorkspaceDespiteTheFreshConfigHomeWarning(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	ws, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+
+	// Simulate workspace-init's own removal-pass pod: a config home this repository's per-repo
+	// config has never been migrated into, unlike newLocalRunner's own (which Provision and the
+	// push above already used).
+	fresh := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", fresh)
+	t.Setenv("JJ_CONFIG", filepath.Join(fresh, "no-user-config.toml"))
+
+	var logged []string
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+		t.Fatalf("RemoveFinished: %v", err)
+	}
+	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("workspace remains after RemoveFinished (err=%v), want removed despite the one-time fresh-config-home warning", err)
+	}
+	if want := "removed WIDGETS-42's workspace"; len(logged) != 1 || !strings.Contains(logged[0], want) {
+		t.Errorf("logged %v, want one line containing %q", logged, want)
+	}
+}

@@ -81,6 +81,20 @@ func snapshotOverrides() []string {
 	}
 }
 
+// freshConfigHomeWarning is the one-time notice jj writes to stderr, and nowhere else, the first
+// time any command needs to write a new operation against a repository from a config home that
+// has never read that repository's per-repo config before (confirmed against the pinned jj: a
+// `jj git clone` under one config home, read by `jj status` under a second, empty one, even with
+// nothing else changed). Every pod's init container starts with an empty XDG_CONFIG_HOME, and a
+// sibling's workspace is provisioned by one pod's container and later judged for removal by
+// another's (dispatch://LEGION-583): without this exemption the removal pass's own pod sees this
+// warning on the first candidate it ever touches, every single launch, and keeps every candidate
+// forever. Matched in full, not as a substring: anything else alongside it, or any other stderr
+// output at all, still keeps the workspace.
+const freshConfigHomeWarning = "Warning: Per-repo config not found. Generating an empty one.\n" +
+	"Per-repo config is stored in the same directory as your user config for security reasons.\n" +
+	"If you work across multiple computers, you may want to keep your user config directory in sync."
+
 // RemoveFinished removes ws when every non-empty commit it holds is on GitHub by unpushedRevset's
 // rule, and otherwise keeps it, naming in one log line the commits that are not — never deleting
 // unpushed work. A workspace already gone (removed already, or never provisioned on this volume)
@@ -111,10 +125,11 @@ func snapshotOverrides() []string {
 // anywhere. A file whose name is not valid UTF-8 gets only a warning jj writes to stderr, with
 // stdout claiming no changes at all. Both leave unpushed work this workspace alone holds invisible
 // to unpushedRevset's read of `@`. So two checks run before it, on the snapshot's own result:
-// anything at all on stderr keeps the workspace (this also makes the untracked-path case below
-// fail closed if a future jj ever changes its stdout wording rather than its stderr one), and so
-// does any nested repository (nestedRepositories below, which treats the workspace's own `.git`
-// and `.jj` — every workspace has both — as not nested, and nothing else as exempt by type).
+// anything at all on stderr, other than freshConfigHomeWarning matched in full (below), keeps the
+// workspace (this also makes the untracked-path case below fail closed if a future jj ever changes
+// its stdout wording rather than its stderr one), and so does any nested repository
+// (nestedRepositories below, which treats the workspace's own `.git` and `.jj` — every workspace
+// has both — as not nested, and nothing else as exempt by type).
 //
 // Past both, the snapshot can still leave an ordinary path untracked rather than commit it (an
 // oversized new file, under snapshot.max-new-file-size, which snapshotOverrides deliberately
@@ -159,7 +174,7 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 	if err != nil {
 		return err
 	}
-	if stderr := strings.TrimSpace(snapshotted.Stderr); stderr != "" {
+	if stderr := strings.TrimSpace(snapshotted.Stderr); stderr != "" && stderr != freshConfigHomeWarning {
 		log(fmt.Sprintf("kept %s's workspace: the snapshot wrote to stderr (%s)", issue, stderr))
 		return nil
 	}
