@@ -244,16 +244,14 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers. Both wait out
 		// an unreachable dependency on ctx, not the bounded boot budget just spent on everything
-		// before them, through the same bootprobe.Run mechanism mintAtBoot already uses — here
-		// with Attempts left at its unbounded zero, where mintAtBoot bounds its own at 5.
-		// natsauth.Unreachable and dispatch.Unreachable each judge their own dependency; their own
-		// docs are the record of what each one waits on and what it still refuses loud.
-		// reconcile's own Postgres transaction is judged by neither: a design choice, not an
-		// inability to tell its failures apart from NATS's or Dispatch's.
-		// TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword and
-		// scripts/e2e/stage1-skeleton.sh prove an unreachable Postgres refuses store.Open, earlier
-		// in boot than this gate runs; neither reaches reconcile's own Postgres transaction
-		// through the gate, which remains unverified by a dedicated test.
+		// before them, through the same bootprobe.Run mechanism mintAtBoot already uses, here with
+		// Attempts left at its unbounded zero. natsauth.Unreachable and dispatch.Unreachable each
+		// judge their own dependency; their own docs are the record of what each one waits on and
+		// what it still refuses loud. reconcile's own Postgres transaction is judged by neither: a
+		// design choice, not an inability to tell its failures apart from NATS's or Dispatch's — an
+		// unreachable Postgres refuses earlier, at store.Open
+		// (TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword, scripts/e2e/stage1-skeleton.sh).
+		plan.nats.log(log)
 		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
 			readinessAttempt(func(attempt context.Context) error {
 				return workflow.connect(attempt, cfg, plan.nats)

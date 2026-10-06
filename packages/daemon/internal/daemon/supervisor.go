@@ -251,15 +251,18 @@ func (s *supervisor) wait() {
 // accept an old generation's shim after its claim has already relaunched, taking the stream slot
 // the new generation's own hello then finds "already bound to a live stream".
 func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration) stream.HelloResolver {
-	return func(bootToken string) (claim.Token, uint64, bool, bool) {
+	resolve := func(bootToken string) (api.BootToken, bool) {
 		ctx, cancel := context.WithTimeout(s.ctx, timeout)
-		_, known, err := tokens.Resolve(ctx, bootToken)
-		cancel()
+		defer cancel()
+		launch, known, err := tokens.Resolve(ctx, bootToken)
 		if err != nil {
 			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
-			return "", 0, false, false
+			return api.BootToken{}, false
 		}
-		if !known {
+		return launch, known
+	}
+	return func(bootToken string) (claim.Token, uint64, bool, bool) {
+		if _, known := resolve(bootToken); !known {
 			return "", 0, false, false
 		}
 		select {
@@ -268,13 +271,7 @@ func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration
 			s.log.Info("worker stream: a hello's boot token was real, but the boot never became ready", "error", s.ctx.Err())
 			return "", 0, false, false
 		}
-		ctx, cancel = context.WithTimeout(s.ctx, timeout)
-		launch, known, err := tokens.Resolve(ctx, bootToken)
-		cancel()
-		if err != nil {
-			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
-			return "", 0, false, false
-		}
+		launch, known := resolve(bootToken)
 		if !known {
 			return "", 0, false, false
 		}

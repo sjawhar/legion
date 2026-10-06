@@ -456,11 +456,9 @@ jj in a managed repository's checkout, `mise where`, a key command) runs without
 `NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
 tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
 `_FILE` variables), since a value stays in the daemon's own process environment. At boot the
-daemon logs `legion daemon connects to NATS` with `user=U…` (the public key, never the seed),
-`paneUser=true|false`, and `seed=daemon|pane|none` before every connect attempt — once before the
-first, and again before each retry while NATS stays unreachable at boot (the readiness gate
-below), always with the same `user` and `seed`. `legion start --check-config` reads it as boot does
-and adds
+daemon logs, once, `legion daemon connects to NATS` with `user=U…` (the public key, never the
+seed), `paneUser=true|false`, and `seed=daemon|pane|none`. `legion start --check-config` reads it
+as boot does and adds
 `nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
 connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
 at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
@@ -483,8 +481,7 @@ A malformed seed refuses the boot immediately at startup, before any network con
 attempted. A NATS authorization violation at connect time is the same: the server said no
 synchronously, and the boot refuses it at once. An EOF during the NATS handshake also refuses at
 once — the connection simply closed, and nats.go returns that synchronously too — though no crash
-in the audited journal took this shape; refusing it, rather than waiting, is a judgment call for a
-shape nobody has yet seen in practice.
+in the audited journal took this shape, so refusing rather than waiting here is a judgment call.
 
 A NATS permission violation (a refused JetStream grant) gives no synchronous answer: nats.go
 reports it asynchronously, so the blocked call's own error carries nothing but a plain timeout,
@@ -517,9 +514,8 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and its `legion daemon connects to NATS` line must name the
-daemon's own user: `paneUser=false` (#1494) on the first such line and on every repeat, if NATS
-was briefly unreachable at boot. Only then is the `legion-pane` seed written. A clean boot line
+every daemon gets it and restarts, and its `legion daemon connects to NATS` line must read
+`paneUser=false` (#1494). Only then is the `legion-pane` seed written. A clean boot line
 proves the user, not every grant: the check before the pane seed is written also has each daemon
 consume a Dispatch and a GitHub event with no error
 line, and searches each daemon's log for `NATS refused the daemon`, since a missing grant on the

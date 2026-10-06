@@ -148,10 +148,11 @@ func (e *TransientError) Unwrap() error { return e.Err }
 // Unreachable reports whether err means Dispatch is not reachable yet, the same outage
 // PermanentRefusal already rides out rather than drops a queued write over: a TransientError (no
 // answer came back at all), or an *Error whose refusal PermanentRefusal does not call permanent —
-// every 5xx, a codeless 4xx, 408, 429, and a credential answer (401, 403; the boot token is read
-// once, so a corrected file takes a restart to take effect, same as a queued write already
-// accepts). Anything else — a genuine coded refusal PermanentRefusal does call permanent, or an
-// error that is neither a TransientError nor a Dispatch *Error at all, such as a 200 response
+// every 5xx, a codeless 4xx, 408, 429, and a credential answer (401, 403; the Dispatch token
+// (dispatch_token_file) is read once at boot, so a corrected file takes a restart to take effect,
+// same as a queued write already accepts). Anything else — a genuine coded refusal
+// PermanentRefusal does call permanent, or an error that is neither a TransientError nor a
+// Dispatch *Error at all, such as a 200 response
 // whose body is not the JSON it promised — is not an outage this waits out.
 func Unreachable(err error) bool {
 	var transient *TransientError

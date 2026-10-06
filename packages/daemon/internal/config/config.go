@@ -557,10 +557,10 @@ func dispatchBase(value, key string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", fmt.Errorf("%s must be http or https, not %q", key, parsed.Scheme)
 	}
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", fmt.Errorf("%s must not include a query string or fragment", key)
+	base, err := trimmedBase(parsed, key)
+	if err != nil {
+		return "", err
 	}
-	base := strings.TrimRight(parsed.String(), "/")
 	if strings.HasSuffix(base, "/mcp") {
 		return "", fmt.Errorf("%s must be the dispatch service base URL, not the /mcp endpoint", key)
 	}
@@ -713,6 +713,13 @@ func baseURL(value, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return trimmedBase(parsed, key)
+}
+
+// trimmedBase is baseURL's own normalization, on an already-validated URL: a query or fragment is
+// refused and trailing slashes are dropped. dispatchBase shares it after its own scheme check,
+// which must read the parsed URL's Scheme directly rather than re-parsing a normalized string.
+func trimmedBase(parsed *url.URL, key string) (string, error) {
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", fmt.Errorf("%s must not include a query string or fragment", key)
 	}

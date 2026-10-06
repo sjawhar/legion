@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,8 +223,10 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, body, int
 
 // transportFailure wraps err as a TransientError unless it is a misconfiguration no wait fixes,
 // never an outage: a certificate Go's client refuses to trust (a wrong or missing CA, a hostname
-// mismatch, an expired or otherwise invalid certificate), or an https:// dispatch_url pointed at
-// a plain-HTTP port (http.ErrSchemeMismatch) — dispatchBase's scheme check (internal/config)
+// mismatch, an expired or otherwise invalid certificate — crypto/tls wraps every one of these as
+// *tls.CertificateVerificationError, never a bare x509 error, since httpClient sets no
+// VerifyPeerCertificate or VerifyConnection of its own), or an https:// dispatch_url pointed at a
+// plain-HTTP port (http.ErrSchemeMismatch) — dispatchBase's scheme check (internal/config)
 // catches a typo in the scheme itself before boot, but not a correct https:// whose port serves
 // plain HTTP. Left wrapped, either would satisfy Unreachable exactly like a dial refused or reset
 // would, and a boot gate would retry a certificate or scheme problem forever instead of refusing
@@ -233,18 +234,6 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, body, int
 func transportFailure(err error) error {
 	var certErr *tls.CertificateVerificationError
 	if errors.As(err, &certErr) {
-		return err
-	}
-	var unknownAuth x509.UnknownAuthorityError
-	if errors.As(err, &unknownAuth) {
-		return err
-	}
-	var hostErr x509.HostnameError
-	if errors.As(err, &hostErr) {
-		return err
-	}
-	var certInvalid x509.CertificateInvalidError
-	if errors.As(err, &certInvalid) {
 		return err
 	}
 	if errors.Is(err, http.ErrSchemeMismatch) {

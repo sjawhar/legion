@@ -963,36 +963,12 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	}))
 	t.Cleanup(dispatchServer.Close)
 
-	cfg := testConfig(t)
+	cfg := workflowConfig(t, natsURL)
 	cfg.DispatchURL = dispatchServer.URL
-	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
-	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
-		t.Fatalf("write Dispatch token: %v", err)
-	}
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.MustParse("acme/widgets")}}
-	cfg.NatsURLs = []string{natsURL}
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.workflowTokens = &workflowTokenRecorder{}
+	startDaemon(t, cfg, o)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
-			listen:  heldListen,
-			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
-		})
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("run: %v", err)
-			}
-		case <-time.After(15 * time.Second):
-			t.Error("daemon did not stop")
-		}
-	})
-
-	awaitHealthz(t, cfg, done)
 	if got := requests.Load(); got < 3 {
 		t.Fatalf("Dispatch saw %d requests, want at least 3 (two 503s then the 200 the daemon booted on)", got)
 	}
