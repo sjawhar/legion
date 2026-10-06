@@ -107,8 +107,11 @@ jobs:
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
       # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
       # them). Writing them here for each of those builds fails the pull request that brings in a
-      # module whose license cannot be determined, before a release does.
-      - name: Check every Go release archive's third-party notices can be written
+      # module whose license cannot be determined, before a release does. The darwin agent-secrets
+      # client is also compiled here, since writing notices loads its packages without type-checking
+      # them and no other pull-request job builds it for darwin: a darwin-only compile error fails
+      # the pull request rather than the release after the merge.
+      - name: Check every Go release archive's third-party notices can be written and the darwin client compiles
         run: |
           notices="$RUNNER_TEMP/notices"
           mkdir -p "$notices"
@@ -124,6 +127,8 @@ jobs:
               ./cmd/agent-secrets ./cmd/agent-secrets-helper)
           done
           for target in $(jq -r '.["agent-secrets-client"][]' .github/go-release-targets.json); do
+            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              go build -buildvcs=false -o /dev/null ./cmd/agent-secrets)
             (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
               ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
               ./cmd/agent-secrets)
