@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
-	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 
@@ -99,7 +99,7 @@ func servedBy(sm secretsAPI) func(name string) Reread {
 		switch {
 		case err != nil || out.DeletedDate != nil:
 			return Reread{Name: name, Reason: policy.ReasonAbsent}
-		case !hasCurrentVersion(out.VersionIdsToStages):
+		case !policy.HasCurrentVersion(out.VersionIdsToStages):
 			return Reread{Name: name, Reason: policy.ReasonNoCurrentValue}
 		}
 		return Reread{Name: name, Served: true}
@@ -140,15 +140,6 @@ func describe(t *testing.T, local *secrets.Local, name string) *secretsmanager.D
 		t.Fatalf("describe %s: %v", name, err)
 	}
 	return out
-}
-
-// tagsOf is tags as a map.
-func tagsOf(tags []smtypes.Tag) map[string]string {
-	m := map[string]string{}
-	for _, tag := range tags {
-		m[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
-	}
-	return m
 }
 
 // valueOf is local's current value of the secret a session asks for as name.
@@ -208,7 +199,7 @@ func TestSecretCreateResolvesOwnerMeFromTheSessionName(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
 	}
 	got := describe(t, local, "NEW_KEY")
-	if tags := tagsOf(got.Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent {
+	if tags := tagMap(got.Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent {
 		t.Fatalf("tags = %v, want owner ada@example.com and tier agent", tags)
 	}
 	if aws.ToString(got.KmsKeyId) != policytest.KeyARN {
@@ -286,7 +277,8 @@ func TestSecretFormsRefuseBadUsageWithExitTwo(t *testing.T) {
 }
 
 // TestSecretRetagSendsBothTags: a retag naming one tag sends both, the other re-sent as the secret
-// holds it, since IAM's TagOwnSecret conditions on both request tags.
+// holds it, since the deployment repository's IAM statement that lets a person tag their own secret
+// conditions on both request tags.
 func TestSecretRetagSendsBothTags(t *testing.T) {
 	local := secrets.NewLocal(policytest.Secret("OWNED_KEY", "ada@example.com", policy.TierAgent, "v1"))
 	sent := &recordingTags{Local: local}
@@ -296,13 +288,13 @@ func TestSecretRetagSendsBothTags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
 	}
-	if tags := tagsOf(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierHuman {
+	if tags := tagMap(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("tags = %v, want owner ada@example.com unchanged and tier human", tags)
 	}
 	if len(sent.requests) != 1 {
 		t.Fatalf("TagResource requests = %d, want 1", len(sent.requests))
 	}
-	if got := tagsOf(sent.requests[0].Tags); len(got) != 2 || got[policy.TagOwner] != "ada@example.com" || got[policy.TagTier] != policy.TierHuman {
+	if got := tagMap(sent.requests[0].Tags); len(got) != 2 || got[policy.TagOwner] != "ada@example.com" || got[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("TagResource sent %v, want both tags: owner ada@example.com and tier human", got)
 	}
 	if rereads, _ := broker.recorded(); len(rereads) != 1 || rereads[0] != "OWNED_KEY" {
@@ -335,10 +327,10 @@ func (refusingTags) TagResource(context.Context, *secretsmanager.TagResourceInpu
 	return nil, &smithy.GenericAPIError{Code: "AccessDeniedException", Message: accessDenied}
 }
 
-// TestSecretRetagOfASharedSecretSaysAnAdministratorChangesIt: IAM refuses a person's retag of a
-// shared secret (spec v12: "Administrators only"); the CLI prints AWS's refusal and says whose
-// change it is, and nothing changes. A refused retag of a secret that is not shared says only
-// what AWS said.
+// TestSecretRetagOfASharedSecretSaysAnAdministratorChangesIt: IAM refuses a person's change to a
+// shared secret's owner or tier, and a person making their own secret shared; the CLI prints AWS's
+// refusal and says whose change it is, and nothing changes. Any other refused retag says only what
+// AWS said.
 func TestSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T) {
 	local := secrets.NewLocal(
 		policytest.Secret("SHARED_KEY", policy.OwnerShared, policy.TierHuman, "v1"),
@@ -346,24 +338,85 @@ func TestSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T) {
 	)
 	broker := startSecretBroker(t, servedBy(local))
 	useAWS(t, refusingTags{local}, testAccount, adaSignIn)
-	_, stderr, code := runSecret("retag", "SHARED_KEY", "--tier", "agent")
-	if code != 1 {
-		t.Fatalf("exit %d, stderr %q; want 1", code, stderr)
-	}
-	for _, want := range []string{accessDenied, "a shared secret's owner and tier are an administrator's to change"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr %q must contain %q", stderr, want)
+	for _, args := range [][]string{{"retag", "SHARED_KEY", "--tier", "agent"}, {"retag", "OWNED_KEY", "--owner", "shared"}} {
+		_, stderr, code := runSecret(args...)
+		if code != 1 {
+			t.Fatalf("%v: exit %d, stderr %q; want 1", args, code, stderr)
+		}
+		for _, want := range []string{accessDenied, "a shared secret's owner and tier are an administrator's to change"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%v: stderr %q must contain %q", args, stderr, want)
+			}
 		}
 	}
-	if tags := tagsOf(describe(t, local, "SHARED_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
+	if tags := tagMap(describe(t, local, "SHARED_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("tags = %v, want shared and human unchanged", tags)
 	}
-	_, stderr, code = runSecret("retag", "OWNED_KEY", "--tier", "agent")
+	if tags := tagMap(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" {
+		t.Fatalf("tags = %v, want OWNED_KEY's owner unchanged", tags)
+	}
+	_, stderr, code := runSecret("retag", "OWNED_KEY", "--tier", "agent")
 	if code != 1 || !strings.Contains(stderr, accessDenied) || strings.Contains(stderr, "administrator") {
 		t.Fatalf("an owned secret's refused retag: exit %d, stderr %q; want 1 with AWS's refusal alone", code, stderr)
 	}
 	if rereads, _ := broker.recorded(); len(rereads) != 0 {
 		t.Fatalf("rereads = %v, want none after refused writes", rereads)
+	}
+}
+
+// TestSecretReadsRefuseAnotherAccount: list and show under a sign-in in an account other than the
+// broker's are refused, naming both accounts, rather than reading that account's secrets as if
+// they were the agent secrets. Reads still take a machine's role in the broker's account.
+func TestSecretReadsRefuseAnotherAccount(t *testing.T) {
+	local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	startSecretBroker(t, servedBy(local))
+	useAWS(t, local, "999999999999", "arn:aws:sts::999999999999:assumed-role/AWSReservedSSO_User_abc123/ada@example.com")
+	for _, args := range [][]string{{"list"}, {"list", "--json"}, {"show", "HELD_KEY"}} {
+		stdout, stderr, code := runSecret(args...)
+		if code != 1 || stdout != "" {
+			t.Fatalf("%v: exit %d, stdout %q, stderr %q; want 1 and nothing on stdout", args, code, stdout, stderr)
+		}
+		for _, want := range []string{"in account 999999999999", "account " + testAccount} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%v: stderr %q must name %q", args, stderr, want)
+			}
+		}
+	}
+}
+
+// failingStdin fails t if a form reads it: no value may be asked for before the sign-in is checked.
+type failingStdin struct{ t *testing.T }
+
+func (f failingStdin) Read([]byte) (int, error) {
+	f.t.Error("the form read the value from standard input before refusing the sign-in")
+	return 0, io.EOF
+}
+
+// TestSecretWritesCheckTheSignInBeforeReadingTheValue: create and set refuse a machine's role or
+// another account before they read the value, so nobody pastes a secret only to be refused.
+func TestSecretWritesCheckTheSignInBeforeReadingTheValue(t *testing.T) {
+	restore := secretStdin
+	secretStdin = failingStdin{t}
+	t.Cleanup(func() { secretStdin = restore })
+	for _, signIn := range []struct{ account, arn, refusal string }{
+		{testAccount, "arn:aws:sts::111122223333:assumed-role/example-service-role/session", "not a person's Identity Center sign-in"},
+		{"999999999999", "arn:aws:sts::999999999999:assumed-role/AWSReservedSSO_User_abc123/ada@example.com", "in account 999999999999"},
+	} {
+		for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+			local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+			startSecretBroker(t, servedBy(local))
+			useAWS(t, local, signIn.account, signIn.arn)
+			_, stderr, code := runSecret(args...)
+			if code != 1 || !strings.Contains(stderr, signIn.refusal) {
+				t.Fatalf("%v as %s: exit %d, stderr %q; want 1 naming %q", args, signIn.arn, code, stderr, signIn.refusal)
+			}
+			if valueOf(t, local, "HELD_KEY") != "v1" {
+				t.Fatalf("%v as %s changed HELD_KEY's value", args, signIn.arn)
+			}
+			if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+				t.Fatalf("%v as %s created NEW_KEY", args, signIn.arn)
+			}
+		}
 	}
 }
 
@@ -623,7 +676,8 @@ func TestSecretWriteExitsOneWhenTheBrokerCannotBeAsked(t *testing.T) {
 }
 
 // TestSecretWritesRefuseAMachinesOwnRoleBeforeWriting: every write form refuses a machine's own
-// role before it calls AWS to write; the reads do not ask (IAM answers them).
+// role before it calls AWS to write; the reads take a machine's role in the broker's account (IAM
+// answers them).
 func TestSecretWritesRefuseAMachinesOwnRoleBeforeWriting(t *testing.T) {
 	const machine = "arn:aws:sts::111122223333:assumed-role/example-service-role/session"
 	for _, args := range [][]string{
@@ -639,7 +693,7 @@ func TestSecretWritesRefuseAMachinesOwnRoleBeforeWriting(t *testing.T) {
 				t.Fatalf("exit %d, stderr %q; want 1 naming the role", code, stderr)
 			}
 			got := describe(t, local, "HELD_KEY")
-			if got.DeletedDate != nil || tagsOf(got.Tags)[policy.TagTier] != policy.TierAgent || valueOf(t, local, "HELD_KEY") != "v1" {
+			if got.DeletedDate != nil || tagMap(got.Tags)[policy.TagTier] != policy.TierAgent || valueOf(t, local, "HELD_KEY") != "v1" {
 				t.Fatalf("HELD_KEY changed under a machine's role: %+v", got)
 			}
 			if rereads, _ := broker.recorded(); len(rereads) != 0 {
@@ -667,7 +721,7 @@ func TestSecretSetOrCreateWithASharedOwner(t *testing.T) {
 	if _, stderr, code := runSecret("create", "TEAM_KEY", "--owner", "shared", "--tier", "human"); code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
-	if tags := tagsOf(describe(t, local, "TEAM_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
+	if tags := tagMap(describe(t, local, "TEAM_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("tags = %v, want shared and human", tags)
 	}
 	useStdin(t, "second\n")

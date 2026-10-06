@@ -36,8 +36,9 @@ var secretForms = []string{"list", "show", "create", "set", "retag", "delete", "
 // longest Secrets Manager allows, during which restore brings the secret back.
 const recoveryWindowDays = 30
 
-// sharedRetagRefused is what a refused retag of a shared secret adds to AWS's own refusal: IAM
-// lets only an administrator change a shared secret's owner or tier.
+// sharedRetagRefused is what a refused retag of a shared secret, or of one the person asked to make
+// shared, adds to AWS's own refusal: IAM lets only an administrator set a shared secret's owner or
+// tier.
 const sharedRetagRefused = "a shared secret's owner and tier are an administrator's to change"
 
 // cmdSecret dispatches the secret forms.
@@ -150,17 +151,6 @@ func readSecretValue() (string, error) {
 	return value, nil
 }
 
-// hasCurrentVersion reports whether a version carries AWSCURRENT, the label GetSecretValue reads,
-// so the secret has a value the broker can release.
-func hasCurrentVersion(versionsToStages map[string][]string) bool {
-	for _, stages := range versionsToStages {
-		if slices.Contains(stages, "AWSCURRENT") {
-			return true
-		}
-	}
-	return false
-}
-
 // minRecoveryWindowDays is the shortest recovery window Secrets Manager allows a deletion, 7 days.
 const minRecoveryWindowDays = 7
 
@@ -222,9 +212,10 @@ type secretSession struct {
 	st       stsAPI
 }
 
-// connectSecrets reads the broker's settings from AGENT_SECRETS_URL and loads the person's AWS
-// sign-in (profile, else AWS_PROFILE, else the default chain) in the broker's region.
-func connectSecrets(ctx context.Context, profile string) (*secretSession, error) {
+// openSession reads the broker's settings from AGENT_SECRETS_URL and loads the person's AWS
+// sign-in (profile, else AWS_PROFILE, else the default chain) in the broker's region. It checks
+// nothing about the sign-in: connectReader and connectWriter do.
+func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
 	if base == "" {
 		return nil, usageErr{errors.New("AGENT_SECRETS_URL is required")}
@@ -241,10 +232,24 @@ func connectSecrets(ctx context.Context, profile string) (*secretSession, error)
 	return &secretSession{ctx: ctx, broker: broker, settings: settings, sm: sm, st: st}, nil
 }
 
-// connectWriter is connectSecrets for a write: it also refuses any sign-in but the person's own in
-// the broker's account (requireWriteSignIn) before anything is written, and answers their email.
+// connectReader is openSession for a read: it refuses a sign-in in another account
+// (requireAccount), whose secrets are not the agent secrets. Any sign-in in the broker's account
+// reads, a machine's role included: IAM decides what it may read.
+func connectReader(ctx context.Context, profile string) (*secretSession, error) {
+	s, err := openSession(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireAccount(ctx, s.st, s.settings); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// connectWriter is openSession for a write: it refuses any sign-in but the person's own in the
+// broker's account (requireWriteSignIn) before anything is written, and answers their email.
 func connectWriter(ctx context.Context, profile string) (*secretSession, string, error) {
-	s, err := connectSecrets(ctx, profile)
+	s, err := openSession(ctx, profile)
 	if err != nil {
 		return nil, "", err
 	}
@@ -344,7 +349,7 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 	if len(positional) > 0 {
 		return secretFail(stderr, form, usageErr{fmt.Errorf("unexpected argument %q", positional[0])})
 	}
-	s, err := connectSecrets(context.Background(), *profile)
+	s, err := connectReader(context.Background(), *profile)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -367,7 +372,7 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 			views = append(views, secretView{
 				Name: s.displayName(id), SecretName: id,
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-				HasValue: hasCurrentVersion(e.SecretVersionsToStages),
+				HasValue: policy.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
 			})
@@ -417,7 +422,7 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	s, err := connectSecrets(context.Background(), *profile)
+	s, err := connectReader(context.Background(), *profile)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -429,7 +434,7 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	view := secretView{
 		Name: s.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-		HasValue: hasCurrentVersion(out.VersionIdsToStages),
+		HasValue: policy.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
 		Versions: out.VersionIdsToStages,
@@ -483,11 +488,11 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue()
+	s, email, err := connectWriter(context.Background(), *profile)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	s, email, err := connectWriter(context.Background(), *profile)
+	value, err := readSecretValue()
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -522,11 +527,11 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue()
+	s, _, err := connectWriter(context.Background(), *profile)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	s, _, err := connectWriter(context.Background(), *profile)
+	value, err := readSecretValue()
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -544,8 +549,8 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 // cmdSecretRetag changes a secret's owner, tier or both. It always sends both tags, re-sending the
-// one not named as the secret holds it: IAM's TagOwnSecret conditions on both request tags, so a
-// request carrying one fails.
+// one not named as the secret holds it: the deployment repository's IAM statement that lets a
+// person tag their own secret conditions on both request tags, so a request carrying one fails.
 func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	const form = "secret retag"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
@@ -593,7 +598,9 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		},
 	}); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
-		if isAccessDenied(err) && tags[policy.TagOwner] == policy.OwnerShared {
+		// IAM leaves a shared secret's owner and tier to administrators: one held shared, or one a
+		// person asked to make shared.
+		if isAccessDenied(err) && (tags[policy.TagOwner] == policy.OwnerShared || owner == policy.OwnerShared) {
 			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
 		}
 		return 1

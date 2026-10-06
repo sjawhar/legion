@@ -23,8 +23,8 @@ func secretsLocalWithoutValue(name, owner string) secrets.LocalSecret {
 	return policytest.Secret(name, owner, policy.TierAgent, "")
 }
 
-// TestSecretCreateIsServedByTheBrokerAtOnce drives Done-when 1's broker half end to end: the CLI
-// writes to (fake) AWS and the broker serves the secret on its very next read, no reload.
+// TestSecretCreateIsServedByTheBrokerAtOnce drives a create end to end: the CLI writes to (fake)
+// AWS and the broker serves the secret on its very next read, no reload.
 func TestSecretCreateIsServedByTheBrokerAtOnce(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	t.Setenv("AGENT_SECRETS_URL", rig.URL)

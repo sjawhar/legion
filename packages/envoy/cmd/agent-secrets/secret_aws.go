@@ -1,7 +1,8 @@
 // packages/envoy/cmd/agent-secrets/secret_aws.go
 //
 // The AWS side of the secret forms: the Secrets Manager and STS calls they make, under the
-// person's own AWS sign-in, and the check that refuses a write under any other sign-in.
+// person's own AWS sign-in, and the checks that refuse a read or a write under a sign-in in another
+// account and a write under any sign-in but a person's own.
 package main
 
 import (
@@ -57,14 +58,15 @@ var awsClients = func(ctx context.Context, profile, region string) (secretsAPI, 
 // secretStdin is where create and set read a secret's value from; tests replace it.
 var secretStdin io.Reader = os.Stdin
 
-// ssoRole matches a person's Identity Center sign-in and captures (account, session name = the
-// Identity Center userName = the person's email, permission_sets.py's ${path:userName} mapping).
+// ssoRole matches a person's Identity Center sign-in and captures (account, session name). The
+// deployment repository's Identity Center permission sets map the session name to the person's
+// userName, which is their email.
 var ssoRole = regexp.MustCompile(`^arn:aws:sts::([0-9]{12}):assumed-role/AWSReservedSSO_[^/]+/(.+)$`)
 
-// requireWriteSignIn refuses, before any write, a sign-in in another account or one that is a
-// machine's own role (a devbox instance role, an assumed service role, an IAM user), naming the
-// ARN it found; it answers the signed-in person's lowercased email for --owner me.
-func requireWriteSignIn(ctx context.Context, st stsAPI, settings Settings) (email string, err error) {
+// requireAccount refuses, before any read or write, a sign-in in an account other than the
+// broker's, naming both accounts: a read there would list another account's secrets as if they
+// were the agent secrets. It answers the sign-in's ARN.
+func requireAccount(ctx context.Context, st stsAPI, settings Settings) (arn string, err error) {
 	id, err := st.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return "", fmt.Errorf("read your AWS sign-in: %w", err)
@@ -73,6 +75,17 @@ func requireWriteSignIn(ctx context.Context, st stsAPI, settings Settings) (emai
 	if account != settings.AWSAccountID {
 		return "", fmt.Errorf("your AWS sign-in %s is in account %s, but the agent secrets are in account %s: sign in to account %s (--profile or AWS_PROFILE names the sign-in)",
 			arn, account, settings.AWSAccountID, settings.AWSAccountID)
+	}
+	return arn, nil
+}
+
+// requireWriteSignIn refuses, before any write, a sign-in in another account (requireAccount) or
+// one that is a machine's own role (a devbox instance role, an assumed service role, an IAM user),
+// naming the ARN it found; it answers the signed-in person's lowercased email for --owner me.
+func requireWriteSignIn(ctx context.Context, st stsAPI, settings Settings) (email string, err error) {
+	arn, err := requireAccount(ctx, st, settings)
+	if err != nil {
+		return "", err
 	}
 	m := ssoRole.FindStringSubmatch(arn)
 	if m == nil || m[1] != settings.AWSAccountID {

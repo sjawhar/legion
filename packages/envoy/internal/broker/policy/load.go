@@ -272,15 +272,17 @@ func (l Loader) secret(ctx context.Context, slug string, ls listing, keys *keyId
 	if !onKey {
 		return Secret{}, ReasonNotOnAgentSecretsKey, nil
 	}
-	if !hasCurrentVersion(ls.versions) {
+	if !HasCurrentVersion(ls.versions) {
 		return Secret{}, ReasonNoCurrentValue, nil
 	}
 	return s, "", nil
 }
 
-// hasCurrentVersion reports whether a secret's version stages (ListSecrets'
-// SecretVersionsToStages, DescribeSecret's VersionIdsToStages) name a version labelled AWSCURRENT.
-func hasCurrentVersion(versionsToStages map[string][]string) bool {
+// HasCurrentVersion reports whether a secret's version stages (ListSecrets'
+// SecretVersionsToStages, DescribeSecret's VersionIdsToStages) name a version labelled AWSCURRENT,
+// the one GetSecretValue reads: the broker serves a secret only then, and the agent-secrets CLI
+// shows it as having a value only then.
+func HasCurrentVersion(versionsToStages map[string][]string) bool {
 	for _, stages := range versionsToStages {
 		if slices.Contains(stages, currentStage) {
 			return true

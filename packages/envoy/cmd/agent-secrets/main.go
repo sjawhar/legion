@@ -155,8 +155,9 @@ environment:
                              approves its waiting request
   OMP_SESSION_ID             the agent session the broker notifies if a pending request expires
   AWS_PROFILE                the AWS profile the secret forms sign in with when --profile names
-                             none (else the AWS SDK's default credential chain); a write needs
-                             your own Identity Center sign-in in the broker's account
+                             none (else the AWS SDK's default credential chain); every secret
+                             form needs a sign-in in the broker's account, and a write your own
+                             Identity Center sign-in there
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run
