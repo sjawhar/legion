@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +33,7 @@ import (
 // Every measured call also runs under its own deadline (perCallDeadline, growsLinearly): a single
 // call that itself blocks far longer than this bound allows fails fast and names its own shape,
 // rather than the package's own ten-minute default eventually firing with no shape attached
-// (perCallDeadline's own comment has the measured margin; leakedCallGuard's has what happens to
+// (perCallDeadline's own comment has the measured margin; runWithDeadline's has what happens to
 // such a call afterward).
 //
 // A write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements), so
@@ -224,24 +225,16 @@ func processCPUTime() time.Duration {
 	return time.Duration(usage.Utime.Nano()+usage.Stime.Nano()) * time.Nanosecond
 }
 
-// leaking tracks the what (growsLinearly's shape-and-size label) of every runWithDeadline call
-// whose own goroutine is still running past its deadline - Go cannot cancel a goroutine
-// mid-computation, so this is the only way a later call can tell that measuring right now would
-// share processCPUTime's process-wide counter with CPU a still-running earlier call keeps
-// spending. runWithDeadline adds to it the instant a deadline misses and removes from it only once
-// that call's own goroutine finally returns; leakedCallGuard reads it.
+// leaking counts how many of each what (growsLinearly's shape-and-size label) are currently
+// running past their own deadline - a count, not a single flag, so two concurrently leaking calls
+// sharing one label cannot be mistaken for one clearing when either returns. Go cannot cancel a
+// goroutine mid-computation, so this is the only way a later call can tell that measuring right
+// now would share processCPUTime's process-wide counter with CPU a still-running earlier call
+// keeps spending. runWithDeadline adds to it the instant a deadline misses and removes from it
+// only once that call's own goroutine finally returns; leakedCallGuard reads it.
 var leaking struct {
 	mu   sync.Mutex
-	what []string
-}
-
-// stillLeaking reports whether any call is still registered as running past its own deadline -
-// leakedCallGuard's predicate without its message, for a caller that only needs to poll (see
-// waitForLeakToClear).
-func stillLeaking() bool {
-	leaking.mu.Lock()
-	defer leaking.mu.Unlock()
-	return len(leaking.what) > 0
+	what map[string]int
 }
 
 // leakedCallGuard reports what, if anything, is still running past its own deadline - the message
@@ -255,7 +248,15 @@ func leakedCallGuard(what string) string {
 	if len(leaking.what) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s: refusing to measure while %s is still running past its own deadline (processCPUTime is this whole process's, so measuring now would attribute its ongoing CPU to this call instead)", what, strings.Join(leaking.what, ", "))
+	labels := make([]string, 0, len(leaking.what))
+	for label, count := range leaking.what {
+		if count > 1 {
+			label = fmt.Sprintf("%s (x%d)", label, count)
+		}
+		labels = append(labels, label)
+	}
+	sort.Strings(labels) // a fixed order, not map iteration's, so the message is reproducible
+	return fmt.Sprintf("%s: refusing to measure while %s is still running past its own deadline (processCPUTime is this whole process's, so measuring now would attribute its ongoing CPU to this call instead)", what, strings.Join(labels, ", "))
 }
 
 // runWithDeadline runs op, labelled what, in its own goroutine and reports whether it returned
@@ -263,29 +264,36 @@ func leakedCallGuard(what string) string {
 // time is left running - registered under what in leaking until it eventually returns and
 // deregisters itself, so leakedCallGuard can refuse a later call that would otherwise share its
 // ongoing CPU - rather than stopped; the point of the deadline is only to stop waiting for it and
-// report that promptly, not to free its resources.
-func runWithDeadline(what string, deadline time.Duration, op func() time.Duration) (took time.Duration, onTime bool) {
+// report that promptly, not to free its resources. A deregistration goroutine is spawned only on
+// a deadline miss, and only then: on a call that truly never returns, it stays parked on result's
+// receive, at no CPU cost, for as long as the test binary runs. cleared, non-nil only on a
+// deadline miss, closes the instant that goroutine deregisters op's own entry - the signal
+// waitForLeakToClear waits on, rather than polling.
+func runWithDeadline(what string, deadline time.Duration, op func() time.Duration) (took time.Duration, onTime bool, cleared <-chan struct{}) {
 	result := make(chan time.Duration, 1)
 	go func() { result <- op() }()
 	select {
 	case took := <-result:
-		return took, true
+		return took, true, nil
 	case <-time.After(deadline):
 		leaking.mu.Lock()
-		leaking.what = append(leaking.what, what)
+		if leaking.what == nil {
+			leaking.what = make(map[string]int)
+		}
+		leaking.what[what]++
 		leaking.mu.Unlock()
+		done := make(chan struct{})
 		go func() {
 			<-result
 			leaking.mu.Lock()
-			for i, w := range leaking.what {
-				if w == what {
-					leaking.what = append(leaking.what[:i], leaking.what[i+1:]...)
-					break
-				}
+			leaking.what[what]--
+			if leaking.what[what] == 0 {
+				delete(leaking.what, what)
 			}
 			leaking.mu.Unlock()
+			close(done)
 		}()
-		return 0, false
+		return 0, false, done
 	}
 }
 
@@ -297,7 +305,7 @@ func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op fun
 	if msg := leakedCallGuard(what); msg != "" {
 		t.Fatal(msg)
 	}
-	took, onTime := runWithDeadline(what, deadline, op)
+	took, onTime, _ := runWithDeadline(what, deadline, op)
 	if !onTime {
 		t.Fatalf("%s did not return within %s", what, deadline)
 	}
@@ -308,14 +316,12 @@ func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op fun
 // synthetic op that blocks far longer than its deadline is reported late (onTime=false) promptly -
 // close to the deadline itself, not close to how long op actually blocks - the property
 // growsLinearly's perCallDeadline relies on to fail fast and name a shape instead of waiting out
-// go test's own default timeout with none attached. The op here returns quickly after its own
-// deadline misses (short enough this test itself stays fast) so it does not leave leaking
-// populated for whichever test runs after this one in the same binary.
+// go test's own default timeout with none attached.
 func TestRunWithDeadlineReportsAHangPromptly(t *testing.T) {
 	const deadline = 20 * time.Millisecond
 	const hang = 200 * time.Millisecond
 	started := time.Now()
-	_, onTime := runWithDeadline("synthetic prompt hang", deadline, func() time.Duration {
+	_, onTime, cleared := runWithDeadline("synthetic prompt hang", deadline, func() time.Duration {
 		time.Sleep(hang) // longer than deadline, short enough this test and its cleanup stay fast
 		return 0
 	})
@@ -325,18 +331,17 @@ func TestRunWithDeadlineReportsAHangPromptly(t *testing.T) {
 	if onTime {
 		t.Error("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
 	}
-	waitForLeakToClear(t, hang)
+	waitForLeakToClear(t, cleared)
 }
 
 // TestLeakedCallBlocksTheNextMeasurement proves leakedCallGuard directly: once a synthetic op has
 // missed its own deadline and is still running, a second, otherwise-healthy call through
 // timedWithDeadline refuses to start - naming the first call - rather than silently sharing its
-// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine; Simplify and Deep
-// both traced this on round 4's version, which had no guard at all).
+// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine).
 func TestLeakedCallBlocksTheNextMeasurement(t *testing.T) {
 	const deadline = 20 * time.Millisecond
 	const hang = 200 * time.Millisecond
-	_, onTime := runWithDeadline("synthetic leaked hang", deadline, func() time.Duration {
+	_, onTime, cleared := runWithDeadline("synthetic leaked hang", deadline, func() time.Duration {
 		time.Sleep(hang)
 		return 0
 	})
@@ -348,22 +353,21 @@ func TestLeakedCallBlocksTheNextMeasurement(t *testing.T) {
 	} else {
 		t.Logf("leakedCallGuard correctly refused: %s", msg)
 	}
-	waitForLeakToClear(t, hang)
+	waitForLeakToClear(t, cleared)
 }
 
-// waitForLeakToClear blocks until leaking is empty or fails t: the goroutine runWithDeadline
-// spawns to deregister a leaked call needs a moment, after the leaked op itself returns, to
-// acquire leaking's lock and remove its entry - this gives it up to 10x hang (itself far more than
-// that handoff needs) before concluding something is wrong, so a later test in this same binary
-// never starts measuring while this test's own synthetic leak is still registered.
-func waitForLeakToClear(t *testing.T, hang time.Duration) {
+// waitForLeakToClear blocks until cleared closes or fails t: the deregistration goroutine
+// runWithDeadline spawned on a deadline miss closes cleared the instant it has removed its own
+// entry from leaking, so a later test in this same binary never starts measuring while this
+// test's own synthetic leak is still registered. 10s (packages/envoy/internal/cistore/burst_test.go's
+// waitAll uses the same bound for the same kind of wait) is far more than the handoff needs; past
+// it, something is wrong.
+func waitForLeakToClear(t *testing.T, cleared <-chan struct{}) {
 	t.Helper()
-	deadline := time.Now().Add(10 * hang)
-	for stillLeaking() {
-		if time.Now().After(deadline) {
-			t.Fatalf("leaking still held an entry %s after its op should have returned and deregistered", 10*hang)
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-cleared:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a synthetic leaked call never deregistered")
 	}
 }
 
