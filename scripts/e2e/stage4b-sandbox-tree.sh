@@ -118,7 +118,8 @@ providers_secret=legion-$run_label-providers
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
 # The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
-# the Legion nodes, so a run never waits for the production daemon to stop.
+# the Legion nodes, so a run never waits for the production daemon to stop. address-moved swaps the
+# two, moving the worker stream within the pair the devbox admits.
 port_daemon=13372
 port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
@@ -230,6 +231,17 @@ claim_moved_or_held() {
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.incarnation'; }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
+# live_claims prints, as one JSON array sorted by token, every claim of the run that runs a process,
+# as `legion claims` shows it: its tree, generation, pod, incarnation, session file, state and budgets.
+live_claims() {
+  claims_cli list --json | jq -ce '[.claims[] | select(.locator != null)
+    | {token, tree, generation, pod: .locator.sandbox.name, incarnation: .locator.incarnation, sessionFile, state, budgets}] | sort_by(.token)'
+}
+# pod_connect POD and pod_resume POD print the worker container's --connect value and its
+# --resume=<session file> word, empty when it has none, as the operator reads pod POD.
+pod_command() { op get pod "$1" -o json | jq -c '[.spec.containers[] | select(.name == "worker") | .command[]?]'; }
+pod_connect() { pod_command "$1" | jq -r '(index("--connect")) as $i | if $i == null then "" else .[$i + 1] end'; }
+pod_resume() { pod_command "$1" | jq -r 'map(select(startswith("--resume="))) | first // ""'; }
 # take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
 # bearer, and waits for Dispatch to show it and for the tree's pods to be gone.
 take_out() {
@@ -2138,8 +2150,13 @@ note "the driver ended $kills pods; the daemon relaunched the merger $relaunches
 [ "$relaunches" -ge "$kills" ] || fail "the daemon relaunched the merger $relaunches times for $kills kills"
 pass
 
+# The supervisor's line for a pod dialling an address the daemon no longer listens on
+# (supervise/machine.go, repoint): restart-mid-tree must log none, address-moved one per claim.
+stale_msg="supervise: the process is alive at a stale address; replacing it with one at the current address"
 begin restart-mid-tree
 before=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.incarnation}')
+live_before=$(live_claims) || fail "legion claims could not be read"
+stale_before=$(log_lines "$stale_msg" | wc -l)
 stop_pid "$daemon_pid"
 daemon_pid=
 start_daemon
@@ -2148,6 +2165,96 @@ until_true 300 "the merger to be re-adopted" sh -c \
 after=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.incarnation}')
 [ "$before" = "$after" ] || fail "the restart relaunched the merger: $before → $after"
 note "the daemon restarted and re-adopted the merger as it was: $after"
+# address-moved's negative control: at the same address no pod is replaced. A boot evaluates every
+# re-adopted pod as it joins the watch, and a relaunch writes its next generation before it starts
+# the pod, so 30 s after the merger is ready a pod the boot found stale shows a new generation. A
+# claim of another tree may have ended its phase meanwhile (no process now); none may be relaunched.
+sleep 30
+live_after=$(live_claims) || fail "legion claims could not be read"
+moved=$(jq -cn --argjson b "$live_before" --argjson a "$live_after" \
+  '[$b[] as $c | $a[] | select(.token == $c.token and (.generation != $c.generation or .incarnation != $c.incarnation))
+    | {token, generation, incarnation, was: ($c | {generation, incarnation})}]')
+[ "$moved" = "[]" ] || fail "the restart at the same address relaunched claims: $moved"
+for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$live_before"); do
+  jq -e --arg t "$token" 'any(.[]; .token == $t)' <<<"$live_after" >/dev/null || fail "$token runs no process after the restart at the same address"
+done
+for token in $(jq -r '.[].token' <<<"$live_after"); do
+  claim=$(jq -c --arg t "$token" '.[] | select(.token == $t)' <<<"$live_after")
+  pod=$(jq -r .pod <<<"$claim")
+  uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
+  [ "$uid" = "$(jq -r .incarnation <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .incarnation <<<"$claim")"
+  note "$token: pod $pod uid $uid and generation $(jq -r .generation <<<"$claim") unchanged across the restart, dialling $(pod_connect "$pod")"
+done
+stale=$(log_lines "$stale_msg" | wc -l)
+[ "$stale" = "$stale_before" ] || fail "the restart at the same address logged $((stale - stale_before)) stale-address replacements"
+note "no stale-address replacement logged since the restart"
+pass
+
+begin address-moved
+# The daemon restarts with its worker-stream address moved: the run swaps its API and worker-stream
+# ports, the rigs' pair the devbox admits from the Legion nodes. Every pod still dials the old
+# address, so the runtime reports it stale_address, and its claim's supervisor relaunches it at once
+# through its launch path onto a pod that dials the new address (docs/kubernetes.md, "A pod whose
+# address moved"): the same session file resumed, registered again at the next generation, and no
+# launch charged. restart-mid-tree, at the same address, replaced no pod. The ports stay swapped for
+# the rest of the run.
+live_before=$(live_claims) || fail "legion claims could not be read"
+jq -e --arg t "$tree1" 'any(.[]; .tree == $t)' <<<"$live_before" >/dev/null || fail "no claim of tree $tree1 runs a process for the move to replace"
+old_stream=tcp://$host:$port_worker_stream
+stale_before=$(log_lines "$stale_msg" | wc -l)
+failed_before=$(log_lines "supervise: launch failed" | wc -l)
+stop_pid "$daemon_pid"
+daemon_pid=
+read -r port_daemon port_worker_stream <<<"$port_worker_stream $port_daemon"
+write_legion_config
+new_stream=tcp://$host:$port_worker_stream
+start_daemon
+note "the daemon restarted with its API on port $port_daemon and its worker stream at $new_stream, moved from $old_stream"
+# claim_moved WAS: the claim WAS describes runs a new pod at exactly the next generation (one launch:
+# a refused one moves the generation too), and its agent is registered and ready.
+claim_moved() {
+  claims_cli list --json | jq -e --argjson was "$1" '.claims[] | select(.token == $was.token)
+    | .generation == $was.generation + 1 and .locator != null and .locator.incarnation != $was.incarnation
+      and (.state | IN("ready", "idle", "working"))' >/dev/null
+}
+# Tree 1's claims are the driver's to hold still, so each is judged in full.
+for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$live_before"); do
+  was=$(jq -c --arg t "$token" '.[] | select(.token == $t)' <<<"$live_before")
+  until_true 900 "$token to run a new pod at its next generation, registered and ready" claim_moved "$was"
+  claim=$(claims_cli list --json | jq -ce --arg t "$token" '.claims[] | select(.token == $t)') || fail "legion claims shows no claim $token"
+  pod=$(jq -r .locator.sandbox.name <<<"$claim")
+  uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
+  [ "$uid" = "$(jq -r .locator.incarnation <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .locator.incarnation <<<"$claim")"
+  connect=$(pod_connect "$pod")
+  [ "$connect" = "$new_stream" ] || fail "$token's new pod $pod dials ${connect:-nothing}, not $new_stream"
+  session_file=$(jq -r .sessionFile <<<"$was")
+  [ "$(jq -r .sessionFile <<<"$claim")" = "$session_file" ] || fail "$token's session file moved: $session_file → $(jq -r .sessionFile <<<"$claim")"
+  resume=$(pod_resume "$pod")
+  if [ -n "$session_file" ]; then
+    [ "$resume" = "--resume=$session_file" ] || fail "$token's new pod $pod runs ${resume:-no --resume}, not --resume=$session_file"
+  fi
+  jq -e --argjson was "$was" '.budgets.launchFailures == 0 and .budgets.deaths == $was.budgets.deaths' <<<"$claim" >/dev/null ||
+    fail "$token's budgets read $(jq -c .budgets <<<"$claim"), want launchFailures 0 and deaths $(jq -r .budgets.deaths <<<"$was")"
+  stale=$(log_lines "$stale_msg" | tail -n "+$((stale_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)] | length')
+  [ "$stale" = 1 ] || fail "the daemon logged $stale stale-address replacements of $token since the restart, want one"
+  refused=$(log_lines "supervise: launch failed" | tail -n "+$((failed_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)] | length')
+  [ "$refused" = 0 ] || fail "the daemon logged $refused failed launches of $token since the restart"
+  note "$token: pod $pod uid $(jq -r .incarnation <<<"$was") → $uid at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$claim"), $(jq -r .state <<<"$claim"); --connect $connect; ${resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$claim"); one stale-address replacement logged"
+done
+# Every other tree's claims move too, though their own workflow may end a phase meanwhile: once
+# each has left its old pod, no pod of the run dials the old address.
+off_old() {
+  local claims
+  claims=$(live_claims) || return 1
+  jq -e --argjson b "$live_before" '[$b[] as $c | .[] | select(.token == $c.token and .incarnation == $c.incarnation)] | length == 0' <<<"$claims" >/dev/null
+}
+until_true 900 "every claim of the run to leave the pod it ran before the move" off_old
+for token in $(live_claims | jq -r '.[].token'); do
+  pod=$(live_claims | jq -r --arg t "$token" '.[] | select(.token == $t) | .pod')
+  connect=$(pod_connect "$pod")
+  [ "$connect" = "$new_stream" ] || fail "$token's pod $pod dials ${connect:-nothing}, not $new_stream"
+  note "$token: pod $pod dials $connect"
+done
 pass
 
 # launch_failure_limit is the daemon's default (3), which the run's legion.yaml leaves unset; it
