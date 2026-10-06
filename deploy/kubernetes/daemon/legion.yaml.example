@@ -16,8 +16,10 @@ state_dir: ./state                     # the daemon's local state
 # the stable address every pod dials instead, split apart once the daemon itself runs in the
 # cluster: bind 0.0.0.0 (every interface) and set advertise_host to the ClusterIP Service's DNS
 # name that fronts it (a Service named legion-daemon-widgets in the legion namespace is the
-# convention this example follows). Running the daemon on a fixed host instead — a devbox or a VM —
-# needs neither: bind that host's own address, which pods then dial, and leave advertise_host unset.
+# convention this example follows). Pods dial advertise_host at the port the worker stream listens
+# on, so that Service exposes worker_stream_port (13371 here, port + 1) as the same port number.
+# Running the daemon on a fixed host instead — a devbox or a VM — needs neither: bind that host's
+# own address, which pods then dial, and leave advertise_host unset.
 bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370

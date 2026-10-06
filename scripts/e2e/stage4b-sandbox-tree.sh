@@ -866,14 +866,11 @@ hog_oomkilled() {
 # worker stream at advertise_host, no token value in a container's environment, command or args,
 # and 4b.6b's split provisioning (the provisioning token only in workspace-fetch, the feed read-only
 # in workspace-init, no provision directory in the worker).
-# shim_connect_jq defines the jq function shim_connect: the address a pod's worker shim dials, the
-# argument after the --connect in its worker container's command (null with none).
-# shellcheck disable=SC2016  # jq's own variables, not expansions
-shim_connect_jq='def shim_connect: [.spec.containers[]? | select(.name == "worker") | (.command // []) as $c | range($c | length) | select($c[.] == "--connect") | $c[. + 1]] | first;'
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
 # judges the object alone, so a pod the watch recorded is judged after it is gone.
 shape_problems() {
-  jq -r --arg route "$route_configmap" --arg audience "$gateway_audience" --arg stream "tcp://$host:$port_worker_stream" "$shim_connect_jq"'
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --arg stream "tcp://$host:$port_worker_stream" '
+    include "stage4b-pods";
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
       (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
@@ -970,9 +967,7 @@ pod_shape_verdict() {
   while IFS=$'\t' read -r uid spec; do
     problems=$(shape_problems <<<"$spec")
     [ -z "$problems" ] || printf '%s: %s\n' "$uid" "$(tr '\n' ';' <<<"$problems")"
-  done < <(jq -c 'select(.object.kind == "Pod") | .object
-      | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-      | select(any(.status.containerStatuses[]?; .name == "worker" and .ready))' "$watch" |
+  done < <(jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods' "$watch" |
     jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
 }
 # stream_missing WATCH prints each Sandbox pod uid the run knows from another source that the watch
@@ -1794,13 +1789,10 @@ for port in "$port_daemon" "$port_worker_stream"; do
   note "port $port: $(tr -s ' ' <<<"$sockets" | paste -sd ';' -)"
 done
 stream_url="tcp://$host:$port_worker_stream"
-ready_pods_jq='select(.object.kind == "Pod") | .object
-  | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-  | select(any(.status.containerStatuses[]?; .name == "worker" and .ready))'
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
-judged=$(jq -r "$ready_pods_jq"' | .metadata.uid' "$evidence/pod-watch.json" | sort -u)
-note "$(grep -c . <<<"$judged") pods seen ready so far, each one's worker shim dialing advertise_host at $stream_url: $(jq -r "$ready_pods_jq"' | "\(.metadata.labels["legion.dev/tree"]) \(.metadata.labels["legion.dev/role"])"' "$evidence/pod-watch.json" | sort -u | paste -sd ',' -)"
+judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u)
+note "$(grep -c . <<<"$judged") pods seen ready so far, each one's worker shim dialing advertise_host at $stream_url: $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | "\(.metadata.labels["legion.dev/tree"]) \(.metadata.labels["legion.dev/role"])"' "$evidence/pod-watch.json" | sort -u | paste -sd ',' -)"
 for issue in "${specs[@]}"; do
   architect=$(claim_view "$issue" architect)
   uid=$(jq -r '.locator.incarnation // empty' <<<"$architect")
@@ -1810,18 +1802,18 @@ for issue in "${specs[@]}"; do
     *) fail "$issue's architect is $state, not registered from its pod $uid" ;;
   esac
   grep -qxF -- "$uid" <<<"$judged" || fail "$issue's architect runs on pod $uid, which the pod watch never saw ready"
-  connect=$(op get pod "$(jq -r '.locator.sandbox.name' <<<"$architect")" -o json | jq -r "$shim_connect_jq"' shim_connect')
-  [ "$connect" = "$stream_url" ] || fail "$issue's architect pod $uid dials $connect, not $stream_url"
-  note "$issue's architect registered ($state) from pod $uid, whose worker shim runs --connect $connect"
+  note "$issue's architect registered ($state) from pod $uid, whose worker shim the verdict above holds to --connect $stream_url"
 done
-# Negative control: the last ready pod the watch recorded, its --connect rewritten to the address
-# the daemon binds, departs from the pod shape.
-jq -c "$ready_pods_jq" "$evidence/pod-watch.json" | tail -1 |
-  jq -c --arg bound "tcp://$bind:$port_worker_stream" '{kind: "Pod", object: (.spec.containers |= map(if .name == "worker"
-    then .command |= (. as $c | [range(length) as $i | if $i > 0 and $c[$i - 1] == "--connect" then $bound else $c[$i] end])
-    else . end))}' >"$work/wildcard-connect.json"
+# Negative control: the last ready pod the watch recorded, its --connect edited in place to the
+# address the daemon binds, departs from the pod shape for that --connect.
+jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$evidence/pod-watch.json" | tail -1 |
+  jq -c --arg bound "tcp://$bind:$port_worker_stream" '.object.spec.containers |= map(if .name == "worker"
+    then .command |= (index("--connect") as $i | .[$i + 1] = $bound) else . end)' >"$work/wildcard-connect.json"
 cat "$evidence/pod-watch.json" "$work/wildcard-connect.json" >"$evidence/controls/pod-watch-wildcard-connect.json"
-expect_failure advertise-host-wildcard-connect test -z "$(pod_shape_verdict "$evidence/controls/pod-watch-wildcard-connect.json")"
+control=$(pod_shape_verdict "$evidence/controls/pod-watch-wildcard-connect.json")
+grep -qF "the worker shim dials tcp://$bind:$port_worker_stream, not advertise_host at $stream_url" <<<"$control" ||
+  fail "the pod shape did not refuse a pod told --connect tcp://$bind:$port_worker_stream for it: ${control:-no departure}"
+note "negative control: a recorded pod told --connect tcp://$bind:$port_worker_stream departs from the pod shape: $control"
 # The daemon's loader on the proof's own file: advertise_host dropped, then a loopback bind beside it.
 sed '/^advertise_host: /d' "$work/legion.yaml" >"$work/legion-no-advertise-host.yaml"
 if out=$("$work/legion" start --check-config --config "$work/legion-no-advertise-host.yaml" 2>&1); then
@@ -2742,8 +2734,7 @@ missing=$(stream_missing "$evidence/pod-watch.json")
 [ -z "$missing" ] || fail "the pod watch never recorded pods the run knows from other sources: $(tr '\n' ' ' <<<"$missing")"
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
-judged=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-  | select(any(.status.containerStatuses[]?; .name == "worker" and .ready)) | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
+judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
 # The Secret-value check: the helper judges the recorded pods against every value it held, on TERM.
 stop_pid "$leaks_pid"
 leaks_pid=

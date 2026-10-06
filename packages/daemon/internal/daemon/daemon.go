@@ -540,19 +540,22 @@ type supervision struct {
 }
 
 // shimAddress is the address every agent's shim dials: the listener's bound address, or, when
-// advertiseHost (runtime.kubernetes.advertise_host) names one, that host at the bound port, the
-// kernel's choice when worker_stream_port was 0. A bound address that is not tcp://host:port (a
-// unix socket's) is returned unchanged.
-func shimAddress(bound, advertiseHost string) string {
+// advertiseHost (the top-level advertise_host, which only runtime: kubernetes accepts) names one,
+// that host at the bound port, the kernel's choice when worker_stream_port was 0. A bound address
+// it cannot split into tcp://host:port beside an advertiseHost is refused, never handed to pods.
+func shimAddress(bound, advertiseHost string) (string, error) {
+	if advertiseHost == "" {
+		return bound, nil
+	}
 	hostport, ok := strings.CutPrefix(bound, "tcp://")
-	if advertiseHost == "" || !ok {
-		return bound
+	if !ok {
+		return "", fmt.Errorf("advertise_host %s needs a tcp:// worker stream, and the listener bound %s", advertiseHost, bound)
 	}
 	_, port, err := net.SplitHostPort(hostport)
 	if err != nil {
-		return bound
+		return "", fmt.Errorf("advertise_host %s: the worker stream listener's address %s: %w", advertiseHost, bound, err)
 	}
-	return "tcp://" + net.JoinHostPort(advertiseHost, port)
+	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
 }
 
 // openSupervision reads the claims the store holds, takes the worker stream, and builds the
@@ -577,7 +580,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, shimAddress(listener.Addr(), cfg.AdvertiseHost), apps)
+	dial, err := shimAddress(listener.Addr(), cfg.AdvertiseHost)
+	if err != nil {
+		cancel()
+		cancelStream()
+		return nil, err
+	}
+	rt, err := p.newRuntime(supervising, listener, dial, apps)
 	if err != nil {
 		cancel()
 		cancelStream()
