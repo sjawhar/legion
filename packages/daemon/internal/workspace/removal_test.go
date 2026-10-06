@@ -526,16 +526,13 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileWhoseNameIsNotValidUTF8(t *tes
 	}
 }
 
-// Every pod's own init container starts with an empty XDG_CONFIG_HOME — the daemon never reuses
-// one pod's config home in another — and a sibling's workspace is provisioned by one pod's
-// container, then later judged for removal by a different pod's (dispatch://LEGION-583). The
-// first jj command any config home ever runs against a repository (confirmed against the pinned
-// jj: `jj git clone` under one config home, `jj status` under a second, with nothing else
-// changed) writes a one-time notice to stderr naming exactly that — "Warning: Per-repo config not
-// found. Generating an empty one." plus its two explanatory lines — which the removal pass's own
-// pod sees on the very first candidate it ever touches, every single launch. A workspace fully
-// pushed is still removed despite it.
-func TestRemoveFinishedRemovesAWorkspaceDespiteTheFreshConfigHomeWarning(t *testing.T) {
+// nestedRepositories' walk can run well past the removal pass's own budget against a workspace
+// holding a large gitignored tree jj's own snapshot never descends into (an ignored
+// node_modules, say): ctx bounds it the same way every other command in this package already is.
+// A ctx that is done by the time the walk starts keeps the workspace rather than fail the whole
+// pass or hang it: a custom runner cancels ctx the instant the snapshot command returns, so the
+// walk that follows sees it already done on its very first entry.
+func TestRemoveFinishedKeepsAWorkspaceWhenTheNestedRepositoryWalkRunsOutOfTime(t *testing.T) {
 	run := newLocalRunner(t)
 	req := provisionRequest(t)
 	ws, err := Provision(context.Background(), run, req)
@@ -544,21 +541,34 @@ func TestRemoveFinishedRemovesAWorkspaceDespiteTheFreshConfigHomeWarning(t *test
 	}
 	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
 
-	// Simulate workspace-init's own removal-pass pod: a config home this repository's per-repo
-	// config has never been migrated into, unlike newLocalRunner's own (which Provision and the
-	// push above already used).
-	fresh := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", fresh)
-	t.Setenv("JJ_CONFIG", filepath.Join(fresh, "no-user-config.toml"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelAfterSnapshot := cancelOnSnapshot{Runner: run, cancel: cancel}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(ctx, cancelAfterSnapshot, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
-	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("workspace remains after RemoveFinished (err=%v), want removed despite the one-time fresh-config-home warning", err)
+	if _, err := os.Stat(ws.Dir); err != nil {
+		t.Fatalf("workspace removed, want it kept: %v", err)
 	}
-	if want := "removed WIDGETS-42's workspace"; len(logged) != 1 || !strings.Contains(logged[0], want) {
-		t.Errorf("logged %v, want one line containing %q", logged, want)
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], "ran out of time") {
+		t.Errorf("logged %v, want one line naming WIDGETS-42 kept for running out of time", logged)
 	}
+}
+
+// cancelOnSnapshot cancels its own context the instant the push-safety snapshot command (`jj
+// status`) returns, simulating a ctx that is already done by the time nestedRepositories' walk
+// starts.
+type cancelOnSnapshot struct {
+	Runner
+	cancel context.CancelFunc
+}
+
+func (r cancelOnSnapshot) Run(ctx context.Context, command Command) (Result, error) {
+	result, err := r.Runner.Run(ctx, command)
+	if len(command.Argv) >= 2 && command.Argv[0] == "jj" && command.Argv[1] == "status" {
+		r.cancel()
+	}
+	return result, err
 }

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -22,14 +23,11 @@ import (
 // sibling workspace on the volume and could delete one directly.
 //
 // This jj log carries none of snapshotOverrides' flags, unlike the snapshot: a repo-configured
-// `revset-aliases."empty()" = "all()"` planted in the shared clone's own legacy config, read here
-// the same way, makes this check pass falsely over a workspace that in fact holds an unpushed
-// edit (confirmed against the pinned jj). No command-line fix was found: redefining an aliased
-// builtin's name back to itself recurses infinitely rather than falling through to the builtin,
-// so once anything shadows `empty()` or `remote_bookmarks()` in any config layer this process
-// reads, there is no `--config` override left that un-shadows it. This sits inside the trust
-// model stated just above (any tree agent can already delete a sibling's workspace directly) and
-// is tracked as hardening on dispatch://LEGION-583, not fixed here.
+// `revset-aliases."empty()" = "all()"` or `"remote_bookmarks()" = "all()"` planted in the shared
+// clone's own legacy config, read here the same way, makes this check pass falsely over a
+// workspace that in fact holds an unpushed edit. This sits inside the trust model stated just
+// above (any tree agent can already delete a sibling's workspace directly) and is tracked as
+// hardening on dispatch://LEGION-583, not fixed here.
 func unpushedRevset(workspaceName, mergedHead string) string {
 	revset := "::" + workspaceName + "@ ~ empty() ~ ::(remote_bookmarks())"
 	if mergedHead != "" {
@@ -81,20 +79,6 @@ func snapshotOverrides() []string {
 	}
 }
 
-// freshConfigHomeWarning is the one-time notice jj writes to stderr, and nowhere else, the first
-// time any command needs to write a new operation against a repository from a config home that
-// has never read that repository's per-repo config before (confirmed against the pinned jj: a
-// `jj git clone` under one config home, read by `jj status` under a second, empty one, even with
-// nothing else changed). Every pod's init container starts with an empty XDG_CONFIG_HOME, and a
-// sibling's workspace is provisioned by one pod's container and later judged for removal by
-// another's (dispatch://LEGION-583): without this exemption the removal pass's own pod sees this
-// warning on the first candidate it ever touches, every single launch, and keeps every candidate
-// forever. Matched in full, not as a substring: anything else alongside it, or any other stderr
-// output at all, still keeps the workspace.
-const freshConfigHomeWarning = "Warning: Per-repo config not found. Generating an empty one.\n" +
-	"Per-repo config is stored in the same directory as your user config for security reasons.\n" +
-	"If you work across multiple computers, you may want to keep your user config directory in sync."
-
 // RemoveFinished removes ws when every non-empty commit it holds is on GitHub by unpushedRevset's
 // rule, and otherwise keeps it, naming in one log line the commits that are not — never deleting
 // unpushed work. A workspace already gone (removed already, or never provisioned on this volume)
@@ -125,11 +109,11 @@ const freshConfigHomeWarning = "Warning: Per-repo config not found. Generating a
 // anywhere. A file whose name is not valid UTF-8 gets only a warning jj writes to stderr, with
 // stdout claiming no changes at all. Both leave unpushed work this workspace alone holds invisible
 // to unpushedRevset's read of `@`. So two checks run before it, on the snapshot's own result:
-// anything at all on stderr, other than freshConfigHomeWarning matched in full (below), keeps the
-// workspace (this also makes the untracked-path case below fail closed if a future jj ever changes
-// its stdout wording rather than its stderr one), and so does any nested repository
-// (nestedRepositories below, which treats the workspace's own `.git` and `.jj` — every workspace
-// has both — as not nested, and nothing else as exempt by type).
+// anything at all on stderr keeps the workspace (this also makes the untracked-path case below
+// fail closed if a future jj ever changes its stdout wording rather than its stderr one), and so
+// does any nested repository (nestedRepositories below, which treats the workspace's own `.git`
+// and `.jj` — every workspace has both — as not nested, and nothing else as exempt by type; it
+// is also kept when that walk runs out of time against ctx, rather than treated as a failure).
 //
 // Past both, the snapshot can still leave an ordinary path untracked rather than commit it (an
 // oversized new file, under snapshot.max-new-file-size, which snapshotOverrides deliberately
@@ -174,12 +158,16 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 	if err != nil {
 		return err
 	}
-	if stderr := strings.TrimSpace(snapshotted.Stderr); stderr != "" && stderr != freshConfigHomeWarning {
+	if stderr := strings.TrimSpace(snapshotted.Stderr); stderr != "" {
 		log(fmt.Sprintf("kept %s's workspace: the snapshot wrote to stderr (%s)", issue, stderr))
 		return nil
 	}
-	nested, err := nestedRepositories(ws.Dir)
+	nested, err := nestedRepositories(ctx, ws.Dir)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log(fmt.Sprintf("kept %s's workspace: ran out of time walking for a nested repository (%v)", issue, err))
+			return nil
+		}
 		return err
 	}
 	if len(nested) > 0 {
@@ -222,12 +210,19 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 // Confirmed against the pinned jj: a plain file and a dangling symlink named .git, planted beside
 // an unpushed file, each made the snapshot report the directory as having no changes, with empty
 // stderr. Found, the search stops descending into a nested directory (a file or a symlink has
-// nothing to descend into); finding any one of them is enough to keep the whole workspace.
-func nestedRepositories(root string) ([]string, error) {
+// nothing to descend into); finding any one of them is enough to keep the whole workspace. The
+// walk also checks ctx on every entry: a workspace holding a large gitignored tree jj's own
+// snapshot never descends into (ctx is never gitignore-aware) can otherwise run well past the
+// removal pass's own budget, and ctx.Err() here is what bounds it the same way every other
+// command in this package already is.
+func nestedRepositories(ctx context.Context, root string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		if d.Name() != ".git" && d.Name() != ".jj" {
 			return nil
@@ -245,6 +240,9 @@ func nestedRepositories(root string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("walk %s for a nested repository: %w", root, err)
 	}
 	return found, nil

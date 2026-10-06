@@ -239,13 +239,15 @@ const removalBudget = 90 * time.Second
 // ones after it or the provisioning this pod already finished; a malformed env var removes
 // nothing.
 //
-// The filtered candidates are rotated (rotateCandidates below) by this pod's own issue and
+// The filtered candidates are rotated (rotateCandidates below) by this pod's own issue, role, and
 // LEGION_GENERATION together before the loop: a candidate that always sorts first in the
 // daemon's list, and so is always the one snapshotted first, would otherwise always spend the
 // removal budget before any candidate after it in that same order is ever reached. Issue alone
 // does not change between launches of the same issue (every phase worker of one child, every
 // relaunch of a root), which left the same candidates starved on every launch of that issue; the
-// generation does, since a relaunch always moves it. now and budget are the clock and
+// generation does, since a relaunch always moves it. Generation alone does not distinguish one
+// issue's own phase workers on their first launches (planner, implementer, tester, reviewer,
+// merger, all at generation 1), which role closes. now and budget are the clock and
 // removalBudget, exposed for a test; the one production call site passes time.Now and
 // removalBudget.
 func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration) {
@@ -273,7 +275,7 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 		}
 		candidates = append(candidates, candidate)
 	}
-	candidates = rotateCandidates(candidates, issue+"-"+os.Getenv("LEGION_GENERATION"))
+	candidates = rotateCandidates(candidates, issue+"-"+os.Getenv("LEGION_ROLE")+"-"+os.Getenv("LEGION_GENERATION"))
 	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }
 	deadline := now().Add(budget)
 	for i, candidate := range candidates {

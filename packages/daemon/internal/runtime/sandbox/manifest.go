@@ -605,17 +605,19 @@ func fetchEnvironment() []corev1.EnvVar {
 // PATH are never ones an agent put there; it carries no tool-path variables, and it is never
 // pointed at the provisioning token. A resume names the recorded session the command must find on
 // the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
-// recovered from; both are workspace-init's alone, never the agent's. LEGION_GENERATION is
-// l.spec.Generation, read by workspace-init provision's own candidate-rotation seed
-// (cmd/legion/workspace_init.go's rotateCandidates): mainEnvironment's own LEGION_GENERATION is
-// the worker container's, a different container, so workspace-init needs its own copy of the same
-// value. LEGION_REMOVABLE_WORKSPACES is l.removableWorkspacesJSON, set by setRemovable (called
-// from relaunch, after the daemon's candidate list is read, last, under the tree's launch turn);
-// absent when the daemon found none.
+// recovered from; both are workspace-init's alone, never the agent's. LEGION_ROLE and
+// LEGION_GENERATION are l.spec.Role and l.spec.Generation, read together by workspace-init
+// provision's own candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates): a
+// generation alone does not distinguish each role's own first launch of one issue, all at
+// generation 1 — mainEnvironment's copies of both are the worker container's, a different
+// container, so workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is
+// l.removableWorkspacesJSON, set by setRemovable (called from relaunch, after the daemon's
+// candidate list is read, last, under the tree's launch turn); absent when the daemon found none.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
+		{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
 		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
 	}
 	if l.initResumeFile != "" {

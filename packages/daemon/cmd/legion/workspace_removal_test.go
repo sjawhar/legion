@@ -157,6 +157,45 @@ func TestRemoveFinishedWorkspacesRotatesByGenerationNotJustIssue(t *testing.T) {
 	}
 }
 
+// One issue's own phase workers on their first launches (planner, implementer, tester, reviewer,
+// merger, all at generation 1) must not share a rotation: a generation-only seed starts the same
+// candidate for every one of them. Adding LEGION_ROLE to the seed is what closes that.
+func TestRemoveFinishedWorkspacesRotatesByRoleNotJustIssueAndGeneration(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101"}, {Issue: "LEGION-102"}, {Issue: "LEGION-103"}}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
+	t.Setenv("LEGION_GENERATION", "1")
+
+	started := map[string]bool{}
+	for _, role := range []string{"planner", "implementer", "tester", "reviewer", "merger"} {
+		t.Setenv("LEGION_ROLE", role)
+		t0 := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+		const budget = 30 * time.Second
+		calls := 0
+		now := func() time.Time {
+			calls++
+			if calls <= 2 {
+				return t0
+			}
+			return t0.Add(budget + time.Second)
+		}
+		var stdout bytes.Buffer
+		removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget)
+		for _, candidate := range candidates {
+			if strings.Contains(stdout.String(), candidate.Issue+" has no workspace on this volume") {
+				started[candidate.Issue] = true
+			}
+		}
+	}
+	if len(started) < 2 {
+		t.Fatalf("all five roles' first launches of LEGION-200 started only %v, want more than one candidate across them", started)
+	}
+}
+
 // rotateCandidates starts a different pass at a different point in the candidate list,
 // deterministically from the pod's own issue: two different issues produce two different
 // rotations of the same four candidates (every element still present, in the same cyclic order),

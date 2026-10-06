@@ -1140,12 +1140,12 @@ rotates the candidate order by the pod's own issue and launch generation togethe
 never changes across relaunches of the same issue) so one expensive candidate does not starve the
 same candidates on every launch.
 
-A near-full tree volume's own `jj status` snapshot above (`removeFinishedWorkspaces`'s own doc
-comment names the measured range, 63-100 s) can outlive an ordinary per-command grant: `legion
-push` alone gets a longer one, `credential.pushTTL` (5 minutes) in place of the usual 60 seconds,
-minted whenever a bash call invokes it — alone, as one segment of a compound command, or a
-pipeline's last stage (`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics and
-the LEGION-17 case this closes).
+The worker's own jj working-copy snapshot before `legion push`'s network push can take 63-100 s
+on a near-full volume (`removalBudget`'s own doc comment, `cmd/legion/workspace_init.go`, names
+the measured range), so that push gets `credential.pushTTL` (5 minutes) in place of the usual 60
+seconds, minted whenever a bash call invokes it — alone, as one segment of a compound command, or
+a pipeline's last stage (`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics
+and the LEGION-17 case this closes).
 
 ### RBAC the daemon needs
 
