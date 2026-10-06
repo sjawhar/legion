@@ -42,6 +42,27 @@ func TestThePinsHoldTheSelfPostingEndpointsOff(t *testing.T) {
 	}
 }
 
+// A bash call Oh My Pi leaves running past its own threshold, under `--mode rpc` (every Legion
+// role), moves to a background job a takeover's abort no longer reaches once it has moved — only
+// the turn asking for it to finish does. supervise.Machine.Quiesce's own promise, that the
+// outgoing worker "never writes the shared workspace beside the role the start hands it to",
+// depends on every long-running command staying inside the turn the abort ends (LEGION-462 found
+// this live, legion-smoke LEGSMOKE-463, at commit 80d0c82b).
+func TestThePinsHoldBashAutoBackgroundOff(t *testing.T) {
+	var pins map[string]any
+	if err := yaml.Unmarshal(overlay, &pins); err != nil {
+		t.Fatal(err)
+	}
+	var got any = pins
+	for _, key := range strings.Split("bash.autoBackground.enabled", ".") {
+		section, _ := got.(map[string]any)
+		got = section[key]
+	}
+	if got != false {
+		t.Errorf("the overlay holds bash.autoBackground.enabled = %#v, want false", got)
+	}
+}
+
 func envMap(environ []string) map[string]string {
 	env := map[string]string{}
 	for _, pair := range environ {
