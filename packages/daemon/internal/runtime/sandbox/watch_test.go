@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,6 +134,54 @@ func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
 	}
 	if writes := g.writes(); len(writes) > 0 {
 		t.Fatalf("re-adoption wrote %v; it only observes", writes)
+	}
+}
+
+// A re-adopted claim whose issue pod lived through the restart but whose role launcher has not
+// yet reconnected (every real launcher redials every second, internal/launcher/launcher.go's
+// reconnectDelay; a fresh listener's first sweep can run before that) is Uncertain, never Gone or
+// NotRecordedProcess, at its unchanged recorded locator, exactly as evaluate() is written
+// (observe.go: "!connected" is Uncertain) and as the supervisor's judge() is written
+// (supervise/machine.go: Uncertain only counts a streak and re-arms the same probe timer — it
+// starts no deadline, suspends nothing, and relaunches nothing). Once the launcher reports in,
+// the very next evaluation is Alive at that same locator, with no write in between: the stage 4a
+// live re-adopt check hit exactly this ordering (LEGION-462).
+func TestADisconnectedLauncherAtReadoptionIsUncertainThenAliveNeverRelaunched(t *testing.T) {
+	g := newRig(t, []k8sruntime.Object{runningSandbox(t, rootToken, claim.RoleArchitect), runningPod(rootToken, "uid-pod-root", claim.RoleArchitect)},
+		withOptions(func(o *Options) { o.ProbeInterval = 50 * time.Millisecond }))
+	loc := sandboxLocator(rootToken, "uid-pod-root")
+	observations, err := g.r.Observe(g.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: rootToken, Locator: &loc}}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if obs := next(t, observations); obs.Kind != runtime.Uncertain || obs.Locator != loc || !strings.Contains(obs.Detail, "disconnected") {
+		t.Fatalf("%s at %+v (%q), want Uncertain quoting the disconnected launcher at the recorded locator", obs.Kind, obs.Locator, obs.Detail)
+	}
+	g.reportLauncher(rootToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
+	alive := false
+	for range 5 {
+		obs := next(t, observations)
+		if obs.Locator != loc {
+			t.Fatalf("%s at %+v, want every observation at the one recorded locator %s", obs.Kind, obs.Locator, loc.Incarnation)
+		}
+		switch obs.Kind {
+		case runtime.Alive:
+			alive = true
+		case runtime.Uncertain:
+			continue
+		default:
+			t.Fatalf("%s at %+v, want Uncertain until the launcher reconnects, then Alive — never %s", obs.Kind, obs.Locator, obs.Kind)
+		}
+		break
+	}
+	if !alive {
+		t.Fatal("the launcher reported in, but no Alive observation followed within 5 probe intervals")
+	}
+	if writes := g.writes(); len(writes) > 0 {
+		t.Fatalf("a disconnected-then-reconnected launcher wrote %v; re-adoption only observes, it never relaunches", writes)
 	}
 }
 

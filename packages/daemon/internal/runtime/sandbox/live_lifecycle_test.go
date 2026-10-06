@@ -686,9 +686,26 @@ func (r *liveRig) checkReAdopt() error {
 
 	for _, c := range r.live() {
 		loc := *c.loc
-		alive, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool { return o.Locator.Claim == c.token })
-		if !ok || alive.Kind != runtime.Alive || !sameLocator(alive.Locator, loc) {
-			return fmt.Errorf("%s's first observation after re-adoption is %+v, want alive with its recorded %s", c.name, alive, loc.Incarnation)
+		alive, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool {
+			return o.Locator.Claim == c.token && o.Kind == runtime.Alive
+		})
+		if !ok || !sameLocator(alive.Locator, loc) {
+			return fmt.Errorf("%s never reached alive at its recorded %s within %s", c.name, loc.Incarnation, liveGoneLimit)
+		}
+		// A role launcher that has not yet redialed the fresh listener — every real launcher
+		// retries every second (internal/launcher/launcher.go's reconnectDelay), and a fresh
+		// sweep can run before that — is legitimately Uncertain for a probe interval or two first
+		// (observe.go's "disconnected" branch); the supervisor's judge() only counts the streak
+		// and re-arms the same probe, never a deadline (TestADisconnectedLauncherAtReadoptionIs-
+		// UncertainThenAliveNeverRelaunched). Anything else before alive — a different locator (something
+		// was relaunched) or a death verdict — is a bug, not a race.
+		for _, o := range r.obs.since(mark) {
+			if o.Locator.Claim != c.token || o.Kind == runtime.Alive {
+				continue
+			}
+			if o.Kind != runtime.Uncertain || !sameLocator(o.Locator, loc) {
+				return fmt.Errorf("%s's observation before reaching alive is %+v, want only launcher-disconnected Uncertain at its recorded %s", c.name, o, loc.Incarnation)
+			}
 		}
 		reg, err := r.awaitHelloAgain(c, restarted)
 		if err != nil {
