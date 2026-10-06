@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -128,15 +129,19 @@ type launch struct {
 	// JSON-encoded; "" when there are none. Not set by prepare: relaunch calls setRemovable with
 	// what Options.Removable returns, last, under the tree's launch turn — prepare runs long
 	// before that turn is even requested, so a list this early could already be stale by the time
-	// a pod's manifest is actually written.
-	removableWorkspacesJSON string
+	// a pod's manifest is actually written. removableWorkspacesNotAfter is the instant past which
+	// workspace-init must treat this same list as too old to trust (dispatch://LEGION-583): set
+	// alongside it, zero when removableWorkspacesJSON is "".
+	removableWorkspacesJSON     string
+	removableWorkspacesNotAfter time.Time
 }
 
-// setRemovable JSON-encodes candidates into l.removableWorkspacesJSON, called from relaunch with
-// Options.Removable's result once the tree's launch turn is held. The encoding cannot fail (plain
+// setRemovable JSON-encodes candidates into l.removableWorkspacesJSON and records notAfter beside
+// it, called from relaunch with Options.Removable's result and the launch time plus the tree's
+// own initWaitSeconds, once the tree's launch turn is held. The encoding cannot fail (plain
 // strings), but initEnvironment has no error to return, so a refusal here is relaunch's own to
 // surface before it ever patches the Sandbox.
-func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace) error {
+func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -145,6 +150,7 @@ func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace) error {
 		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
 	}
 	l.removableWorkspacesJSON = string(encoded)
+	l.removableWorkspacesNotAfter = notAfter
 	return nil
 }
 
@@ -613,6 +619,11 @@ func fetchEnvironment() []corev1.EnvVar {
 // container, so workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is
 // l.removableWorkspacesJSON, set by setRemovable (called from relaunch, after the daemon's
 // candidate list is read, last, under the tree's launch turn); absent when the daemon found none.
+// LEGION_REMOVABLE_WORKSPACES_NOT_AFTER, set only alongside it, is l.removableWorkspacesNotAfter
+// (RFC 3339): the launch time plus the tree's own initWaitSeconds, past which workspace-init
+// trusts the list no further — a pod the Sandbox controller recreates on its own runs from this
+// same template without the daemon ever retaking the tree's launch turn to refresh it
+// (dispatch://LEGION-583).
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
@@ -628,6 +639,7 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	}
 	if l.removableWorkspacesJSON != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
+		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES_NOT_AFTER", Value: l.removableWorkspacesNotAfter.Format(time.RFC3339)})
 	}
 	return append(env, xdgEnvironment()...)
 }

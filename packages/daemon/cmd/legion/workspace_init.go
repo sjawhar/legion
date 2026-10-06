@@ -44,6 +44,15 @@ const (
 	// internal/daemon/removable.go's removableWorkspaces is the one place that states which
 	// issues qualify; unset or empty removes none.
 	removableWorkspacesEnv = "LEGION_REMOVABLE_WORKSPACES"
+	// removableWorkspacesNotAfterEnv names the RFC 3339 instant past which this pod's own copy of
+	// removableWorkspacesEnv is too old to trust: relaunch stamps it alongside the list, under the
+	// tree's launch turn, as the launch time plus the tree's own initWaitSeconds. A pod the
+	// Sandbox controller recreates on its own (eviction, node drain, a hand deletion) runs
+	// workspace-init from the same pod template — the same stale list — without the daemon ever
+	// taking the tree's launch turn again; this is what stops it from acting on a list that may by
+	// then be hours old (dispatch://LEGION-583). Set only alongside removableWorkspacesEnv, so its
+	// absence with a non-empty list means an older daemon or plugin, read as no bound at all.
+	removableWorkspacesNotAfterEnv = "LEGION_REMOVABLE_WORKSPACES_NOT_AFTER"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands
 	// (DEFAULT_WORKSPACE_INIT_LOCK_WAIT_SECONDS, workspace-init.ts).
@@ -256,12 +265,16 @@ const nestedRepositoryWalkTimeout = 30 * time.Second
 // workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
 // issue — the one this pod provisions, never the daemon's to name but filtered out here too, in
 // case it ever is — and the tree's own root, which Location names for no issue so it is never a
-// candidate in the first place. Each candidate's shape is checked before it ever reaches a revset
-// or a path: Issue against the key form workspace.Location accepts (legionclaim.IsIssueKey), and
-// MergedHead, when not empty, against workspace.IsCommitID; either refusal is logged and the
-// candidate is skipped rather than acted on. One candidate's failure is logged and never stops the
-// ones after it or the provisioning this pod already finished; a malformed env var removes
-// nothing.
+// candidate in the first place. Nothing is removed once now() is past removableWorkspacesNotAfterEnv
+// (a pod the Sandbox controller recreated on its own, running from the pod template's old list
+// without the daemon ever retaking the tree's launch turn, dispatch://LEGION-583): that is logged
+// too, distinctly from every other refusal below, since it means this pod's whole candidate list
+// is untrustworthy rather than one candidate being malformed. Each candidate's shape is then
+// checked before it ever reaches a revset or a path: Issue against the key form workspace.Location
+// accepts (legionclaim.IsIssueKey), and MergedHead, when not empty, against workspace.IsCommitID;
+// either refusal is logged and the candidate is skipped rather than acted on. One candidate's
+// failure is logged and never stops the ones after it or the provisioning this pod already
+// finished; a malformed env var removes nothing.
 //
 // The filtered candidates are rotated (rotateCandidates below) by this pod's own issue, role, and
 // LEGION_GENERATION together before the loop: a candidate that always sorts first in the
@@ -278,6 +291,17 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 	raw := os.Getenv(removableWorkspacesEnv)
 	if raw == "" {
 		return
+	}
+	if rawNotAfter := os.Getenv(removableWorkspacesNotAfterEnv); rawNotAfter != "" {
+		notAfter, err := time.Parse(time.RFC3339, rawNotAfter)
+		if err != nil {
+			fmt.Fprintf(stdout, "workspace-init: %s is not a valid timestamp, removing nothing: %v\n", removableWorkspacesNotAfterEnv, err)
+			return
+		}
+		if now().After(notAfter) {
+			fmt.Fprintf(stdout, "workspace-init: %s's removable-workspaces list is past its %s (%s), removing nothing: this pod may have been recreated by the Sandbox controller long after the daemon last computed it\n", issue, removableWorkspacesNotAfterEnv, notAfter.Format(time.RFC3339))
+			return
+		}
 	}
 	var all []runtime.RemovableWorkspace
 	if err := json.Unmarshal([]byte(raw), &all); err != nil {

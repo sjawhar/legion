@@ -93,12 +93,37 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		// Computed now, under the tree's launch turn, after every other pod of the tree has
 		// finished initializing: the latest moment before this pod's own manifest is written, so a
 		// sibling that became live in the time this launch spent waiting is not judged by a list
-		// that was already stale when this launch started (dispatch://LEGION-583).
+		// that was already stale when this launch started (dispatch://LEGION-583). That guarantee
+		// is this relaunch's own, though: a pod the Sandbox controller recreates on its own
+		// (eviction, node drain, a hand deletion) runs workspace-init from this same pod template,
+		// list included, without ever passing through here again — removableWorkspacesNotAfter,
+		// stamped below, is what bounds how long such a pod may still trust it.
+		//
+		// removableWorkspaces' own candidate rule reads each issue's claim from the store
+		// (supervise.GoneStates(), or no claim at all); it cannot tell a claim whose fail
+		// persisted StateFailed despite its own suspendProcess erroring from one truly gone, so a
+		// candidate can still have a live, non-terminal pod of this tree right now. That pod, not
+		// the claim record, is checked directly here and is reason enough to drop the candidate.
 		candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
 		if err != nil {
 			return fail("compute its tree's removable workspaces", err)
 		}
-		if err := l.setRemovable(candidates); err != nil {
+		live := make(map[string]bool)
+		for _, pod := range r.treePods(l) {
+			if !terminal(pod) {
+				if issueLabel := pod.Labels[labelIssue]; issueLabel != "" {
+					live[issueLabel] = true
+				}
+			}
+		}
+		filtered := candidates[:0]
+		for _, candidate := range candidates {
+			if !live[labelValue(candidate.Issue)] {
+				filtered = append(filtered, candidate)
+			}
+		}
+		notAfter := time.Now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
+		if err := l.setRemovable(filtered, notAfter); err != nil {
 			return fail("build its removable-workspaces list", err)
 		}
 	}

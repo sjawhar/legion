@@ -16,7 +16,7 @@ import (
 // GrantRequest is a request to mint one short-lived grant, in one of three forms. The claim form
 // preserves the shipped route wire shape: a registered pane identifies its session, tree, issue,
 // and capability secret, and, since dispatch://LEGION-583, whether the bash command it is minted
-// for runs `legion push` (pi-envoy's commandRunsPush): such a grant lives pushTTL rather than the
+// for runs `legion push` (pi-envoy's commandsRunPush): such a grant lives pushTTL rather than the
 // ordinary ttl, since jj's own working-copy snapshot before the network push can run past it on a
 // near-full tree volume. The controller-session form is the session registered with the current
 // controller capability and its registration secret, with no tree and no issue (the shipped

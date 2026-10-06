@@ -311,6 +311,68 @@ func TestRemovableWorkspacesAreReadAfterATreesOtherPodsFinishInitializing(t *tes
 	}
 }
 
+// relaunch stamps LEGION_REMOVABLE_WORKSPACES_NOT_AFTER at the launch time plus the tree's own
+// init-wait window, reaching the init container alongside the list itself: a pod the Sandbox
+// controller recreates on its own (eviction, node drain, a hand deletion) runs workspace-init from
+// this same pod template without the daemon ever taking the tree's launch turn again, so this is
+// what bounds how long such a pod may still trust a list that could by then be hours old
+// (dispatch://LEGION-583).
+func TestRemovableWorkspacesCarryANotAfterTime(t *testing.T) {
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	before := time.Now()
+	g.spawn(rootSpec(t))
+	after := time.Now()
+
+	pod := g.pod(SandboxName(rootToken))
+	if pod == nil {
+		t.Fatal("the root's pod does not exist")
+	}
+	env := envOf(containerNamed(t, pod.Spec, initContainer))
+	got, set := env["LEGION_REMOVABLE_WORKSPACES_NOT_AFTER"]
+	if !set {
+		t.Fatal("the init container carries no LEGION_REMOVABLE_WORKSPACES_NOT_AFTER, want one alongside the list")
+	}
+	notAfter, err := time.Parse(time.RFC3339, got)
+	if err != nil {
+		t.Fatalf("LEGION_REMOVABLE_WORKSPACES_NOT_AFTER = %q is not RFC 3339: %v", got, err)
+	}
+	window := time.Duration(g.r.initWaitSeconds()) * time.Second
+	// RFC 3339 formatting drops the sub-second component, so compare with one second of slack
+	// either side rather than fail on truncation alone.
+	if notAfter.Before(before.Add(window).Add(-time.Second)) || notAfter.After(after.Add(window).Add(time.Second)) {
+		t.Errorf("LEGION_REMOVABLE_WORKSPACES_NOT_AFTER = %s, want the launch time plus %s (between %s and %s)", notAfter, window, before.Add(window), after.Add(window))
+	}
+}
+
+// A candidate whose issue still has a live, non-terminal pod of this tree is dropped before it is
+// ever written to a pod template, regardless of what its claim record says: fail can persist
+// StateFailed even when suspendProcess itself errored (dispatch://LEGION-583), and GoneStates()
+// cannot tell that case from a claim whose process is in fact gone.
+func TestRemovableWorkspacesDropsACandidateWithALiveTreePod(t *testing.T) {
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	// A live, non-terminal pod of the tree whose own issue is the candidate's own.
+	g.spawn(testSpec(t, claim.Token("legion-legion-legion-999-reviewer"), claim.RoleReviewer, "LEGION-999"))
+	live := SandboxName(claim.Token("legion-legion-legion-999-reviewer"))
+	g.update(g.pod(live), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+
+	g.spawn(workerSpec(t))
+	worker := SandboxName(workerToken)
+	pod := g.pod(worker)
+	if pod == nil {
+		t.Fatal("the worker's pod does not exist")
+	}
+	got, set := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+	if set {
+		t.Errorf("the worker's init container carries LEGION_REMOVABLE_WORKSPACES=%q, want none: LEGION-999 has a live tree pod", got)
+	}
+}
+
 // Every pod of a tree, the root included, gets the tree's pod affinity exactly when another pod of
 // the tree is scheduled at its launch: the tree volume attaches to one node (P2, R1).
 func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {

@@ -117,6 +117,52 @@ func TestRemoveFinishedWorkspacesRefusesAMalformedCandidate(t *testing.T) {
 	}
 }
 
+// A removal pass whose own LEGION_REMOVABLE_WORKSPACES_NOT_AFTER has already passed removes
+// nothing at all and logs why, never reaching a single candidate: a pod the Sandbox controller
+// recreated on its own may be running from a pod template the daemon stamped hours ago
+// (dispatch://LEGION-583), so the list it carries can no longer be trusted at all, not merely one
+// candidate at a time.
+func TestRemoveFinishedWorkspacesRemovesNothingPastItsNotAfter(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
+	t.Setenv(removableWorkspacesNotAfterEnv, time.Now().Add(-time.Second).Format(time.RFC3339))
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget)
+
+	output := stdout.String()
+	if !strings.Contains(output, removableWorkspacesNotAfterEnv) {
+		t.Errorf("stdout %q, want it to name %s", output, removableWorkspacesNotAfterEnv)
+	}
+	if strings.Contains(output, "LEGION-100") {
+		t.Errorf("stdout %q names LEGION-100 at all, want the pass to stop before reaching any candidate", output)
+	}
+}
+
+// An absent LEGION_REMOVABLE_WORKSPACES_NOT_AFTER (an older daemon or plugin) is no bound at all:
+// the pass runs normally.
+func TestRemoveFinishedWorkspacesRunsNormallyWithNoNotAfter(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget)
+
+	if want := "LEGION-100 has no workspace on this volume; nothing to remove"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout %q, want %q", stdout.String(), want)
+	}
+}
+
 // The rotation seed changes with LEGION_GENERATION, not only the pod's own issue: ten relaunches
 // of the same issue, each spending its whole budget on the first candidate it starts, started
 // more than one of four candidates across those ten relaunches rather than always the same one —

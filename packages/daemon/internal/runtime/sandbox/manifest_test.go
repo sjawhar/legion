@@ -675,14 +675,16 @@ func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
 }
 
 // The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
-// container alone, JSON-encoded, never the agent; a launch with none names none. relaunch is what
-// calls setRemovable in production, after the tree's launch turn is held; this reaches directly
-// for podTemplate's own contract, that it reads removableWorkspacesJSON off the launch, not spec.
+// container alone, JSON-encoded, never the agent; a launch with none names none, and so does
+// LEGION_REMOVABLE_WORKSPACES_NOT_AFTER, set only alongside the list. relaunch is what calls
+// setRemovable in production, after the tree's launch turn is held; this reaches directly for
+// podTemplate's own contract, that it reads both off the launch, not spec.
 func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
+	notAfter := time.Now().Add(time.Hour)
 	for name, tc := range map[string]struct {
 		candidates []runtime.RemovableWorkspace
 		want       string
@@ -696,17 +698,29 @@ func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := l.setRemovable(tc.candidates); err != nil {
+			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
 				t.Fatal(err)
 			}
 			pod := r.podTemplate(l, false).Spec
-			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+			env := envOf(containerNamed(t, pod, initContainer))
+			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
 			}
+			gotNotAfter, setNotAfter := env["LEGION_REMOVABLE_WORKSPACES_NOT_AFTER"]
+			if setNotAfter != (tc.want != "") {
+				t.Errorf("LEGION_REMOVABLE_WORKSPACES_NOT_AFTER set = %t, want %t", setNotAfter, tc.want != "")
+			}
+			if setNotAfter && gotNotAfter != notAfter.Format(time.RFC3339) {
+				t.Errorf("LEGION_REMOVABLE_WORKSPACES_NOT_AFTER = %q, want %q", gotNotAfter, notAfter.Format(time.RFC3339))
+			}
 			for _, name := range []string{fetchContainer, mainContainer} {
-				if _, set := envOf(containerNamed(t, pod, name))["LEGION_REMOVABLE_WORKSPACES"]; set {
+				env := envOf(containerNamed(t, pod, name))
+				if _, set := env["LEGION_REMOVABLE_WORKSPACES"]; set {
 					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", name)
+				}
+				if _, set := env["LEGION_REMOVABLE_WORKSPACES_NOT_AFTER"]; set {
+					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES_NOT_AFTER", name)
 				}
 			}
 		})
