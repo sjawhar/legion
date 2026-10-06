@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { api } from "../../api/client";
+import { type ArtifactOwner, api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -37,6 +37,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -44,6 +45,7 @@ import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskAnchorHeader } from "./AskAnchorLink";
+import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
 import {
   AskCompletionCard,
@@ -57,6 +59,7 @@ import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnLabel } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
+import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
@@ -92,6 +95,10 @@ export interface AskCardProps {
   /** Timestamp of the Inbox snapshot that supplied initialThread. */
   initialThreadUpdatedAt?: number;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  /** Whether an approval ask's label also links its document and version. Default `true`: the
+   *  Inbox, the drawer and the Conversation name it. The margin passes `false` — the reader is
+   *  already on that document, so the link would point at the page under it. */
+  documentLink?: boolean;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
 }
@@ -147,6 +154,7 @@ export function AskCard({
   getAskThread: getThread = getAskThread,
   initialThread,
   initialThreadUpdatedAt,
+  documentLink = true,
   onAnswered,
 }: AskCardProps): ReactNode {
   const {
@@ -197,6 +205,20 @@ export function AskCard({
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
+  // Where a file pasted or dropped into the answer, or into a reply under the ask, goes: the
+  // ask's issue, or the project of the document it was asked on.
+  const documentProject = (displayedAsk.document ?? owner ?? displayedAsk.anchor_artifact)?.project;
+  const uploadOwner: ArtifactOwner | undefined =
+    displayedAsk.issue_key !== null
+      ? { issue: displayedAsk.issue_key }
+      : documentProject === undefined
+        ? undefined
+        : { project: documentProject };
+  const upload = useDraftUpload((text) => {
+    setAnswerText((current) => appendToDraft(current, text));
+    setQuestionChoice(false);
+  });
+  const uploading = upload.pending > 0;
   const answerFieldRef = useRef<HTMLTextAreaElement>(null);
   // Picking Request changes moves the person straight to the field the server insists
   // on. Keyed on the field actually being mounted, not just on the option: the compact variant
@@ -234,6 +256,11 @@ export function AskCard({
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
   const currentAsk = completed ?? displayedAsk;
+  // A resolved ask takes no more replies, so an unsent one has nowhere to go.
+  const resolved = displayedAsk.state === "resolved" || currentAsk.state === "resolved";
+  useEffect(() => {
+    if (resolved) clearReplyDraft(displayedAsk.id);
+  }, [displayedAsk.id, resolved]);
   // The count comes from `displayedAsk`, never from `completed`: answering an ask does not move
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
@@ -263,48 +290,58 @@ export function AskCard({
         createReply={reply}
         embedded={completed === null}
         thread={threadQuery}
+        uploadOwner={uploadOwner}
       />
     ) : (
       <AskThread
         ask={currentAsk}
         createReply={reply}
         embedded={completed === null}
-        showResolution={false}
         thread={threadQuery}
+        uploadOwner={uploadOwner}
       />
     );
 
   const answerField = (
-    <label className="block" htmlFor={answerFieldId}>
-      <span
-        className={
-          reasonRequired ? `mb-1 block text-sm font-medium ${textSecondaryOnSurface}` : "sr-only"
-        }
-      >
-        {reasonRequired ? "Reason (required)" : isApproval ? "Reason" : "Your answer"}
-      </span>
-      <textarea
-        className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-        data-ask-answer=""
-        disabled={isSubmitting}
-        id={answerFieldId}
-        onChange={(event) => {
-          setAnswerText(event.target.value);
-          setQuestionChoice(false);
-        }}
-        onKeyDown={(event) => submitOnModifiedEnter(event)}
-        placeholder={answerPlaceholder}
-        ref={answerFieldRef}
-        rows={2}
-        value={answerText}
-      />
-    </label>
+    <>
+      <label className="block" htmlFor={answerFieldId}>
+        <span
+          className={
+            reasonRequired ? `mb-1 block text-sm font-medium ${textSecondaryOnSurface}` : "sr-only"
+          }
+        >
+          {reasonRequired ? "Reason (required)" : isApproval ? "Reason" : "Your answer"}
+        </span>
+        <textarea
+          className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+          data-ask-answer=""
+          disabled={isSubmitting}
+          id={answerFieldId}
+          onChange={(event) => {
+            setAnswerText(event.target.value);
+            setQuestionChoice(false);
+          }}
+          onDrop={
+            uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)
+          }
+          onKeyDown={(event) => submitOnModifiedEnter(event, { disabled: uploading })}
+          onPaste={
+            uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
+          }
+          placeholder={answerPlaceholder}
+          ref={answerFieldRef}
+          rows={2}
+          value={answerText}
+        />
+      </label>
+      <DraftUploadStatus upload={upload} />
+    </>
   );
   const submitButton = (
     <button
       aria-describedby={submitHint === undefined ? undefined : submitHintId}
       className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-      disabled={!canAnswer || isSubmitting}
+      disabled={!canAnswer || isSubmitting || uploading}
       title={submitHint}
       type="submit"
     >
@@ -343,7 +380,7 @@ export function AskCard({
         {submitButton}
         <button
           className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-          disabled={trimmedAnswer === "" || isSubmitting}
+          disabled={trimmedAnswer === "" || isSubmitting || uploading}
           onClick={sendClarification}
           type="button"
         >
@@ -360,6 +397,7 @@ export function AskCard({
         <AskCompletionCard
           artifactSlug={artifactSlug}
           ask={completed}
+          documentLink={documentLink}
           edits={edits}
           frame={frame}
         />
@@ -405,6 +443,11 @@ export function AskCard({
         {isApproval ? (
           <p className={`text-[10px] font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
             Approval requested
+          </p>
+        ) : null}
+        {isApproval && documentLink ? (
+          <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+            <AskApprovalLink ask={displayedAsk} />
           </p>
         ) : null}
         {inBlock ? null : (

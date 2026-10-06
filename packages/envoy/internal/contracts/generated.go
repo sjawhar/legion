@@ -169,6 +169,12 @@ const SearchQueryHint = "search with a short phrase of a few words, not a passag
 // dispatch_search tool's account of it cannot drift apart.
 const SearchKindDepth = 100
 
+// SearchDegradedEmbedderUnavailable is GET /api/v1/search's SearchResponse.degraded value when
+// meaning search could not run for this request and search fell back to keyword-only ranking.
+// Generated from SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE in packages/contracts so the string
+// Dispatch writes and the string search-answer.ts compares against cannot drift apart.
+const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds

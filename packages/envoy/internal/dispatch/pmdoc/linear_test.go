@@ -2,40 +2,133 @@ package pmdoc
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
-// before LEGION-465. Each bound is at least ten times the time measured after the fix on a
-// development machine (parse: `a_` 0.3 s, `a_b*` 2 s, `a~b_` 1 s per MiB; render of 4 MiB: `[a`
-// 1.4 s, `a_b&` 0.4 s, `<a` 1.3 s, `[^a` 1.0 s) and well under the time before it (parse of 1 MiB
-// of `a_`: about 4 minutes; of `a_b*`: 12 minutes; render of 4 MiB of `[a`: minutes). A caller's
-// write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements), so the
-// parse here is a read-back's, which counts none and reads all of it.
+// before LEGION-465. Each shape is timed at growthStep's fraction of its target size and then at
+// the full size (parseFullTarget/renderFullTarget: linear_sizes.go, and a smaller pair under
+// -race, linear_sizes_race.go, so a -count=N run stays well inside go test's own default
+// per-package timeout even there), through growsLinearly (below).
+//
+// What each shape's closure measures is this process's own CPU time (processCPUTime), not wall
+// time. A loaded box's scheduler can inflate wall time on either side of a comparison without
+// either side doing more work - that is LEGION-569/571's whole flake history across three rounds
+// of widening the growth step and the slack without removing the root cause. CPU time is immune
+// to another process's contention for the same cores; it only grows with work this process (and
+// its GC) actually does.
+//
+// growsLinearly also samples every size the same number of times and keeps the fastest
+// (growthVerdict's sampleCount), so neither a first run's warm-up nor whichever side a stray spike
+// lands on biases the comparison. Round 3's asymmetric sampling - up to six draws at the smaller
+// size against one or two at the larger - systematically biased the baseline low under bursty
+// load, inflating the apparent ratio independent of any real growth; TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack's
+// own history records the fix.
+//
+// Every measured call also runs under its own deadline (perCallDeadline, growsLinearly): a single
+// call that itself blocks far longer than this bound allows fails fast and names its own shape,
+// rather than the package's own ten-minute default eventually firing with no shape attached
+// (perCallDeadline's own comment has the measured margin; runWithDeadline's has what happens to
+// such a call afterward).
+//
+// A write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements), so
+// the parse here is a read-back's, which counts none and reads all of it. Render's target is
+// smaller than parse's (linear_sizes.go): this loop's own ratio check is `<a`'s live linearity
+// measurement, at whatever parseFullTarget/renderFullTarget currently are, not a one-time aside
+// recorded in a comment to go stale - but -race's own per-access instrumentation costs real CPU
+// time a reintroduced O(n²) bug would cost far more of; the margin this loop checks is that
+// difference, not a hang (which perCallDeadline catches on its own, independent of the ratio).
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
-		markdown := strings.Repeat(shape, (1<<20)/len(shape))
-		started := time.Now()
-		if _, err := ParseRendering(markdown); err != nil {
-			t.Fatalf("parse 1 MiB of %q: %v", shape, err)
-		}
-		if elapsed := time.Since(started); elapsed > 30*time.Second {
-			t.Errorf("parse of 1 MiB of %q took %s, want under 30 s", shape, elapsed)
-		}
+		full := parseFullTarget / len(shape)
+		small := full / growthStep
+		t.Run(shape, func(t *testing.T) {
+			growsLinearly(t, fmt.Sprintf("parsing %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
+				repeats := size / len(shape)
+				before := processCPUTime()
+				if _, err := ParseRendering(strings.Repeat(shape, repeats)); err != nil {
+					t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
+				}
+				return processCPUTime() - before
+			})
+		})
 	}
 	for _, shape := range []string{"[a", "a_b&", "<a", "[^a"} {
-		doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: strings.Repeat(shape, (4<<20)/len(shape))}}}}}
-		started := time.Now()
-		if _, err := Render(doc); err != nil {
-			t.Fatalf("render 4 MiB of %q: %v", shape, err)
+		full := renderFullTarget / len(shape)
+		small := full / growthStep
+		doc := func(repeats int) *Node {
+			return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: strings.Repeat(shape, repeats)}}}}}
 		}
-		if elapsed := time.Since(started); elapsed > 30*time.Second {
-			t.Errorf("render of 4 MiB of %q took %s, want under 30 s", shape, elapsed)
-		}
+		t.Run(shape, func(t *testing.T) {
+			growsLinearly(t, fmt.Sprintf("rendering %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
+				repeats := size / len(shape)
+				before := processCPUTime()
+				if _, err := Render(doc(repeats)); err != nil {
+					t.Fatalf("render %d bytes of %q: %v", size, shape, err)
+				}
+				return processCPUTime() - before
+			})
+		})
 	}
 }
+
+// growthStep is the size ratio TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText's two
+// measurements differ by (full is growthStep times small). growsLinearly's check is
+// took > allowance*growth*before, so growth must exceed allowance for growth² (a quadratic
+// regression's growth) to ever clear allowance*growth (linear's own expected growth) at all: at
+// growthStep=8 and linearSlack=3 the bound is 3*8=24, true-linear clears it with 3x headroom, and
+// a quadratic regression's 8²=64 clears it by 2.67x. A 2x step, which rounds 1-2 of LEGION-571
+// used, could never discriminate at any slack - 2²=4 always clears 2*slack once slack>2 - which
+// TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack's own synthetic check, below,
+// catches as a negative control.
+const growthStep = 8
+
+// growthVerdict's check is took > allowance*growth*before: true-linear time grows about as fast
+// as growth itself, quadratic time about growth² - so growth must exceed allowance for growth² to
+// ever clear allowance*growth. This proves both directions with a synthetic timing function at
+// the exact growth (growthStep) and slack (linearSlack)
+// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText uses: growthStep exceeds linearSlack,
+// so the arithmetic actually discriminates. The quadratic direction goes through growthVerdict
+// directly, not growsLinearly, since a real *testing.T that fails would fail this test too -
+// growsLinearly is a thin wrapper over growthVerdict's verdict, so this is the same check
+// growsLinearly makes, symmetric sampling and the per-call deadline included (growthVerdict's
+// fastest and growsLinearly's perCallDeadline are exercised identically whichever caller drives
+// them; TestRunWithDeadlineReportsAHangPromptly, below growsLinearly, proves the deadline itself).
+func TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack(t *testing.T) {
+	const small, full = 1, growthStep // the growth step itself; growthVerdict never reads these as bytes
+	linear := func(size int) time.Duration { return time.Duration(size) * time.Second }
+	quadratic := func(size int) time.Duration { return time.Duration(size*size) * time.Second }
+	if failedStep, _ := growthVerdict([]int{small, full}, linearSlack, quadratic); failedStep != 0 {
+		t.Errorf("growthVerdict did not fail a synthetic quadratic timing function at growth=%d, slack=%d (failedStep=%d), want step 0 to fail", growthStep, linearSlack, failedStep)
+	}
+	if failedStep, _ := growthVerdict([]int{small, full}, linearSlack, linear); failedStep != -1 {
+		t.Errorf("growthVerdict failed a synthetic linear timing function at growth=%d, slack=%d (step %d), want it to pass", growthStep, linearSlack, failedStep)
+	}
+	// Negative control: round 1-2's 2x step, the same slack, the same quadratic function. This
+	// must still pass growthVerdict (wrongly) - it is the historical defect
+	// growthStep's doc comment names, kept here so a future reader can run it and see the defect
+	// reproduce rather than take the claim on faith.
+	if failedStep, _ := growthVerdict([]int{1, 2}, linearSlack, quadratic); failedStep != -1 {
+		t.Errorf("growthVerdict unexpectedly failed the 2x-step negative control (failedStep=%d) - if this starts failing, the control no longer demonstrates round 1-2's defect and this test's comment needs updating, not alarm", failedStep)
+	}
+	// growsLinearly itself, through a real *testing.T, confirms the wrapper agrees with
+	// growthVerdict on the passing direction (the failing direction cannot run through a real
+	// t.Fatalf without failing this test, which the growthVerdict assertion above already proves).
+	growsLinearly(t, "synthetic linear", []int{small, full}, linearSlack, linear)
+}
+
+// linearSlack is how many times faster than growth itself a linear operation's time may grow
+// before growsLinearly calls it quadratic, at the growthStep growth
+// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText uses: true-linear time grows about
+// growthStep times, comfortably inside the linearSlack*growthStep threshold; the quadratic cost
+// LEGION-465 fixed would grow about growthStep² times, clearing that threshold with room to
+// spare (growthStep's own doc comment has the exact numbers).
+const linearSlack = 3
 
 // The shapes a sweep found after the ones above, each quadratic before LEGION-465 finished: a
 // text of one delimiter character, whose every character was escaped by a scan of its whole run;
@@ -87,17 +180,19 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 // rows parsed in 35 ms and 256 KiB in 6.8 s, and 1 MiB took 2 min 9 s. unescapeTablePipes,
 // which replaced it, parsed 16 KiB in 19 ms, 256 KiB in 0.6-0.8 s and 1 MiB in 2.0-2.4 s there. No
 // wall-clock bound holds on every runner, so the parse is timed at growing sizes and its growth
-// bounded (growsLinearly). A caller's write of a table that size passes the element limit and is
-// refused, so it is read as a rendering is, whose parse no element limit stops.
+// bounded (growsLinearly), by this process's own CPU time rather than wall time, for the same
+// reason TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText measures CPU time. A caller's
+// write of a table that size passes the element limit and is refused, so it is read as a
+// rendering is, whose parse no element limit stops.
 func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	const header, row = "| a |\n| --- |\n", "`\\|`\n"
-	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, func(size int) time.Duration {
+	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) time.Duration {
 		markdown := header + strings.Repeat(row, (size-len(header))/len(row))
-		started := time.Now()
+		before := processCPUTime()
 		if _, err := ParseRendering(markdown); err != nil {
 			t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
 		}
-		return time.Since(started)
+		return processCPUTime() - before
 	})
 }
 
@@ -107,37 +202,242 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // quadruple between two parses and still refuses a quadratic one at any step over four.
 const growthAllowance = 4
 
-// growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
-// more than growthAllowance times faster than the size did. The first size is timed three times
-// before the second and three times after it, and the fastest of the six kept, so neither a first
-// run's warm-up nor a load spike shorter than the second size's run reads as growth. A step over
-// the bound times the larger size again and keeps the faster time, and after the first step also
-// times the smaller size again and keeps the slower, so load that rose between two runs does not
-// read as growth either.
-func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) time.Duration) {
+// sampleCount is how many times growthVerdict measures each size before keeping the fastest - the
+// same count at every size, so neither side of a comparison draws from more samples than the
+// other (an asymmetric draw biases a minimum low on the side with more samples, independent of
+// any real growth). Measuring CPU time rather than wall time (processCPUTime, below) removes most
+// of what ambient box load would otherwise still leave to sample away.
+const sampleCount = 3
+
+// processCPUTime is this process's total CPU time, user and system, since it started
+// (syscall.Getrusage(RUSAGE_SELF)), not wall time - immune to another process's contention for
+// the same cores, which is LEGION-569/571's whole flake history (the file-level comment above has
+// the fuller account). No test in this package calls t.Parallel (there is no t.Parallel()
+// anywhere under internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time,
+// and this process's CPU delta across one call is that call's own cost plus whatever GC work its
+// allocations trigger meanwhile. leakedCallGuard (below) is what keeps that true even once a call
+// has missed its own deadline and gone on running in the background.
+func processCPUTime() time.Duration {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		panic(fmt.Sprintf("getrusage(RUSAGE_SELF): %v", err))
+	}
+	return time.Duration(usage.Utime.Nano()+usage.Stime.Nano()) * time.Nanosecond
+}
+
+// leaking counts how many of each what (growsLinearly's shape-and-size label) are currently
+// running past their own deadline - a count, not a single flag, so two concurrently leaking calls
+// sharing one label cannot be mistaken for one clearing when either returns. Go cannot cancel a
+// goroutine mid-computation, so this is the only way a later call can tell that measuring right
+// now would share processCPUTime's process-wide counter with CPU a still-running earlier call
+// keeps spending. runWithDeadline adds to it the instant a deadline misses and removes from it
+// only once that call's own goroutine finally returns; leakedCallGuard reads it.
+var leaking struct {
+	mu   sync.Mutex
+	what map[string]int
+}
+
+// leakedCallGuard reports what, if anything, is still running past its own deadline - the message
+// timedWithDeadline fails a new call with before ever starting it, naming the call still leaking
+// CPU into this process's RUSAGE_SELF rather than inventing a ratio out of a measurement that
+// shared it. A pure function (no *testing.T) so a unit test can assert it directly: see
+// TestLeakedCallBlocksTheNextMeasurement.
+func leakedCallGuard(what string) string {
+	leaking.mu.Lock()
+	defer leaking.mu.Unlock()
+	if len(leaking.what) == 0 {
+		return ""
+	}
+	labels := make([]string, 0, len(leaking.what))
+	for label, count := range leaking.what {
+		if count > 1 {
+			label = fmt.Sprintf("%s (x%d)", label, count)
+		}
+		labels = append(labels, label)
+	}
+	sort.Strings(labels) // a fixed order, not map iteration's, so the message is reproducible
+	return fmt.Sprintf("%s: refusing to measure while %s is still running past its own deadline (processCPUTime is this whole process's, so measuring now would attribute its ongoing CPU to this call instead)", what, strings.Join(labels, ", "))
+}
+
+// runWithDeadline runs op, labelled what, in its own goroutine and reports whether it returned
+// within deadline. Go cannot cancel a goroutine mid-computation, so an op that does not return in
+// time is left running - registered under what in leaking until it eventually returns and
+// deregisters itself, so leakedCallGuard can refuse a later call that would otherwise share its
+// ongoing CPU - rather than stopped; the point of the deadline is only to stop waiting for it and
+// report that promptly, not to free its resources. A deregistration goroutine is spawned only on
+// a deadline miss, and only then: on a call that truly never returns, it stays parked on result's
+// receive, at no CPU cost, for as long as the test binary runs. cleared, non-nil only on a
+// deadline miss, closes the instant that goroutine deregisters op's own entry - the signal
+// waitForLeakToClear waits on, rather than polling.
+func runWithDeadline(what string, deadline time.Duration, op func() time.Duration) (took time.Duration, onTime bool, cleared <-chan struct{}) {
+	result := make(chan time.Duration, 1)
+	go func() { result <- op() }()
+	select {
+	case took := <-result:
+		return took, true, nil
+	case <-time.After(deadline):
+		leaking.mu.Lock()
+		if leaking.what == nil {
+			leaking.what = make(map[string]int)
+		}
+		leaking.what[what]++
+		leaking.mu.Unlock()
+		done := make(chan struct{})
+		go func() {
+			<-result
+			leaking.mu.Lock()
+			leaking.what[what]--
+			if leaking.what[what] == 0 {
+				delete(leaking.what, what)
+			}
+			leaking.mu.Unlock()
+			close(done)
+		}()
+		return 0, false, done
+	}
+}
+
+// timedWithDeadline refuses to run op, naming whatever is still leaking (leakedCallGuard), then
+// runs it under runWithDeadline and fails t, naming what and deadline, if it did not return in
+// time.
+func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op func() time.Duration) time.Duration {
 	t.Helper()
-	first := func() time.Duration { return min(timed(sizes[0]), timed(sizes[0]), timed(sizes[0])) }
-	before := first()
+	if msg := leakedCallGuard(what); msg != "" {
+		t.Fatal(msg)
+	}
+	took, onTime, _ := runWithDeadline(what, deadline, op)
+	if !onTime {
+		t.Fatalf("%s did not return within %s", what, deadline)
+	}
+	return took
+}
+
+// TestRunWithDeadlineReportsAHangPromptly proves runWithDeadline's own guarantee directly: a
+// synthetic op that blocks far longer than its deadline is reported late (onTime=false) promptly -
+// close to the deadline itself, not close to how long op actually blocks - the property
+// growsLinearly's perCallDeadline relies on to fail fast and name a shape instead of waiting out
+// go test's own default timeout with none attached.
+func TestRunWithDeadlineReportsAHangPromptly(t *testing.T) {
+	const deadline = 20 * time.Millisecond
+	const hang = 200 * time.Millisecond
+	started := time.Now()
+	_, onTime, cleared := runWithDeadline("synthetic prompt hang", deadline, func() time.Duration {
+		time.Sleep(hang) // longer than deadline, short enough this test and its cleanup stay fast
+		return 0
+	})
+	if elapsed := time.Since(started); elapsed > 10*deadline {
+		t.Errorf("runWithDeadline took %s to report a hang against a %s deadline, want close to immediate", elapsed, deadline)
+	}
+	if onTime {
+		t.Error("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
+	}
+	waitForLeakToClear(t, cleared)
+}
+
+// TestLeakedCallBlocksTheNextMeasurement proves leakedCallGuard directly: once a synthetic op has
+// missed its own deadline and is still running, a second, otherwise-healthy call through
+// timedWithDeadline refuses to start - naming the first call - rather than silently sharing its
+// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine).
+func TestLeakedCallBlocksTheNextMeasurement(t *testing.T) {
+	const deadline = 20 * time.Millisecond
+	const hang = 200 * time.Millisecond
+	_, onTime, cleared := runWithDeadline("synthetic leaked hang", deadline, func() time.Duration {
+		time.Sleep(hang)
+		return 0
+	})
+	if onTime {
+		t.Fatal("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
+	}
+	if msg := leakedCallGuard("a second call"); msg == "" {
+		t.Error("leakedCallGuard let a second call measure while the first was still registered as leaked, want it refused")
+	} else {
+		t.Logf("leakedCallGuard correctly refused: %s", msg)
+	}
+	waitForLeakToClear(t, cleared)
+}
+
+// waitForLeakToClear blocks until cleared closes or fails t: the deregistration goroutine
+// runWithDeadline spawned on a deadline miss closes cleared the instant it has removed its own
+// entry from leaking, so a later test in this same binary never starts measuring while this
+// test's own synthetic leak is still registered. 10s (packages/envoy/internal/cistore/burst_test.go's
+// waitAll uses the same bound for the same kind of wait) is far more than the handoff needs; past
+// it, something is wrong.
+func waitForLeakToClear(t *testing.T, cleared <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-cleared:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a synthetic leaked call never deregistered")
+	}
+}
+
+// growthVerdict runs growsLinearly's measurement algorithm without a *testing.T to report
+// through: which step (0-based, among sizes[1:]) first grew past its bound, or -1 if none did,
+// and one line of context for every step up to and including a failure - the fail-style line at
+// that step, a log-style line at every other. Every size, the first included, is measured
+// sampleCount times and the fastest kept, so the comparison at every step draws from the same
+// number of samples on both sides. growsLinearly below turns these into t.Fatalf/t.Logf;
+// TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack calls this directly, so the
+// bound it proves is provable without a real *testing.T failing, a real parse or render, or a
+// hang past some other timeout standing in for the check actually tripping.
+func growthVerdict(sizes []int, allowance int, timed func(size int) time.Duration) (failedStep int, lines []string) {
+	fastest := func(size int) time.Duration {
+		best := timed(size)
+		for i := 1; i < sampleCount; i++ {
+			if sample := timed(size); sample < best {
+				best = sample
+			}
+		}
+		return best
+	}
+	before := fastest(sizes[0])
+	failedStep = -1
 	for i := 1; i < len(sizes); i++ {
 		smaller, size := sizes[i-1], sizes[i]
 		growth := size / smaller
-		took := timed(size)
-		if i == 1 {
-			before = min(before, first())
-		}
-		if took > time.Duration(growthAllowance*growth)*before {
-			took = min(took, timed(size))
-			if i > 1 {
-				before = max(before, timed(smaller))
-			}
-		}
+		took := fastest(size)
 		ratio := float64(took) / float64(before)
-		if took > time.Duration(growthAllowance*growth)*before {
-			t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a parse linear in it may grow %d times at most (growthAllowance)",
-				what, took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, growthAllowance*growth)
+		if took > time.Duration(allowance*growth)*before {
+			failedStep = i - 1
+			lines = append(lines, fmt.Sprintf("took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a parse linear in it may grow %d times at most",
+				took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, allowance*growth))
+			return failedStep, lines
 		}
-		t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
+		lines = append(lines, fmt.Sprintf("%s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, allowance*growth))
 		before = took
+	}
+	return failedStep, lines
+}
+
+// perCallDeadline bounds every one of growthVerdict's measured calls: well under go test's own
+// ten-minute default per-package timeout, so a single call that itself blocks far longer than
+// this file's bound allows fails fast and names its own shape and size (the file-level comment
+// above has why that matters). It is a wall-clock bound guarding a CPU-time budget, so box-load
+// scheduling starvation, not only a regression, could in principle trip it on a healthy call -
+// measured margin against that: the slowest observed healthy call at this file's current sizes,
+// under real ambient box load, was "<a" rendering at parseFullTarget/renderFullTarget's race-mode
+// size in about 0.8s, and "a_b*" parsing at the non-race size in about 0.9s - both over 60x under
+// this deadline. A margin under 10x would call for raising it; this one does not.
+const perCallDeadline = 60 * time.Second
+
+// growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
+// more than allowance times faster than the size did (growthVerdict, which this wraps). Every
+// measured call runs under perCallDeadline (timedWithDeadline), so a call that itself hangs fails
+// this shape by name instead of the package's own default timeout firing with none.
+func growsLinearly(t *testing.T, what string, sizes []int, allowance int, timed func(size int) time.Duration) {
+	t.Helper()
+	bounded := func(size int) time.Duration {
+		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline, func() time.Duration {
+			return timed(size)
+		})
+	}
+	failedStep, lines := growthVerdict(sizes, allowance, bounded)
+	for step, line := range lines {
+		if step == failedStep {
+			t.Fatalf("%s %s", what, line)
+			return
+		}
+		t.Logf("%s: %s", what, line)
 	}
 }
 

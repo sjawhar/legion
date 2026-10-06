@@ -158,7 +158,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 			b.Run(name, func(b *testing.B) {
 				service := &Service{}
 				replica := service.keepReplica(live, nil)
-				replica.observe("bench", live)
+				replica.observe("bench", live, nil)
 				for b.Loop() {
 					stop := make(chan struct{})
 					var reading sync.WaitGroup
@@ -179,7 +179,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 						time.Sleep(20 * time.Millisecond)
 						start := time.Now()
 						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
-						replica.observe("bench", live)
+						replica.observe("bench", live, nil)
 						latencies = append(latencies, time.Since(start))
 					}
 					close(stop)

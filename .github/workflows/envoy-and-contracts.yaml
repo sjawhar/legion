@@ -368,7 +368,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -388,6 +388,13 @@ jobs:
           go-version-file: packages/envoy/go.mod
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
+      - name: Build contracts for dispatch e2e
+        # e2e/agent-view.e2e.ts imports AGENT_STREAM_LIMITS and capAgentStreamText as values
+        # (LEGION-548), which Playwright's own Node resolution reads from contracts' built
+        # dist/, unlike a type-only import or the dashboard's own Vite build (which bundles the
+        # TS source directly through the workspace's "bun" export condition).
+        run: bun run build
+        working-directory: packages/contracts
       - name: Lint proof editor
         run: bun run lint
         working-directory: packages/proof-editor
@@ -498,7 +505,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -591,11 +598,16 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
-  # The document service and the API that drives it, under the race detector. A read that walks a
-  # live document without its lock races the room's peers, which no ordinary run shows: the
+  # The document service and the API that drives it, and pmdoc (LEGION-571: its own flakes under
+  # -race and load, not a race in production code, cost three review rounds because nothing ran
+  # this package under -race before a PR claimed it), all under the race detector. A read that
+  # walks a live document without its lock races the room's peers, which no ordinary run shows: the
   # unit-test step above runs without -race (LEGION-499). Its own job beside envoy-go because -race
-  # runs these two packages several times slower, and with its own package deadline, since go
-  # test's ten-minute default is a whole package's.
+  # runs these packages several times slower, and with its own package deadline, since go test's
+  # ten-minute default is a whole package's. pmdoc's tests shell out to the generated TypeScript
+  # fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to
+  # date" step), so this job needs Bun installed and its workspace linked the same way, though not
+  # that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -603,7 +615,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -618,11 +630,13 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Race-test the document service and its API
-        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/
+      - name: Race-test the document service, its API, and pmdoc
+        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/...
         working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
@@ -637,7 +651,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]

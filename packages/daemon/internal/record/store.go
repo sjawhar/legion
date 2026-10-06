@@ -183,7 +183,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
 	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
-	checked_head, required, required_workflows, required_workflows_head`
+	checked_head, required, required_workflows, required_workflows_head, mergeability`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -274,8 +274,8 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
 		head_counted, planned_red, review_seen, review_seen_at, state, checked_head, required,
-		required_workflows, required_workflows_head)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+		required_workflows, required_workflows_head, mergeability)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
@@ -285,12 +285,12 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
 		required = excluded.required, required_workflows = excluded.required_workflows,
-		required_workflows_head = excluded.required_workflows_head`,
+		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
-		workflows, pr.WorkflowsHead,
+		workflows, pr.WorkflowsHead, pr.Mergeability,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -353,7 +353,7 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
-		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead); err != nil {
+		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -495,10 +495,13 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 // project's row from its own daemon. An issue's Dispatch status writes run one at a time in the
 // order they were made: a status row waits while an older one for the same issue is unfinished,
 // because each carries the status its predecessor leaves, and a newer write run first would find the
-// board short of it and finish unwritten as though a human had moved it. Supervise rows need no
-// such rule: a stop names the run it ends through the claim's own record of the newest start run
-// against it (claims.last_start_row), so ordering them here would buy nothing that survives a
-// retry the runtime delayed.
+// board short of it and finish unwritten as though a human had moved it. A start of an issue's role
+// waits while an older issue_branch row of the issue is unfinished, so no role starts before its
+// issue's branch exists on GitHub (IssueBranch), and a create GitHub keeps refusing holds the
+// issue's roles back while the row retries. Supervise rows need no other such rule: a stop names the
+// run it ends through the claim's own record of the newest start run against it
+// (claims.last_start_row), so ordering them here would buy nothing that survives a retry the runtime
+// delayed.
 func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
 	if limit <= 0 {
 		return []OutboxRow{}, nil
@@ -510,8 +513,10 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now 
 		where split_part(issue, '-', 1) = $4 and next_at <= $1 and (lease_until is null or lease_until <= $1)
 		and not (kind = $3 and exists (select 1 from outbox older
 			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
+		and not (kind = $5 and payload->>'op' = 'start' and exists (select 1 from outbox branch
+			where branch.kind = $6 and branch.issue = outbox.issue and branch.id < outbox.id))
 		order by next_at, id limit $2 for update skip locked`,
-		now, limit, string(OutboxKindDispatchStatus), project)
+		now, limit, string(OutboxKindDispatchStatus), project, string(OutboxKindSupervise), string(OutboxKindIssueBranch))
 	if err != nil {
 		return nil, fmt.Errorf("claim due outbox rows: %w", err)
 	}

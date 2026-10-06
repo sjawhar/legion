@@ -4,6 +4,32 @@
 
 ### Added
 
+- Pictures reach the model (LEGION-541): a Dispatch tool result carries its `images` as image
+  blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
+  pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn
+  with its text unchanged), at most 8 and 10 MiB of them, each read with the session's own
+  Dispatch bearer within 20 s; a picture Dispatch cannot serve leaves the delivery its text. A
+  session is shown each picture once: a later delivery or `dispatch_read` that embeds one it was
+  already shown names it as shown earlier instead of sending it again, because every request
+  carries the session's history and Anthropic refuses one over 32 MB; `dispatch_doc_read` shows it
+  again. A delivery's pictures count as shown once the host took the message that carries them, so
+  the delivery Dispatch retries after a send that failed shows them again. A session that moves
+  onto a transcript (`/fork`, `/handoff`, `/resume`, a restart) counts the pictures that transcript
+  already shows: those a `dispatch_read` or `dispatch_doc_read` result or a card names as shown,
+  and a person's own turn whose every picture was shown beside it. The session id the extension
+  leaves or shuts down is forgotten.
+- The live agent conversation stream names the `provider/model` that produced each assistant turn
+  (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
+  the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
+  for a client whose assistant message carries no model identity.
+- `plan-gap-analyst` also reads a spec before a human does, and reports every finding of a fourth
+  kind: a claim about how a system works today that the code, its documentation or command output
+  it was given does not show (a claim about live state it cannot read is reported as unverified),
+  and, when the caller gave it the owner's words to check against, a requirement that traces to
+  neither them nor a cited fact; a requirement in a version a human approved has its source. The
+  `dispatch-first` skill, which every session with Dispatch carries, says in "Design in the spec" to
+  have it check a spec against the code, the human's words and any command output a claim rests on,
+  before the first version and each approval request, and to resolve what it flags (LEGION-577).
 - A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
   session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
   conversation runs in the issue's spec, the first version holds only established facts and every

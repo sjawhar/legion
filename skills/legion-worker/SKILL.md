@@ -117,7 +117,8 @@ answer questions or to keep editing. Do not create new commits, run
 (and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
 
 On every start, and especially after revival or re-creation, read the issue and then the
-committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legion/`:
+committed predecessor handoffs in lifecycle order from
+`$LEGION_WORKSPACE/.legion/<issue>/`:
 
 1. `architect.json`
 2. `plan.json`
@@ -131,11 +132,11 @@ untouched and reach the next worker. The `legion` tool's `handoff_read` returns 
 stands in the workspace.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
-`$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
+`$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a prior
 transcript, the committed file wins: it is the copy that survived.
 
 If your system prompt begins with `Your workspace was recreated…`, read
-`.legion/workspace-recovered.json`, then your phase's committed handoff, and reconcile before any
+`.legion/<issue>/workspace-recovered.json`, then your phase's committed handoff, and reconcile before any
 new work.
 
 ## jj Safety Rules
@@ -239,6 +240,17 @@ artifact, not a broken credential. Run credentialed commands from your own bash 
 run that may outlast a minute with `gh run watch` in bash, which redeems once and then runs on the
 token it got.
 
+**Other credentials your pod may already carry.** Before reporting that a read is unreachable,
+check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
+are set when the deployment enrolls pods with the agent-secrets broker (`docs/kubernetes.md`,
+"Operator configuration"), in which case `agent-secrets <SECRET> -- <command>` runs `<command>`
+with only the secrets this pod generation's grant allows — refuses closed, naming the secret, if
+the rule does not allow it. `AWS_CONFIG_FILE` is set when the deployment's `pod.volumes` carries a
+further projected token beyond the model route's own; read the file it names for what profiles it
+configures before assuming the AWS CLI has nothing to reach. Neither variable existing is a
+guarantee the read you need is covered — a refusal from either still means what it says — but
+neither should be assumed absent without checking.
+
 ## GitHub PR comment attribution
 
 Append this exact structured footer to **every** pull-request comment and review that this
@@ -261,7 +273,7 @@ legion gh -- pr comment <pr-number> \
 
 ## Planner artifact
 
-The plan lives in `.legion/plan.json` and the issue's `plan.md` document, never in the issue's
+The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document, never in the issue's
 primary document, which is its spec; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
 and spec content goes into the issue, never into a PR (the root `AGENTS.md`
@@ -270,7 +282,7 @@ to a file" is satisfied by the handoff write in the completion gate below; the p
 commit is `plan: record handoff`.
 
 A plan that departs from the spec's design records the departure in `plan.md` and in the required
-`.legion/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
+`.legion/<issue>/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
 the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
 never edits the spec. Whether the spec changes is the architect's decision
 (`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
@@ -327,13 +339,17 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 The merger writes no handoff and pushes nothing, so this gate does not apply to it
 (`packages/daemon/internal/prompts/roles/merger.md`).
 
+A planner picking up after the issue moves back from implementing starts fresh on the remote
+tip — `jj -R "$LEGION_WORKSPACE" new legion/<KEY>@origin` — since the implementer's unpushed
+commits are no longer in the chain (*Every role pushes its own commits*, below).
+
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
 `$LEGION_WORKSPACE` and returns its output.
 
 A handoff built from the one already on disk (a test handoff that accumulates review rounds can
 pass 128 KiB) can instead be piped from bash, so you never re-emit the whole payload:
-`cd -- "$LEGION_WORKSPACE" && bun -e 'const h = await Bun.file(".legion/<phase>.json").json(); delete h.schemaVersion; delete h.phase; delete h.completed; <your edit to h>; console.log(JSON.stringify(h))' | legion handoff write --phase <phase>`.
+`cd -- "$LEGION_WORKSPACE" && bun -e 'const h = await Bun.file(".legion/<issue>/<phase>.json").json(); delete h.schemaVersion; delete h.phase; delete h.completed; <your edit to h>; console.log(JSON.stringify(h))' | legion handoff write --phase <phase>`.
 The program is single-quoted, so strings in your edit take double quotes. It is `bun` because the
 worker image a pod runs ships `bun` and not `jq`, and a devbox pane has the `bun` Legion builds
 with. With `--data` omitted, `legion handoff write` reads the JSON object from stdin. The CLI adds
@@ -348,14 +364,14 @@ either phase, is an object of six non-empty strings: `criterion` (the acceptance
 Then verify the durable artifact exists:
 
 ```bash
-test -f "$LEGION_WORKSPACE/.legion/<phase>.json"
+test -f "$LEGION_WORKSPACE/.legion/<issue>/<phase>.json"
 ```
 
 Then commit that exact handoff file onto the issue branch:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<phase>.json
+  jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<issue>/<phase>.json
 ```
 
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
@@ -367,11 +383,20 @@ cd -- "$LEGION_WORKSPACE" && legion push
 
 It pushes `@-` through the provisioned credential helper, which authenticates as your role's App
 (`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
-which pushes skip CI and which commit-message keywords it refuses. Its ancestry check refuses
+which pushes skip CI and which commit-message keywords it refuses. While the head commit carries
+`skip-checks: true`, a pull-request body edit alone starts no GitHub workflow run, so a check that
+re-judges the body re-runs on that head only after a later push; on a code head the same edit
+re-runs it at once. While the pull request conflicts with its base (GitHub shows it
+`CONFLICTING`), no workflow triggered `on: pull_request` runs for any of its activity types, so
+a body edit re-judges nothing there either; a push cures both, but only once the pull request is
+mergeable, so the implementer forward-merges a conflicting one first (*Reintegrating the base* in
+`skill://legion-worker/references/conflicts-and-rewrites.md`). Its ancestry check refuses
 unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every issue
 workspace shares one clone, so another role's push moves `legion/<KEY>@origin` here at once, and
 a push that did not descend from it would move the remote branch sideways onto your commit and
-drop theirs.
+drop theirs. A handoff commit never sits on an implementer's unpushed chain: when the issue moves
+back to planning, the implementer's unpushed commits stay off the bookmark until the implementer
+returns, and the planner writes its handoff on the remote tip.
 
 Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
 rewrite — read *Rewriting pushed commits* in
@@ -380,15 +405,17 @@ is built on that commit and records the pushed tip `legion push` reads, the only
 push lets the remote branch move off its current tip.
 
 Before the push, check ancestry and identity as above: the chain carries every earlier phase's
-commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
+pushed commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
 report to the architect with the output, never a force-push. The merger makes no commit and
 pushes nothing.
 
 Do not report phase completion until the write, existence check, handoff commit, and push
 succeed. This is the committed copy the next phase reads after revival. No phase removes
-`.legion/`: the reviewer approves a head that carries it, and the operator removes it from the
-default branch after the merge. Retro and the post-merge production check write no
-`.legion/<phase>.json`, commit no handoff, and report with `handoff_complete` alone (below).
+`.legion/`: the reviewer approves a head that carries it. The daemon strips any `.legion/` still on
+main from the next issue's branch before any of its roles start (dispatch://LEGION-565), so that
+tree's own merge carries the removal onto the default branch; no operator sweep follows. Retro and
+the post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and
+report with `handoff_complete` alone (below).
 
 ## Completion: report to the architect, then stay
 

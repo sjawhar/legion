@@ -496,7 +496,7 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 			t.Fatalf("%s: %v (%v), want a directory", dir, info, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(workspace, ".legion", "workspace-recovered.json")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(workspace, ".legion", "LEGION-42", "workspace-recovered.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a recovery marker without LEGION_WORKSPACE_RECOVERED_FROM: %v", err)
 	}
 	if !v.lockIsFree(t) {
@@ -560,7 +560,7 @@ func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 
 // The command side of workspace recovery (decision 11): a relaunch after a lost volume names the
 // ref it recovers from, and the recreated workspace records it, with the commit it was recreated
-// at, in .legion/workspace-recovered.json (cmdWorkspaceInit's LEGION_WORKSPACE_RECOVERED_FROM
+// at, in .legion/<issue>/workspace-recovered.json (cmdWorkspaceInit's LEGION_WORKSPACE_RECOVERED_FROM
 // branch, workspace-init.ts). The commit is read uncolored, so an operator's `ui.color = "always"`
 // never wraps it in escape codes.
 func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
@@ -580,7 +580,7 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	workspace := v.workspace("LEGION-42")
-	body, err := os.ReadFile(filepath.Join(workspace, ".legion", "workspace-recovered.json"))
+	body, err := os.ReadFile(filepath.Join(workspace, ".legion", "LEGION-42", "workspace-recovered.json"))
 	if err != nil {
 		t.Fatalf("read the recovery marker: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := workspace.NewRunner(100*time.Millisecond, map[string]string{"jj": jj, "git": git})
-	err = writeRecoveryMarker(context.Background(), run, t.TempDir(), "legion/LEGION-42")
+	err = writeRecoveryMarker(context.Background(), run, t.TempDir(), "LEGION-42", "legion/LEGION-42")
 	if err == nil || !strings.Contains(err.Error(), "command timed out: jj log -r @ --no-graph -T commit_id") {
 		t.Fatalf("writeRecoveryMarker = %v, want the timed-out jj log named", err)
 	}

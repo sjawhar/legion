@@ -22,7 +22,14 @@ import (
 // document or a non-primary artifact owns no issue row and records nothing. The caller holds the
 // issue's owner row already (lockArtifactOwner, requireOpenOwner), so this update waits on nothing.
 func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node) error {
-	progress := pmdoc.CountTasks(tree)
+	return recordTaskProgress(ctx, tx, artifactID, pmdoc.CountTasks(tree))
+}
+
+// recordTaskProgress writes progress onto the issue owning artifactID, when that artifact is its
+// primary document, naming the document's latest version, which the caller has written already.
+func recordTaskProgress(
+	ctx context.Context, tx pgx.Tx, artifactID string, progress pmdoc.TaskProgress,
+) error {
 	if _, err := tx.Exec(ctx, `
 		update issues i
 		set tasks_done = $2, tasks_total = $3,
@@ -37,14 +44,14 @@ func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree 
 // RecordTaskProgressMarkdown is RecordTaskProgress for a caller that holds the canonical markdown
 // it has just stored as the document's version rather than the tree: issue creation and an upload
 // insert their version row themselves, after the document write, and record the count once the
-// row exists so tasks_version names it. The markdown is the server's own rendering, so it reads
-// back (pmdoc.ParseRendering); one that does not is the write's error.
+// row exists so tasks_version names it. The markdown is read for its task items alone
+// (pmdoc.CountTasksMarkdown): a count never needs the whole document to fit the Proof schema.
 func RecordTaskProgressMarkdown(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
-	tree, err := pmdoc.ParseRendering(markdown)
+	progress, err := pmdoc.CountTasksMarkdown(markdown)
 	if err != nil {
 		return fmt.Errorf("count the stored document's task items: %w", err)
 	}
-	return RecordTaskProgress(ctx, tx, artifactID, tree)
+	return recordTaskProgress(ctx, tx, artifactID, progress)
 }
 
 // latestPrimaryVersion is the number of the latest version of issue i's primary document, in a
@@ -84,8 +91,10 @@ const TaskProgressReconcileInterval = 5 * time.Minute
 // while a row stays locked. Each pass runs until no drift it can lock remains; a batch that fails,
 // or that was short because rows were locked, is retried after a short wait, a bounded number of
 // times, so one bad batch ends the pass and not the loop. Each issue's latest version markdown is
-// parsed as the stored rendering it is (pmdoc.ParseRendering); an issue whose spec does not parse
-// is logged and counted as holding none, so one broken document does not hold the rest back.
+// read for its task items alone (pmdoc.CountTasksMarkdown), so a spec the Proof schema refuses
+// elsewhere - a table row wider than its header - is still counted; an issue whose spec the reader
+// cannot read at all is logged and counted as holding none, so one broken document does not hold
+// the rest back.
 func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
 	for {
 		s.ReconcileTaskProgress(ctx)
@@ -196,12 +205,15 @@ func (s *Service) reconcileTaskProgressBatch(
 	for _, issue := range batch {
 		var progress pmdoc.TaskProgress
 		if issue.markdown != "" {
-			tree, err := pmdoc.ParseRendering(issue.markdown)
+			// The markdown is read for its task items alone, so a spec the Proof schema refuses
+			// elsewhere (a table row wider than its header) is still counted, and only markdown
+			// the reader cannot read at all is counted as none.
+			counted, err := pmdoc.CountTasksMarkdown(issue.markdown)
 			if err != nil {
-				slog.Warn("dispatch: issue task progress reconciliation cannot parse the spec; counting none",
+				slog.Warn("dispatch: issue task progress reconciliation cannot read the spec; counting none",
 					"issue", issue.key, "error", err)
 			} else {
-				progress = pmdoc.CountTasks(tree)
+				progress = counted
 			}
 		}
 		if _, err := tx.Exec(ctx, `

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -793,6 +795,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 // An issue moved to todo while boot reads its Dispatch listing, and missing from that listing, is
 // still admitted. A durable consumer created now delivers only what is published after it exists,
 // so boot creates the consumers before it lists: what the listing missed, the consumer delivers.
+// The admitted issue's branch is then created under the GitHub root the daemon was given.
 func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	natsURL := workflowNATS(t)
 	js := workflowJetStream(t, natsURL)
@@ -831,12 +834,14 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	}))
 	t.Cleanup(dispatchServer.Close)
 	cfg.DispatchURL = dispatchServer.URL
+	github := newBranchGitHub(t, nil, branchCreated)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+			githubAPI: github.url,
 		})
 	}()
 	t.Cleanup(func() {
@@ -868,12 +873,24 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 			if err == nil && response.StatusCode == http.StatusOK {
 				active = state.Admission.Active
 				if slices.Contains(active, key) {
-					return
+					break
 				}
 			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("admission is %v, want %s, moved to todo while boot listed Dispatch", active, key)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for deadline := time.Now().Add(60 * time.Second); ; {
+		if creates := github.created(); len(creates) > 0 {
+			if want := "refs/heads/legion/" + key; creates[0].ref != want {
+				t.Fatalf("the GitHub stand-in's first create is of %s, want %s", creates[0].ref, want)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the GitHub stand-in saw no create of %s's branch", key)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -943,6 +960,42 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("the daemon kept running after its intake ended")
+	}
+}
+
+// readinessAttempt and bootprobe.Run are only useful if run() actually wires them together. Here
+// a real daemon.Run() boots against a Dispatch stand-in that answers 503 twice before listing no
+// issues, under a fast readinessRetry, and reaches /healthz — proving the wiring itself rides out
+// the outage, not just the adapter TestReadinessAttempt (readiness_test.go) already covers in
+// isolation.
+func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
+	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
+	natsURL := workflowNATS(t)
+	var requests atomic.Int64
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
+			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			return
+		}
+		if requests.Add(1) <= 2 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+			t.Errorf("write Dispatch issues: %v", err)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
+
+	cfg := workflowConfig(t, natsURL)
+	cfg.DispatchURL = dispatchServer.URL
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.workflowTokens = &workflowTokenRecorder{}
+	startDaemon(t, cfg, o)
+
+	if got := requests.Load(); got < 3 {
+		t.Fatalf("Dispatch saw %d requests, want at least 3 (two 503s then the 200 the daemon booted on)", got)
 	}
 }
 

@@ -22,7 +22,8 @@ import (
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
 // outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
 // `merge_queue_role`, the role the merger's READY is published to, and its withdrawal when the
-// head's own CI turns red before the merge; empty, the READY is posted only.
+// head's own CI turns red or it starts conflicting with its base before the merge; empty, the
+// READY is posted only.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
@@ -37,8 +38,10 @@ type Config struct {
 	ReviewWorkflows []string
 	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
-	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits can be
-	// the reviewer's answer to a round it left undecided (reviewersAnswer). Empty matches no one.
+	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
+	// a round whatever GitHub gives its bot account (decidesRound) and can be the reviewer's answer
+	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
+	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
 	ReviewAppLogin string
 }
 
@@ -101,6 +104,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:
 		return e.requiredChecks(ctx, tx, fact)
+	case intake.PullRequestMergeability:
+		return e.mergeability(ctx, tx, fact)
 	case intake.PullRequestReview:
 		return e.review(ctx, tx, fact)
 	case intake.PullRequestMerged:
@@ -303,7 +308,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 		return err
 	}
 	if gate != nil && classify.DesignGateOpen(*gate) {
-		return e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
+		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
 }
@@ -792,7 +797,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 }
 
 // noticeFor is what a transition on trigger out of from tells the architect: that from finished,
-// with its worker's handoff, or, when CI stopped the phase (TriggerChecksRed), why.
+// with its worker's handoff, or, when CI stopped the phase or the head started conflicting with
+// its base (TriggerChecksRed), why.
 func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, reason string) record.Notice {
 	if trigger == TriggerChecksRed {
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}
@@ -819,12 +825,24 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	}
 	for _, issue := range members {
 		if issue.Phase == phase.Admitted {
-			if err := e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, ""); err != nil {
+			if err := e.gateOpened(ctx, tx, issue); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
+// creating its branch (record.IssueBranch): its planner's start, the first worker start of every
+// member, waits for that row, so no planner's push is the one that creates the branch. A member
+// whose earlier row a linger dropped, or one admitted before the daemon queued such rows, gets its
+// row here.
+func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) error {
+	if err := e.enqueue(ctx, tx, issue.Key, record.IssueBranch{Generation: issue.Generation}); err != nil {
+		return err
+	}
+	return e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 }
 
 // everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the

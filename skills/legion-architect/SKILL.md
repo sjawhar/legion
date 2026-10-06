@@ -86,7 +86,7 @@ The issue's primary document **is** the root specification. Extend it in place: 
 that adds only the evidence each decision needs and what the human decides, each as a
 decision block (`skill://dispatch`, "Decision blocks"). The decomposition and its waves, how each
 outcome is proven, and the integration test are your own calls: they go in the child issues and
-the planner's `.legion/plan.json`, not the root spec. Never post a second "spec" artifact beside
+the planner's `.legion/<issue>/plan.json`, not the root spec. Never post a second "spec" artifact beside
 it (`dispatch_artifact` with the primary document's name replaces the human's document; do not do
 that).
 The design gate's approval step runs only when the `Design gate policy` sentence of your
@@ -161,7 +161,7 @@ evidence the human did not weigh that would change the decision, such as a measu
 settled choice cannot meet the Acceptance; then that decision block names the decision and that
 evidence. A plan never overturns a settled decision on its own. A design change that leaves all
 four intact, such as a planner's measurement that finds a better way to build the same outcome,
-goes in the plan (the issue's `plan.md` document and `.legion/plan.json`), never into the approved
+goes in the plan (the issue's `plan.md` document and `.legion/<issue>/plan.json`), never into the approved
 spec, even where the spec's text describes the older design; the reviewer reads the plan beside the
 spec. When a planner's phase-finished notice names a departure from the spec's design, defer to
 this section's full condition: only when the approved Summary, Acceptance, scope and settled
@@ -169,6 +169,20 @@ decisions all hold is the plan the record and the tree carries on. Otherwise cha
 and request approval again as this section says. Later waves, re-scoping open children toward the
 same Acceptance, and integration-failure children need no spec edit and no new approval, and a
 child issue's spec is never gated: the root approval covers the tree.
+
+**A decision block for a read no pod can make.** An acceptance criterion sometimes needs
+evidence from a production or external system before a human can approve it: a measurement, a
+current count, a stored record. Check first whether the evidence is already reachable through a
+credential this tree's own pods carry — the model route every pod already has, and any further
+identity the operator's deployment configuration grants pods (read the pod's own environment,
+for example `AWS_CONFIG_FILE` or `AGENT_SECRETS_URL`, rather than assuming there is none; a
+credential can exist without any skill having told you so). When the evidence genuinely is not
+reachable, do not have a different running session perform the read on this tree's behalf and
+fold the result into the spec as if it were routine: write the missing capability as its own
+decision block — which external system, which read or write, why the spec needs it — addressed
+to the human, in the same spirit as the implementer reports a production-check gap (section 6) and leave it
+open until the human resolves it. A workaround substituted for that record only hides the gap
+from the next tree that hits it.
 
 ## 2. Children in flight
 
@@ -236,8 +250,10 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 
 1. tester green and review cycles complete;
 2. on a clean review, the reviewer approves the head by SHA, and the daemon moves the issue to
-   `retro`. No role pushes a `.legion/` deletion: the approved head still carries `.legion/`, and
-   the operator removes it from the default branch in a follow-up pull request after the merge;
+   `retro`. No role pushes a `.legion/` deletion: the approved head still carries `.legion/`. The
+   daemon strips whatever `.legion/` main still carries from the next issue's branch before any of
+   its roles start, so that tree's own merge carries the removal onto the default branch; no
+   operator sweep follows;
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
@@ -327,7 +343,7 @@ active phase worker.
 | A reply on an ask you follow | Interpret the reply in the issue's design context. Answer in its thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is yours, such as the approval request you must revise or hand back, `reply_to_ask` with `turn: "agent"`, since a default-turn reply hands that request back to the human and a corrected `summary` is then refused), then adjust the plan or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `worker-died` | Its `role` and `phase`. That role's claim failed: its launches or prompts ran out. For a phase worker the daemon holds the issue (phase `held`) and starts nothing more on it. Reassess the work, then decide with `retry_or_escalate`: `retry` when the failure looks agent-specific or transient, `escalate` to hand the held issue to the controller when it looks environmental. |
 | `held` | Its `role` and `phase` (the phase the issue left), or `phase` with `reason: "escalated"`. Without `reason`, that phase's worker ran out of launches or prompts: the issue is held (phase `held`), the `worker-died` that comes with it is yours to answer with `retry_or_escalate` as that row says, and the controller hears of the hold too. With `reason: "escalated"`, it records your own `escalate`: the controller has the issue now, and you start nothing for it. |
-| `ready-refused` | Its `version` and `reason`. The merger's READY was refused. A `reason` of `READY refused: approve design version <N> before requesting READY.` (or, with `version` 0, `no design version is approved`) means the design gate is closed: get that version approved (section 1), and the daemon advances the merge and posts the packet the merger sent once it is; nothing else is needed. A `reason` starting `READY_PACKET_MISSING` names a READY refused before the daemon kept packets: that READY is void and the issue stays in merging, so start it over (`park_child` then `rerun_child`, for a child) or end it. |
+| `ready-refused` | Its `version` and `reason`. The merger's READY was refused, and its packet is kept with the completion so no second READY is ever needed. With `version` greater than 0, `reason` reads `READY refused: approve design version <N> before requesting READY.`: the root's spec is already registered at that version, so get it approved (section 1), and the daemon advances the merge and posts the kept packet the moment it is. With `version` 0, `reason` reads `READY refused: no design version is approved; register and approve the tree's spec before requesting READY.`: the root has no spec registered yet, so register it and get it approved (section 1) exactly as above; the daemon releases the kept packet the same way — at registration itself when that opens the gate (`gates.design: off`, or Dispatch already shows the version approved), otherwise the moment a human approves the version you registered. Either way, nothing else is needed once the gate opens. A `reason` starting `READY_PACKET_MISSING` names a READY refused before the daemon kept packets: that READY is void and the issue stays in merging, so start it over (`park_child` then `rerun_child`, for a child) or end it. |
 
 ## Escalation judgment
 

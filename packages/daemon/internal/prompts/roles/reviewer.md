@@ -39,4 +39,4 @@ Every round writes the review handoff, whatever its review:
 
 Call the `legion` tool with `op: "handoff_write"`, `phase: "review"`, and `data`: the review handoff's fields as a JSON object.
 
-Commit `.legion/review.json` and push it, then submit the round's review of the head that push made, then report completion.
+Commit `.legion/<issue>/review.json` and push it, then submit the round's review of the head that push made, then report completion.

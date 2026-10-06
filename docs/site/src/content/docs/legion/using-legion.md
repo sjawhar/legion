@@ -81,11 +81,15 @@ template, and the later phases fill in their own lines:
   decision would hurt and every claim left unproven.
 - **Production**: written by the implementer after the merge.
 
-Legion's reviewer posts its review as the review App. A review you submit on GitHub while the issue
-is in `needs_review` counts the same way: **Request changes** sends the work back to the
-implementer with your comments, and an approval of the head can end the round. A plain comment
-moves nothing. The pull request also carries a `.legion/` directory of handoff files; the operator
-removes it from the default branch after the merge.
+Legion's reviewer posts its review as the review App. A review from anyone with write access to the
+repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
+**Request changes** sends the work back to the implementer with your comments, and an approval of
+the head can end the round. A review from an account without write access decides nothing, since
+any GitHub account can review a public repository's pull request, and a plain comment moves
+nothing. The pull request also carries the tree's handoff files under `.legion/<issue>/`. Its
+branch started with whatever `.legion/` earlier merges left on the default branch removed, so its
+own merge carries that removal onto the default branch too: afterwards the default branch holds
+this tree's handoff directory and those of trees merged after its branch was cut.
 
 ## Merge
 

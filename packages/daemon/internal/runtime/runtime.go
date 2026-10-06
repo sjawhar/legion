@@ -82,6 +82,21 @@ type Runtime interface {
 	// process runs (a pod's init containers, on the tree volume). When it does, the daemon
 	// provisions and removes none on its own host.
 	ProvisionsWorkspaces() bool
+	// ProvisionBound is how much longer a launch may run before its agent's own process has even
+	// started, beyond the registration deadline's base Boot×RegistrationIntervals bound: zero for
+	// a runtime whose process starts the agent at once (tmux), and the Sandbox runtime's own
+	// init-container budget (its fetch's clone plus its own lock wait) for a launch whose pod runs
+	// provisioning first. The supervisor adds it only while a claim is still StateLaunching.
+	ProvisionBound() time.Duration
+}
+
+// RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
+// grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and
+// with zero after, and a runtime's own wait for a sibling's init to finish (the Sandbox runtime's
+// treeWaitBound) calls it with ProvisionBound too, so none of them can compute the deadline
+// differently from the others.
+func RegistrationDeadline(boot time.Duration, intervals int, grace time.Duration) time.Duration {
+	return boot*time.Duration(intervals) + grace
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and

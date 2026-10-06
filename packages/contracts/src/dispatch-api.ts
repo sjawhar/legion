@@ -205,6 +205,12 @@ export interface WriteAdvice {
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
+  /**
+   * LEGION-550's write-time feedback, set only on an issue or ask creation: the items most like
+   * what was just filed, and any past decision that matches. Never refuses or delays the write;
+   * `suggestions.missing` explains why search did not answer in time instead.
+   */
+  readonly suggestions?: Suggestions;
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -438,7 +444,13 @@ export interface ArchitectureTreeRetired extends ArchitectureTreeIssueRef {
 export interface Artifact {
   readonly id: string;
   readonly issue_key: string | null;
+  /** `""` for an artifact an agent's conversation owns. */
   readonly project: string;
+  /** The Envoy session whose conversation on the Agents page owns the artifact (a picture a person
+   *  or the agent sent there), with `issue_key` null and `project` empty; null for an issue's or a
+   *  project's artifact. Absent from a Dispatch older than conversation-owned artifacts. */
+  readonly session_id?: string | null;
+  /** `<issue key or project key>/<slug>`, or `agent/<session id>/<slug>` for a conversation's. */
   readonly ref_key?: string;
   readonly slug: string;
   readonly name: string;
@@ -643,6 +655,10 @@ export interface Ask extends AnchorPosition {
   readonly edited_at: string | null;
   /** Present only on a server-created approval ask. */
   readonly approval?: AskApproval;
+  /** The document `approval.artifact_id` names, hydrated live like `anchor_artifact` and
+   *  `block_artifact`: its current slug and primary flag, not a snapshot from when the request
+   *  opened. Present only alongside `approval`. */
+  readonly approval_artifact?: AskAnchorArtifact;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -1197,6 +1213,13 @@ export interface SearchResultsPage {
  * `exactOptionalPropertyTypes`). */
 export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
 
+/** `SearchResponse.degraded`'s one value today: meaning search could not run for this request (no
+ * Bedrock credentials configured, the query's own embedding timed out, or Bedrock answered an
+ * error) and search fell back to keyword-only ranking. Generated into Go as
+ * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
+ * `search-answer.ts` compares against cannot drift apart. */
+export const SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
+
 /** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
  * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
  * search paging omits all four and always answers its first page regardless of any offset
@@ -1204,6 +1227,13 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
 export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
+  /**
+   * Why this search fell back to keyword-only ranking - today only
+   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no Bedrock credentials configured, the
+   * query's own embedding timed out, or Bedrock answered an error) - absent when meaning search
+   * ran normally.
+   */
+  readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {
@@ -1213,6 +1243,35 @@ export interface DuplicateCandidate {
   readonly snippet: string;
   readonly shared_terms: number;
   readonly href: string;
+}
+
+/**
+ * One item LEGION-550's write-time feedback judges similar to what was just filed: a fused-search
+ * hit (`SearchResult`) over the same project. `answered_by`/`answered_at` are set only when this
+ * is `Suggestions.decision` — the "past decision" case, where the agent needs who answered and
+ * when, not just a link.
+ */
+export interface WriteSuggestion {
+  readonly kind: SearchResultKind;
+  readonly owner: SearchOwner;
+  readonly artifact?: SearchArtifactRef;
+  readonly id: string;
+  readonly snippet: string;
+  readonly href: string;
+  readonly answered_by?: string;
+  readonly answered_at?: string;
+}
+
+/**
+ * LEGION-550's write-time feedback on a newly created issue or ask: the three items most like
+ * it (`related`) and, when an answered ask already settles the same question, that decision
+ * (`decision`). `missing` explains why search did not answer within the write's bounded budget,
+ * instead of refusing or delaying the write itself.
+ */
+export interface Suggestions {
+  readonly related: WriteSuggestion[];
+  readonly decision?: WriteSuggestion;
+  readonly missing?: string;
 }
 
 export interface Agent {

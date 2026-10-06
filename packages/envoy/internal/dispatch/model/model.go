@@ -293,6 +293,11 @@ type SearchResponse struct {
 	Limit     int   `json:"limit"`
 	Offset    int   `json:"offset"`
 	TookMS    int64 `json:"took_ms"`
+	// Degraded names why search fell back to keyword-only ranking this request - today only
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no Bedrock
+	// credentials configured, the query's own embedding timed out, or Bedrock answered an error) -
+	// and is empty when meaning search ran normally.
+	Degraded string `json:"degraded,omitempty"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
@@ -303,6 +308,31 @@ type DuplicateCandidate struct {
 	Snippet     string `json:"snippet"`
 	SharedTerms int    `json:"shared_terms"`
 	Href        string `json:"href"`
+}
+
+// WriteSuggestion is one item LEGION-550's write-time feedback judges similar to what was just
+// filed: a fused-search hit (sjawhar/legion#1764) over the same project. AnsweredBy and
+// AnsweredAt are set only when this is the ask Suggestions.Decision names — the "past decision"
+// case, where the agent needs who answered and when, not just a link.
+type WriteSuggestion struct {
+	Kind       string          `json:"kind"`
+	Owner      SearchOwner     `json:"owner"`
+	Artifact   *SearchArtifact `json:"artifact,omitempty"`
+	ID         string          `json:"id"`
+	Snippet    string          `json:"snippet"`
+	Href       string          `json:"href"`
+	AnsweredBy string          `json:"answered_by,omitempty"`
+	AnsweredAt *time.Time      `json:"answered_at,omitempty"`
+}
+
+// Suggestions is LEGION-550's write-time feedback on a newly created issue or ask: the three
+// items most like it (Related) and, when an answered ask already settles the same question,
+// that decision (Decision). Neither ever refuses or delays the write past
+// writeSuggestionTimeout; Missing explains why search did not answer in time instead.
+type Suggestions struct {
+	Related  []WriteSuggestion `json:"related"`
+	Decision *WriteSuggestion  `json:"decision,omitempty"`
+	Missing  string            `json:"missing,omitempty"`
 }
 
 // IssueChild is a child item embedded in an issue detail response. The subtree counts
@@ -415,11 +445,14 @@ type ArchitectureTreeRetired struct {
 	IDs    []string `json:"ids"`
 }
 
-// Artifact is an issue-attached document or binary blob, or an unlinked project document.
+// Artifact is an issue-attached document or binary blob, an unlinked project document, or a
+// file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
+// `agent/<session id>/<slug>`).
 type Artifact struct {
 	ID        string    `json:"id"`
 	IssueKey  *string   `json:"issue_key"`
 	Project   string    `json:"project"`
+	SessionID *string   `json:"session_id"`
 	RefKey    string    `json:"ref_key"`
 	Slug      string    `json:"slug"`
 	Name      string    `json:"name"`
@@ -588,6 +621,11 @@ type Ask struct {
 	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
+	// ApprovalArtifact is the document Approval.ArtifactID names, hydrated the same way
+	// AnchorArtifact and BlockArtifact are: live, by its current slug and primary flag, not a
+	// snapshot from when the request opened. nil for questions, and for an approval ask whose
+	// document has since been deleted.
+	ApprovalArtifact *AskAnchorArtifact `json:"approval_artifact,omitempty"`
 	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
 	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
 	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
@@ -1081,8 +1119,10 @@ type ArtifactReferences struct {
 	ReferencedBy []ReferencedBy      `json:"referenced_by"`
 }
 
-// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; Ref is its
-// dispatch:// address and is empty for session nodes, which have none.
+// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
+// agent's conversation owns has neither and is located by Ref alone
+// (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
+// for session nodes, which have none.
 type GraphNode struct {
 	Kind     string  `json:"kind"`
 	ID       string  `json:"id"`

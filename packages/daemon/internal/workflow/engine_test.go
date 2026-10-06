@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,11 +93,13 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate outbox: %v", err)
 	}
-	if want := []string{"gate_seed", "notice", "supervise", "notice"}; !sameStrings(kinds, want) {
+	if want := []string{"gate_seed", "notice", "issue_branch", "supervise", "notice"}; !sameStrings(kinds, want) {
 		t.Fatalf("outbox kinds = %v, want %v", kinds, want)
 	}
 }
 
+// A child entering an open gate is recorded and its planning started in one fact, its planner's
+// start queued behind the row creating the child's branch, which the start waits for.
 func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -117,7 +121,15 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	if tree != "LEGION-208" || gotPhase != string(phase.Planning) {
 		t.Fatalf("child tree/phase = %q/%q, want LEGION-208/planning", tree, gotPhase)
 	}
-	assertOutboxKinds(t, pool, []string{"supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice"})
+	var branchIssue string
+	var generation int
+	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {
+		t.Fatalf("read the branch row: %v", err)
+	}
+	if branchIssue != "LEGION-209" || generation != 4 {
+		t.Fatalf("branch row = %s at generation %d, want the child's at the generation it entered, 4", branchIssue, generation)
+	}
 }
 
 func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing.T) {
@@ -298,7 +310,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	}
 
 	js := testJetStream(t)
-	stop := startConsume(t, js, pool, engine)
+	stop := startConsume(t, js, pool, engine, nil)
 	defer stop()
 	publishCaptured(t, js, "notifications.dispatch.issue.CAPTURE-4.artifact.version", "../intake/testdata/dispatch/artifact-version.json")
 	testwait.Eventually(t, "captured version closes gate", func() bool {
@@ -312,6 +324,10 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	})
 }
 
+// The captured review's author, `reviewer`, is not the review App, so the approval decides the round
+// only because GitHub gives that account write access to the repository, which the consumer reads
+// before the fact reaches the engine: the review's whole path, decode, permission read and apply,
+// runs through the real consumer.
 func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -319,8 +335,16 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	// The base requires no check, so the head's green settlement, which names none, is green.
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", CheckedHead: "head-captured", Failing: []string{}, Required: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
+	var mu sync.Mutex
+	var asked []string
+	writers := func(_ context.Context, review intake.PullRequestReview) (bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, review.Repo+" "+review.Author)
+		return review.Repo == "sjawhar/legion" && review.Author == "reviewer", nil
+	}
 	js := testJetStream(t)
-	stop := startConsume(t, js, pool, testEngine(config.DesignGateRootIssues, nil))
+	stop := startConsume(t, js, pool, testEngine(config.DesignGateRootIssues, nil), writers)
 	defer stop()
 	publishCaptured(t, js, "notifications.github.sjawhar.legion.pr.42.review", "../intake/testdata/github/review.json")
 	testwait.Eventually(t, "captured approval reaches retro", func() bool {
@@ -331,6 +355,11 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 		return gotPhase == string(phase.Retro) && status == "retro"
 	})
 	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "supervise", "notice"})
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"sjawhar/legion reviewer"}; !slices.Equal(asked, want) {
+		t.Fatalf("the consumer asked GitHub about %v, want %v", asked, want)
+	}
 }
 
 func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
@@ -342,7 +371,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
-	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head"}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Author: testReviewApp}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact review: %v", err)
 	}
 	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "supervise", "notice"})
@@ -621,7 +650,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
 			},
 			fact: func() intake.Fact {
-				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}
+				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}
 			},
 			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
 		},
@@ -791,11 +820,15 @@ func seedRecord(t *testing.T, pool *pgxpool.Pool, put func(pgx.Tx) error) {
 	}
 }
 
+// testReviewApp is the review App's bot login the test engines configure: a review it submits
+// decides a round.
+const testReviewApp = "legion-reviewer[bot]"
+
 // testEngine is the engine the workflow tests drive, under the design gate policy given and
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }
@@ -844,11 +877,13 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 	return js
 }
 
-func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine) func() {
+// startConsume runs the consumers on js, applying through engine, with permission as the
+// consumer's ReviewPermission (nil reads none).
+func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine, permission func(context.Context, intake.PullRequestReview) (bool, error)) func() {
 	t.Helper()
 	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond,
-		Logger: slog.Default(),
+		Logger: slog.Default(), ReviewPermission: permission,
 	})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)

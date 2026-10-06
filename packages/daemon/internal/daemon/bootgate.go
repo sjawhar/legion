@@ -20,11 +20,11 @@ import (
 	goruntime "runtime"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
@@ -704,10 +704,8 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	cmd.Stdin = g.stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.Configure(cmd)
 	job.attach(cmd)
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = time.Second
 	started := time.Now()
 	err := cmd.Run()
 	job.release()
@@ -717,9 +715,8 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	if job.interrupted(cmd.ProcessState) {
 		return ran{}, errors.New("the probe was interrupted at the terminal")
 	}
-	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, exec.ErrWaitDelay) {
-		return ran{}, err
+	if runErr := procgroup.Err(err); runErr != nil {
+		return ran{}, runErr
 	}
 	tail := strings.TrimSpace(stderr.String())
 	if len(tail) > maxProbeStderr {

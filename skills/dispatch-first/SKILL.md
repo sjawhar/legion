@@ -27,6 +27,10 @@ parent's children and the issue's `Components:` line show where the rest of that
 
 ## What to do with what you find
 
+Filing an issue or opening an ask also searches for you: the result's `advice.suggestions` names
+likely duplicates or a decision that may already settle it. Treat a hit there the same as one you
+found yourself.
+
 - **The work is already tracked: extend that issue.** Put the finding on it (a comment, a message,
   or an edit to its spec) instead of filing another. File a new issue only when no hit covers the
   work, and cite the nearest one you ruled out (`dispatch://KEY`).
@@ -46,7 +50,7 @@ parent's children and the issue's `Components:` line show where the rest of that
 A design conversation with a person, or the implementation plan that follows one, uses
 `skill://dispatch-brainstorming`: read it before your first design question on a change, the spec,
 or that plan. It replaces superpowers' `brainstorming` and `writing-plans` here, even when the user
-invokes one by name. A Legion architect's own issue spec follows `skill://legion-architect`.
+invokes one by name. A Legion architect's own issue spec follows `skill://legion-architect`. Before a spec's first version and each approval request, have a fresh read-only subagent (on Oh My Pi, `task(agent="plan-gap-analyst")`) check it against the code, the human's words and any command output a claim rests on, and resolve what it flags.
 
 ## Load the full skill before you write
 

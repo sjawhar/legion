@@ -84,7 +84,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   it for your inference; an answer that is only a chosen option is recorded in the form
   `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
   or the conversation, or "the person" when the token names no owner — never a name you were not
-  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  given. A point you inferred says so, with the reasoning — a security concern, a restriction, or
+  a cost nobody measured is exactly this, not a settled constraint; during a live brainstorming
   conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
   until the human has agreed to it. One carried in from another document keeps its provenance: an
   agent's inference there is marked one here, or stays out until the human raises it.
@@ -163,14 +164,14 @@ do with each hit. What it leaves out:
 dispatch_search({ query, project?, limit?, offset? })
 ```
 Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. Issues, documents, asks, comments, and messages rank separately; the
-merged page orders each kind's best in turn — issue, document, ask, comment, message — and a bare issue key ranks first. A page
-holds `limit` hits (20 default, 50 max); the first line gives the total (`showing 1-20 of 312`); see
-[Search paging](skill://dispatch/references/issues.md#search-paging) for more. Queries over 1,000 characters are refused: use the
-few words `skill://dispatch-first` names, never a pasted passage. Issue hits start with the issue key; document hits start with
-`dispatch://PROJECT/artifact/<slug>`, then the link. Cite the hit (`dispatch://KEY` or the doc ref) or say "no prior issue".
+merged page orders each kind's best in turn — issue, document, ask, comment, message — and a bare issue key ranks first. Each
+kind's list also merges a query embedding's meaning match with keyword hits (LEGION-549): a paraphrase with no shared word can
+still match; without an embedder, it says so and ranks by keyword alone. A page holds `limit` hits (20 default, 50 max); the first
+line gives the total (`showing 1-20 of 312`); see [Search paging](skill://dispatch/references/issues.md#search-paging) for more.
+Queries over 1,000 characters are refused: use the few words `skill://dispatch-first` names, never a pasted passage. Issue hits
+start with the issue key; document hits start with `dispatch://PROJECT/artifact/<slug>`, then the link. Cite the hit (`dispatch://KEY` or the doc ref) or say "no prior issue".
 
-`dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
-Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+`dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`). Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
 The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
 merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
 the new issue a title that names what differs where you can, and open its spec with the
@@ -415,6 +416,9 @@ It returns live or versioned markdown with open marks. A live read ends with a d
 `artifact` reads the issue specification; a project needs `artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
 `dispatch_artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.
+A picture (PNG, JPEG, GIF or WebP under 3,750,000 bytes, 5 MB of base64) comes back as an image you see, with its name, type, size and version;
+that includes `dispatch://agent/<session id>/artifact/<slug>@vN`, one a person sent you on the Agents page. A session is shown each picture once,
+since the provider refuses a request over 32 MB: later reads and deliveries name it, and `dispatch_doc_read` shows it again (after compaction too).
 
 Editing one is [Editing a document](skill://dispatch/references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
@@ -472,6 +476,9 @@ dispatch_message({ issue, body })
 
 It returns `details` `{ issue, message }`. `body` is capped at 2,000 characters. A message is not a decision
 (a decision block, or `dispatch_ask` for a human to-do) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
+
+**Pictures.** To show a screenshot inline, pass its path in `images` (`dispatch_message`, `dispatch_comment`, `dispatch_ask`);
+`dispatch_read` hands you the pictures what it shows embeds. Both are in [Documents](skill://dispatch/references/documents.md), "Artifacts".
 
 A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 [Targeted and direct messages](skill://dispatch/references/messages.md) says.

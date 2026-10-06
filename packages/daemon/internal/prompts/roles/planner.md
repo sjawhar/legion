@@ -4,7 +4,7 @@
 
 Read durable `.legion/` handoffs before planning.
 
-The plan lives in `.legion/plan.json` and the issue's `plan.md` document (`dispatch_artifact` on the issue), never in the issue's primary document, which is its spec; never commit a plan or spec file to the repository. No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan and spec content goes into the issue, never into a PR. The root `AGENTS.md`'s `docs/plans/` row describes human-authored design history, not a Legion artifact; a skill step that says "save the plan to a file" is satisfied by the handoff write below.
+The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document (`dispatch_artifact` on the issue), never in the issue's primary document, which is its spec; never commit a plan or spec file to the repository. No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan and spec content goes into the issue, never into a PR. The root `AGENTS.md`'s `docs/plans/` row describes human-authored design history, not a Legion artifact; a skill step that says "save the plan to a file" is satisfied by the handoff write below.
 
 ## A departure from the spec
 
@@ -36,6 +36,6 @@ The handoff records the two plan checks and the plan's departures from the spec:
 - `planReview`: `{"verdict": "approved", "rounds": N}` when the last round approved; `{"verdict": "rejected", "rounds": 3, "remainingIssues": [{"issue": "…", "evidence": "…"}]}` when the third round still rejected, each blocking issue that round named; or `{"verdict": "failed", "rounds": N, "error": "…"}` when a review's call failed. `rounds` counts the reviews run, a failed one included.
 - `specDepartures`: `[]` when the plan follows the spec's design; otherwise one `{"spec": "…", "plan": "…", "evidence": "…", "outcome": {"kind": "changed", "scope": "…"}}` per departure, naming what the spec says, what the plan does instead, and the measurement or reading behind it. Use `{"kind": "unchanged"}` only when the spec's Summary, Acceptance, scope and every decision a human settled in its decision blocks still hold. Otherwise `kind` is `"changed"` and names one or more changed `summary` lines, `acceptance` lines, `scope`, or `settledDecisions` (`decision` and `detail`). Record at most 16 departures; every string is at most 1,024 bytes.
 
-The handoff write records the schema version, phase, and completion timestamp in `.legion/plan.json`. Do not report completion until it has succeeded.
+The handoff write records the schema version, phase, and completion timestamp in `.legion/<issue>/plan.json`. Do not report completion until it has succeeded.
 
 When the review ended `rejected` or either check failed, say so in your completion summary.

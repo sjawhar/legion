@@ -53,7 +53,11 @@ export function ProjectPage(): ReactNode {
     (stored) => stored === "shown",
     (shown) => (shown ? "shown" : "hidden")
   );
-
+  const [lanes, setLanes] = useUserPreference(
+    "project.board-lanes",
+    (stored) => stored === "shown",
+    (shown) => (shown ? "shown" : "hidden")
+  );
   const route = parseProjectPath(location.pathname, location.search);
   const projectKey = route?.project;
   const inbox = useQuery({
@@ -221,6 +225,18 @@ export function ProjectPage(): ReactNode {
             {showEdges ? "Hide Icebox & Done" : "Show Icebox & Done"}
           </button>
         ) : null}
+        {activeTab === "issues" && issueView === "board" ? (
+          <button
+            aria-pressed={lanes}
+            className={`order-8 min-h-11 shrink-0 rounded-xl border px-3 text-sm font-medium md:order-4 md:min-h-9 md:px-2 ${borderDefault} ${
+              lanes ? surfaceMutedStrongBg : surfaceMutedBg
+            } ${textSecondaryOnCanvas}`}
+            onClick={() => setLanes(!lanes)}
+            type="button"
+          >
+            {lanes ? "Hide lanes" : "Show lanes"}
+          </button>
+        ) : null}
       </header>
       {hasSource ? (
         <div
@@ -252,7 +268,7 @@ export function ProjectPage(): ReactNode {
             {issueView === "list" ? (
               <IssueList project={route.project} />
             ) : (
-              <IssueBoard project={route.project} showEdges={showEdges} />
+              <IssueBoard lanes={lanes} project={route.project} showEdges={showEdges} />
             )}
           </>
         ) : null}

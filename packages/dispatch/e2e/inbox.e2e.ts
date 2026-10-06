@@ -18,7 +18,7 @@ import {
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
 import { setPendingCredentialRequests } from "./fake-broker-helpers";
-import { resetDatabase } from "./seed";
+import { resetDatabase, setCreatedAt } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -101,6 +101,72 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     } else {
       await page.screenshot({ fullPage: true, path: testInfo.outputPath("askcard-1280.png") });
     }
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an ask thread shows its newest two replies, expands older replies, and puts a fresh reply first", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Newest replies" });
+  const ask = await createAsk(issue.key, { question: "Which reply should lead?" }, session);
+  const replies = await Promise.all(
+    ["Oldest reply", "Older reply", "Middle reply", "Newer reply", "Newest reply"].map((body) =>
+      createComment(issue.key, { ask_id: ask.id, body }, session)
+    )
+  );
+  await Promise.all(
+    replies.map((reply, index) =>
+      setCreatedAt("comments", reply.id, `2026-10-03T00:00:0${index + 1}Z`)
+    )
+  );
+  expect((await getAsk(ask.id)).replies.map((reply) => reply.body)).toEqual([
+    "Oldest reply",
+    "Older reply",
+    "Middle reply",
+    "Newer reply",
+    "Newest reply",
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    const thread = card.getByRole("region", { name: "Replies" });
+    const replyBodies = () => thread.locator("li > div > .dispatch-markdown").allTextContents();
+
+    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+    await expect(card.getByText("Middle reply", { exact: true })).toHaveCount(0);
+    const showMore = card.getByRole("button", { name: "Show 3 more replies" });
+    await expect(showMore).toHaveAttribute("aria-expanded", "false");
+    const before = testInfo.outputPath(`ask-thread-before-${testInfo.project.name}.png`);
+    await page.screenshot({ path: before, fullPage: true });
+    await testInfo.attach(`ask thread before (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: before,
+    });
+
+    await showMore.click();
+    await expect
+      .poll(replyBodies)
+      .toEqual(["Newest reply", "Newer reply", "Middle reply", "Older reply", "Oldest reply"]);
+    const showFewer = card.getByRole("button", { name: "Show fewer replies" });
+    await expect(showFewer).toHaveAttribute("aria-expanded", "true");
+    await showFewer.click();
+    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+
+    await card.getByLabel("Your answer").fill("Fresh reply");
+    await card.getByRole("button", { name: "Ask back" }).click();
+    await expect.poll(replyBodies).toEqual(["Fresh reply", "Newest reply"]);
+    const after = testInfo.outputPath(`ask-thread-after-${testInfo.project.name}.png`);
+    await page.screenshot({ path: after, fullPage: true });
+    await testInfo.attach(`ask thread after (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: after,
+    });
   } finally {
     await alice.close();
   }
@@ -795,6 +861,53 @@ test("a pending credential request alone is listed, counted, and keeps the empty
       contentType: "image/png",
       path: shot,
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+// No Dispatch event names a credential request (the broker holds no Dispatch credential by
+// design), so an Inbox already open can only learn of one, or that one is gone, from the
+// credential list's own poll (`CREDENTIAL_POLL_INTERVAL_MS`, `features/credentials/pending.ts`).
+// `page.clock` fast-forwards past that interval without disturbing the event stream: its watchdog
+// is 45 s (`WATCHDOG_MS`, `api/sse.ts`), well past the 15.5 s advanced here, so the stream never
+// reconnects and the poll is the only thing that could have surfaced the change. This repeats the
+// test above's setup rather than sharing a helper: this file's own convention is self-contained
+// tests, and the two prove different mechanisms (an initial load via reload vs. a live poll that
+// both shows and clears a request with no reload at all).
+test("a credential request seeded after the Inbox loads appears, and counts, without a reload; clearing it leaves the same way", async ({
+  browser,
+}) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    const empty = page.getByText("Nothing needs you");
+    await page.goto("/");
+    await expect(empty).toBeVisible();
+    await expect(page.getByText(/^Needs you \d+$/)).toHaveCount(0);
+
+    await setPendingCredentialRequests([
+      {
+        approver: "alice",
+        identifiers: ["DEMO_API_KEY"],
+        kind: "agent_secret",
+        record_id: "record-alice",
+        requested_at: new Date().toISOString(),
+      },
+    ]);
+    await page.clock.fastForward(15_500);
+    const requests = page.getByRole("region", { name: "Credential requests" });
+    await expect(requests.getByRole("link")).toHaveCount(1);
+    await expect(requests.getByRole("link")).toContainText("DEMO_API_KEY");
+    await expect(empty).toHaveCount(0);
+    await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+
+    await setPendingCredentialRequests([]);
+    await page.clock.fastForward(15_500);
+    await expect(requests).toHaveCount(0);
+    await expect(empty).toBeVisible();
+    await expect(page.getByText(/^Needs you \d+$/)).toHaveCount(0);
   } finally {
     await alice.close();
   }

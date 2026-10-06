@@ -492,3 +492,25 @@ test("a failed action shows its reason, with Retry only when a retry can succeed
     }
   }
 });
+
+// LEGION-540. A suggestion's note is Markdown its author wrote; the collapsed card previews it
+// formatted on one line beside the diff, never as `**` and `-`.
+test("a collapsed suggestion card previews its note formatted on one line", async () => {
+  const view = renderCard(
+    suggestionThread({ body: "**Tighter** wording:\n\n- drops `very`\n- keeps the claim" }),
+    { expanded: false }
+  );
+  try {
+    const card = screen.getByTestId("margin-comment-root-1");
+    await waitFor(() => expect(card.querySelector("strong")?.textContent).toBe("Tighter"));
+    const preview = card.querySelector<HTMLElement>("[data-markdown-preview]");
+    if (preview === null) throw new Error("the suggestion's note is not a preview");
+    expect(preview.querySelector("code")?.textContent).toBe("very");
+    expect(preview.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Tighter wording: drops very keeps the claim"
+    );
+    expect(preview.querySelector("ul, li, p")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
