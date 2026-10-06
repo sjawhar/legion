@@ -86,9 +86,17 @@ type Runtime interface {
 	// started, beyond the registration deadline's base Boot×RegistrationIntervals bound: zero for
 	// a runtime whose process starts the agent at once (tmux), and the Sandbox runtime's own
 	// init-container budget (its fetch's clone plus its own lock wait) for a launch whose pod runs
-	// provisioning first. The supervisor adds it only while a claim is still StateLaunching — once
-	// the shim's first hello reaches StateShimConnected, that budget has already done its job.
+	// provisioning first. The supervisor adds it only while a claim is still StateLaunching.
 	ProvisionBound() time.Duration
+}
+
+// PreHelloDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus a
+// provisioning bound (ProvisionBound), the total a claim still StateLaunching is tolerated for
+// before its agent has even started: both the supervisor (armRegistration) and a runtime's own
+// wait for a sibling's init to finish (the Sandbox runtime's treeWaitBound) call this, so neither
+// can compute the deadline differently from the other.
+func PreHelloDeadline(boot time.Duration, intervals int, provision time.Duration) time.Duration {
+	return boot*time.Duration(intervals) + provision
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and

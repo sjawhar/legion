@@ -646,10 +646,7 @@ so no process that can read the token may touch the tree volume. The Go coordina
   It mounts neither the tree volume nor the config home. Every other provisioning command is bounded
   by `workspace.CommandTimeout` (5 minutes, fixed), but this one clone's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: it runs under
-  `workspace.FetchTimeout` (30 minutes) instead, with git's own stall detector
-  (`GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME`, `workspace.FetchLowSpeedLimit`/
-  `FetchLowSpeedTime`) set so a connection that goes quiet still dies within about a minute of
-  stalling, rather than surviving on the wider bound. The daemon's own registration deadline (below,
+  `workspace.FetchTimeout` (30 minutes) instead. The daemon's own registration deadline (below,
   "Liveness rules") carries a matching bound under Kubernetes, so this wider bound has room to run
   before the daemon would otherwise retire the pod for an agent that never registered.
 - **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
@@ -1156,8 +1153,8 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   non-zero, else the main one) are quoted in the daemon log;
 - `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
   whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
-  bounded by its own `workspace.FetchTimeout` and git's own stall detector rather than
-  `workspace.CommandTimeout`; `workspace-init`'s own commands, each up to `workspace.CommandTimeout`;
+  bounded by its own `workspace.FetchTimeout` rather than `workspace.CommandTimeout`;
+  `workspace-init`'s own commands, each up to `workspace.CommandTimeout`;
   or a wait behind another pod's lock on the shared clone), and a live initialiser is a live
   process — as the tmux runtime's own in-process provisioning is. The boot watchdog re-arms on it,
   bounded by its registration deadline (`worker_boot_timeout_seconds ×

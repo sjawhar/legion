@@ -834,17 +834,15 @@ func (m *Machine) armBoot() {
 
 // armRegistration arms the registration deadline at its base Boot×RegistrationIntervals bound,
 // plus the runtime's own ProvisionBound while the claim is still StateLaunching: a pod that has
-// not said hello yet may still be provisioning. Once the claim is StateShimConnected — the state
-// both a fresh hello (helloed) and a restored claim past its hello (NewMachine) arm this from —
-// the budget that covered provisioning has already done its job, and the deadline that watches
-// for the agent's own registration is the same one a tmux launch, which carries no provisioning
-// bound at all, always ran under.
+// not said hello yet may still be provisioning. A claim already StateShimConnected — reached by
+// a fresh hello (helloed) or restored there (NewMachine) — gets the base bound alone, the same
+// one a tmux launch (ProvisionBound always zero) gets throughout.
 func (m *Machine) armRegistration() {
 	grace := time.Duration(0)
 	if m.claim.State == StateLaunching {
 		grace = m.deps.Runtime.ProvisionBound()
 	}
-	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals)+grace, "")
+	m.arm(TimerRegistration, runtime.PreHelloDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries

@@ -364,16 +364,13 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	}
 }
 
-// treeWaitBound is awaitTreeInitialized's budget: the sibling's own full pre-hello registration
-// deadline — bootTimeout×bootIntervals plus ProvisionBound, the same sum the daemon's
-// registration deadline arms while a claim is still launching — plus one more boot interval of
-// headroom, the same relationship workspace-init's own lock wait always had to the registration
-// deadline alone (ceil(boot)×(intervals+1) against boot×intervals). A tree's launch wait must
-// never give up on a sibling before the daemon's own deadline for that sibling would; it is a
-// named function so a test can assert that invariant, and its exact value, without waiting it
-// out.
+// treeWaitBound is awaitTreeInitialized's budget: runtime.PreHelloDeadline (the sibling's own
+// full pre-hello registration deadline) plus one more boot interval of headroom — the same
+// ceil(boot)×(intervals+1)-against-boot×intervals relationship workspace-init's own lock wait
+// holds to the registration deadline alone. A named function so a test can assert its exact
+// value without waiting it out.
 func (r *Runtime) treeWaitBound() time.Duration {
-	return r.bootTimeout*time.Duration(r.bootIntervals) + r.ProvisionBound() + r.bootTimeout
+	return runtime.PreHelloDeadline(r.bootTimeout, r.bootIntervals, r.ProvisionBound()) + r.bootTimeout
 }
 
 // awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's

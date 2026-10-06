@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -468,30 +467,47 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	}
 }
 
-// The fetch's clone is bounded by FetchTimeout rather than the runner's own slow-command budget,
-// and carries git's own stall detector (GIT_HTTP_LOW_SPEED_LIMIT/TIME): a transfer that keeps
-// progressing can run far longer than CommandTimeout, but one that goes quiet dies within about a
-// minute of stalling, not at the outer bound.
-func TestFetchBoundsItsCloneByTransferProgressNotWallClock(t *testing.T) {
-	run := newLocalRunner(t)
-	req := fetchRequest(t)
+// scaledCloneRunner simulates a clone that takes cloneDuration (a real-scale value such as
+// 15*time.Minute) without waiting real minutes: it races a scaled-down sleep against the
+// scaled-down Timeout the Command it is given carries, dividing both by the same factor (one
+// real minute becomes one test millisecond), so the test proves the clone's relative timing —
+// bounded by whatever Timeout Fetch's clone actually passes, not a different one — at test
+// speed.
+type scaledCloneRunner struct {
+	timeout       time.Duration
+	cloneDuration time.Duration
+}
 
-	if _, err := Fetch(context.Background(), run, req); err != nil {
-		t.Fatalf("Fetch: %v", err)
+func (r *scaledCloneRunner) Timeout() time.Duration { return r.timeout }
+
+func (r *scaledCloneRunner) Run(ctx context.Context, command Command) (Result, error) {
+	bounded, cancel := context.WithTimeout(ctx, command.Timeout/60000)
+	defer cancel()
+	select {
+	case <-time.After(r.cloneDuration / 60000):
+		return Result{}, nil
+	case <-bounded.Done():
+		return Result{TimedOut: true}, fmt.Errorf("command timed out: %w", bounded.Err())
 	}
-	clone := findCall(t, run.Calls(), "git", "clone")
-	if clone.Timeout != FetchTimeout {
-		t.Errorf("clone timeout = %s, want FetchTimeout %s (not the runner's slow-command budget)", clone.Timeout, FetchTimeout)
-	}
-	if clone.Timeout == run.Timeout() {
-		t.Errorf("clone timeout %s equals the runner's own budget %s, want a bound that follows transfer progress instead", clone.Timeout, run.Timeout())
-	}
-	if want := strconv.Itoa(FetchLowSpeedLimit); commandEnv(clone, "GIT_HTTP_LOW_SPEED_LIMIT") != want {
-		t.Errorf("GIT_HTTP_LOW_SPEED_LIMIT = %q, want %q", commandEnv(clone, "GIT_HTTP_LOW_SPEED_LIMIT"), want)
-	}
-	if want := strconv.Itoa(int(FetchLowSpeedTime.Seconds())); commandEnv(clone, "GIT_HTTP_LOW_SPEED_TIME") != want {
-		t.Errorf("GIT_HTTP_LOW_SPEED_TIME = %q, want %q", commandEnv(clone, "GIT_HTTP_LOW_SPEED_TIME"), want)
-	}
+}
+
+// The fetch's clone runs under FetchTimeout (30 minutes), not CommandTimeout (5 minutes): a clone
+// slower than CommandTimeout but faster than FetchTimeout completes, and one slower than
+// FetchTimeout is ended. Proven with scaledCloneRunner's injected, scaled-down bounds rather than
+// waiting real minutes.
+func TestFetchsCloneRunsUnderFetchTimeoutNotCommandTimeout(t *testing.T) {
+	t.Run("slower than CommandTimeout, faster than FetchTimeout: completes", func(t *testing.T) {
+		run := &scaledCloneRunner{timeout: CommandTimeout, cloneDuration: 15 * time.Minute}
+		if _, err := Fetch(context.Background(), run, fetchRequest(t)); err != nil {
+			t.Fatalf("Fetch: %v, want a clone slower than CommandTimeout but faster than FetchTimeout to complete", err)
+		}
+	})
+	t.Run("slower than FetchTimeout: ended", func(t *testing.T) {
+		run := &scaledCloneRunner{timeout: CommandTimeout, cloneDuration: 45 * time.Minute}
+		if _, err := Fetch(context.Background(), run, fetchRequest(t)); err == nil {
+			t.Fatal("Fetch: no error, want a clone slower than FetchTimeout to be ended")
+		}
+	})
 }
 
 // A pod's second init container provisions from the feed Fetch filled, which is read-only there,
