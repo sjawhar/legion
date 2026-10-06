@@ -651,26 +651,31 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 }
 
 // The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
-// container alone, JSON-encoded, never the agent; a launch with none names none.
+// container alone, JSON-encoded, never the agent; a launch with none names none. relaunch is what
+// calls setRemovable in production, after the tree's launch turn is held; this reaches directly
+// for podTemplate's own contract, that it reads removableWorkspacesJSON off the launch, not spec.
 func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	withCandidates := workerSpec(t)
-	withCandidates.RemovableWorkspaces = []runtime.RemovableWorkspace{
-		{Issue: "LEGION-100"},
-		{Issue: "LEGION-101", MergedHead: "abc123"},
-	}
 	for name, tc := range map[string]struct {
-		spec runtime.SpawnSpec
-		want string
+		candidates []runtime.RemovableWorkspace
+		want       string
 	}{
-		"candidates": {withCandidates, `[{"issue":"LEGION-100"},{"issue":"LEGION-101","mergedHead":"abc123"}]`},
-		"none":       {workerSpec(t), ""},
+		"candidates": {[]runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
+			`[{"issue":"LEGION-100"},{"issue":"LEGION-101","mergedHead":"abc123"}]`},
+		"none": {nil, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec, false)
+			l, err := r.prepare(workerSpec(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.setRemovable(tc.candidates); err != nil {
+				t.Fatal(err)
+			}
+			pod := r.podTemplate(l, false).Spec
 			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)

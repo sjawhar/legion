@@ -125,7 +125,10 @@ type RemovableWorkspace struct {
 }
 
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
-// working on, and the environment, secrets, and prompt it starts with.
+// working on, and the environment, secrets, and prompt it starts with. The claim token travels
+// with the process because the runtime addresses the agent's connection by it — `Suspend` and
+// `Release` send a shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it
+// could not be matched to the claim it belongs to.
 //
 // Nothing in it is a place on one runtime's disk. Repository is the issue's repository, the zero
 // Repository for a configuration with none, and each runtime locates the issue's
@@ -135,10 +138,11 @@ type RemovableWorkspace struct {
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
 // names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
 // workspace recreated after its volume was lost is recovered from; "" for every other launch.
-// RemovableWorkspaces is every sibling of Tree the daemon has judged safe to remove by lifecycle
-// alone, for a runtime that provisions each claim's workspace in its own pod to remove from the
-// tree volume before this launch's own provisioning (dispatch://LEGION-583); nil for a runtime
-// that does not (ProvisionsWorkspaces false).
+// There is no removable-workspaces field here: the sandbox runtime's own Options.Removable
+// computes that candidate list itself, inside relaunch, after the tree's launch turn is held and
+// its other pods have finished initializing (dispatch://LEGION-583) — before that point, a spec
+// built this far ahead of when a pod's manifest is actually written could already be stale by the
+// time it was used, since a relaunch can wait minutes for the turn and the other pods.
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string
@@ -153,7 +157,6 @@ type SpawnSpec struct {
 	Repository             ghrepo.Repository
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
-	RemovableWorkspaces    []RemovableWorkspace
 }
 
 // PromptParts are the pieces of the agent's system prompt: its role prompt files, the sentence

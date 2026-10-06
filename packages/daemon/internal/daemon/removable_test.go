@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,8 +14,62 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
+
+// isolatedRemovableSupervisor is isolatedOutboxPool plus a supervisor wired to a real store-backed
+// ClaimStore, so sup.Claims (removableWorkspaces' own dependency, read with no machine lock taken:
+// the point of the fix this test file covers) returns every claimOn plants — unlike
+// newOutboxSupervisor's fake in-memory outboxClaimStore, which supervisor.Claims never reads at
+// all, since its own supervisor.store stays nil there.
+func isolatedRemovableSupervisor(t *testing.T) (*pgxpool.Pool, *supervisor) {
+	t.Helper()
+	base, err := url.Parse(testDSN(t))
+	if err != nil {
+		t.Fatalf("parse test DSN: %v", err)
+	}
+	adminURL := *base
+	adminURL.Path = "/postgres"
+	admin, err := pgxpool.New(context.Background(), adminURL.String())
+	if err != nil {
+		t.Fatalf("connect test admin database: %v", err)
+	}
+	t.Cleanup(admin.Close)
+	name := "legion_removable_test_" + outboxSuffix(t)
+	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+			t.Errorf("drop %s: %v", name, err)
+		}
+	})
+	databaseURL := *base
+	databaseURL.Path = "/" + name
+	st, err := legionstore.Open(context.Background(), databaseURL.String())
+	if err != nil {
+		t.Fatalf("open isolated store: %v", err)
+	}
+	if _, err := st.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate isolated store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	pool, err := pgxpool.New(context.Background(), databaseURL.String())
+	if err != nil {
+		t.Fatalf("open isolated pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	sup := newSupervisor(context.Background(), st, "legion", t.TempDir(), quietLogger())
+	sup.deps = supervise.Deps{
+		Runtime: fake.NewRuntime(), Conns: fake.NewConns(), Store: st, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
+	}
+	t.Cleanup(sup.stop)
+	return pool, sup
+}
 
 // putRemovableIssue plants issue so TreeIssues reads it back; a helper distinct from
 // putOutboxIssue only in intent (dispatch://LEGION-583's removable_test.go).
@@ -66,9 +122,8 @@ func callRemovable(t *testing.T, pool *pgxpool.Pool, records record.Store, sup *
 // A done child is a candidate, paired with its merged pull request's head: workspace-init's
 // push-safety check needs the head once GitHub deletes the squash merge's branch.
 func TestRemovableWorkspacesIncludesADoneChildWithItsMergedHead(t *testing.T) {
-	pool := isolatedOutboxPool(t)
+	pool, sup := isolatedRemovableSupervisor(t)
 	records := record.NewStore()
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Done child", Phase: phase.Done, Generation: 1, Status: "done"})
 	putMergedPullRequest(t, pool, records, "LEGION-2", "deadbeef")
@@ -99,9 +154,8 @@ func TestRemovableWorkspacesIncludesADoneChildWithEveryClaimParkedOrAbsent(t *te
 		{"backlog, no claim ever made", "backlog", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
+			pool, sup := isolatedRemovableSupervisor(t)
 			records := record.NewStore()
-			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Done child", Phase: phase.Done, Generation: 1, Status: tc.status})
 			for role, state := range tc.states {
@@ -131,9 +185,8 @@ func TestRemovableWorkspacesExcludesAChildBetweenPhases(t *testing.T) {
 		{"todo, waiting on the workflow", phase.Admitted, "todo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
+			pool, sup := isolatedRemovableSupervisor(t)
 			records := record.NewStore()
-			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Mid-phase child", Phase: tc.phase, Generation: 1, Status: tc.status})
 			// Every claim suspended: the predicate excludes this issue by its phase alone, never
@@ -163,9 +216,8 @@ func TestRemovableWorkspacesExcludesALiveChild(t *testing.T) {
 		{"phase done, a claim the outbox has not yet suspended", phase.Done},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
+			pool, sup := isolatedRemovableSupervisor(t)
 			records := record.NewStore()
-			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Live child", Phase: tc.phase, Generation: 1, Status: "backlog"})
 			claimOn(t, sup, "LEGION-2", claim.RoleImplementer, supervise.StateWorking)
@@ -181,14 +233,112 @@ func TestRemovableWorkspacesExcludesALiveChild(t *testing.T) {
 // The tree's own root and the issue excluded for this launch are never candidates, whatever their
 // phase or status.
 func TestRemovableWorkspacesExcludesTheRootAndTheExcludedIssue(t *testing.T) {
-	pool := isolatedOutboxPool(t)
+	pool, sup := isolatedRemovableSupervisor(t)
 	records := record.NewStore()
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Done, Generation: 1, Status: "done"})
 	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Done, but this launch's own issue", Phase: phase.Done, Generation: 1, Status: "done"})
 
 	got := callRemovable(t, pool, records, sup, "LEGION-1", "LEGION-2")
 	if len(got) != 0 {
 		t.Fatalf("candidates = %+v, want none", got)
+	}
+}
+
+// barrieredTreeIssues is records.Store with TreeIssues forced to rendezvous with n callers before
+// any of them returns, so two goroutines racing removableWorkspaces for the same tree are
+// guaranteed to overlap deep inside it (past the point the launching claim's own machine lock is
+// already held) rather than happening to run one after the other, which would hide a lock-order
+// bug behind a lucky interleaving.
+type barrieredTreeIssues struct {
+	record.Store
+	barrier *sync.WaitGroup
+}
+
+func (b barrieredTreeIssues) TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]record.Issue, error) {
+	b.barrier.Done()
+	b.barrier.Wait()
+	return b.Store.TreeIssues(ctx, tx, tree)
+}
+
+// removableOnlyRuntime is runtime.Runtime whose Spawn calls only removable before delegating:
+// specs.SpawnSpec no longer calls removable (dispatch://LEGION-583's last-moment fix moved that
+// call into the sandbox runtime's own relaunch, after the tree's launch turn is held); this
+// wraps the fake runtime's Spawn instead, the same call Machine.launch→start reaches under the
+// same lock, so the deadlock this test guards against is exercised at its real call site.
+type removableOnlyRuntime struct {
+	*fake.Runtime
+	removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
+}
+
+func (r removableOnlyRuntime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	if _, err := r.removable(ctx, spec.Tree, spec.Issue); err != nil {
+		return runtime.Locator{}, err
+	}
+	return r.Runtime.Spawn(ctx, spec)
+}
+
+// Two done siblings of the same tree launching at once each compute the tree's removable
+// workspaces from inside Machine.Handle, which holds the launching claim's own machine lock for
+// the whole transition (supervisor.go:188-189's rule: code reached this way reads no other
+// machine). A version of issueHasALiveClaim that took another machine's lock to read its claim
+// state deadlocked here: each Handle call waits on the other's lock from inside its own, an AB-BA
+// cycle neither side ever breaks. Both must complete.
+func TestRemovableWorkspacesTwoDoneSiblingsLaunchAtOnceAndBothComplete(t *testing.T) {
+	pool, sup := isolatedRemovableSupervisor(t)
+	records := record.NewStore()
+	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Done sibling", Phase: phase.Done, Generation: 1, Status: "done"})
+	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-3", Project: "LEGION", Tree: "LEGION-1", Title: "Done sibling", Phase: phase.Done, Generation: 1, Status: "done"})
+
+	var barrier sync.WaitGroup
+	barrier.Add(2)
+	barriered := barrieredTreeIssues{Store: records, barrier: &barrier}
+	removable := removableWorkspaces(pool, barriered, sup, "legion")
+	fakeRuntime, ok := sup.deps.Runtime.(*fake.Runtime)
+	if !ok {
+		t.Fatalf("sup.deps.Runtime is %T, want *fake.Runtime", sup.deps.Runtime)
+	}
+	sup.deps.Runtime = removableOnlyRuntime{Runtime: fakeRuntime, removable: removable}
+
+	launch := func(issue string) (*supervise.Machine, claim.Token) {
+		t.Helper()
+		token := mustClaimToken(t, issue, claim.RoleImplementer)
+		machine, created, err := sup.Create(context.Background(), supervise.Claim{
+			Token: token, Project: "legion", Tree: "LEGION-1", Issue: issue, Role: claim.RoleImplementer,
+			State: supervise.StateQueued, Generation: 1,
+		}, "")
+		if err != nil {
+			t.Fatalf("create the implementer claim of %s: %v", issue, err)
+		}
+		if !created {
+			t.Fatalf("the implementer claim of %s already existed", issue)
+		}
+		return machine, token
+	}
+	machine2, token2 := launch("LEGION-2")
+	machine3, token3 := launch("LEGION-3")
+
+	results := make(chan error, 2)
+	for machine, token := range map[*supervise.Machine]claim.Token{machine2: token2, machine3: token3} {
+		go func(machine *supervise.Machine, token claim.Token) {
+			results <- machine.Handle(context.Background(), supervise.RequestSpawn{Claim: token})
+		}(machine, token)
+	}
+	deadline := time.After(10 * time.Second)
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("launch a done sibling: %v", err)
+			}
+		case <-deadline:
+			t.Fatal("two done siblings launching at once did not both complete within 10s: likely the AB-BA deadlock this test guards against")
+		}
+	}
+	if got := machine2.Claim().State; got != supervise.StateLaunching {
+		t.Errorf("LEGION-2's implementer claim = %s, want launching", got)
+	}
+	if got := machine3.Claim().State; got != supervise.StateLaunching {
+		t.Errorf("LEGION-3's implementer claim = %s, want launching", got)
 	}
 }

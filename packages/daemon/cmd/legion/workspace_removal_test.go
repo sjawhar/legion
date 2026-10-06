@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,82 @@ func (p panicRunner) Timeout() time.Duration { return winitWait }
 func (p panicRunner) Run(context.Context, workspace.Command) (workspace.Result, error) {
 	p.t.Fatal("a candidate with no workspace on this volume ran a command")
 	return workspace.Result{}, nil
+}
+
+// A malformed candidate never reaches workspace.Location or RemoveFinished's revset: an issue key
+// that is not the Dispatch form, and a mergedHead that is not 40 hex characters, are each refused
+// and logged, never acted on — panicRunner would fail the test the moment either one tried to run
+// a command. A well-formed candidate alongside them still runs normally.
+func TestRemoveFinishedWorkspacesRefusesAMalformedCandidate(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []runtime.RemovableWorkspace{
+		{Issue: "not an issue key"},
+		{Issue: "LEGION-101", MergedHead: "not 40 hex characters"},
+		{Issue: "LEGION-102", MergedHead: "deadbeef"}, // 8 hex characters, still not 40
+		{Issue: "LEGION-103"},
+	}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget)
+
+	output := stdout.String()
+	for _, want := range []string{
+		`"not an issue key" is not a Dispatch issue key`,
+		`LEGION-101's mergedHead "not 40 hex characters" is not 40 hex characters`,
+		`LEGION-102's mergedHead "deadbeef" is not 40 hex characters`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("stdout %q, want it to contain %q", output, want)
+		}
+	}
+	if want := "LEGION-103 has no workspace on this volume; nothing to remove"; !strings.Contains(output, want) {
+		t.Errorf("stdout %q, want the well-formed candidate LEGION-103 to still run: %q", output, want)
+	}
+}
+
+// The rotation seed changes with LEGION_GENERATION, not only the pod's own issue: ten relaunches
+// of the same issue, each spending its whole budget on the first candidate it starts, started
+// more than one of four candidates across those ten relaunches rather than always the same one —
+// seeding by issue alone starved the same candidates on every relaunch of one issue, since the
+// issue never changes between them while the generation always does.
+func TestRemoveFinishedWorkspacesRotatesByGenerationNotJustIssue(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101"}, {Issue: "LEGION-102"}, {Issue: "LEGION-103"}}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
+
+	started := map[string]bool{}
+	for generation := 1; generation <= 10; generation++ {
+		t.Setenv("LEGION_GENERATION", strconv.Itoa(generation))
+		t0 := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+		const budget = 30 * time.Second
+		calls := 0
+		now := func() time.Time {
+			calls++
+			if calls <= 2 {
+				return t0
+			}
+			return t0.Add(budget + time.Second)
+		}
+		var stdout bytes.Buffer
+		removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget)
+		for _, candidate := range candidates {
+			if strings.Contains(stdout.String(), candidate.Issue+" has no workspace on this volume") {
+				started[candidate.Issue] = true
+			}
+		}
+	}
+	if len(started) < 2 {
+		t.Fatalf("ten relaunches of LEGION-200 started only %v, want more than one candidate across them", started)
+	}
 }
 
 // rotateCandidates starts a different pass at a different point in the candidate list,

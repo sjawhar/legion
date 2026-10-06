@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
@@ -14,17 +15,70 @@ import (
 // show that placeholder as unreachable from anything and never be judged safe.
 //
 // remote_bookmarks() is the shared clone's own ref state, writable by any role's pane on the tree
-// volume (the same `jj config set --repo` reach snapshotOverrides guards against, applied to a
-// bookmark instead of a program): this check is what stops an ordinary slip — a candidate's
-// workspace genuinely holding a commit nothing pushed — from being deleted, not a defense against
-// a hostile role, which already has filesystem access to every sibling workspace on the volume and
-// could delete one directly.
+// volume (the same legacy `.jj/workspace-config.toml` channel snapshotOverrides guards the
+// snapshot against, applied to a bookmark instead of a program): this check is what stops an
+// ordinary slip — a candidate's workspace genuinely holding a commit nothing pushed — from being
+// deleted, not a defense against a hostile role, which already has filesystem access to every
+// sibling workspace on the volume and could delete one directly.
+//
+// This jj log carries none of snapshotOverrides' flags, unlike the snapshot: a repo-configured
+// `revset-aliases."empty()" = "all()"` planted in the shared clone's own legacy config, read here
+// the same way, makes this check pass falsely over a workspace that in fact holds an unpushed
+// edit (confirmed against the pinned jj). No command-line fix was found: redefining an aliased
+// builtin's name back to itself recurses infinitely rather than falling through to the builtin,
+// so once anything shadows `empty()` or `remote_bookmarks()` in any config layer this process
+// reads, there is no `--config` override left that un-shadows it. This sits inside the trust
+// model stated just above (any tree agent can already delete a sibling's workspace directly) and
+// is tracked as hardening on dispatch://LEGION-583, not fixed here.
 func unpushedRevset(workspaceName, mergedHead string) string {
 	revset := "::" + workspaceName + "@ ~ empty() ~ ::(remote_bookmarks())"
 	if mergedHead != "" {
 		revset += " ~ ::" + mergedHead
 	}
 	return revset
+}
+
+// snapshotOverrides are the command-line `--config` flags RemoveFinished's one real snapshot adds
+// (every other command in this package passes --ignore-working-copy instead and never needs
+// these). They outrank whatever a tree agent wrote into the one legacy `.jj/workspace-config.toml`
+// file a workspace's own directory (or the shared clone's) can carry on the tree volume: jj
+// migrates such a file into whatever fresh config home it finds — a pod's own, which starts empty
+// every launch — so a worker that writes one into a workspace's `.jj` before it is ever parked
+// reaches every later snapshot of that same workspace. Each flag below is confirmed against the
+// pinned jj (0.45.1-sami):
+//
+//   - `git.filter.enabled=false` turns off the working-copy filter `onClone`'s own doc comment
+//     already names: left on, a `git.filter.drivers.<name>.clean`/`.smudge` program runs over
+//     every tracked file its `.gitattributes` names.
+//   - `signing.backend=none` turns off every signing backend: left configured (`signing.backend`,
+//     `signing.behavior`, a key, and a `signing.backends.<backend>.program`), the program runs to
+//     (re-)sign the commit the snapshot creates.
+//   - `fsmonitor.backend=none` needs no vulnerability to justify it: this snapshot needs no file
+//     watching, so it is forced off rather than ever touch a watchman daemon on the tree volume.
+//     fsmonitor's one non-`"none"` backend, `"watchman"`, is a fixed binary name jj resolves on
+//     the process's own `PATH` in any case, never a path or command a repo config can choose.
+//   - `snapshot.auto-track=all()` restores jj's own default (every new path is tracked): a
+//     configured `snapshot.auto-track=none()` would otherwise leave every new path untracked,
+//     which would starve RemoveFinished's push-safety check of anything to read at all and keep
+//     every candidate forever, the opposite failure from a program running. The one thing that
+//     still leaves a path untracked under `all()` is jj's own anti-footgun limit on a new file's
+//     size (snapshot.max-new-file-size, 1MiB by default): deliberately left at its default rather
+//     than raised or disabled, since snapshotting a worker's own oversized file would write its
+//     content into the shared clone's object store this pass exists to shrink. untrackedPaths
+//     below is what catches that one case: a size-refused path, read off jj's own "Untracked
+//     paths:" section on stdout, keeps the workspace rather than let an unsnapshotted file read as
+//     a clean `@`.
+//
+// `--config` outranks every config layer below the command line (built-in defaults, user, repo,
+// workspace) regardless of where in the argv it sits; the flags are grouped here for readability,
+// not because their position matters.
+func snapshotOverrides() []string {
+	return []string{
+		"--config", "git.filter.enabled=false",
+		"--config", "signing.backend=none",
+		"--config", "fsmonitor.backend=none",
+		"--config", "snapshot.auto-track=all()",
+	}
 }
 
 // RemoveFinished removes ws when every non-empty commit it holds is on GitHub by unpushedRevset's
@@ -40,23 +94,37 @@ func unpushedRevset(workspaceName, mergedHead string) string {
 // knows it (ws.Dir's own base name is lowercased for jj's workspace name, per Location).
 //
 // Before judging anything, the check snapshots ws.Dir's own working copy for real (a plain `jj
-// status` there, with snapshotOverrides (config.go), which explains what each override neutralizes
-// and why): a child parked between phases can hold an edit its agent never ran a jj command over
+// status` there, with snapshotOverrides below, which explains what each override neutralizes and
+// why): a child parked between phases can hold an edit its agent never ran a jj command over
 // since, and without this snapshot that edit is invisible to unpushedRevset's `::workspaceName@`
 // and the workspace would be judged clean and removed out from under it. The one jj command this
 // package runs against the shared clone proper without --ignore-working-copy is `jj workspace
 // add` (createWorkspace); this is the other, and the only one that runs a real snapshot over a
 // workspace a tree agent writes to directly.
 //
-// The snapshot can still leave a path untracked rather than commit it (an oversized new file,
-// under snapshot.max-new-file-size, which snapshotOverrides deliberately leaves at its default):
-// jj's own contract for "something was left out" is the "Untracked paths:" header `jj status`
-// prints on stdout (never stderr's prose, which is only the human explanation and is not
-// guaranteed stable across reasons or releases) before every such path, one per line as `?
-// <path>`. Reading that header is what untrackedPaths below does; its presence means @ does not
-// hold everything on disk, so unpushedRevset's read of @ cannot be trusted to prove the workspace
+// The snapshot cannot see everything on disk, though, and jj says nothing useful when it misses:
+// a directory holding its own .git or .jj (a second repository an agent cloned to patch a
+// dependency or a fork, inside the workspace) is skipped outright — not tracked, not listed as
+// untracked, no warning anywhere — and a file whose name is not valid UTF-8 gets only a warning jj
+// writes to stderr, with stdout claiming no changes at all. Both leave unpushed work this
+// workspace alone holds invisible to unpushedRevset's read of `@`. So two checks run before it, on
+// the snapshot's own result: anything at all on stderr keeps the workspace (this also makes the
+// untracked-path case below fail closed if a future jj ever changes its stdout wording rather than
+// its stderr one), and so does any nested repository (nestedRepositories below, which treats the
+// workspace's own `.jj` as not nested: every workspace has one; a colocated workspace's own `.git`
+// is a worktree *file*, not a directory, so it is never flagged either).
+//
+// Past both, the snapshot can still leave an ordinary path untracked rather than commit it (an
+// oversized new file, under snapshot.max-new-file-size, which snapshotOverrides deliberately
+// leaves at its default): jj's own contract for "something was left out" there is the "Untracked
+// paths:" header `jj status` prints on stdout before every such path, one per line as `? <path>`.
+// Reading that header is what untrackedPaths below does; its presence means @ does not hold
+// everything on disk, so unpushedRevset's read of @ cannot be trusted to prove the workspace
 // clean, and the workspace is kept rather than risk removing one that in fact still holds unpushed
-// work on disk.
+// work on disk. Every removed workspace's gitignored content (including `.git/info/exclude`, which
+// provisioning writes `.codegraph/` into) is deleted with it: jj never snapshots it, so none of
+// the checks above ever see it, but it is also never pushed by definition, so there is nothing of
+// it for any of them to protect.
 func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, mergedHead string, log func(string)) error {
 	if !located(ws) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", ws)
@@ -89,6 +157,19 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 	if err != nil {
 		return err
 	}
+	if stderr := strings.TrimSpace(snapshotted.Stderr); stderr != "" {
+		log(fmt.Sprintf("kept %s's workspace: the snapshot wrote to stderr (%s)", issue, stderr))
+		return nil
+	}
+	nested, err := nestedRepositories(ws.Dir)
+	if err != nil {
+		return err
+	}
+	if len(nested) > 0 {
+		log(fmt.Sprintf("kept %s's workspace: a nested repository below the workspace root (%s)",
+			issue, strings.Join(nested, ", ")))
+		return nil
+	}
 	if untracked := untrackedPaths(snapshotted.Stdout); len(untracked) > 0 {
 		log(fmt.Sprintf("kept %s's workspace: the snapshot left %d path(s) untracked (%s)",
 			issue, len(untracked), strings.Join(untracked, ", ")))
@@ -109,6 +190,37 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 	}
 	log(fmt.Sprintf("removed %s's workspace: every commit is on GitHub", issue))
 	return nil
+}
+
+// nestedRepositories walks ws.Dir (filepath.WalkDir, which never follows a symlink into its
+// target: a symlinked directory entry reports IsDir false, so WalkDir never recurses into one) for
+// any directory named .git or .jj below the root, excluding the workspace's own .jj (every
+// workspace has one; a colocated workspace's own .git is a worktree *file*, never a directory, so
+// it is never matched at all). jj silently skips a directory holding its own .git or .jj during a
+// snapshot — it is neither tracked, listed as untracked, nor warned about — so a nested
+// repository's own unpushed commits, cloned there to patch a dependency or a fork, are invisible
+// to every other check RemoveFinished makes. Found, the search stops descending into it: whatever
+// it holds is no longer this workspace's concern once flagged, and finding one is enough to keep
+// the whole workspace.
+func nestedRepositories(root string) ([]string, error) {
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() || d.Name() != ".git" && d.Name() != ".jj" {
+			return nil
+		}
+		if path == filepath.Join(root, ".jj") {
+			return filepath.SkipDir
+		}
+		found = append(found, path)
+		return filepath.SkipDir
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk %s for a nested repository: %w", root, err)
+	}
+	return found, nil
 }
 
 // untrackedPaths reads jj status's own "Untracked paths:" section off stdout (never stderr's

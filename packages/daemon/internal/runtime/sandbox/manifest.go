@@ -124,10 +124,28 @@ type launch struct {
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
 	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
-	// removableWorkspacesJSON is spec.RemovableWorkspaces JSON-encoded, computed once here since
-	// the encoding cannot fail (plain strings) and initEnvironment has no error to return; "" when
-	// the daemon found none.
+	// removableWorkspacesJSON is the tree's removable-workspace candidates (Options.Removable),
+	// JSON-encoded; "" when there are none. Not set by prepare: relaunch calls setRemovable with
+	// what Options.Removable returns, last, under the tree's launch turn — prepare runs long
+	// before that turn is even requested, so a list this early could already be stale by the time
+	// a pod's manifest is actually written.
 	removableWorkspacesJSON string
+}
+
+// setRemovable JSON-encodes candidates into l.removableWorkspacesJSON, called from relaunch with
+// Options.Removable's result once the tree's launch turn is held. The encoding cannot fail (plain
+// strings), but initEnvironment has no error to return, so a refusal here is relaunch's own to
+// surface before it ever patches the Sandbox.
+func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(candidates)
+	if err != nil {
+		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
+	}
+	l.removableWorkspacesJSON = string(encoded)
+	return nil
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -182,13 +200,6 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 			return launch{}, refuse("%v", err)
 		}
 		l.resumeFile = spec.ResumeSessionFile
-	}
-	if len(spec.RemovableWorkspaces) > 0 {
-		encoded, err := json.Marshal(spec.RemovableWorkspaces)
-		if err != nil {
-			return launch{}, refuse("encode LEGION_REMOVABLE_WORKSPACES: %v", err)
-		}
-		l.removableWorkspacesJSON = string(encoded)
 	}
 	argv := l.agentArgv(r.agent)
 	for i, arg := range argv {

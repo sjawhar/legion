@@ -254,54 +254,6 @@ func onClone(cloneDir string, args ...string) []string {
 	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir)
 }
 
-// snapshotOverrides are the command-line `--config` flags RemoveFinished's one real snapshot adds
-// (removal.go; every other command in this package passes --ignore-working-copy instead and
-// never needs these), so they outrank whatever a tree agent set in the one jj repo config every
-// workspace of the shared clone reads: `jj config set --repo` (config.go's own
-// ensureFetchConfiguration sets git.abandon-unreachable-commits this way) writes the repository's
-// own config wherever it is run from, so a tree agent's own pane, in its own issue's workspace,
-// reaches every later provisioning's snapshot of any workspace of the tree — confirmed directly: a
-// `jj config set --repo` run against one jj workspace of a repo is read by a plain `jj status` run
-// against a different workspace of the same repo. Each flag below is confirmed against the pinned
-// jj (0.45.1-sami):
-//
-//   - `git.filter.enabled=false` turns off the working-copy filter `onClone`'s own doc comment
-//     already names: left on, a repo-configured `git.filter.drivers.<name>.clean`/`.smudge`
-//     program runs over every tracked file its `.gitattributes` names (isolation_test.go's
-//     TestTheCredentialedFetchRunsNoWorkingCopyFilter proves the same filter against the clone).
-//   - `signing.backend=none` turns off every signing backend: left configured (a repo-set
-//     `signing.backend`, `signing.behavior`, a key, and a `signing.backends.<backend>.program`),
-//     the program runs to (re-)sign the commit the snapshot creates — verified directly with
-//     `signing.backend = "ssh"` and a marker-writing script as the program.
-//   - `fsmonitor.backend=none` needs no vulnerability to justify it: this snapshot needs no file
-//     watching, so it is forced off rather than ever touch a watchman daemon on the tree volume.
-//     fsmonitor's one non-`"none"` backend, `"watchman"`, is a fixed binary name jj resolves on
-//     the process's own `PATH` in any case, never a path or command a repo config can choose.
-//   - `snapshot.auto-track=all()` restores jj's own default (every new path is tracked): a
-//     repo-configured `snapshot.auto-track=none()` would otherwise leave every new path
-//     untracked, which would starve RemoveFinished's push-safety check of anything to read at
-//     all and keep every candidate forever, the opposite failure from a program running. The one
-//     thing that still leaves a path untracked under `all()` is jj's own anti-footgun limit on a
-//     new file's size (snapshot.max-new-file-size, 1MiB by default): deliberately left at its
-//     default rather than raised or disabled, since snapshotting a worker's own oversized file
-//     would write its content into the shared clone's object store this pass exists to shrink.
-//     untrackedPaths (removal.go) is what catches that one case: a size-refused path, read off
-//     jj's own "Untracked paths:" section on stdout, keeps the workspace rather than let an
-//     unsnapshotted file read as a clean `@`.
-//
-// Every override here is last on the argv jj builds (RemoveFinished's), which is what makes a
-// command-line `--config` win: jj reads its layers in the fixed order (built-in defaults, user,
-// repo, command line), the command line last, so this slice's position in the argv does not
-// matter, only that each flag is present.
-func snapshotOverrides() []string {
-	return []string{
-		"--config", "git.filter.enabled=false",
-		"--config", "signing.backend=none",
-		"--config", "fsmonitor.backend=none",
-		"--config", "snapshot.auto-track=all()",
-	}
-}
-
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
 	setting, err := RunChecked(ctx, run, onClone(cloneDir, "config", "get", "git.abandon-unreachable-commits"), nil, "")
 	if err != nil {

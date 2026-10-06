@@ -54,7 +54,8 @@ const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
  * `jj git push`, the `gh` shim), Oh My Pi's `github` tool, and any tool whose `path` or `paths`
  * names a `pr://` or `issue://` URL (`read`, `grep`, `glob`, `ast_grep`, `ast_edit` all resolve
  * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
- * that runs `legion gh`. A grant lives 60 seconds, so a call that reaches `gh` long after the
+ * that runs `legion gh`. A grant lives its ttl (60 seconds, or pushTTL for a `legion push`
+ * invocation), so a call that reaches `gh` long after the
  * pane's last bash command needs its own. */
 function needsGrant({ toolName, input }: ToolCallEvent): boolean {
   if (toolName === "bash") return typeof input.command === "string";

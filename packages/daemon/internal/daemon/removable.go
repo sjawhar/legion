@@ -8,7 +8,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -35,23 +34,29 @@ import (
 // pushed at all. The actual push-safety check — whether a candidate's workspace in fact holds no
 // commit that is not on GitHub — is workspace-init's alone, on the tree volume this daemon cannot
 // read; this function names only who is lifecycle-safe to ask it about.
+//
+// This runs inside Machine.Handle for the launching claim's own machine, which holds that
+// machine's mutex for the whole transition (supervisor.go:188-189's rule: code reached this way
+// reads no other machine). sup.Claims below reads the store directly and takes no machine's lock
+// at all, so two done siblings launching at once — each inside its own Handle, each computing this
+// same list — never wait on each other: calling sup.Machine(token) and Claim() here, as an earlier
+// version did, deadlocks exactly that way (AB-BA on the two machines' mutexes) and was fixed by
+// this function never touching a machine again.
 func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervisor, project string) func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
 	return func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
+		claims, err := sup.Claims(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("read claims for tree %s: %w", tree, err)
+		}
+		live := liveIssues(claims)
 		var candidates []runtime.RemovableWorkspace
-		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 			issues, err := records.TreeIssues(ctx, tx, tree)
 			if err != nil {
 				return fmt.Errorf("list the issues of tree %s: %w", tree, err)
 			}
 			for _, issue := range issues {
-				if issue.Key == tree || issue.Key == exclude || issue.Phase != phase.Done {
-					continue
-				}
-				live, err := issueHasALiveClaim(sup, project, issue)
-				if err != nil {
-					return err
-				}
-				if live {
+				if issue.Key == tree || issue.Key == exclude || issue.Phase != phase.Done || live[issue.Key] {
 					continue
 				}
 				candidate := runtime.RemovableWorkspace{Issue: issue.Key}
@@ -73,29 +78,21 @@ func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervis
 	}
 }
 
-// parkedClaimStates are the only states issueHasALiveClaim lets a done issue's claim hold: suspended,
-// failed, or retired — never a live state (supervise.LiveStates), and never StateQueued, which is
-// a claim the daemon still means to launch.
-var parkedClaimStates = []supervise.ClaimState{supervise.StateSuspended, supervise.StateFailed, supervise.StateRetired}
-
-// issueHasALiveClaim says whether any of issue's role claims sits outside parkedClaimStates: a
-// claim never made (empty) is not live. leave's phase-done write and its claim suspends are not
-// one transaction (workflow/linger.go enqueues the suspends for the outbox to run), so a done
-// issue can still show a live claim in the window before the outbox catches up; this is what
-// keeps such an issue off the candidate list until it does.
-func issueHasALiveClaim(sup *supervisor, project string, issue record.Issue) (bool, error) {
-	for _, role := range claim.Roles {
-		token, err := claim.NewToken(project, issue.Key, role)
-		if err != nil {
-			return false, fmt.Errorf("derive the %s claim of %s: %w", role, issue.Key, err)
-		}
-		machine, found := sup.Machine(token)
-		if !found {
-			continue
-		}
-		if !slices.Contains(parkedClaimStates, machine.Claim().State) {
-			return true, nil
+// liveIssues says, for every issue claims names, whether any of its role claims sits outside
+// supervise.GoneStates (suspended, failed, or retired — never StateQueued, which is a claim the
+// daemon still means to launch) — an issue with no claim at all is simply absent from the result,
+// which reads as not live. claims is sup.Claims' own result, read from the store with no machine's
+// lock taken (removableWorkspaces' own doc comment says why that matters): leave's phase-done
+// write and its claim suspends are not one transaction (workflow/linger.go enqueues the suspends
+// for the outbox to run), so a done issue can still show a live claim in the window before the
+// outbox catches up; this is what keeps such an issue out of the result until it does.
+func liveIssues(claims []supervise.Claim) map[string]bool {
+	gone := supervise.GoneStates()
+	live := make(map[string]bool, len(claims))
+	for _, c := range claims {
+		if !slices.Contains(gone, c.State) {
+			live[c.Issue] = true
 		}
 	}
-	return false, nil
+	return live
 }

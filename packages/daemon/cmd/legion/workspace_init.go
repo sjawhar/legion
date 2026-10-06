@@ -232,13 +232,20 @@ const removalBudget = 90 * time.Second
 // workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
 // issue — the one this pod provisions, never the daemon's to name but filtered out here too, in
 // case it ever is — and the tree's own root, which Location names for no issue so it is never a
-// candidate in the first place. One candidate's failure is logged and never stops the ones after
-// it or the provisioning this pod already finished; a malformed env var removes nothing.
+// candidate in the first place. Each candidate's shape is checked before it ever reaches a revset
+// or a path: Issue against the key form workspace.Location accepts (legionclaim.IsIssueKey), and
+// MergedHead, when not empty, against workspace.IsCommitID; either refusal is logged and the
+// candidate is skipped rather than acted on. One candidate's failure is logged and never stops the
+// ones after it or the provisioning this pod already finished; a malformed env var removes
+// nothing.
 //
-// The filtered candidates are rotated by issue (this pod's own, rotateCandidates below) before
-// the loop: a candidate that always sorts first in the daemon's list, and so is always the one
-// snapshotted first, would otherwise always spend the removal budget before any candidate after
-// it in that same order is ever reached, every launch. now and budget are the clock and
+// The filtered candidates are rotated (rotateCandidates below) by this pod's own issue and
+// LEGION_GENERATION together before the loop: a candidate that always sorts first in the
+// daemon's list, and so is always the one snapshotted first, would otherwise always spend the
+// removal budget before any candidate after it in that same order is ever reached. Issue alone
+// does not change between launches of the same issue (every phase worker of one child, every
+// relaunch of a root), which left the same candidates starved on every launch of that issue; the
+// generation does, since a relaunch always moves it. now and budget are the clock and
 // removalBudget, exposed for a test; the one production call site passes time.Now and
 // removalBudget.
 func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration) {
@@ -253,11 +260,20 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 	}
 	var candidates []runtime.RemovableWorkspace
 	for _, candidate := range all {
-		if candidate.Issue != "" && candidate.Issue != issue {
-			candidates = append(candidates, candidate)
+		if candidate.Issue == "" || candidate.Issue == issue {
+			continue
 		}
+		if !legionclaim.IsIssueKey(candidate.Issue) {
+			fmt.Fprintf(stdout, "workspace-init: %q is not a Dispatch issue key, keeping it off the removable list\n", candidate.Issue)
+			continue
+		}
+		if candidate.MergedHead != "" && !workspace.IsCommitID(candidate.MergedHead) {
+			fmt.Fprintf(stdout, "workspace-init: %s's mergedHead %q is not 40 hex characters, keeping its workspace\n", candidate.Issue, candidate.MergedHead)
+			continue
+		}
+		candidates = append(candidates, candidate)
 	}
-	candidates = rotateCandidates(candidates, issue)
+	candidates = rotateCandidates(candidates, issue+"-"+os.Getenv("LEGION_GENERATION"))
 	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }
 	deadline := now().Add(budget)
 	for i, candidate := range candidates {
@@ -281,10 +297,11 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 	}
 }
 
-// rotateCandidates rotates candidates by a deterministic offset derived from seed (the pod's own
-// issue, which differs every launch): candidates[offset:] followed by candidates[:offset], so a
+// rotateCandidates rotates candidates by a deterministic offset derived from seed: a different
+// seed produces a different rotation of candidates[offset:] followed by candidates[:offset], so a
 // candidate that always sorts first in the daemon's list is not always the one every pass starts
-// with, and does not always starve every candidate after it of the removal budget.
+// with, and does not always starve every candidate after it of the removal budget. The caller's
+// seed is what makes this change every launch, not this function.
 func rotateCandidates(candidates []runtime.RemovableWorkspace, seed string) []runtime.RemovableWorkspace {
 	if len(candidates) < 2 {
 		return candidates

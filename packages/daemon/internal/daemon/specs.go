@@ -41,11 +41,6 @@ type specs struct {
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
-	// removable computes the tree's removable-workspace candidates for a launch (dispatch://LEGION-583):
-	// every member but exclude and the tree's own root whose every role's claim is gone. nil for a
-	// runtime that does not provision workspaces in its own pods (ProvisionsWorkspaces false), and
-	// in a narrow test that does not exercise it.
-	removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -56,7 +51,12 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository; for a claim whose workspace was lost with its
-// session, the issue's branch the recreated workspace is recovered from.
+// session, the issue's branch the recreated workspace is recovered from. The removable-workspace
+// candidates a Sandbox-provisioning runtime removes before this launch's own provisioning are not
+// here: removableWorkspaces (removable.go) is the rule, and the sandbox runtime's own
+// Options.Removable is how it reaches that runtime, computed last, under the tree's launch turn
+// (dispatch://LEGION-583) — not this far ahead, where a relaunch's own waits could leave it stale
+// by the time a pod's manifest is actually written.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -92,13 +92,6 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	}
 	if c.WorkspaceLost {
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
-	}
-	if s.removable != nil {
-		removable, err := s.removable(ctx, c.Tree, c.Issue)
-		if err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("compute the removable workspaces of %s: %w", c.Tree, err)
-		}
-		spec.RemovableWorkspaces = removable
 	}
 	return spec, nil
 }

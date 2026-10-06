@@ -136,10 +136,11 @@ func (g *Grants) record(grant Grant) {
 	g.issued[grant.ID] = grant
 }
 
-// Redeem answers id's grant for as long as its sixty seconds last. A grant is the credential of one
-// bash command, which may run `legion gh` several times and whose git may call the credential
-// helper more than once, so it serves every redemption until it expires — as the shipped daemon's
-// resolveGrant does. Redeem knows nothing of the claim: a route refuses a grant whose claim no
+// Redeem answers id's grant for as long as its lifetime lasts — ttl ordinarily, or pushTTL for a
+// `legion push` invocation's own grant. A grant is the credential of one bash command, which may
+// run `legion gh` several times and whose git may call the credential helper more than once, so it
+// serves every redemption until it expires — as the shipped daemon's resolveGrant does. Redeem
+// knows nothing of the claim: a route refuses a grant whose claim no
 // longer holds the capability that minted it (StillMatches), on every redemption.
 func (g *Grants) Redeem(id string) (Grant, error) {
 	g.mu.Lock()

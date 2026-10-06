@@ -17,6 +17,11 @@ var (
 	commitID            = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
+// IsCommitID reports whether s is the shape of a jj/git commit id: 40 hex characters, a plain
+// SHA-1. Exported for cmd/legion, which validates a daemon-recorded merged head against it before
+// that value ever reaches a revset.
+func IsCommitID(s string) bool { return commitID.MatchString(s) }
+
 // createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before deleting a
 // stale git worktree entry or adding a workspace: a conflicted bookmark must not leave a registered
 // working copy behind.

@@ -79,6 +79,7 @@ type Runtime struct {
 	conns                                   runtime.Conns
 	now                                     func() time.Time
 	log                                     *slog.Logger
+	removable                               func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
@@ -125,6 +126,14 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// SetRemovable sets the runtime's removable-workspace candidate function after construction: the
+// daemon builds this value from its supervisor, which exists only after the runtime does (the
+// supervisor's own Deps name the runtime), so Options.Removable alone cannot carry it in that
+// order; a direct construction (a test) may still set Options.Removable instead.
+func (r *Runtime) SetRemovable(removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) {
+	r.removable = removable
 }
 
 // configure checks opts and fills their defaults, touching no cluster.
@@ -200,7 +209,7 @@ func configure(opts Options) (*Runtime, error) {
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, trees: map[string]chan struct{}{},
 		launched: map[string]bool{},
 	}

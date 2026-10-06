@@ -132,17 +132,17 @@ func TestRemoveFinishedSnapshotsTheWorkspaceBeforeJudgingAnUncommittedEdit(t *te
 
 // RemoveFinished's snapshot (unlike every other command this package runs, which pass
 // --ignore-working-copy) runs a real `jj status` over a workspace a tree agent writes to
-// directly. `jj config set --repo` (config.go's own `ensureFetchConfiguration` sets
-// git.abandon-unreachable-commits this way) writes every workspace of the repository's one shared
-// repo config, wherever it is run from: a tree agent's own pane, in its own issue's workspace, can
-// run it once and reach every later provisioning of the tree, on the tree volume every pod of the
-// tree mounts read-write — confirmed directly: a `jj config set --repo` run against one jj
-// workspace of a repo is read by a plain `jj status` run against a different workspace of the same
-// repo, with no migration or cache file involved (unlike the legacy per-workspace
-// `.jj/workspace-config.toml` isolation_test.go's filter test plants, which this is not). Repo
-// config naming the working-copy filter and a signing backend, behavior, key and program runs
-// neither program on RemoveFinished's snapshot. A pending edit untouched by any jj command still
-// keeps the workspace, proving the snapshot itself still ran.
+// directly. The channel that reaches it is not `jj config set --repo` (in this jj version,
+// `--repo` config lives under `$XDG_CONFIG_HOME/jj/repos/`, a pod's own in-memory volume that
+// starts empty every launch, so nothing an earlier pod's agent set that way survives to this
+// one — confirmed directly: a `--repo` setting made under one config home is not read back under
+// another) but a legacy `.jj/workspace-config.toml` left on the tree volume itself, in the
+// workspace's own `.jj` directory: jj migrates such a file into whatever fresh config home it
+// finds, every time, so a worker that writes one into its own workspace before being parked
+// reaches its own later snapshot the same way isolation_test.go's filter test proves it reaches
+// provisioning's. A config naming the working-copy filter and a signing backend, behavior, key and
+// program runs neither program on RemoveFinished's snapshot. A pending edit untouched by any jj
+// command still keeps the workspace, proving the snapshot itself still ran.
 func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T) {
 	requireFilters(t)
 	run := newLocalRunner(t)
@@ -163,23 +163,12 @@ func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T)
 	if err := os.WriteFile(signKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop planted\n"), 0o644); err != nil {
 		t.Fatalf("write planted signing key: %v", err)
 	}
-	// Planted against the shared clone with --ignore-working-copy, as every other command this
-	// package runs against it does: --repo config is the repository's own, not this one
-	// invocation's workspace, and reaches ws.Dir's later snapshot exactly as it would reach any
-	// other workspace of the tree a phase worker's own pane set it from.
-	for _, setting := range [][2]string{
-		{"git.filter.enabled", "true"},
-		{"git.filter.drivers.planted.required", "false"},
-		{"git.filter.drivers.planted.clean", `["` + filter + `"]`},
-		{"git.filter.drivers.planted.smudge", `["cat"]`},
-		{"fsmonitor.backend", `"watchman"`},
-		{"signing.backend", `"ssh"`},
-		{"signing.behavior", `"own"`},
-		{"signing.key", `"` + signKey + `"`},
-		{"signing.backends.ssh.program", `"` + signProgram + `"`},
-	} {
-		runSetup(t, ws.Clone, "jj", "config", "set", "--repo", "--ignore-working-copy", setting[0], setting[1])
-	}
+	// Planted in ws.Dir's own .jj, the real channel: a worker's own pane, in this same workspace,
+	// before it was ever parked.
+	plantWorkspaceConfig(t, ws.Dir,
+		"[git.filter]\nenabled = true\n[git.filter.drivers.planted]\nclean = ["+tomlString(filter)+"]\nsmudge = [\"cat\"]\nrequired = false\n"+
+			"[fsmonitor]\nbackend = \"watchman\"\n"+
+			"[signing]\nbackend = \"ssh\"\nbehavior = \"own\"\nkey = "+tomlString(signKey)+"\n[signing.backends.ssh]\nprogram = "+tomlString(signProgram)+"\n")
 	if err := os.WriteFile(filepath.Join(ws.Dir, ".gitattributes"), []byte("*.txt filter=planted\n"), 0o644); err != nil {
 		t.Fatalf("write .gitattributes: %v", err)
 	}
@@ -289,5 +278,82 @@ func TestRemoveFinishedOfAWorkspaceAlreadyGoneIsANoop(t *testing.T) {
 	}
 	if want := "has no workspace on this volume"; len(logged) != 1 || !strings.Contains(logged[0], want) {
 		t.Errorf("logged %v, want one line containing %q", logged, want)
+	}
+}
+
+// jj silently skips a directory holding its own .git or .jj: not tracked, not listed as untracked,
+// no warning anywhere. A workspace otherwise fully pushed, holding a second repository an agent
+// cloned to patch a dependency and committed to locally, is kept: that local commit is invisible
+// to unpushedRevset's `::workspaceName@`, and without nestedRepositories the snapshot would read
+// the workspace clean and RemoveFinished would delete the nested repository's own unpushed commit
+// along with it.
+func TestRemoveFinishedKeepsAWorkspaceHoldingANestedRepositoryWithALocalCommit(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	ws, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatalf("write worker change: %v", err)
+	}
+	runSetup(t, ws.Dir, "jj", "status")
+	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+
+	nested := filepath.Join(ws.Dir, "vendor", "dep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("make the nested repository's directory: %v", err)
+	}
+	gitEnv := []string{"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid", "GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid"}
+	runSetupWith(t, nested, gitEnv, "git", "init")
+	if err := os.WriteFile(filepath.Join(nested, "patch.txt"), []byte("a local fix\n"), 0o644); err != nil {
+		t.Fatalf("write the nested repository's own file: %v", err)
+	}
+	runSetupWith(t, nested, gitEnv, "git", "add", "patch.txt")
+	runSetupWith(t, nested, gitEnv, "git", "commit", "-m", "a local fix")
+
+	var logged []string
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+		t.Fatalf("RemoveFinished: %v", err)
+	}
+	if _, err := os.Stat(ws.Dir); err != nil {
+		t.Fatalf("workspace removed, want it kept: %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], nested) {
+		t.Errorf("logged %v, want one line naming WIDGETS-42 kept and the nested repository %s", logged, nested)
+	}
+}
+
+// jj writes "Warning: Skipped some paths because they are not valid UTF-8" to stderr only, with
+// stdout claiming "The working copy has no changes." A workspace otherwise fully pushed, holding
+// such a file, is kept: nothing about it reaches untrackedPaths (which reads only stdout), so the
+// stderr check is the only thing that catches it.
+func TestRemoveFinishedKeepsAWorkspaceHoldingAFileWhoseNameIsNotValidUTF8(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	ws, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatalf("write worker change: %v", err)
+	}
+	runSetup(t, ws.Dir, "jj", "status")
+	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+
+	name := "notes-" + string([]byte{0xff}) + ".md"
+	if err := os.WriteFile(filepath.Join(ws.Dir, name), []byte("not valid utf-8 in the name\n"), 0o644); err != nil {
+		t.Fatalf("write the invalid-UTF-8-named file: %v", err)
+	}
+
+	var logged []string
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+		t.Fatalf("RemoveFinished: %v", err)
+	}
+	if _, err := os.Stat(ws.Dir); err != nil {
+		t.Fatalf("workspace removed, want it kept: %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], "stderr") {
+		t.Errorf("logged %v, want one line naming WIDGETS-42 kept for the snapshot's stderr", logged)
 	}
 }

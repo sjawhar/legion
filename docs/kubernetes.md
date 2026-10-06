@@ -1016,65 +1016,6 @@ Containers, in order:
    (`LEGION_WORKSPACE`/`LEGION_ROOT_WORKSPACE`) and answers `adopt-working-copy-result`; `ok: false`
    fails the delivery exactly as a failed `metaedit` does on tmux.
 
-### Finished siblings' workspaces, and `legion push`'s grant lifetime
-
-The tree volume otherwise only grows: every issue's jj workspace stays on it even once that issue is
-done, so a long-running tree slowly fills `tree_volume`. On every `workspace-init provision`, the Go
-daemon computes which of the tree's *other* issues (never the one this pod provisions, and never the
-tree's own root) are safe to remove by lifecycle alone — a candidate is one whose phase is `done`
-*and* whose every role claim is either never made or sits in `suspended`, `failed`, or `retired`,
-never a live state. The claim check applies even to a done phase: a child leaving the Dispatch
-workflow (done, backlog, icebox, or triage alike) has its phase forced to `done` in the same
-transaction as the status write, but its claim suspends are only *enqueued* for the daemon's
-outbox to apply later, so a probe in that window can see a done child whose claim is still
-working — not yet safe. A child merely between phases (`awaiting_merge`, a review round the
-architect has not yet decided) never reaches phase `done` at all, and so is never a candidate:
-removing its workspace would force its next phase into a multi-minute re-clone on its own tree
-volume, the cost this rule exists to avoid. Each candidate is paired with its pull request's
-merged head when the daemon recorded one merging it, since GitHub deletes a squash merge's branch
-and that commit then carries no remote bookmark of its own.
-
-The daemon passes that candidate list as JSON in `LEGION_REMOVABLE_WORKSPACES` on the
-`workspace-init provision` container alone — never on `workspace-fetch` or the main `worker`
-container, and the daemon never execs into a pod to remove anything itself. `workspace-init` is
-the one process that actually decides, and removes, each candidate, inside a time budget (90 s by
-default): once spent, it stops before starting the next candidate and logs the rest as deferred to
-the tree's next launch, rather than risk the registration deadline this init container shares with
-the provisioning it still has to report done, or a sibling pod's own wait behind this one's
-repository lock. The candidate order is rotated by this pod's own issue each pass, so one candidate
-that always sorts first in the daemon's list does not always spend the whole budget before any
-candidate after it is ever reached.
-
-For each candidate it starts, `workspace-init` snapshots the candidate's own working copy first (a
-real `jj status` in its workspace directory, not the shared clone's `--ignore-working-copy` reads),
-with `--config` overrides that neutralize every jj setting a tree agent's own `jj config set
---repo` could otherwise use against this snapshot: the working-copy filter and every signing
-backend are turned off, file-watching is forced off, and `snapshot.auto-track` is forced back to
-jj's own default so a repo-configured `none()` cannot leave every candidate permanently untracked.
-An edit a parked agent left uncommitted is caught by this snapshot and is not invisible to the
-check that follows. The one thing the snapshot can still leave untracked under that default is a
-new file over jj's own size limit (1 MiB by default, deliberately left there rather than raised:
-committing an oversized file would write it into the shared clone's object store this pass exists
-to shrink) — `workspace-init` reads jj's own "Untracked paths:" section off that snapshot's stdout,
-and keeps the workspace, naming the path, whenever anything is left untracked, rather than trust an
-incomplete `@` as clean. Only once nothing is left untracked does it ask whether every non-empty
-commit the workspace holds is reachable from a remote bookmark or from the recorded merged head. A
-workspace that fails that check — it holds a commit neither reached — is kept, and
-`workspace-init`'s log names the commit and why; one that passes is removed: its directory is first
-renamed aside, a same-filesystem atomic rename regardless of the directory's size, and only then
-recursively deleted, so a kill partway through that slower delete leaves a name the next pass
-recognizes and finishes rather than a half-deleted tree a later snapshot would misjudge. A
-candidate the daemon named that already has no workspace on this volume (already removed, or never
-provisioned here) is left alone without error. One candidate's failure is logged and never stops
-the ones after it or the provisioning this pod already finished.
-
-A `legion push` invocation's grant lives `credential.pushTTL` (5 minutes) rather than the ordinary 60
-second `ttl`: jj's own working-copy snapshot before the network push can run past the ordinary grant
-on a near-full tree volume (measured 63–100 s worst case). The pi-envoy extension requests the longer
-lifetime only for a bash command its tokenizer judges to invoke `legion push` — alone, as a compound
-command's one segment (`cd ws && legion push`), or a pipeline's last stage — never a blanket increase
-for every command a pane runs.
-
 Volumes and mounts:
 
 | volume | source | mounted at | in |
@@ -1177,6 +1118,26 @@ its cleanup delete failed too — is not the sweep's to find (no pod names it, a
 lists Secrets); the next spawn of that `(issue, role)` reclaims it: once `retirePreviousPods` has
 proven no pod of the role exists, the spawn deletes the same-name Secret by name (a 404 is nothing to
 reclaim) before creating its own, exactly as it treats a same-name pod.
+
+### Finished siblings' workspaces
+
+The tree volume otherwise only grows: every issue's jj workspace stays on it even once that issue
+is done. On every `workspace-init provision`, the Go daemon computes which of the tree's other
+issues are safe to remove and passes that list as JSON in `LEGION_REMOVABLE_WORKSPACES` on the
+`provision` init container alone (never `workspace-fetch`, never the main `worker` container, and
+the daemon never execs into a pod itself); `removableWorkspaces`
+(`packages/daemon/internal/daemon/removable.go`) is the one place that states the candidate rule.
+`workspace-init` is the process that judges and removes each candidate: it snapshots the
+candidate's own working copy with `--config` overrides that neutralize a hostile legacy
+`.jj/workspace-config.toml` a tree agent could leave on the volume (`snapshotOverrides`,
+`internal/workspace/removal.go`), keeps the workspace whenever that snapshot leaves anything
+unaccounted for — an untracked path, anything on stderr, or a nested repository the snapshot
+cannot see at all — and otherwise removes it only once every commit it holds is reachable from a
+remote bookmark or the recorded merged pull-request head, renaming its directory aside before the
+slower recursive delete so a kill mid-delete is finished, not re-judged, on the next pass. The pass
+runs inside a 90 s budget, deferring the rest of the list to the tree's next launch once spent, and
+rotates the candidate order by the pod's own issue so one expensive candidate does not starve the
+same candidates on every launch.
 
 ### RBAC the daemon needs
 

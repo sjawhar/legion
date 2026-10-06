@@ -89,6 +89,19 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if err := r.awaitTreeInitialized(ctx, l); err != nil {
 		return fail("wait for its tree's other pods to finish initializing", err)
 	}
+	if r.removable != nil {
+		// Computed now, under the tree's launch turn, after every other pod of the tree has
+		// finished initializing: the latest moment before this pod's own manifest is written, so a
+		// sibling that became live in the time this launch spent waiting is not judged by a list
+		// that was already stale when this launch started (dispatch://LEGION-583).
+		candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
+		if err != nil {
+			return fail("compute its tree's removable workspaces", err)
+		}
+		if err := l.setRemovable(candidates); err != nil {
+			return fail("build its removable-workspaces list", err)
+		}
+	}
 	// Minted now, not before the waits: an installation token can be handed out with minutes left.
 	// Bounded like an API call, since the tree's launch turn is held while it runs.
 	owner := l.spec.Repository.Owner()

@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -545,13 +546,15 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
 	repo := cfg.Projects[cfg.Project].Repo
-	// removable is nil for a runtime that does not provision each claim's workspace in its own
-	// pod (ProvisionsWorkspaces false, tmux's answer): SpawnSpec.RemovableWorkspaces then stays
-	// nil too, which specs.go's own doc comment on removable already promises, and a tmux pane's
-	// workspace-init never runs to read LEGION_REMOVABLE_WORKSPACES even if it were set.
-	var removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
+	// A runtime that does not provision each claim's workspace in its own pod
+	// (ProvisionsWorkspaces false, tmux's answer) removes nothing. The sandbox runtime itself
+	// computes the candidate list, last, under each launch's tree turn (dispatch://LEGION-583);
+	// it cannot build the function itself since it needs sup, which exists only after the runtime
+	// does (sup.deps names the runtime), so this wires it in after both exist.
 	if rt.ProvisionsWorkspaces() {
-		removable = removableWorkspaces(st.Pool(), record.NewStore(), sup, p.project)
+		if sandboxed, ok := rt.(*sandbox.Runtime); ok {
+			sandboxed.SetRemovable(removableWorkspaces(st.Pool(), record.NewStore(), sup, p.project))
+		}
 	}
 
 	sup.deps = supervise.Deps{
@@ -561,7 +564,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
-			removable: removable,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,

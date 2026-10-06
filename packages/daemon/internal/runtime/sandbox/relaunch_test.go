@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,6 +255,59 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
+// The daemon computes removable-workspace candidates last, under the tree's launch turn, after
+// every other pod of the tree has finished initializing (dispatch://LEGION-583): a sibling that
+// becomes live while this launch waits out another pod's workspace-init is read as live by the
+// time the list is actually built, not as whatever it was before the wait, and its workspace is
+// kept off the list the worker's own init container carries.
+func TestRemovableWorkspacesAreReadAfterATreesOtherPodsFinishInitializing(t *testing.T) {
+	var stillRemovable atomic.Bool
+	stillRemovable.Store(true)
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		if stillRemovable.Load() {
+			return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+		}
+		return nil, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	root := SandboxName(rootToken)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, workerSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(workerToken)
+	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+	time.Sleep(200 * time.Millisecond)
+	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
+		t.Fatalf("the worker was set Running while the root was still in workspace-init: %v", got)
+	}
+	// The sibling becomes live (no longer a candidate) while the worker's launch is still waiting
+	// out the root's workspace-init — exactly the window a stale, SpawnSpec-time list would have
+	// missed.
+	stillRemovable.Store(false)
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+	pod := g.pod(worker)
+	if pod == nil {
+		t.Fatal("the worker's pod does not exist")
+	}
+	got, set := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+	if set {
+		t.Errorf("the worker's init container carries LEGION_REMOVABLE_WORKSPACES=%q, want none: the sibling became live before the list was built", got)
 	}
 }
 
