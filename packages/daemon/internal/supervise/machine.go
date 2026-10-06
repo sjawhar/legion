@@ -680,7 +680,9 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 // is spent. A resume that found the tree volume lost is the exception (relaunchFresh). A task whose
 // turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
 // and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
-// A process that dies while a suspension is held leaves the claim suspended instead (endHeld).
+// A process that dies while a suspension is held leaves the claim suspended instead (endHeld). A
+// process found alive but at a stale address is not a death at all (repoint): nothing is charged,
+// and the claim cannot fail for it.
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
@@ -719,6 +721,26 @@ func (m *Machine) relaunchFresh(ctx context.Context) error {
 // claim expects no session until a new agent registers, and its launches recreate the workspace.
 func (m *Machine) loseSession() {
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
+}
+
+// repoint is the claim's process found alive at an address that no longer reaches this daemon
+// (runtime.Stale): the worker-stream address every pod's shim is handed moved since this one
+// launched, which only happens under the Sandbox runtime when the daemon's own pod — and so its
+// advertised address — was replaced. The process cannot dial the daemon from the address it
+// holds and never will while it keeps it, so there is nothing to wait out: the same session is
+// relaunched at once onto a process that dials the daemon's current address, exactly as a
+// suspend-then-resume does. A task whose turn the process was running goes back to waiting first
+// (interrupted), the same recovery a death in a turn gets, since that turn can never report back
+// either. Unlike died, nothing is charged and the claim never fails for this: the process did
+// nothing wrong, and there is no budget whose end would leave the claim stuck at a dead address
+// forever instead.
+func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) error {
+	m.log.Warn("supervise: the process is alive at a stale address; replacing it with one at the current address",
+		"incarnation", m.claim.Locator.Incarnation, "detail", observation.Detail)
+	if err := m.interrupted(ctx); err != nil {
+		return err
+	}
+	return m.launch(ctx)
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -805,6 +827,8 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 		return alive(ctx)
 	case runtime.Gone, runtime.NotRecordedProcess:
 		return m.died(ctx, observation)
+	case runtime.Stale:
+		return m.repoint(ctx, observation)
 	case runtime.Uncertain:
 		m.claim.UncertainStreak++
 		m.log.Warn("supervise: process uncertain", "streak", m.claim.UncertainStreak, "detail", observation.Detail)

@@ -71,7 +71,10 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 //  5. P Failed or Succeeded                          → Gone, quoting the container that ended
 //  6. P Pending, PodScheduled=False past BootTimeout → Gone, quoting the pod's events
 //  7. S's current Ready reason MultiplePods or ReconcilerError → Uncertain
-//  8. P Pending (any sub-state) or Running           → Alive
+//  8. P Pending (any sub-state) or Running, and its shim dials this runtime's
+//     own current stream address                      → Alive
+//  9. P Pending or Running, and its shim dials a different address — this
+//     runtime's own stream address moved since the pod was launched → Stale
 //
 // Terminal state is read from the pod, whose phase and container states belong to its one uid; a
 // Sandbox condition is quoted only when written for the Sandbox's current generation, so one left
@@ -118,9 +121,30 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	}
 	switch pod.Status.Phase {
 	case corev1.PodPending, corev1.PodRunning, "":
+		if dialed, ok := connectAddress(pod); ok && dialed != r.streamURL {
+			return observe(runtime.Stale, "pod %s (uid %s) dials %s, not this runtime's current %s", name, pod.UID, dialed, r.streamURL)
+		}
 		return observe(runtime.Alive, "pod %s (uid %s) %s", name, pod.UID, phaseOf(pod))
 	}
 	return observe(runtime.Uncertain, "pod %s (uid %s) phase %s", name, pod.UID, pod.Status.Phase)
+}
+
+// connectAddress is the worker-shim's --connect value in pod's main container command — the
+// address its shim dials for the worker stream — and whether the container carried one at all:
+// false for a pod with no main container or no such flag (never one this runtime built), which
+// row 9 above must never read as stale for want of something to compare.
+func connectAddress(pod *corev1.Pod) (string, bool) {
+	for _, c := range pod.Spec.Containers {
+		if c.Name != mainContainer {
+			continue
+		}
+		for i, arg := range c.Command {
+			if arg == "--connect" && i+1 < len(c.Command) {
+				return c.Command[i+1], true
+			}
+		}
+	}
+	return "", false
 }
 
 // podAbsent is row 3's detail: the Sandbox's mode, its Suspended condition when current, and any

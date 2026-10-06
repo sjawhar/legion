@@ -183,6 +183,25 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Alive,
 		},
 		{
+			row: "8 the current --connect address is alive",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, func(p *corev1.Pod) {
+				p.Spec.Containers = []corev1.Container{{Name: mainContainer, Command: []string{
+					"legion", "worker-shim", "--connect", "tcp://192.0.2.250:13371", "--boot-token-file", "/boot/token",
+				}}}
+			}),
+			want: runtime.Alive,
+		},
+		{
+			row: "9 a stale --connect address",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, func(p *corev1.Pod) {
+				p.Spec.Containers = []corev1.Container{{Name: mainContainer, Command: []string{
+					"legion", "worker-shim", "--connect", "tcp://192.0.2.9:13371", "--boot-token-file", "/boot/token",
+				}}}
+			}),
+			want:   runtime.Stale,
+			detail: []string{"dials tcp://192.0.2.9:13371", "current tcp://192.0.2.250:13371"},
+		},
+		{
 			row:     "a phase the mapping has no row for is uncertain",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodUnknown}),
 			want:    runtime.Uncertain, detail: []string{"phase Unknown"},

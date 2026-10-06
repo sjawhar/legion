@@ -596,6 +596,30 @@ Every pod runs:
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
 `shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
 
+### A pod whose address moved
+
+Every pod's `--connect` is baked in at the moment the pod is created (the bullet above): once a
+pod is running, nothing changes its argv, so a pod keeps dialling the address its launch held even
+once the daemon's own address moves — its own pod replaced in the cluster, under
+`advertise_host`'s Service name reaching whichever pod is live. A daemon that restarts re-adopts
+each live claim's pod by its recorded locator (the boot orphan sweep), which only tells the runtime
+the pod is still the claim's; it does not, by itself, notice that the pod cannot reach this daemon
+any more.
+
+So every re-adoption also checks the pod's own `--connect` against the address this runtime now
+hands every new pod. A pod that dials anywhere else is reported `stale` rather than `alive`
+(`ObservationKind`, `internal/runtime/runtime.go`), and the supervisor replaces it at once: the
+same session relaunched — `Resume`, never a fresh `Spawn` — onto a pod whose shim dials the
+corrected address, exactly the mechanism an ordinary suspend-then-resume already uses. This runs
+automatically at every boot, never as an operator command: a daemon only ever finds a stale address
+once it has itself moved and re-adopted what the previous one left running, so there is no moment
+an operator would reach for this on their own that a boot has not already covered. Nothing is
+charged for it and the claim cannot fail: the pod did nothing wrong, the daemon's address moved.
+A turn the stale pod was in the middle of cannot be finished — that pod can never report back to
+this daemon — so it is lost, and the relaunched agent resumes from its last saved turn, the task it
+was running sent again once it is ready, the same recovery an ordinary process death in a turn gets
+(LEGION-592).
+
 ### A shell on the tree volume
 
 Some of provisioning's refusals name `jj` commands against the tree's shared clone,

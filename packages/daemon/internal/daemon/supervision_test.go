@@ -999,3 +999,30 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 		t.Errorf("the worker relaunched with %+v, want a fresh session recovering legion/LEGION-2", relaunched)
 	}
 }
+
+// A process the runtime reports stale — alive, but at a worker-stream address this daemon no
+// longer dials pods at (LEGION-592: the address a boot hands every pod moved since this one
+// launched, the live locator re-adoption catches at the next restart) — relaunches its recorded
+// session at once, exactly as a suspend-then-resume does, and charges nothing: the daemon's own
+// address moved, not a fault of the agent's.
+func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	token := d.spawn(architect())
+	readyClaim(t, d, rt, token)
+	loc := d.claim(token).Locator
+
+	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.Stale, Detail: "pod dials a stale address"})
+
+	testwait.Eventually(t, "the relaunch", func() bool {
+		c := d.claim(token)
+		return c.Generation == 2 && c.State == string(supervise.StateLaunching)
+	})
+	if relaunched := lastLaunch(t, rt, token); relaunched.ResumeSessionFile == "" {
+		t.Errorf("relaunched with %+v, want the recorded session resumed", relaunched)
+	}
+	if c := d.claim(token); c.Budgets.LaunchFailures != 0 {
+		t.Errorf("the stale address was charged: %+v", c.Budgets)
+	}
+}

@@ -182,6 +182,15 @@ const (
 	// is a fourth verdict precisely so that it is never read as either: the supervisor re-arms
 	// the probe and counts the streak, and changes no state on it.
 	Uncertain ObservationKind = "uncertain"
+	// Stale: the process the locator recorded is running, but at an address that no longer
+	// reaches this daemon — the worker-stream address a runtime hands every new process moved
+	// since this one was launched (the Sandbox runtime's own advertised host, under
+	// runtime.kubernetes, is the one case this arises: a daemon pod replaced onto a new
+	// address). The process cannot dial the daemon from the address it holds and never will
+	// while it keeps it, so the supervisor relaunches the same session onto a process that
+	// dials the daemon's current address at once, exactly as a suspend-then-resume does,
+	// charging nothing: the process did nothing wrong, the daemon's address moved.
+	Stale ObservationKind = "stale"
 )
 
 // Observation is one runtime fact about one process, with the moment it was observed and, for a
