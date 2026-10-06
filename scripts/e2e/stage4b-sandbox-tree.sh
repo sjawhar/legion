@@ -2155,22 +2155,34 @@ pass
 
 begin ci-red-takeover
 # CI settling red while the tester is in its turn takes the phase back without the tester's
-# completion (workflow's TriggerChecksRed). The tester runs a command that writes a file once its
-# sleep ends; the proof human commits .fail-me to the pull request's branch, and the smoke
-# repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
-# implementing and interrupts the tester's turn: the command's process ends and its file is never
-# written, the tester stays live on its session in its first pod, and the implementer's start,
-# held meanwhile, acts and hands the implementer its task only once that turn is over
-# (supervise.Machine.Quiesce). The control: the same command with a shorter sleep, which nothing
-# interrupts, writes its file.
+# completion (workflow's TriggerChecksRed). The tester repeats a short command that writes a file
+# only once it stops repeating; the proof human commits .fail-me to the pull request's branch, and
+# the smoke repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
+# implementing and interrupts the tester's turn: the repeating stops and its file is never written,
+# the tester stays live on its session in its first pod, and the implementer's start, held
+# meanwhile, acts and hands the implementer its task only once that turn is over
+# (supervise.Machine.Quiesce). The control: the same repeating command with far fewer repeats,
+# which nothing interrupts, writes its file.
+# A single `/usr/bin/sleep 1207` bash call is not this witness, though a daemon restart's own tree
+# took exactly that shape once (restart-mid-tree): Oh My Pi backgrounds any one bash call left
+# running around a minute (the control's own `/usr/bin/sleep 20` does not; a prior witness's
+# `/usr/bin/sleep 1207` did, at 60.006s — stage4b-80d0c82b.log), and a backgrounded call is a job
+# the turn-level abort no longer reaches: Quiesce's own interrupt still lands — on the `wait` tool
+# call the agent is told to use while the job runs, which that evidence shows correctly answers
+# "Operation aborted" — but the job underneath a `wait` keeps running regardless, to its own
+# completion, since Oh My Pi's background jobs outlive the turn that started them by design
+# (LEGION-462 found this against legion-legsmoke-legsmoke-463). Repeating a short call instead
+# keeps every single bash call under that threshold, so the one Quiesce actually interrupts is
+# always the process itself, never a `wait` standing in front of one still running underneath it.
 tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
 witness=/tmp/stage4b-takeover-witness control=/tmp/stage4b-takeover-control
-send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
+witness_sleep="/usr/bin/sleep 40"
+send_agent "$tree1" tester "Stage 4b proof control operation: run exactly $witness_sleep as one bash tool call with a 60 second timeout, not backgrounded, and repeat it, one at a time, waiting for each to finish before starting the next, never combining repeats into a shell loop or one call, for exactly 3 repeats total; then run exactly this as one more bash tool call: date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
 on_tree "$tree1" until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" tester "$control"
 on_tree "$tree1" until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
-note "the control: the tester's uninterrupted /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
-send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 1207 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Wait for it to finish."
-on_tree "$tree1" until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 1207"
+note "the control: the tester's uninterrupted $witness_sleep chain wrote $control in pod $tester_pod"
+send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly $witness_sleep as one bash tool call with a 60 second timeout, not backgrounded, and repeat it, one at a time, waiting for each to finish before starting the next, never combining repeats into a shell loop or one call: keep repeating it until this turn is interrupted. If you are never interrupted, stop after 30 repeats and run exactly this as one more bash tool call: date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN."
+on_tree "$tree1" until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" tester "$witness_sleep"
 issue_worker_state "$tree1" tester working || fail "the tester runs its witness command while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
 # fail_me_at is taken before the commit, not derived from a log line: the negative control below
 # needs a timestamp that can never be null (takeover_interrupted can be absent — see the comment
@@ -2184,7 +2196,7 @@ fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b 
 note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 900
 on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
-! pod_runs "$tester_pod" tester "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
+! pod_runs "$tester_pod" tester "$witness_sleep" || fail "the tester's witness command still runs after its turn was interrupted"
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
 # The row that held the implementer's start: the tester's own "the interrupted turn is over"
 # (takeover_over), logged whenever a start was genuinely held for this claim's turn, not the
