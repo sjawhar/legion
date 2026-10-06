@@ -93,8 +93,10 @@ image's digest.
 The daemon reads one file, `legion.yaml`. Relative paths in it resolve against the file's own
 directory. The repository's `deploy/kubernetes/daemon/legion.yaml.example`, rendered in the
 [configuration reference](/legion/legion/reference/config/), is a complete file for a Kubernetes
-deployment: copy it and replace every value. Each one is a placeholder (documentation addresses,
-made-up App ids, an all-zero image digest) that reaches nothing. As written, the file passes the
+deployment: copy it and replace every value that names your deployment (documentation addresses,
+made-up App ids, an all-zero image digest, the example's `advertise_host`). `bind: 0.0.0.0` is
+already real: a daemon whose own pod restarts onto a new IP binds every interface. As written, the
+file passes the
 [configuration check](#check-and-start-the-daemon) once the three token files and the kubeconfig it
 names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) names a Postgres.
 
@@ -109,8 +111,12 @@ What each part is for:
   review bot's. A red only they make, in testing or review, goes to the reviewer, who adjudicates
   their findings and re-runs them, rather than back to the implementer; any other red required
   workflow sends the work back, as a red required check does. None is declared unless you list it.
-- **`bind`**, **`daemon_url`**, **`envoy_url`**, **`dispatch_url`** and every **`nats_urls`** entry
-  are handed to pods, so none of them may be a loopback or unspecified address.
+- **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
+  worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
+  none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
+  only) is an IP address or a DNS name, such as the Service that fronts a daemon whose own pod
+  restarts onto a new IP. Beside it, `bind` is only where the daemon listens: it may be `0.0.0.0`,
+  but not loopback, where no pod reaches it.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),
   `private_key_command` (a command whose output is the PEM) or `private_key_secret`. The daemon
   finds each App's installations itself; `installations` (owner to installation id) is optional.
