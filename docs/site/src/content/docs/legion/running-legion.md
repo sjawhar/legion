@@ -114,7 +114,9 @@ What each part is for:
   are handed to pods, so none of them may be a loopback or unspecified address — except `bind`
   once **`advertise_host`** (optional) names the stable, pod-facing address instead (a Kubernetes
   Service's DNS name, say, for a daemon whose own pod restarts onto a new IP): `bind` is then free
-  to be `0.0.0.0`, a pure listen address, and `advertise_host` alone is held to the refusal.
+  to be the unspecified address (`0.0.0.0`), a pure listen address, and `advertise_host` alone is
+  held to the loopback-or-unspecified refusal — `bind` itself is still refused on loopback, since a
+  listener bound only to loopback answers no Service and no pod either.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),
   `private_key_command` (a command whose output is the PEM) or `private_key_secret`. The daemon
   finds each App's installations itself; `installations` (owner to installation id) is optional.

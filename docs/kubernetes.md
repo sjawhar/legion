@@ -710,9 +710,12 @@ reads the same `runtime.kubernetes` key with different rules, and refuses the ex
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
 required, and a `gateway` block is refused as removed (LEGION-270: a pod's model route is the
-operator's `pod` below); `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
-dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
-(`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
+operator's `pod` below); every pod dials the worker stream at `tcp://<advertise_host, or bind with
+none set>:<worker_stream_port>`, so that address must be one pods reach, never `0.0.0.0` or
+loopback — `bind` itself may be `0.0.0.0` only once `advertise_host` names the address instead, so
+a daemon whose own pod restarts onto a new IP can still bind every interface and be reached through
+its Service; and no Legion URL a pod is handed (`daemon_url`, `envoy_url`, `dispatch_url`, each
+`nats_urls` entry) may name a loopback or
 unspecified host (`packages/daemon/internal/config/kubernetes.go`). It also reads
 `runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
 source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
