@@ -787,6 +787,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
 	}
+	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
+	// its ready; otherwise watchController says when the operator's is missing.
+	var keeper *controllerKeeper
+	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
+		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, s.log)
+	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -799,22 +805,23 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
 		},
-		StateTransactions: st,
-		Supervisor:        s.supervisor,
-		BootTokens:        s.tokens,
-		Project:           p.project,
-		OperatorToken:     p.operatorToken,
-		Controller:        st,
-		DesignGate:        cfg.Gates.Design,
-		Log:               s.log,
-		Pool:              st.Pool(),
-		Handlers:          handlers,
-		Record:            records,
-		Dispatch:          client,
-		Tokens:            tokens,
-		GitHubOwner:       githubOwner(cfg),
-		Grants:            grants,
-		ClaimReady:        claimReady,
+		StateTransactions:  st,
+		Supervisor:         s.supervisor,
+		BootTokens:         s.tokens,
+		Project:            p.project,
+		OperatorToken:      p.operatorToken,
+		Controller:         st,
+		DesignGate:         cfg.Gates.Design,
+		ControllerLaunched: keeper != nil,
+		Log:                s.log,
+		Pool:               st.Pool(),
+		Handlers:           handlers,
+		Record:             records,
+		Dispatch:           client,
+		Tokens:             tokens,
+		GitHubOwner:        githubOwner(cfg),
+		Grants:             grants,
+		ClaimReady:         claimReadyHook(keeper, claimReady),
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -834,7 +841,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		group.Go(func() error { return workflow.run(serving) })
 	}
 	group.Go(func() error {
-		watchController(serving, st, cfg, p, s.log)
+		if keeper != nil {
+			keeper.run(serving, p.orphanSweep)
+		} else {
+			watchController(serving, st, cfg, p, s.log)
+		}
 		return nil
 	})
 	return group.Wait()

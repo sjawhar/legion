@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -458,9 +459,14 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 
-	controllerPrompt, err := os.ReadFile(filepath.Join(c.defaultDir, "prompts", "shared", "controller-root.md"))
-	if err != nil {
-		t.Fatalf("read the controller prompt snapshot: %v", err)
+	// The controller's role part, then the daemon's part for a controller the operator started.
+	var controllerPrompt []byte
+	for _, part := range []string{filepath.Join("shared", "controller-root.md"), filepath.Join("go", "controller-interactive.md")} {
+		body, err := os.ReadFile(filepath.Join(c.defaultDir, "prompts", part))
+		if err != nil {
+			t.Fatalf("read the controller prompt snapshot: %v", err)
+		}
+		controllerPrompt = append(controllerPrompt, body...)
 	}
 	instructions, err := os.ReadFile(filepath.Join(c.defaultDir, "deployment-instructions.md"))
 	if err != nil {
@@ -470,7 +476,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	wantArgv := []string{"--append-system-prompt",
 		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`.\n\n" +
 			strings.TrimRight(string(instructions), "\n"),
-		controllerStartMessage}
+		daemon.ControllerStartMessage}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
 	}
