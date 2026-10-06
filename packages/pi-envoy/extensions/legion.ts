@@ -236,17 +236,15 @@ function isPushInvocation(words: readonly string[]): boolean {
   return commandMatch(words, "legion", ["push"]) !== -1;
 }
 
-/** Whether a bash command's tokenised simple commands include a `legion push` invocation --
- * `legion push`, `cd … && legion push`, a pipeline's last segment -- so the tool_call hook mints
- * its grant with the longer pushTTL (dispatch://LEGION-583): jj's own working-copy snapshot before
- * the network push can outrun the ordinary sixty seconds on a near-full tree volume. Not a string
- * (a tool call that is not `bash`, so its `input.command` carries no shell command at all) or an
- * unterminated quote is judged not a push: the ordinary grant is the safe default, since missing
- * a genuine push here costs only the grant expiring before it, which `legion push` already fails
- * loudly on. */
-function commandRunsPush(command: unknown): boolean {
-  if (typeof command !== "string") return false;
-  const commands = splitShellCommands(command);
+/** Whether tokenised simple commands (splitShellCommands' result, shared with paneRuleRefusal's
+ * own tokenisation of the same bash command rather than retokenising it) include a `legion push`
+ * invocation -- `legion push`, `cd … && legion push`, a pipeline's last segment -- so the
+ * tool_call hook mints its grant with the longer pushTTL (dispatch://LEGION-583): jj's own
+ * working-copy snapshot before the network push can outrun the ordinary sixty seconds on a
+ * near-full tree volume. undefined (a tool call that is not `bash`, or an unterminated quote) is
+ * judged not a push: the ordinary grant is the safe default, since missing a genuine push here
+ * costs only the grant expiring before it, which `legion push` already fails loudly on. */
+function commandsRunPush(commands: string[][] | undefined): boolean {
   return commands !== undefined && commands.some(isPushInvocation);
 }
 
@@ -387,16 +385,21 @@ function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
   return NON_FILE_WRITE_URL.exec(writeTarget(toolCall.input.path))?.[1]?.toLowerCase();
 }
 
-/** The refusal for the first of `rules` a tool call breaks, or undefined. A `bash` command is
- * tokenised, a supervised service's start included (a `bash` call with a `name`); `eval` code and
- * the content a `write` sends to a `proc://` target (stdin for a supervised service) are held to
- * the plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
-function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): string | undefined {
+/** The refusal for the first of `rules` a tool call breaks, or undefined. commands is bash's own
+ * tokenisation (splitShellCommands(input.command)), computed once by the caller and shared with
+ * the push-grant check later in the same hook, rather than tokenised twice for the same command.
+ * A supervised service's start is included (a `bash` call with a `name`); `eval` code and the
+ * content a `write` sends to a `proc://` target (stdin for a supervised service) are held to the
+ * plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
+function paneRuleRefusal(
+  toolCall: ToolCallEvent,
+  rules: readonly PaneRule[],
+  commands: string[][] | undefined
+): string | undefined {
   if (rules.length === 0) return undefined;
   const { toolName, input } = toolCall;
   if (toolName === "bash") {
     if (typeof input.command !== "string") return undefined;
-    const commands = splitShellCommands(input.command);
     for (const rule of rules) {
       const attempt = refusedCommand(input.command, commands, rule);
       if (attempt !== undefined) return rule.refusal(attempt);
@@ -550,7 +553,11 @@ export default function legionExtension(pi: PiApi): void {
     // instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the handler,
     // never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
-    const refusal = paneRuleRefusal(toolCall, paneRules);
+    const commands =
+      toolCall.toolName === "bash" && typeof toolCall.input.command === "string"
+        ? splitShellCommands(toolCall.input.command)
+        : undefined;
+    const refusal = paneRuleRefusal(toolCall, paneRules, commands);
     if (refusal !== undefined) return { block: true, reason: refusal };
     // No other gate applies to a subagent's own tool calls: the role gates below bind the session
     // that holds the claim, and a subagent shares its parent's identity and claims no role (see
@@ -608,7 +615,7 @@ export default function legionExtension(pi: PiApi): void {
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
-        push: toolCall.toolName === "bash" && commandRunsPush(toolCall.input.command),
+        push: commandsRunPush(commands),
       })
     );
   });

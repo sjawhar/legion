@@ -55,16 +55,22 @@ func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervis
 			if err != nil {
 				return fmt.Errorf("list the issues of tree %s: %w", tree, err)
 			}
+			var issueKeys []string
 			for _, issue := range issues {
 				if issue.Key == tree || issue.Key == exclude || issue.Phase != phase.Done || live[issue.Key] {
 					continue
 				}
-				candidate := runtime.RemovableWorkspace{Issue: issue.Key}
-				pr, err := records.PullRequest(ctx, tx, issue.Key)
-				if err != nil {
-					return fmt.Errorf("read the pull request of %s: %w", issue.Key, err)
-				}
-				if pr != nil && pr.State == record.PullRequestMerged {
+				issueKeys = append(issueKeys, issue.Key)
+			}
+			// One query for every candidate's pull request, instead of one query per candidate:
+			// a tree this pass exists to shrink can hold many done siblings at once.
+			prs, err := records.PullRequestsByIssue(ctx, tx, issueKeys)
+			if err != nil {
+				return fmt.Errorf("read the pull requests of %d candidate(s) of tree %s: %w", len(issueKeys), tree, err)
+			}
+			for _, key := range issueKeys {
+				candidate := runtime.RemovableWorkspace{Issue: key}
+				if pr, ok := prs[key]; ok && pr.State == record.PullRequestMerged {
 					candidate.MergedHead = pr.HeadSHA
 				}
 				candidates = append(candidates, candidate)
