@@ -11,25 +11,29 @@ import (
 	"time"
 )
 
-// WaitDelay is the one value every Configure caller passes: how long the backstop waits, once a
-// command's own process has already died (by its own exit or the group kill), for whatever still
-// holds its pipes open to close them; past this, Wait forces the pipes closed itself rather than
-// block forever. It needs no margin for the command's own slow work — that's what its context
-// deadline and the group kill are for — only enough for an already-dead process tree's file
-// descriptors to actually close, so one second serves a probe and a git clone alike.
+// WaitDelay is the one value every Configure caller passes: how long Wait keeps waiting, once the
+// command's own leader process has exited, for whatever still holds its output pipes open to
+// close them on its own, before giving up and forcing the pipes closed itself. After the group
+// kill (Cancel's SIGKILL), that is every process in the group, already dying together, so the
+// wait is brief. After the leader's own clean exit, though, Cancel never ran: a child the leader
+// started earlier is untouched and keeps running on its own schedule, holding the pipe open for
+// as long as it likes. WaitDelay does not stop that lingering process — only Go's own wait for it
+// — so it needs no margin for slow work, only enough to not block on a descendant indefinitely;
+// one second serves a probe and a git clone alike.
 const WaitDelay = time.Second
 
 // Configure sets cmd's own process group (SysProcAttr.Setpgid), a Cancel that signals the whole
-// group instead of the single process exec.CommandContext would kill alone, and waitDelay as the
-// backstop that force-closes cmd's pipes if something still holds them open once Cancel has
-// fired. Without this, a helper a command's own child spawns (git's git-remote-https, under an
-// https remote) can keep a pipe open forever, reparented, after exec.CommandContext's own kill
-// ends only the direct child — leaving Wait, and so Run, never returning.
+// group instead of the single process exec.CommandContext would kill alone, and WaitDelay as the
+// backstop that stops Wait from blocking forever on a pipe something still holds open once cmd's
+// own process has exited, cleanly or by the group kill. Without this, a helper a command's own
+// child spawns (git's git-remote-https, under an https remote) can keep a pipe open forever,
+// reparented, after exec.CommandContext's own kill ends only the direct child — leaving Wait, and
+// so Run, never returning.
 //
 // Call Configure before setting any of the caller's own SysProcAttr fields (a terminal foreground
 // job's Ctty, for one): it replaces cmd.SysProcAttr whole, and the caller's own fields need to
 // land on the same struct afterward.
-func Configure(cmd *exec.Cmd, waitDelay time.Duration) {
+func Configure(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -44,22 +48,5 @@ func Configure(cmd *exec.Cmd, waitDelay time.Duration) {
 		}
 		return err
 	}
-	cmd.WaitDelay = waitDelay
-}
-
-// HeldOpen reports whether err is exec.ErrWaitDelay: cmd exited on its own, but a process it
-// started (directly or not) kept an output pipe open past its WaitDelay, so Wait gave up draining
-// it and forced the pipes closed instead. Go reports this only once the command's own exit status
-// was already a clean 0 (Cmd.Run's doc on WaitDelay): read in isolation, that exit code looks like
-// an ordinary successful run, which is why every caller that inspects one of Configure's commands
-// should check HeldOpen before trusting it as one.
-func HeldOpen(err error) bool {
-	return errors.Is(err, exec.ErrWaitDelay)
-}
-
-// HeldOpenMessage is HeldOpen's own accurate description of what happened to command (the argv or
-// launch string a caller names it by): not a failure code the process itself never reported, and
-// not silence that lets the exit look like nothing unusual happened.
-func HeldOpenMessage(command string) string {
-	return "a process " + command + " started held its output open past its WaitDelay"
+	cmd.WaitDelay = WaitDelay
 }

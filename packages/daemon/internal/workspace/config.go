@@ -41,16 +41,13 @@ type Command struct {
 	Timeout time.Duration
 }
 
-// Result is the process result. A non-zero ExitCode, or HeldOpen, is a process failure; a non-nil
-// Run error means the process could not be started or observed. HeldOpen means the process's own
-// ExitCode (always 0 when it is set) is not the real answer: a process it started kept an output
-// pipe open past its WaitDelay, so the result never finished draining (see procgroup.HeldOpen).
+// Result is the process result. A non-zero ExitCode, or TimedOut, is a process failure; a
+// non-nil Run error means the process could not be started or observed.
 type Result struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
 	TimedOut bool
-	HeldOpen bool
 }
 
 // Runner is injected so provisioning's exact argv, environment, directory, and timeout are
@@ -157,10 +154,8 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	// when bounded expires, and that helper, now reparented, can keep the pipe open forever,
 	// leaving Wait (and so Run) never returning. procgroup.Configure's Setpgid plus Cancel signals
 	// the whole process group instead, killing the helper too; after that, Wait normally returns
-	// an ordinary *exec.ExitError for the signaled process — WaitDelay is only the backstop that
-	// force-closes the pipes for whatever still escapes the group kill (a process that reparented
-	// itself out of the group, say).
-	procgroup.Configure(child, procgroup.WaitDelay)
+	// an ordinary *exec.ExitError for the signaled process.
+	procgroup.Configure(child)
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
@@ -175,14 +170,15 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		result.ExitCode = exited.ExitCode()
 		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
 		return result, nil
-	case procgroup.HeldOpen(err):
-		// Go reports this only once the process itself has already exited 0 (os/exec's doc on
-		// Cmd.Run's WaitDelay): ExitCode 0 reports that truthfully, the same choice
-		// bootgate.pluginGate.run makes for its own command. HeldOpen carries the real signal:
-		// checkedResult below treats it as a failure unconditionally, regardless of ExitCode or
-		// whether the command's own Timeout happened to also have passed by now.
-		result.ExitCode = 0
-		result.HeldOpen = true
+	case errors.Is(err, exec.ErrWaitDelay):
+		// Go returns this only once the process itself already exited on its own (os/exec's doc
+		// on Cmd.Run's WaitDelay): the deadline never fired Cancel, so the group kill never ran,
+		// and a child the command started earlier is still alive, holding an output pipe open on
+		// its own schedule. The command's own exit status is still the real result — reading it
+		// from ProcessState the same way an ordinary exit does, matching Go's own semantics for
+		// this case and bootgate.pluginGate.run's choice for the same command — not a distinct
+		// failure to invent for a command that actually answered.
+		result.ExitCode = child.ProcessState.ExitCode()
 		return result, nil
 	}
 	return result, err
@@ -284,16 +280,15 @@ func runCheckedTimeout(ctx context.Context, run Runner, argv []string, env []str
 }
 
 // checkedResult is RunChecked's and runCheckedTimeout's shared answer: a process that could not
-// start, exited non-zero, outlived its budget, or outlived its WaitDelay without ever reporting a
-// real failure is an error naming the command. ExitCode alone cannot carry the last case: Go
-// reports ErrWaitDelay as ExitCode 0, the process's own true exit, so HeldOpen (like TimedOut) is
-// checked independently and always fails the result, whether or not the budget also happened to
-// pass by the time Wait gave up.
+// start, exited non-zero, or outlived its budget is an error naming the command. A clean exit
+// whose I/O draining outlived WaitDelay (exec.ErrWaitDelay) is not this: execRunner.Run already
+// reads that as the process's own true ExitCode, so it passes through the same as any other
+// answer.
 func checkedResult(argv []string, result Result, err error) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("run %s: %w", strings.Join(argv, " "), err)
 	}
-	if result.ExitCode != 0 || result.TimedOut || result.HeldOpen {
+	if result.ExitCode != 0 || result.TimedOut {
 		return Result{}, commandFailure(argv, result)
 	}
 	return result, nil
@@ -301,9 +296,6 @@ func checkedResult(argv []string, result Result, err error) (Result, error) {
 
 func commandFailure(argv []string, result Result) error {
 	command := strings.Join(argv, " ")
-	if result.HeldOpen {
-		return fmt.Errorf("%s\n%s", procgroup.HeldOpenMessage(command), strings.TrimSpace(result.Stderr))
-	}
 	if result.TimedOut {
 		return fmt.Errorf("command timed out: %s\n%s", command, strings.TrimSpace(result.Stderr))
 	}

@@ -267,6 +267,7 @@ root="$HOME/.omp"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)
 case "$step" in
 yes) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; exit 0 ;;
+yes-then-linger) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; sleep 3 & echo $! >"$dir/lingering.pid"; exit 0 ;;
 yes-elsewhere) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/elsewhere/dist/legion.js?mtime=1\n' "$HOME" >&2; exit 0 ;;
 yes-unowned) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/unowned/legion.js\n' "$HOME" >&2; exit 0 ;;
 yes-then-die) echo LEGION_PLUGIN_LOADED=yes >&2; echo "database is locked" >&2; exit 1 ;;
@@ -464,6 +465,25 @@ func TestTheLoadProbeRunsWhatAPaneRunsAndPassesOnTheLoadedMarker(t *testing.T) {
 	}
 	if info, err := os.Stat(gate.env["XDG_DATA_HOME"]); err != nil || !info.IsDir() {
 		t.Errorf("the pane's XDG_DATA_HOME was not created before the probe: %v", err)
+	}
+}
+
+// Exit 0 with LEGION_PLUGIN_LOADED=yes already written is an answer, whatever the launch started
+// that is still running when Oh My Pi itself exits: a process it left behind (sleep 3 &, standing
+// in for whatever a real tmux pane's launch can leave running) holds the probe's output pipe open
+// past procgroup.WaitDelay, but the probe already answered before that, and must not be retried
+// for it.
+func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutputPipe(t *testing.T) {
+	f := newFakeOmp(t, "yes-then-linger")
+	gate, _ := gateUnder(t, f, contractCurrent)
+	t.Cleanup(func() { killPIDFile(t, filepath.Join(f.dir, "lingering.pid")) })
+
+	if err := gate.verify(context.Background()); err != nil {
+		t.Fatalf("the gate refused a plugin that answered yes before a lingering child outlived it: %v", err)
+	}
+
+	if n := f.attempts(t); n != 1 {
+		t.Fatalf("Oh My Pi ran %d times, want once: a lingering descendant is not a reason to retry an answer already given", n)
 	}
 }
 

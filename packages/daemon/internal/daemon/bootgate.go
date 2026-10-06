@@ -542,13 +542,9 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pl
 		return bootprobe.Outcome{Refusal: fmt.Errorf("%s: run the pi-legion-envoy load probe: %w", g.label(), err)}, ""
 	}
 	// A budget kill is transient when the probe never answered; a probe that said "not loaded" and
-	// only then hung has answered, and is judged below like any other answer. A process the launch
-	// started holding its output open past WaitDelay is the same kind of transient non-answer.
+	// only then hung has answered, and is judged below like any other answer.
 	if r.timedOut && !strings.Contains(r.output, notLoadedMarker) {
 		return bootprobe.Outcome{Detail: r.killed(launch, g.timeout)}, ""
-	}
-	if r.heldOpen && !strings.Contains(r.output, notLoadedMarker) {
-		return bootprobe.Outcome{Detail: r.heldOpenDetail(launch)}, ""
 	}
 	loaded := strings.Contains(r.output, loadedMarker)
 	if r.exit == 0 && loaded {
@@ -598,9 +594,6 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 		if r.timedOut && !answeredNo {
 			return bootprobe.Outcome{Detail: r.killed(launch, g.timeout)}
 		}
-		if r.heldOpen && !answeredNo {
-			return bootprobe.Outcome{Detail: r.heldOpenDetail(launch)}
-		}
 		available := strings.Contains(r.output, agentsMarker)
 		if r.exit == 0 && available {
 			return bootprobe.Outcome{Passed: true}
@@ -637,8 +630,6 @@ func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 		switch {
 		case r.timedOut:
 			return bootprobe.Outcome{Detail: r.killed(launch, g.timeout)}
-		case r.heldOpen:
-			return bootprobe.Outcome{Detail: r.heldOpenDetail(launch)}
 		case r.exit != 0 && strings.Contains(r.stderr, sessionStorageVariable):
 			return bootprobe.Outcome{Passed: true}
 		case r.exit == 0:
@@ -663,17 +654,13 @@ func (g pluginGate) writeProbe(pattern string, source []byte) (string, string, e
 	return dir, probe, nil
 }
 
-// ran is one probe command's run: its exit code (-1 when killed; always 0, misleadingly, when
-// heldOpen is true instead — see heldOpenDetail), its stderr, its stdout, stderr and stdout
-// together, the tail of stderr a refusal quotes, whether the budget killed it, and whether a
-// process it started held its output open past its WaitDelay instead of the probe itself ever
-// answering.
+// ran is one probe command's run: its exit code (-1 when killed), its stderr, its stdout, stderr
+// and stdout together, the tail of stderr a refusal quotes, and whether the budget killed it.
 type ran struct {
 	exit                   int
 	stderr, stdout, output string
 	tail                   string
 	timedOut               bool
-	heldOpen               bool
 	elapsed                time.Duration
 }
 
@@ -692,13 +679,6 @@ func (r ran) killed(launch string, budget time.Duration) string {
 		detail += "\n" + r.tail
 	}
 	return detail
-}
-
-// heldOpenDetail is procgroup.HeldOpenMessage's detail for this probe's launch, with its stderr
-// tail: exit 0 here is not the probe answering, only the one exit code Go reports once a process
-// it started has kept its output open past WaitDelay.
-func (r ran) heldOpenDetail(launch string) string {
-	return r.quoting(procgroup.HeldOpenMessage(launch))
 }
 
 // run runs `sh -c script sh args…` once within the gate's budget, under the gate's environment and
@@ -724,7 +704,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	cmd.Stdin = g.stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	procgroup.Configure(cmd, procgroup.WaitDelay)
+	procgroup.Configure(cmd)
 	job.attach(cmd)
 	started := time.Now()
 	err := cmd.Run()
@@ -736,7 +716,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 		return ran{}, errors.New("the probe was interrupted at the terminal")
 	}
 	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) && !procgroup.HeldOpen(err) {
+	if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, exec.ErrWaitDelay) {
 		return ran{}, err
 	}
 	tail := strings.TrimSpace(stderr.String())
@@ -750,7 +730,6 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 		output:   stderr.String() + "\n" + stdout.String(),
 		tail:     tail,
 		timedOut: errors.Is(attempt.Err(), context.DeadlineExceeded),
-		heldOpen: procgroup.HeldOpen(err),
 		elapsed:  time.Since(started),
 	}, nil
 }

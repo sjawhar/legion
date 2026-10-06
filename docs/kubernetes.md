@@ -1180,11 +1180,10 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   once: `lockTree` holds the tree's launch turn only until the new pod is in the store, well before
   that pod's own init finishes, so by itself it would let a third pod start initializing while a
   second one still is; `awaitTreeInitialized` is what closes that gap, since no new pod is ever
-  created while an existing tree pod is still initializing. Because those two mechanisms already
-  keep two pods from provisioning the shared clone at once, the lock wait itself
-  (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout` `workspace-init` passes when
-  contending for another pod's hold on the shared clone) almost never actually contends, so it is
-  sized as a safety net for whatever can still race around them — the
+  created while an existing tree pod is still initializing. Because of those two mechanisms, the
+  lock wait itself (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout`
+  `workspace-init` passes when contending for another pod's hold on the shared clone) almost never
+  actually contends, so it is sized as a safety net for whatever can still race around them — the
   `ceil(boot) × (intervals + 1)` lock-wait budget alone (`sandbox.Runtime`'s own
   `initWaitSeconds`), with no added `FetchTimeout` — rather than as a budget matched against
   another pod's own remaining registration deadline (a manual `legion workspace-init` without the

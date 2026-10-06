@@ -3,11 +3,9 @@ package procgroup
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"testing"
-	"time"
 )
 
 // Configure's Cancel runs in the race window between ctx firing and the process finishing on its
@@ -18,7 +16,7 @@ import (
 // the kill syscall must be translated, not passed through.
 func TestConfigureCancelMapsESRCHToErrProcessDone(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "true")
-	Configure(cmd, time.Second)
+	Configure(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start a trivial command: %v", err)
 	}
@@ -32,25 +30,12 @@ func TestConfigureCancelMapsESRCHToErrProcessDone(t *testing.T) {
 	}
 }
 
-func TestHeldOpenIsTrueOnlyForErrWaitDelay(t *testing.T) {
-	if !HeldOpen(exec.ErrWaitDelay) {
-		t.Error("HeldOpen(exec.ErrWaitDelay) = false, want true")
-	}
-	if !HeldOpen(fmt.Errorf("run widget: %w", exec.ErrWaitDelay)) {
-		t.Error("HeldOpen on a wrapped ErrWaitDelay = false, want true (errors.Is sees through %w)")
-	}
-	if HeldOpen(nil) {
-		t.Error("HeldOpen(nil) = true, want false")
-	}
-	if HeldOpen(&exec.ExitError{}) {
-		t.Error("HeldOpen(*exec.ExitError{}) = true, want false: an ordinary exit is not this case")
-	}
-}
-
-func TestHeldOpenMessageNamesTheCommand(t *testing.T) {
-	got := HeldOpenMessage("git clone --bare https://example.invalid/widgets.git")
-	want := "a process git clone --bare https://example.invalid/widgets.git started held its output open past its WaitDelay"
-	if got != want {
-		t.Errorf("HeldOpenMessage = %q, want %q", got, want)
+// Configure takes no waitDelay argument: both callers always want the same bound, so Configure
+// sets it from the package's own WaitDelay constant rather than asking each caller to pass it.
+func TestConfigureSetsThePackagesOwnWaitDelay(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "true")
+	Configure(cmd)
+	if cmd.WaitDelay != WaitDelay {
+		t.Errorf("cmd.WaitDelay = %s, want the package's own WaitDelay (%s)", cmd.WaitDelay, WaitDelay)
 	}
 }
