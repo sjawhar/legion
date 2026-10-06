@@ -2435,6 +2435,10 @@ export interface DeliveryPR {
   readonly deploy_run: number | null;
   readonly deployed_at: string | null;
   readonly deployed_status: "deployed" | "waiting" | "not_tracked";
+  /** Set once this pull request's completing fetch answered a permanent 404/410 from GitHub (or
+   *  could not resolve which installation covers its repository): why, for the drill-down. Null
+   *  for every normal row. */
+  readonly unfetchable_reason: string | null;
 }
 
 /** One `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a successful production deploy

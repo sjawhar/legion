@@ -218,15 +218,19 @@ func DeletePullRequest(ctx context.Context, pool *store.Pool, repo string, numbe
 }
 
 // MarkPullRequestUnfetchable records that repo#number's completing fetch answered a permanent
-// 404 or 410 (FetchPullRequest's ErrPullRequestNotFound): the pull request or its repository no
+// 404 or 410 (FetchPullRequest's ErrPullRequestNotFound) or a 404 resolving which installation
+// covers the repository (githubapp.ErrNoInstallation): the pull request or its repository no
 // longer exists, or no longer reaches this token. ListPartialPullRequests stops returning the row
 // until a later successful UpsertPullRequest clears it (a webhook retry, or a reconcile pass once
-// the repository or PR becomes reachable again).
+// the repository or PR becomes reachable again). Conditioned on the row still being partial: a
+// concurrent write (a live webhook, or another goroutine of this same reconcile pass racing a
+// retried fetch) can complete the row between this caller's own failed fetch and this UPDATE
+// running, and marking it unfetchable after that would silently throw the completion away.
 func MarkPullRequestUnfetchable(ctx context.Context, pool *store.Pool, repo string, number int, reason string) error {
 	_, err := pool.Exec(ctx, `
 		update delivery_pull_requests
 		set unfetchable_at = now(), unfetchable_reason = $3
-		where repo = $1 and number = $2
+		where repo = $1 and number = $2 and partial
 	`, repo, number, reason)
 	return err
 }
@@ -335,6 +339,10 @@ func ScanJob(row pgx.Row) (DeliveryRunJob, error) {
 // UpsertRunJobs writes every job of one run, keyed on (repo, run_id, name): a job's own identity
 // is its name, since GitHub does not number jobs and a run never repeats one within the attempt
 // intake and reconcile keep. The run row itself must already exist (delivery_runs' foreign key).
+// Reaching here means ListWorkflowRunJobs just succeeded for this run, so this also clears
+// jobs_unfetchable_at/jobs_unfetchable_reason to null: a successful listing is itself the "it is
+// fetchable after all" signal, the same way a successful UpsertPullRequest clears
+// unfetchable_at/unfetchable_reason.
 func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64, jobs []DeliveryRunJob) error {
 	for _, job := range jobs {
 		var conclusion *string
@@ -353,7 +361,48 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 			return fmt.Errorf("upsert job %q of run %d: %w", job.Name, runID, err)
 		}
 	}
+	if _, err := pool.Exec(ctx, `
+		update delivery_runs set jobs_unfetchable_at = null, jobs_unfetchable_reason = null
+		where repo = $1 and run_id = $2
+	`, repo, runID); err != nil {
+		return fmt.Errorf("clear jobs-unfetchable mark for run %d: %w", runID, err)
+	}
 	return nil
+}
+
+// MarkRunJobsUnfetchable records that repo's run_id's job listing answered a permanent 404
+// (github_runs.go's ErrRunNotFound) or a 404 resolving which installation covers the repository
+// (githubapp.ErrNoInstallation): the run's repository no longer exists, or no longer reaches this
+// token. reconcileRun skips re-listing this run's jobs on every further pass until a later
+// successful UpsertRunJobs clears it. Conditioned on no job row already existing for this run: a
+// concurrent write (a live webhook's own fetch finishing between this caller's own failed fetch
+// and this UPDATE running) must not be overwritten back to unfetchable.
+func MarkRunJobsUnfetchable(ctx context.Context, pool *store.Pool, repo string, runID int64, reason string) error {
+	_, err := pool.Exec(ctx, `
+		update delivery_runs
+		set jobs_unfetchable_at = now(), jobs_unfetchable_reason = $3
+		where repo = $1 and run_id = $2
+			and not exists (select 1 from delivery_run_jobs where repo = $1 and run_id = $2)
+	`, repo, runID, reason)
+	return err
+}
+
+// RunJobsUnfetchable reports whether repo's run_id already carries a MarkRunJobsUnfetchable mark
+// from an earlier pass, so reconcileRun can skip re-listing jobs GitHub has already told this
+// installation are permanently gone, rather than repeating the same failing call on every further
+// pass within the reconcile overlap window.
+func RunJobsUnfetchable(ctx context.Context, pool *store.Pool, repo string, runID int64) (bool, error) {
+	var unfetchableAt *time.Time
+	err := pool.QueryRow(ctx, `
+		select jobs_unfetchable_at from delivery_runs where repo = $1 and run_id = $2
+	`, repo, runID).Scan(&unfetchableAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return unfetchableAt != nil, nil
 }
 
 // ListRunJobs lists every job of one run, in no particular order (callers that need the jobs in

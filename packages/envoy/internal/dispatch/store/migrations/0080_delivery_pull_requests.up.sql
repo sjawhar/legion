@@ -46,3 +46,6 @@ create table delivery_pull_requests (
 
 create index delivery_pull_requests_merged_at on delivery_pull_requests (merged_at) where merged_at is not null;
 create index delivery_pull_requests_partial on delivery_pull_requests (repo, number) where partial and unfetchable_at is null;
+-- CountUnfetchablePullRequests runs on every GET /api/v1/delivery/timeline; without this, it is a
+-- full table scan on every request.
+create index delivery_pull_requests_unfetchable on delivery_pull_requests (repo, number) where unfetchable_at is not null;

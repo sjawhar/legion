@@ -111,7 +111,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 		failures = append(failures, fmt.Sprintf("%s: %s", step, err))
 	}
 
-	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, owner, repo, since, now))
+	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, since, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, since, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
@@ -127,10 +127,21 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	}
 }
 
+// maxLastErrorLength bounds what fail() writes to delivery_settings.last_error: a reconcile pass
+// with many failing items (every rate-limited run in a reconcileWorkflow pass before Rev's
+// probe-driven stop-at-first-rate-limit fix, 197 of 200 requests, each contributing its own
+// error text) could otherwise grow this column without bound. Generous enough to still name
+// several distinct failures, not just one.
+const maxLastErrorLength = 4000
+
 // fail records a reconcile pass's failure reason in delivery_settings.last_error without
 // advancing last_reconcile_at (RecordReconcileError's own contract).
 func (r *Reconcile) fail(ctx context.Context, cause error) {
-	if err := RecordReconcileError(ctx, r.pool, cause.Error()); err != nil {
+	message := cause.Error()
+	if len(message) > maxLastErrorLength {
+		message = message[:maxLastErrorLength] + fmt.Sprintf(" ... (truncated from %d bytes)", len(message))
+	}
+	if err := RecordReconcileError(ctx, r.pool, message); err != nil {
 		slog.Error("dispatch delivery: record reconcile error", "error", err)
 	}
 }
@@ -145,16 +156,20 @@ func (r *Reconcile) windowStart(settings DeliverySettings, now time.Time) time.T
 }
 
 // reconcileMergedPullRequests searches every population pull request merged in [since, until)
-// across the whole installation (LEGION-294's population spans any repository the three authors
-// merge into, not just the deploy repository), classifies each with the labels the search result
-// already carries, and upserts the ones that belong -- complete, except for MergeCommitSHA,
-// Additions, Deletions and FirstCommitAt, which the search response never carries (the
-// per-repository tokenOwner/tokenRepo pair -- the configured deploy repository -- only resolves
-// which installation to search as).
-func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, tokenOwner, tokenRepo string, since, until time.Time) error {
-	found, err := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, tokenOwner, tokenRepo, settings.PopulationAuthors, since, until)
-	if err != nil {
-		return fmt.Errorf("search merged pull requests: %w", err)
+// across every installation the App has (LEGION-294's population spans any repository the three
+// authors merge into, not just the deploy repository), classifies each with the labels the
+// search result already carries, and upserts the ones that belong -- complete, except for
+// MergeCommitSHA, Additions, Deletions and FirstCommitAt, which the search response never
+// carries. SearchMergedPullRequestsAcrossInstallation returns both a partial result set and a
+// non-nil error when some (not every) installation failed: every result it did gather is still
+// processed here, and the search's own error plus every per-PR classify/upsert failure are
+// aggregated into one returned error, so the pass is reported unhealthy without throwing away
+// whatever this pass did manage to reconcile.
+func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, since, until time.Time) error {
+	found, searchErr := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until)
+	var failures []string
+	if searchErr != nil {
+		failures = append(failures, fmt.Sprintf("search merged pull requests: %s", searchErr))
 	}
 	for _, pr := range found {
 		if pr.MergedAt == nil {
@@ -163,11 +178,16 @@ func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings De
 		repoFull, err := r.searchResultRepo(pr)
 		if err != nil {
 			slog.Warn("dispatch delivery: merged-PR search result", "number", pr.Number, "error", err)
+			failures = append(failures, fmt.Sprintf("pull request #%d: %s", pr.Number, err))
 			continue
 		}
 		if err := r.reconcilePullRequest(ctx, settings, repoFull, pr); err != nil {
 			slog.Warn("dispatch delivery: reconcile pull request", "repo", repoFull, "number", pr.Number, "error", err)
+			failures = append(failures, fmt.Sprintf("%s#%d: %s", repoFull, pr.Number, err))
 		}
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
 	}
 	return nil
 }
@@ -233,14 +253,19 @@ const reconcilePartialConcurrency = 8
 // errgroup.WithContext(ctx)'s own semantics give the redeliver.Sweeper rate-limit pattern
 // directly: SetLimit bounds concurrency, and the first goroutine to return a non-nil error (here,
 // specifically a *githubapp.RateLimitError) cancels groupCtx -- the loop checks it before
-// starting each further completion, so nothing new launches once that happens, while every
-// completion already in flight (there is no cheap way to cancel a request already sent, and
-// GitHub's own rate-limit window does not care whether it finishes) runs to completion.
-// Wait returns that first error, so the pass is reported failed and last_reconcile_at does not
-// advance past rows this pass never got to -- the next pass's overlap re-reads them rather than
-// losing them for good. Any other per-row error (a 404, a deleted repository, a malformed answer)
-// is still only logged and skipped inside completePartialPullRequest, never returned: it is that
-// one row's own problem, not a reason to stop the rest of the batch.
+// starting each further completion, so nothing new launches once that happens. A completion
+// already in flight when that happens is not necessarily spared either: it shares groupCtx, so
+// its own in-flight HTTP request (there is no cheap way to cancel one already sent otherwise) can
+// itself be aborted by the cancellation before GitHub ever answers it -- it does not reliably run
+// to completion the way a row started before the cancellation and already past its HTTP call
+// does. Either way that row's own result is only logged and swallowed inside
+// completePartialPullRequest below, never a second time mistaken for the batch's own stop signal.
+// Wait returns the first row's own *githubapp.RateLimitError, so the pass is reported failed and
+// last_reconcile_at does not advance past rows this pass never got to -- the next pass's overlap
+// re-reads them rather than losing them for good. Any other per-row error (a 404, a deleted
+// repository, a malformed answer) is still only logged and skipped inside
+// completePartialPullRequest, never returned: it is that one row's own problem, not a reason to
+// stop the rest of the batch.
 func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	partials, err := ListPartialPullRequests(ctx, r.pool)
 	if err != nil {
@@ -263,11 +288,14 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 }
 
 // completePartialPullRequest is reconcilePartialPullRequests' per-row body, run as its own
-// errgroup goroutine. Returns non-nil only for a *githubapp.RateLimitError from FetchPullRequest
-// (the signal that stops the batch, per reconcilePartialPullRequests' own doc comment); every
-// other error is logged and swallowed here, since one row's own failure must not stop any other
-// row's completion already in flight. A permanent 404/410 (ErrPullRequestNotFound) marks the row
-// unfetchable instead of logging a transient-looking warning every pass forever.
+// errgroup goroutine. Returns non-nil only for a *githubapp.RateLimitError (the signal that
+// stops the batch, per reconcilePartialPullRequests' own doc comment, from either FetchPullRequest
+// or completePullRequest's own session-trailer fetch); every other error is logged and swallowed
+// here, since one row's own failure must not stop any other row's completion already in flight.
+// A permanent 404/410 (ErrPullRequestNotFound) or a 404 resolving which installation covers the
+// repository (githubapp.ErrNoInstallation -- the repository itself was deleted or renamed, which
+// its own doc comment already names as exactly this case) both mark the row unfetchable instead
+// of logging a transient-looking warning every pass forever.
 func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryPullRequest) error {
 	owner, repo, err := splitRepo(pr.Repo)
 	if err != nil {
@@ -278,10 +306,10 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 	if err != nil {
 		var limited *githubapp.RateLimitError
 		if errors.As(err, &limited) {
-			slog.Warn("dispatch delivery: rate-limited completing partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
+			slog.Warn("dispatch delivery: stopped completing partial pull request: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited
 		}
-		if errors.Is(err, ErrPullRequestNotFound) {
+		if errors.Is(err, ErrPullRequestNotFound) || errors.Is(err, githubapp.ErrNoInstallation) {
 			if markErr := MarkPullRequestUnfetchable(ctx, r.pool, pr.Repo, pr.Number, err.Error()); markErr != nil {
 				slog.Warn("dispatch delivery: mark pull request unfetchable", "repo", pr.Repo, "number", pr.Number, "error", markErr)
 			}
@@ -294,6 +322,11 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 		return nil
 	}
 	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched); err != nil {
+		var limited *githubapp.RateLimitError
+		if errors.As(err, &limited) {
+			slog.Warn("dispatch delivery: stopped fetching session trailers for a partial pull request: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
+			return limited
+		}
 		slog.Warn("dispatch delivery: upsert completed pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
 	}
 	return nil
@@ -313,9 +346,21 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 	}
 	var failures []string
 	for _, run := range runs {
-		if err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run); err != nil {
-			slog.Warn("dispatch delivery: reconcile run", "repo", repoFull, "run_id", run.RunID, "error", err)
-			failures = append(failures, fmt.Sprintf("run %d: %s", run.RunID, err))
+		err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run)
+		if err == nil {
+			continue
+		}
+		slog.Warn("dispatch delivery: reconcile run", "repo", repoFull, "run_id", run.RunID, "error", err)
+		failures = append(failures, fmt.Sprintf("run %d: %s", run.RunID, err))
+		// A rate limit is a global condition on this installation token's budget, not one run's
+		// own problem: Rev's probe showed the un-fixed loop sending 197 of 200 requests after the
+		// first rate-limited one, each adding its own failure text to last_error (57 KB by the
+		// end). Stop here instead, preserving the typed error with %w so a caller checking
+		// errors.As for it still can, unlike every other per-run failure joined into one string.
+		var limited *githubapp.RateLimitError
+		if errors.As(err, &limited) {
+			return fmt.Errorf("%d of %d %s runs attempted before a rate limit stopped the rest: %s: %w",
+				len(failures), len(runs), kind, strings.Join(failures, "; "), limited)
 		}
 	}
 	if len(failures) > 0 {
@@ -328,7 +373,10 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 // commit's timestamp (head_commit.timestamp, read into FetchedRun.HeadCommitAt by
 // github_runs.go's fetchedRunFromItem), unlike the live webhook envelope intake.go handles, which
 // re-verifies the whole run against GitHub rather than trusting the envelope -- and, once it has
-// concluded, its jobs.
+// concluded, its jobs. A run whose jobs listing is already marked unfetchable
+// (MarkRunJobsUnfetchable, from an earlier pass's permanent 404) is skipped rather than
+// re-fetched: the same treatment completePartialPullRequest gives an already-unfetchable pull
+// request.
 func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, run FetchedRun) error {
 	if err := UpsertRun(ctx, r.pool, DeliveryRun{
 		Repo: repoFull, RunID: run.RunID, Kind: kind, PRNumber: run.PRNumber, HeadSHA: run.HeadSHA,
@@ -340,8 +388,21 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 	if run.CompletedAt == nil {
 		return nil
 	}
+	unfetchable, err := RunJobsUnfetchable(ctx, r.pool, repoFull, run.RunID)
+	if err != nil {
+		return fmt.Errorf("check run jobs unfetchable: %w", err)
+	}
+	if unfetchable {
+		return nil
+	}
 	fetchedJobs, err := ListWorkflowRunJobs(ctx, r.github, owner, repo, run.RunID)
 	if err != nil {
+		if errors.Is(err, ErrRunNotFound) || errors.Is(err, githubapp.ErrNoInstallation) {
+			if markErr := MarkRunJobsUnfetchable(ctx, r.pool, repoFull, run.RunID, err.Error()); markErr != nil {
+				slog.Warn("dispatch delivery: mark run jobs unfetchable", "repo", repoFull, "run_id", run.RunID, "error", markErr)
+			}
+			return nil
+		}
 		return fmt.Errorf("list jobs: %w", err)
 	}
 	jobs := make([]DeliveryRunJob, len(fetchedJobs))

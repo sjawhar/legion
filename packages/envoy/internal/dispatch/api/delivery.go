@@ -140,6 +140,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: pr.CreatedAt, MergedAt: pr.MergedAt, FirstCommitAt: pr.FirstCommitAt,
 			Additions: pr.Additions, Deletions: pr.Deletions, Partial: pr.Partial, Rework: pr.Rework,
 			Issue: pr.IssueKey, Sessions: pr.Sessions, DeployedStatus: status,
+			UnfetchableReason: pr.UnfetchableReason,
 		}
 		if len(pr.Sessions) > 0 {
 			agent := delivery.DisplayAgent(pr.Sessions[0], titles)

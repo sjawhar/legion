@@ -3,12 +3,21 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
+
+// ErrRunNotFound is a 404 from GitHub listing a specific run's jobs: the run or its repository no
+// longer exists, or no longer reaches this token. A permanent condition, unlike every other
+// ListWorkflowRunJobs failure (a transient 5xx, a rate limit) -- reconcile.reconcileRun marks the
+// run's jobs unfetchable rather than retrying forever, the same treatment github_prs.go's
+// ErrPullRequestNotFound gives a permanently-gone pull request.
+var ErrRunNotFound = errors.New("workflow run not found or gone")
 
 // FetchedRun is one workflow run's GitHub facts.
 //
@@ -202,6 +211,9 @@ func ListWorkflowRunJobs(ctx context.Context, client *githubapp.Client, owner, r
 		body, status, header, err := client.Read(ctx, token, path)
 		if err != nil {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
+		}
+		if status == http.StatusNotFound {
+			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w (status %d)", owner, repo, runID, page, ErrRunNotFound, status)
 		}
 		if err := githubapp.CheckResponse(status, header, body); err != nil {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)

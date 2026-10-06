@@ -386,6 +386,101 @@ func TestReconcileWorkflowFailureStopsThePassFromReportingSuccess(t *testing.T) 
 	}
 }
 
+// TestReconcileMarksA404RunJobsUnfetchableAndSkipsItUntilItRecovers proves Deep's finding: unlike
+// TestReconcileWorkflowFailureStopsThePassFromReportingSuccess's transient 500 (which must keep
+// failing the pass), a run whose jobs listing answers a permanent 404 must not fail the pass at
+// all -- it is marked unfetchable instead, the same treatment S3 gives a permanently 404ing pull
+// request -- and a later pass must not even re-call the jobs endpoint for it. reconcileRun itself
+// never retries a run it has marked unfetchable (there is no "the window reopened" signal to
+// retry on, unlike a partial pull request's own completing fetch); what clears the mark is an
+// independent successful write of its jobs -- here, standing in for intake.go's own live-webhook
+// UpsertRunJobs call, which already runs through the same shared upsert.
+func TestReconcileMarksA404RunJobsUnfetchableAndSkipsItUntilItRecovers(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+
+	fake := newFakeGitHub(t)
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{
+			"total_count": 1,
+			"workflow_runs": []map[string]any{
+				{
+					"id": 901, "head_sha": "deadbeef", "html_url": "https://github.com/acme/widgets/actions/runs/901",
+					"status": "completed", "conclusion": "success",
+					"run_started_at": "2024-01-01T02:00:00Z", "created_at": "2024-01-01T02:00:00Z",
+					"updated_at":    "2024-01-01T02:10:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T01:55:00Z"},
+					"pull_requests": []any{},
+				},
+			},
+		})
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fpr-checks.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	var jobsCalls atomic.Int32
+	fake.handle("GET /repos/acme/widgets/actions/runs/901/jobs", func(w http.ResponseWriter, r *http.Request) {
+		jobsCalls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	client := fake.newTestClient()
+	reconcile := NewReconcile(pool, client)
+
+	reconcile.runOnce(ctx)
+	after, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("GetSettings after first pass: %v", err)
+	}
+	if after.LastError != nil {
+		t.Fatalf("settings.LastError = %q, want nil: a permanently 404ing run's jobs must not fail the whole pass", *after.LastError)
+	}
+	if after.LastReconcileAt == nil {
+		t.Fatal("settings.LastReconcileAt is nil, want it advanced: the pass must be reported healthy")
+	}
+	if jobsCalls.Load() != 1 {
+		t.Fatalf("jobs endpoint called %d times, want 1", jobsCalls.Load())
+	}
+	unfetchable, err := RunJobsUnfetchable(ctx, pool, "acme/widgets", 901)
+	if err != nil {
+		t.Fatalf("RunJobsUnfetchable after first pass: %v", err)
+	}
+	if !unfetchable {
+		t.Fatal("RunJobsUnfetchable = false after a permanent 404, want true")
+	}
+
+	// A second pass must skip the jobs listing entirely: the run is already marked unfetchable.
+	reconcile.runOnce(ctx)
+	if jobsCalls.Load() != 1 {
+		t.Fatalf("jobs endpoint called %d times after a second pass, want still 1 (skipped once marked unfetchable)", jobsCalls.Load())
+	}
+
+	// An independent successful write of this run's jobs (a live webhook retry's own
+	// UpsertRunJobs call, intake.go's own write path) clears the mark.
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 901, []DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 901, Name: "build", StartedAt: ptrTime("2024-01-01T02:00:00Z"), CompletedAt: ptrTime("2024-01-01T02:05:00Z")},
+	}); err != nil {
+		t.Fatalf("UpsertRunJobs (simulating a live webhook retry): %v", err)
+	}
+	unfetchable, err = RunJobsUnfetchable(ctx, pool, "acme/widgets", 901)
+	if err != nil {
+		t.Fatalf("RunJobsUnfetchable after recovery: %v", err)
+	}
+	if unfetchable {
+		t.Fatal("RunJobsUnfetchable = true after a successful UpsertRunJobs, want false")
+	}
+	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 901)
+	if err != nil {
+		t.Fatalf("ListRunJobs after recovery: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Name != "build" {
+		t.Fatalf("jobs = %+v, want one job named build once the listing recovers", jobs)
+	}
+}
+
 // TestReconcilePartialPullRequestsStopsOnRateLimitInsteadOfRetryingAtFullConcurrency proves the
 // errgroup.WithContext + SetLimit(8) rate-limit stop end to end: among several partial rows, the
 // one answering a 403 secondary-rate-limit response must stop every further completion from

@@ -107,7 +107,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	return f
 }
 
-// installationIDFromtoken recovers the installation id POST /app/installations/{id}/access_tokens
+// installationIDFromToken recovers the installation id POST /app/installations/{id}/access_tokens
 // encoded into its own fake token ("ghs_fake_<id>_<mint counter>"), so GET
 // /installation/repositories can answer the asking installation's own repos rather than always
 // the default one.
@@ -364,11 +364,12 @@ func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	// tokenOwner/tokenRepo (acme/widgets) only resolves which installation to ask about -- the
-	// query itself must carry an explicit repo: qualifier for every repository the installation's
-	// GET /installation/repositories lists, since an unqualified query is NOT scoped by the
-	// authenticating token for public-repository content (it searches all of public GitHub).
-	if _, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, "acme", "widgets", []string{"alice", "bob"}, since, until); err != nil {
+	// The fake's single default installation (fake.installationRepos) covers acme/widgets and
+	// acme/other-widgets: the query itself must carry an explicit repo: qualifier for every
+	// repository the installation's GET /installation/repositories lists, since an unqualified
+	// query is NOT scoped by the authenticating token for public-repository content (it searches
+	// all of public GitHub).
+	if _, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, []string{"alice", "bob"}, since, until); err != nil {
 		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
 	}
 
@@ -404,7 +405,7 @@ func TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation(t *
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	results, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, "acme", "widgets", []string{"alice"}, since, until)
+	results, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, []string{"alice"}, since, until)
 	if err != nil {
 		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
 	}

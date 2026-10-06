@@ -307,10 +307,20 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 // answer) are in hand. The shared tail both intake's live handlePullRequestEnvelope and
 // reconcile's completePartialPullRequest call, so "a live webhook completes a PR" and "reconcile
 // completes a partial row" write through the exact same last steps, never two copies that can
-// drift from each other.
+// drift from each other. A rate-limited session-trailer fetch returns the *githubapp.RateLimitError
+// without upserting anything: writing the row Partial: false with no sessions on a rate limit
+// would complete it with empty attribution exactly as permanently as a real "this PR has no
+// Omp-Session trailer" answer, and the next pass would never revisit it to try again -- leaving
+// the row untouched (still partial, for reconcile's own caller; unwritten, for intake's) means
+// whichever path calls this next actually retries the fetch instead of accepting a false empty
+// answer.
 func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest) error {
 	sessions, err := fetchSessionTrailers(ctx, github, owner, repo, number)
 	if err != nil {
+		var limited *githubapp.RateLimitError
+		if errors.As(err, &limited) {
+			return limited
+		}
 		slog.Warn("dispatch delivery: fetch session trailers", "repo", repoFull, "number", number, "error", err)
 	}
 	issueKey := resolveIssueKey(ctx, pool, fetched.Title, fetched.Body)

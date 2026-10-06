@@ -148,25 +148,26 @@ type DeliveryRunJobView struct {
 // the same set of sessions today (LEGION-567: no grouping link exists between sessions) -- see
 // agents.go's comment on the pair for why both still exist.
 type DeliveryPRView struct {
-	ID             string         `json:"id"`
-	Repo           string         `json:"repo"`
-	Number         int            `json:"number"`
-	Title          string         `json:"title"`
-	URL            string         `json:"url"`
-	Author         string         `json:"author"`
-	CreatedAt      *time.Time     `json:"created_at"`
-	MergedAt       *time.Time     `json:"merged_at"`
-	FirstCommitAt  *time.Time     `json:"first_commit_at"`
-	Additions      *int           `json:"additions"`
-	Deletions      *int           `json:"deletions"`
-	Partial        bool           `json:"partial"`
-	Rework         bool           `json:"rework"`
-	Issue          *string        `json:"issue"`
-	Sessions       []string       `json:"sessions"`
-	ParentAgent    *string        `json:"parent_agent"`
-	DeployRun      *int64         `json:"deploy_run"`
-	DeployedAt     *time.Time     `json:"deployed_at"`
-	DeployedStatus DeployedStatus `json:"deployed_status"`
+	ID                string         `json:"id"`
+	Repo              string         `json:"repo"`
+	Number            int            `json:"number"`
+	Title             string         `json:"title"`
+	URL               string         `json:"url"`
+	Author            string         `json:"author"`
+	CreatedAt         *time.Time     `json:"created_at"`
+	MergedAt          *time.Time     `json:"merged_at"`
+	FirstCommitAt     *time.Time     `json:"first_commit_at"`
+	Additions         *int           `json:"additions"`
+	Deletions         *int           `json:"deletions"`
+	Partial           bool           `json:"partial"`
+	Rework            bool           `json:"rework"`
+	Issue             *string        `json:"issue"`
+	Sessions          []string       `json:"sessions"`
+	ParentAgent       *string        `json:"parent_agent"`
+	DeployRun         *int64         `json:"deploy_run"`
+	DeployedAt        *time.Time     `json:"deployed_at"`
+	DeployedStatus    DeployedStatus `json:"deployed_status"`
+	UnfetchableReason *string        `json:"unfetchable_reason"`
 }
 
 // DeliveryRunView is one `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a successful

@@ -8,8 +8,9 @@ import {
 } from "../../theme/classes";
 import { type DeliveryFreshness, sourceFreshness } from "./lib/freshness";
 
-/** One row per aggregate freshness timestamp the delivery API reports (reconcile, events); red,
- *  with its reason in the text and on hover, when it has gone stale or never happened. Ticks
+/** One row per freshness fact sourceFreshness reports: the two aggregate timestamps (reconcile,
+ *  events) and, when positive, the unfetchable pull-request count -- red, with its reason in the
+ *  text and on hover, when it has gone stale, never happened, or (the count) is nonzero. Ticks
  *  every second on its own, so the ages move between refetches without re-rendering the page. */
 export function SourceFreshness({ freshness }: { freshness: DeliveryFreshness }): ReactNode {
   const [now, setNow] = useState(() => Date.now());

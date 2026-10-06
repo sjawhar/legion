@@ -128,6 +128,9 @@ type Client struct {
 	// needs to re-fetch it.
 	installations   []Installation
 	installationsAt time.Time
+	// installationRepos caches ListInstallationRepositoriesByID's own answer per installation id,
+	// for the same reason.
+	installationRepos map[int64]cachedRepositories
 }
 
 // installationsCacheTTL bounds how long ListInstallations trusts its own cached answer before
@@ -265,22 +268,39 @@ func (c *Client) installation(ctx context.Context, owner, repo string) (Installa
 	if status != http.StatusOK {
 		return Installation{}, fmt.Errorf("GET %s: status %d: %s", target, status, body)
 	}
-	var payload struct {
-		ID          int64         `json:"id"`
-		AppSlug     string        `json:"app_slug"`
-		Permissions auth.AppPerms `json:"permissions"`
-	}
+	var payload installationPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return Installation{}, fmt.Errorf("decode installation: %w", err)
 	}
 	return Installation{ID: payload.ID, AppSlug: payload.AppSlug, Permissions: payload.Permissions}, nil
 }
 
+// installationPayload is GitHub's one object shape for an installation, shared by
+// GET /repos/{owner}/{repo}/installation (installation()) and GET /app/installations
+// (ListInstallations): identical except that only the list form's answer needs Account, since a
+// repo-scoped lookup already knows the account from its own owner/repo argument.
+type installationPayload struct {
+	ID      int64  `json:"id"`
+	AppSlug string `json:"app_slug"`
+	Account struct {
+		Login string `json:"login"`
+	} `json:"account"`
+	Permissions auth.AppPerms `json:"permissions"`
+}
+
+// maxInstallations bounds ListInstallations' pagination the same way maxInstallationRepositories
+// bounds a single installation's own repository list: a real-world App installed on far more
+// accounts than this should fail loudly rather than grow an unbounded page loop forever.
+const maxInstallations = 2000
+
 // ListInstallations lists every installation of this App (GET /app/installations,
 // JWT-authenticated, paginated): LEGION-567's merged-PR search must cover every installation the
 // App has, not only the one covering the configured deploy repository, since the population rule
-// (an author allowlist) names no installation or org boundary. Cached for installationsCacheTTL
-// the same way RepositoryToken caches an owner/repo's installation ID.
+// (an author allowlist) names no installation or org boundary. Cached for installationsCacheTTL:
+// unlike RepositoryToken's owner/repo cache (invalidated only when a mint actually fails), this is
+// a plain time-based cache, since there is no per-call signal analogous to a failed token mint to
+// invalidate it on -- the install list changes only when a human installs/uninstalls the App, far
+// slower than any reconcile pass needs a fresh answer.
 func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) {
 	if c == nil {
 		return nil, ErrNoAppKey
@@ -298,21 +318,14 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 	var installations []Installation
 	for page := 1; ; page++ {
 		target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
-		body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+jwt)
+		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
 		if err != nil {
 			return nil, fmt.Errorf("list installations (page %d): %w", page, err)
 		}
-		if status != http.StatusOK {
-			return nil, fmt.Errorf("GET %s: status %d: %s", target, status, body)
+		if err := CheckResponse(status, header, body); err != nil {
+			return nil, fmt.Errorf("list installations (page %d): %w", page, err)
 		}
-		var payload []struct {
-			ID      int64  `json:"id"`
-			AppSlug string `json:"app_slug"`
-			Account struct {
-				Login string `json:"login"`
-			} `json:"account"`
-			Permissions auth.AppPerms `json:"permissions"`
-		}
+		var payload []installationPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return nil, fmt.Errorf("decode installations (page %d): %w", page, err)
 		}
@@ -323,6 +336,9 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 			installations = append(installations, Installation{
 				ID: entry.ID, AppSlug: entry.AppSlug, Permissions: entry.Permissions, AccountLogin: entry.Account.Login,
 			})
+		}
+		if len(installations) > maxInstallations {
+			return nil, fmt.Errorf("list installations: the App has more than %d installations", maxInstallations)
 		}
 		if len(payload) < 100 {
 			break
@@ -368,37 +384,54 @@ func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (strin
 // installationRepositoriesPerPage is GitHub's own page size for GET /installation/repositories.
 const installationRepositoriesPerPage = 100
 
-// maxInstallationRepositories bounds ListInstallationRepositories the same way
+// maxInstallationRepositories bounds ListInstallationRepositoriesByID the same way
 // delivery.maxDeliveryWindow/maxRunsPerWindow/maxPullRequestsPerWindow bound their own queries:
 // an installation covering a very large org should fail loudly past this rather than build an
 // ever-growing, unbounded `repo:` qualifier list on every 5-minute reconcile pass.
 const maxInstallationRepositories = 2000
 
-// ListInstallationRepositories lists every repository ("owner/name") the App installation
-// covering owner/repo can see, via GET /installation/repositories (an installation-token
-// endpoint, paginated). LEGION-567's merged-PR search needs this to scope its query to exactly
-// the installation's own repositories: an unqualified GitHub search query is NOT scoped by the
-// authenticating token for public-repository content -- it searches all of public GitHub
-// (confirmed live against a real installation token) -- so the caller must supply an explicit
-// repo: qualifier per repository instead of relying on the token alone.
-func (c *Client) ListInstallationRepositories(ctx context.Context, owner, repo string) ([]string, error) {
-	token, err := c.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return nil, fmt.Errorf("mint installation token for %s/%s: %w", owner, repo, err)
-	}
-	return listInstallationRepositories(ctx, c, token)
+// cachedRepositories is one installation's repository list and when it was fetched, for
+// ListInstallationRepositoriesByID's own cache.
+type cachedRepositories struct {
+	names []string
+	at    time.Time
 }
 
-// ListInstallationRepositoriesByID is ListInstallationRepositories for an installation
-// ListInstallations already resolved by id, with no representative owner/repo to mint a token
-// through RepositoryToken's own owner/repo-keyed cache -- every installation but the one covering
-// the configured deploy repository needs this form.
+// ListInstallationRepositoriesByID lists every repository ("owner/name") installation installs
+// -- GET /installation/repositories (an installation-token endpoint, paginated), under a token
+// minted directly by id (ListInstallations already resolved the id; there is no representative
+// owner/repo to mint one through RepositoryToken's own owner/repo-keyed cache). LEGION-567's
+// merged-PR search needs this to scope its query to exactly each installation's own repositories:
+// an unqualified GitHub search query is NOT scoped by the authenticating token for
+// public-repository content -- it searches all of public GitHub (confirmed live against a real
+// installation token) -- so the caller must supply an explicit repo: qualifier per repository
+// instead of relying on the token alone. Cached for installationsCacheTTL per installation id,
+// for the same reason ListInstallations caches its own answer: round 4's reconcile pass refetched
+// every installation's full repository list on every pass, multiplying the across-installation
+// search's own cost by the installation count for data that changes on human timescales, not
+// every five minutes.
 func (c *Client) ListInstallationRepositoriesByID(ctx context.Context, installationID int64) ([]string, error) {
+	c.mu.Lock()
+	cached, ok := c.installationRepos[installationID]
+	c.mu.Unlock()
+	if ok && c.now().Sub(cached.at) < installationsCacheTTL {
+		return cached.names, nil
+	}
 	token, err := c.Token(ctx, installationID)
 	if err != nil {
 		return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
 	}
-	return listInstallationRepositories(ctx, c, token)
+	names, err := listInstallationRepositories(ctx, c, token)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	if c.installationRepos == nil {
+		c.installationRepos = map[int64]cachedRepositories{}
+	}
+	c.installationRepos[installationID] = cachedRepositories{names: names, at: c.now()}
+	c.mu.Unlock()
+	return names, nil
 }
 
 func listInstallationRepositories(ctx context.Context, c *Client, token string) ([]string, error) {

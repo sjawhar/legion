@@ -19,6 +19,15 @@ create table delivery_runs (
   completed_at timestamptz,
   conclusion text check (conclusion in ('success', 'failure', 'cancelled')),
   url text not null,
+  -- Set when this run's job listing answers a permanent 404 (github_runs.go's ErrRunNotFound) or
+  -- a 404 resolving which installation covers the repository (githubapp.ErrNoInstallation):
+  -- reconcile.reconcileRun stops re-fetching this run's jobs on every further pass within the
+  -- overlap window and does not fail the pass over it, the same treatment
+  -- delivery_pull_requests.unfetchable_at gives a permanently 404ing pull request. Cleared by the
+  -- next successful UpsertRunJobs for this run (a later pass, or a live webhook retry, that
+  -- finally lists its jobs).
+  jobs_unfetchable_at timestamptz,
+  jobs_unfetchable_reason text,
   primary key (repo, run_id)
 );
 

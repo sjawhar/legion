@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
@@ -266,57 +269,102 @@ func SearchMergedPullRequests(ctx context.Context, client *githubapp.Client, own
 	return searchMergedPullRequests(ctx, client, token, []string{owner + "/" + repo}, authors, since, until)
 }
 
+// installationSearchConcurrency bounds how many installations SearchMergedPullRequestsAcrossInstallation
+// searches at once -- the same reasoning as reconcile.go's reconcilePartialConcurrency: enough to
+// meaningfully parallelize an App installed on several accounts without treating one reconcile
+// pass as free to hammer GitHub as hard as it can.
+const installationSearchConcurrency = 8
+
 // SearchMergedPullRequestsAcrossInstallation finds every pull request merged in [since, until)
 // authored by any of authors, across every repository every installation of the App can see.
 // LEGION-294's population rule (an author allowlist: sjawhar, sjawhar-agent, legion-implementer)
 // names no installation or org boundary -- a merge under a second installation is still
 // population, and Rev measured roughly a quarter of the real population living there -- so this
-// does not stop at the one installation covering tokenOwner/tokenRepo (typically the configured
-// deploy repository); it lists every installation (ListInstallations) and searches each one's own
-// repositories (ListInstallationRepositoriesByID), since an App-authenticated search query with
-// no repo:/org: qualifier is NOT scoped to any installation's repositories for public-repository
-// content -- live-verified against a real installation token, it returns results from unrelated
-// public repositories no installation of this App covers. Results are merged and de-duplicated by
-// URL: GitHub does not let one repository belong to two installations of the same App, so a
-// duplicate should never occur, but de-duplicating costs nothing and removes any doubt.
-// tokenOwner/tokenRepo is accepted for its error messages' context and so a caller with exactly
-// one installation configured needs nothing else; it does not otherwise narrow the search.
-func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, tokenOwner, tokenRepo string, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+// does not stop at one configured deploy repository's installation; it lists every installation
+// (ListInstallations) and searches each one's own repositories
+// (ListInstallationRepositoriesByID), since an App-authenticated search query with no repo:/org:
+// qualifier is NOT scoped to any installation's repositories for public-repository content --
+// live-verified against a real installation token, it returns results from unrelated public
+// repositories no installation of this App covers. Results are merged and de-duplicated by URL:
+// GitHub does not let one repository belong to two installations of the same App, so a duplicate
+// should never occur, but de-duplicating costs nothing and removes any doubt.
+//
+// Installations are searched concurrently (errgroup.WithContext + SetLimit, the same pattern
+// reconcile.go's reconcilePartialPullRequests uses) through searchOneInstallation. One
+// installation's own failure never discards what every other installation already found: its
+// error is collected by name (which installation, by id and account) rather than aborting the
+// whole search, and the caller still gets back every result gathered so far alongside a non-nil
+// error naming what failed -- the pass is reported unhealthy, but nothing already found is
+// thrown away. A *githubapp.RateLimitError is the one exception: it stops every further
+// installation from starting (the ones already in flight still finish), since a rate limit is a
+// global condition on this installation token budget, not one installation's own problem.
+func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
 	installations, err := client.ListInstallations(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list installations for %s/%s merged-PR search: %w", tokenOwner, tokenRepo, err)
+		return nil, fmt.Errorf("list installations for merged-PR search: %w", err)
 	}
 	if len(installations) == 0 {
-		return nil, fmt.Errorf("list installations for %s/%s merged-PR search: the App has no installations", tokenOwner, tokenRepo)
+		return nil, errors.New("merged-PR search: the App has no installations")
 	}
 
+	var mu sync.Mutex
 	seen := map[string]bool{}
 	var results []FetchedPullRequest
+	var failures []string
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(installationSearchConcurrency)
 	for _, installation := range installations {
-		repos, err := client.ListInstallationRepositoriesByID(ctx, installation.ID)
-		if err != nil {
-			return nil, fmt.Errorf("list repositories for installation %d (%s) merged-PR search: %w", installation.ID, installation.AccountLogin, err)
+		if groupCtx.Err() != nil {
+			break
 		}
-		if len(repos) == 0 {
-			continue
-		}
-		token, err := client.Token(ctx, installation.ID)
-		if err != nil {
-			return nil, fmt.Errorf("mint token for installation %d (%s) merged-PR search: %w", installation.ID, installation.AccountLogin, err)
-		}
-		found, err := searchMergedPullRequests(ctx, client, token, repos, authors, since, until)
-		if err != nil {
-			return nil, fmt.Errorf("search installation %d (%s): %w", installation.ID, installation.AccountLogin, err)
-		}
-		for _, pr := range found {
-			if seen[pr.URL] {
-				continue
+		installation := installation
+		group.Go(func() error {
+			found, err := searchOneInstallation(groupCtx, client, installation, authors, since, until)
+			if err != nil {
+				var limited *githubapp.RateLimitError
+				if errors.As(err, &limited) {
+					return limited
+				}
+				mu.Lock()
+				failures = append(failures, fmt.Sprintf("installation %d (%s): %s", installation.ID, installation.AccountLogin, err))
+				mu.Unlock()
+				return nil
 			}
-			seen[pr.URL] = true
-			results = append(results, pr)
-		}
+			mu.Lock()
+			for _, pr := range found {
+				if !seen[pr.URL] {
+					seen[pr.URL] = true
+					results = append(results, pr)
+				}
+			}
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return results, fmt.Errorf("rate-limited searching installations: %w", err)
+	}
+	if len(failures) > 0 {
+		return results, fmt.Errorf("%d of %d installations failed: %s", len(failures), len(installations), strings.Join(failures, "; "))
 	}
 	return results, nil
+}
+
+// searchOneInstallation is SearchMergedPullRequestsAcrossInstallation's per-installation body.
+func searchOneInstallation(ctx context.Context, client *githubapp.Client, installation githubapp.Installation, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+	repos, err := client.ListInstallationRepositoriesByID(ctx, installation.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list repositories: %w", err)
+	}
+	if len(repos) == 0 {
+		return nil, nil
+	}
+	token, err := client.Token(ctx, installation.ID)
+	if err != nil {
+		return nil, fmt.Errorf("mint token: %w", err)
+	}
+	return searchMergedPullRequests(ctx, client, token, repos, authors, since, until)
 }
 
 // searchMergedPullRequests pages a GraphQL search query over [since, until) through fetchWindowed

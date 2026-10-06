@@ -78,6 +78,11 @@ function PRDetail({ pr }: { pr: DeliveryPR }): ReactNode {
           Still completing: some fields await the next reconcile pass.
         </p>
       ) : null}
+      {pr.unfetchable_reason === null ? null : (
+        <p className={textMutedOnCanvas}>
+          Can no longer be fetched from GitHub: {pr.unfetchable_reason}
+        </p>
+      )}
     </div>
   );
 }

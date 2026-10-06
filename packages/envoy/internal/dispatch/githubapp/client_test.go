@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,13 @@ type fakeGitHub struct {
 	// DeliveryPermissions' tests; a repo absent from one of these maps gets "" (no permission).
 	actionsPermissions      map[string]string
 	pullRequestsPermissions map[string]string
+	// appInstallations, when non-nil, backs GET /app/installations, paginated at 100 per page; a
+	// nil value answers an empty list. appInstallationsCalls counts every call made, and
+	// appInstallationsRateLimitOnCall (1-indexed, 0 means never) makes that numbered call answer a
+	// 403 secondary rate limit instead of a real page.
+	appInstallations                []map[string]any
+	appInstallationsCalls           int
+	appInstallationsRateLimitOnCall int
 }
 
 func (f *fakeGitHub) handler() http.Handler {
@@ -115,6 +123,32 @@ func (f *fakeGitHub) handler() http.Handler {
 			"expires_at": f.tokenExpiresAt.Format(time.RFC3339),
 		}); err != nil {
 			f.t.Errorf("encode token: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, r *http.Request) {
+		f.verifyAppJWT(r)
+		f.appInstallationsCalls++
+		if f.appInstallationsRateLimitOnCall != 0 && f.appInstallationsCalls == f.appInstallationsRateLimitOnCall {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		const perPage = 100
+		start, end := (page-1)*perPage, page*perPage
+		if start > len(f.appInstallations) {
+			start = len(f.appInstallations)
+		}
+		if end > len(f.appInstallations) {
+			end = len(f.appInstallations)
+		}
+		if err := json.NewEncoder(w).Encode(f.appInstallations[start:end]); err != nil {
+			f.t.Errorf("encode installations: %v", err)
 		}
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
@@ -729,5 +763,53 @@ func TestDirFilesEnforceMaxFileSize(t *testing.T) {
 	_, _, err = readDir(t, client, token)
 	if !errors.Is(err, ErrFileTooLarge) || !strings.Contains(err.Error(), ".dispatch/architecture/big.md") {
 		t.Fatalf("oversized listing: err=%v, want ErrFileTooLarge naming the file, refused before the blob read", err)
+	}
+}
+
+// TestListInstallationsPaginatesCachesAndDetectsARateLimit covers Qual's finding that
+// ListInstallations had no direct unit test: pagination (more than one page of 100), the
+// installationsCacheTTL cache (a second call within the TTL makes no further request), and a 403
+// secondary-rate-limit response surfacing as a *RateLimitError via CheckResponse.
+func TestListInstallationsPaginatesCachesAndDetectsARateLimit(t *testing.T) {
+	fake := &fakeGitHub{installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour)}
+	for i := range 150 {
+		fake.appInstallations = append(fake.appInstallations, map[string]any{
+			"id": int64(i + 1), "app_slug": "dispatch-test",
+			"account":     map[string]any{"login": fmt.Sprintf("account-%d", i+1)},
+			"permissions": map[string]string{"contents": "read"},
+		})
+	}
+	client := newTestClient(t, fake)
+
+	installations, err := client.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations: %v", err)
+	}
+	if len(installations) != 150 {
+		t.Fatalf("len(installations) = %d, want 150 (pagination across 2 pages of 100)", len(installations))
+	}
+	if fake.appInstallationsCalls != 2 {
+		t.Fatalf("GET /app/installations calls = %d, want 2", fake.appInstallationsCalls)
+	}
+	if installations[0].AccountLogin != "account-1" || installations[149].AccountLogin != "account-150" {
+		t.Fatalf("installations[0].AccountLogin=%q installations[149].AccountLogin=%q, want account-1/account-150", installations[0].AccountLogin, installations[149].AccountLogin)
+	}
+
+	// A second call within installationsCacheTTL makes no further request.
+	if _, err := client.ListInstallations(context.Background()); err != nil {
+		t.Fatalf("ListInstallations (cached): %v", err)
+	}
+	if fake.appInstallationsCalls != 2 {
+		t.Fatalf("GET /app/installations calls after a cached call = %d, want still 2", fake.appInstallationsCalls)
+	}
+
+	// A fresh client (so the cache starts empty) hitting a rate limit on its first call surfaces
+	// a *RateLimitError.
+	rateLimited := &fakeGitHub{installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour), appInstallationsRateLimitOnCall: 1}
+	rateLimitedClient := newTestClient(t, rateLimited)
+	_, err = rateLimitedClient.ListInstallations(context.Background())
+	var limited *RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("ListInstallations with a 403 rate limit: err = %v, want a *RateLimitError", err)
 	}
 }
