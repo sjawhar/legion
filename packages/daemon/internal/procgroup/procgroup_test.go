@@ -34,9 +34,9 @@ func TestConfigureCancelMapsESRCHToErrProcessDone(t *testing.T) {
 // Err is the one place both execRunner and the boot gate's probe runner read a command's real
 // exit: nil for an ordinary exit (whatever its own code) and for exec.ErrWaitDelay (a clean exit
 // whose I/O draining outlived WaitDelay), seen through a wrapped error too — a caller then reads
-// cmd.ProcessState.ExitCode() for both. Had Err instead let exec.ErrWaitDelay through unchanged,
-// a caller would propagate it as a real error and a command that actually exited 0 would be
-// reported as a failure (as "command failed (exit -1)" was, before this package existed).
+// cmd.ProcessState.ExitCode() for both. Had Err instead let exec.ErrWaitDelay through unchanged, a
+// caller would propagate it as a real error, reporting a command that actually exited 0 as
+// "run git: exec: WaitDelay expired before I/O complete" rather than reading its own exit code.
 // Anything else — the command never started, or Run failed some other way — is unchanged.
 func TestErrRecognizesAnOrdinaryExitAndErrWaitDelayButNothingElse(t *testing.T) {
 	exited := exec.Command("false").Run()
