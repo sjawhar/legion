@@ -24,7 +24,11 @@ import (
 // row and no requesting enrollment) always answers both null. GET /v1/pending's own
 // pendingEntry.Session carries this same shape (handlers_ui_pending.go).
 type recordSessionResp struct {
-	Request    *string `json:"request"`
+	// The id the request itself stated as an unsigned override in its body; null when it named
+	// none.
+	Request *string `json:"request"`
+	// The id the requesting session's own enrollment stated when it enrolled; null when it named
+	// none, or for a machine login, which has no requesting enrollment at all.
 	Enrollment *string `json:"enrollment"`
 }
 
