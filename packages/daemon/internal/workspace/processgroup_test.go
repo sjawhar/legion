@@ -43,11 +43,11 @@ func trustHangingServerCA(t *testing.T, server *httptest.Server) {
 	t.Setenv("GIT_SSL_CAINFO", caFile)
 }
 
-// shortTimeoutRunner retargets the fetch's clone at a local server (as a stallRunner would) and
-// cuts Fetch's real FetchTimeout (30 minutes, never practical to wait out) down to timeout, so the
-// test proves execRunner.Run's own process-group kill without waiting real minutes — the way the
-// reviewer's own reproduction (the production Fetch through NewRunner, against a local TLS server,
-// with the timeout cut to a few seconds) found the bug.
+// shortTimeoutRunner retargets the fetch's clone at a local server and cuts Fetch's real
+// FetchTimeout (30 minutes, never practical to wait out) down to timeout, so the test proves
+// execRunner.Run's own process-group kill without waiting real minutes: the production Fetch
+// through NewRunner, against a local TLS server that accepts a connection and never answers, with
+// the timeout cut to a few seconds.
 type shortTimeoutRunner struct {
 	remote  string
 	timeout time.Duration
@@ -89,18 +89,21 @@ func TestFetchKillsGitsWholeProcessTreeWhenItsTimeoutFires(t *testing.T) {
 	if !strings.Contains(err.Error(), "command timed out") {
 		t.Errorf("Fetch error = %q, want it to name the timeout (\"command timed out\")", err)
 	}
-	if elapsed > timeout+5*time.Second {
+	if elapsed > timeout+3*time.Second {
 		t.Errorf("Fetch took %s to return, want within a few seconds of its %s timeout", elapsed, timeout)
 	}
 
-	if leftover := gitProcessesUnder(t, req.CredentialDir); len(leftover) != 0 {
+	if leftover := gitProcessesUnder(t, server.URL); len(leftover) != 0 {
 		t.Errorf("git processes still running after Fetch returned: %v", leftover)
 	}
 }
 
-// gitProcessesUnder scans /proc for a process whose command line names marker (this test's own
-// unique CredentialDir), the way a git or git-remote-https process orphaned by a timeout that
-// killed only its parent would still show up.
+// gitProcessesUnder scans /proc for a process whose command line names marker (server.URL, the
+// one local address the fetch's clone and git-remote-https both reach): a git or git-remote-https
+// process orphaned by a timeout that killed only its parent would still show up this way. A
+// request's own CredentialDir never appears in any git argv — the credential helper reaches git
+// through GIT_CONFIG_VALUE_1 (clone.go), not a path — so scanning for it finds nothing whether or
+// not a process leaked.
 func gitProcessesUnder(t *testing.T, marker string) []string {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
