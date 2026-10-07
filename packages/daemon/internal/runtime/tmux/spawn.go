@@ -211,7 +211,7 @@ func makePaneHome(stateDir string) error {
 }
 
 // PaneVariables is a launch's environment without the launch, for a process this runtime does not
-// start that must be told exactly what a pane is: the rigs under packages/pi-envoy/scripts, which
+// start that must be told exactly what a pane is: the rigs under packages/pi-legion/scripts, which
 // run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and returns the
 // variables panePairs tells a pane for spec, NAME=value in their order, files being the secret
 // files they point at.

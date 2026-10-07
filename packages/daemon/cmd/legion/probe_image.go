@@ -26,9 +26,10 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // runProbeImage is `legion probe-image`, run inside the worker image: by its build's final step
 // (packages/daemon/docker/worker.Dockerfile), and with the daemon's own contract by the daemon's
 // probe Sandbox, which reads the OK line back from the pod's log (internal/runtime/sandbox,
-// ProbeImage). Both pass --plugin-root, the plugin directory a pod loads as its one explicit
-// extension, and the command refuses a run without it (exit 2): the probe certifies the lane a pod
-// uses, so a build line that lost the flag fails the build instead of probing a lane no pod loads.
+// ProbeImage). Both pass --plugin-root and --envoy-plugin-root, the Legion and Envoy plugin
+// directories a pod loads as its two explicit extensions, and the command refuses a run without
+// either (exit 2): the probe certifies the lane a pod uses, so a build line that lost a flag fails
+// the build instead of probing a lane no pod loads.
 // It runs the image's launch probes under the image's own environment (daemon.ProbeImage) and,
 // when every one passes, prints bootprobe.OKLine; a failure is the probe's message, exit 1, so a
 // broken image never publishes. Unlike the TypeScript command, the contract is always checked:
@@ -47,11 +48,12 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // own (natsauth.Seed) and must be a user's, and the line before the OK line names that user's
 // public key (bootprobe.NATSUserLine), never the seed, for the daemon to compare with its own.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> [flags]", stderr)
+	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> --envoy-plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
 	contract := flags.String("daemon-api-version", strconv.Itoa(api.DaemonAPIVersion),
-		"the daemon API contract the image's pi-legion-envoy must declare (the daemon's probe Sandbox passes its own)")
-	pluginRoot := flags.String("plugin-root", "", "the plugin directory a pod loads as its one explicit extension, which the load probe loads the same way (required)")
+		"the daemon API contract the image's pi-legion must declare (the daemon's probe Sandbox passes its own)")
+	pluginRoot := flags.String("plugin-root", "", "the Legion plugin directory a pod loads as an explicit extension, which the load probe loads the same way (required)")
+	envoyPluginRoot := flags.String("envoy-plugin-root", "", "the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way (required)")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
@@ -64,7 +66,11 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 2
 	}
 	if *pluginRoot == "" {
-		fmt.Fprintln(stderr, "legion probe-image: --plugin-root is required: the plugin directory a pod loads as its one explicit extension, which the load probe loads the same way")
+		fmt.Fprintln(stderr, "legion probe-image: --plugin-root is required: the Legion plugin directory a pod loads as an explicit extension, which the load probe loads the same way")
+		return 2
+	}
+	if *envoyPluginRoot == "" {
+		fmt.Fprintln(stderr, "legion probe-image: --envoy-plugin-root is required: the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way")
 		return 2
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
@@ -138,7 +144,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
-		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot,
+		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, EnvoyPluginRoot: *envoyPluginRoot,
 		RoleReferences: references, SkipAgentModels: *skipAgentModels,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})

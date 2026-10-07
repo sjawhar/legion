@@ -32,7 +32,7 @@ func newImageOmp(t *testing.T, agents, load, session []string) imageOmp {
 	script := `#!/bin/sh
 dir=` + dir + `
 case "$*" in
-"models --no-extensions --extension "*" --extension "*" --json") kind=load ;;
+"models --no-extensions --extension "*" --extension "*" --extension "*" --json") kind=load ;;
 "models --no-extensions --extension "*" --json") kind=agents ;;
 "models --extension "*" --json") kind=load ;;
 "--no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools") kind=session ;;
@@ -47,18 +47,26 @@ step=$(sed -n "${n}p" "$dir/$kind.plan")
 [ -n "$step" ] || step=$(tail -n 1 "$dir/$kind.plan")
 root="$HOME/.omp"
 [ -n "${OMP_PROFILE:-}" ] && root="$root/profiles/$OMP_PROFILE"
-installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)
-# A pod's lane hands Oh My Pi the plugin root as its one explicit extension: it loads from there.
-[ "$kind:$2" = "load:--no-extensions" ] && installed=$(cd "$4" && pwd -P)
+installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion" 2>/dev/null && pwd -P)
+envoy=$(cd "$root/plugins/node_modules/@sjawhar/pi-envoy" 2>/dev/null && pwd -P)
+# A pod's lane hands Oh My Pi the Envoy plugin root, then the Legion plugin root, as its explicit
+# extensions: each loads from its root.
+if [ "$kind:$2" = "load:--no-extensions" ]; then envoy=$(cd "$4" && pwd -P); installed=$(cd "$6" && pwd -P); fi
+legion="LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$installed/dist/legion.js?mtime=1\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n"
+with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n"
 case "$kind:$step" in
 agents:available) echo LEGION_OMP_AGENTS=available >&2; exit 0 ;;
 agents:missing) echo LEGION_OMP_AGENTS=missing >&2; exit 0 ;;
 agents:silent) exit 0 ;;
 agents:available-then-die) echo LEGION_OMP_AGENTS=available >&2; echo "database is locked" >&2; exit 1 ;;
 agents:missing-then-hang) echo LEGION_OMP_AGENTS=missing >&2; exec sleep 30 ;;
-load:yes) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; exit 0 ;;
+load:yes) printf "$legion$with_envoy" >&2; exit 0 ;;
 load:no) echo LEGION_PLUGIN_LOADED=no >&2; exit 0 ;;
-load:elsewhere) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/elsewhere/pi-legion-envoy/dist/legion.js\n' "$dir" >&2; exit 0 ;;
+load:elsewhere) printf "LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$dir/elsewhere/pi-legion/dist/legion.js\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n$with_envoy" >&2; exit 0 ;;
+load:no-envoy) printf "${legion}LEGION_ENVOY_INTERFACE=none\n" >&2; exit 0 ;;
+load:envoy-mismatch) printf "${legion}LEGION_ENVOY_INTERFACE=2\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n" >&2; exit 0 ;;
+load:legacy) printf "$legion${with_envoy}LEGION_LEGACY_PLUGIN_LOADED_FROM=file://$dir/legacy/dist/legion.js\n" >&2; exit 0 ;;
+load:envoy-elsewhere) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$dir/elsewhere/pi-envoy/dist/envoy.js\n" >&2; exit 0 ;;
 session:refuses) echo "Invalid OMP_SESSION_STORAGE: legion-launch-probe (expected file or sql)" >&2; exit 1 ;;
 session:accepts) echo "startup timings: settings 3ms" >&2; exit 0 ;;
 session:dies) echo "database is locked" >&2; exit 1 ;;
@@ -107,26 +115,30 @@ func (f imageOmp) read(t *testing.T, name string) string {
 	return string(raw)
 }
 
-// imageHome is a HOME laid out as the worker image lays it out: the plugin's manifest declaring
-// legion (raw JSON), linked into the `legion` profile as `omp plugin install` links it.
+// imageHome is a HOME laid out as the worker image lays it out: the Legion plugin's manifest
+// declaring legion (raw JSON) under opt-legion/pi-legion and the Envoy plugin's under
+// opt-legion/pi-envoy, each linked into the `legion` profile as `omp plugin install` links it.
 func imageHome(t *testing.T, legion string) string {
 	t.Helper()
 	home := t.TempDir()
-	unpacked := filepath.Join(home, "opt-legion", "pi-legion-envoy")
-	writeManifest(t, filepath.Join(unpacked, "package.json"), legion)
-	installed := filepath.Dir(manifestAt(filepath.Join(home, ".omp", "profiles", "legion")))
-	mkdir(t, filepath.Dir(installed))
-	if err := os.Symlink(unpacked, installed); err != nil {
-		t.Fatalf("link the plugin into the profile: %v", err)
-	}
+	profile := filepath.Join(home, ".omp", "profiles", "legion")
+	writeManifest(t, filepath.Join(legionRootOf(home), "package.json"), legion)
+	link(t, legionRootOf(home), filepath.Dir(manifestAt(profile)))
+	writeEnvoyManifest(t, filepath.Join(envoyRootOf(home), "package.json"))
+	link(t, envoyRootOf(home), filepath.Dir(envoyManifestAt(profile)))
 	return home
 }
+
+// legionRootOf and envoyRootOf are the image's two plugin roots under home, which a pod passes
+// as its explicit extensions.
+func legionRootOf(home string) string { return filepath.Join(home, "opt-legion", "pi-legion") }
+func envoyRootOf(home string) string  { return filepath.Join(home, "opt-legion", "pi-envoy") }
 
 func imageEnv(home string) map[string]string {
 	return map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": os.Getenv("PATH"), "LEGION_OMP_PATH": "/opt/omp/bin/omp"}
 }
 
-// imageGateUnder is the image probe's gate over the image's HOME, loading the image's plugin root
+// imageGateUnder is the image probe's gate over the image's HOME, loading the image's plugin roots
 // as a pod does, run through f, with budgets that cost the suite little: attempts bounds the retry
 // (0 for none).
 func imageGateUnder(t *testing.T, f imageOmp, legion string, attempts int) (pluginGate, *bytes.Buffer) {
@@ -134,28 +146,29 @@ func imageGateUnder(t *testing.T, f imageOmp, legion string, attempts int) (plug
 	var logged bytes.Buffer
 	home := imageHome(t, legion)
 	return pluginGate{
-		env:        imageEnv(home),
-		pluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
-		workDir:    t.TempDir(),
-		invocation: f.path,
-		timeout:    1500 * time.Millisecond,
-		retry:      bootprobe.Retry{Initial: 10 * time.Millisecond, Max: 40 * time.Millisecond, Attempts: attempts},
-		contract:   3,
-		log:        slog.New(slog.NewTextHandler(&logged, nil)),
+		env:             imageEnv(home),
+		pluginRoot:      legionRootOf(home),
+		envoyPluginRoot: envoyRootOf(home),
+		workDir:         t.TempDir(),
+		invocation:      f.path,
+		timeout:         1500 * time.Millisecond,
+		retry:           bootprobe.Retry{Initial: 10 * time.Millisecond, Max: 40 * time.Millisecond, Attempts: attempts},
+		contract:        3,
+		log:             slog.New(slog.NewTextHandler(&logged, nil)),
 	}, &logged
 }
 
-// A pod loads the plugin as one explicit extension root, with discovery off, so the probe that
-// certifies the image loads it the same way: a packaging or pin change that broke only that lane
-// would otherwise pass the probe whose job is to refuse such an image, and every pod would start
-// without the Legion tool.
+// A pod loads the Envoy and Legion plugins as its two explicit extension roots, in that order,
+// with discovery off, so the probe that certifies the image loads them the same way: a packaging
+// or pin change that broke only that lane would otherwise pass the probe whose job is to refuse
+// such an image, and every pod would start without the Legion tool.
 func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
 	home := imageHome(t, contractCurrent)
-	root := filepath.Join(home, "opt-legion", "pi-legion-envoy")
+	root, envoyRoot := legionRootOf(home), envoyRootOf(home)
 
 	err := ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: root,
+		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: root, EnvoyPluginRoot: envoyRoot,
 		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
@@ -163,26 +176,35 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 		t.Fatalf("ProbeImage = %v, want every probe to pass", err)
 	}
 	argv := f.read(t, "load.argv.1")
-	if !strings.Contains(argv, "--no-extensions ") || !strings.Contains(argv, "--extension "+root+" ") {
-		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: --no-extensions with %s as an explicit extension", strings.TrimSpace(argv), root)
+	if !strings.Contains(argv, "--no-extensions --extension "+envoyRoot+" --extension "+root+" --extension ") {
+		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: --no-extensions with %s then %s as the explicit extensions", strings.TrimSpace(argv), envoyRoot, root)
 	}
-	// The plugin root is also the one extension root the probe's own discovery of task agents and
-	// skills reads: exported as the root, never as the probe's own path.
-	if env := f.read(t, "load.env.1"); !slices.Contains(strings.Split(env, "\n"), "LEGION_PROMPT_ROOT="+root) {
-		t.Errorf("the load probe's environment has no LEGION_PROMPT_ROOT=%s, the plugin root:\n%s", root, env)
+	// The two plugin roots are also the extension roots the probe's own discovery of task agents
+	// and skills reads: exported as the roots, never as the probe's own path.
+	if env := f.read(t, "load.env.1"); !slices.Contains(strings.Split(env, "\n"), "LEGION_PROMPT_ROOTS="+envoyRoot+":"+root) {
+		t.Errorf("the load probe's environment has no LEGION_PROMPT_ROOTS=%s:%s, the plugin roots:\n%s", envoyRoot, root, env)
 	}
-	// Without a plugin root the image probe has no lane a pod uses, and is refused before any probe
-	// runs.
-	f = newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
-	err = ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: imageEnv(imageHome(t, contractCurrent)), WorkDir: t.TempDir(),
-		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
-	})
-	if err == nil || !strings.Contains(err.Error(), "ImageProbe.PluginRoot is required") {
-		t.Fatalf("ProbeImage without a plugin root = %v, want it refused naming PluginRoot", err)
-	}
-	if calls := f.calls(t); len(calls) != 0 {
-		t.Errorf("ProbeImage without a plugin root ran %v, want no probe", calls)
+	// Without either plugin root the image probe has no lane a pod uses, and is refused before any
+	// probe runs.
+	for _, testCase := range []struct {
+		name  string
+		probe ImageProbe
+		want  string
+	}{
+		{"no plugin root", ImageProbe{EnvoyPluginRoot: envoyRoot}, "ImageProbe.PluginRoot is required"},
+		{"no Envoy plugin root", ImageProbe{PluginRoot: root}, "ImageProbe.EnvoyPluginRoot is required"},
+	} {
+		f = newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
+		probe := testCase.probe
+		probe.Omp, probe.Contract, probe.Env, probe.WorkDir = f.path, 3, imageEnv(home), t.TempDir()
+		probe.RoleReferences, probe.Log = promptrefs.New(), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+		err = ProbeImage(context.Background(), probe)
+		if err == nil || !strings.Contains(err.Error(), testCase.want) {
+			t.Fatalf("ProbeImage with %s = %v, want it refused saying %q", testCase.name, err, testCase.want)
+		}
+		if calls := f.calls(t); len(calls) != 0 {
+			t.Errorf("ProbeImage with %s ran %v, want no probe", testCase.name, calls)
+		}
 	}
 }
 
@@ -193,7 +215,7 @@ func TestTheImageProbeRequiresTheRolePromptsReferences(t *testing.T) {
 	home := imageHome(t, contractCurrent)
 
 	err := ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
+		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: legionRootOf(home), EnvoyPluginRoot: envoyRootOf(home),
 		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
@@ -206,28 +228,29 @@ func TestTheImageProbeRequiresTheRolePromptsReferences(t *testing.T) {
 }
 
 // A relative plugin root is the one the caller's working directory names: the probe hands Oh My Pi
-// that directory, absolute, and holds what it loaded to that directory's manifest.
+// each directory, absolute, and holds what it loaded to those directories' manifests.
 func TestTheImageProbeResolvesARelativePluginRoot(t *testing.T) {
 	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
 	home := imageHome(t, contractCurrent)
 	t.Chdir(home)
 
 	err := ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: home, PluginRoot: filepath.Join("opt-legion", "pi-legion-envoy"),
+		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: home,
+		PluginRoot: filepath.Join("opt-legion", "pi-legion"), EnvoyPluginRoot: filepath.Join("opt-legion", "pi-envoy"),
 		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {
-		t.Fatalf("ProbeImage with a relative plugin root = %v, want every probe to pass", err)
+		t.Fatalf("ProbeImage with relative plugin roots = %v, want every probe to pass", err)
 	}
-	if argv, root := f.read(t, "load.argv.1"), filepath.Join(home, "opt-legion", "pi-legion-envoy"); !strings.Contains(argv, "--extension "+root+" ") {
-		t.Errorf("the load probe ran `omp %s`, want the plugin root as the absolute %s", strings.TrimSpace(argv), root)
+	if argv := f.read(t, "load.argv.1"); !strings.Contains(argv, "--extension "+envoyRootOf(home)+" --extension "+legionRootOf(home)+" ") {
+		t.Errorf("the load probe ran `omp %s`, want the plugin roots as the absolute %s and %s", strings.TrimSpace(argv), envoyRootOf(home), legionRootOf(home))
 	}
 }
 
-// In a pod's lane the plugin comes from the image's plugin root, and discovery is off, so no
-// refusal there sends the operator to the profile's plugin install: each names the root a pod
-// loads.
+// In a pod's lane the plugins come from the image's plugin roots, and discovery is off, so no
+// refusal there sends the operator to the profile's plugin install: each names the roots a pod
+// loads, and sends the operator to rebuild the worker image.
 func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 	for _, testCase := range []struct {
 		name, legion string
@@ -236,15 +259,24 @@ func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 		notWant      string
 	}{
 		{"another contract", contractPrevious, []string{"yes"},
-			[]string{"speaks daemon API contract 2; this daemon requires 3", "into the plugin root @ROOT, which a pod loads as its one explicit extension"}, "OMP profile"},
+			[]string{"speaks daemon API contract 2; this daemon requires 3", "into the plugin root @ROOT, which a pod loads as an explicit extension beside the Envoy plugin root @ENVOY"}, "OMP profile"},
 		{"not loaded", contractCurrent, []string{"no"},
-			[]string{"pi-legion-envoy 1.57.0 at @ROOT did not load with discovery off and @ROOT as Oh My Pi's one explicit extension, as a pod loads it"}, "omp plugin list"},
+			[]string{"pi-legion 1.57.0 at @ROOT did not load with discovery off and @ROOT as one of Oh My Pi's two explicit extensions, as a pod loads it"}, "omp plugin list"},
 		{"loaded from another copy", contractCurrent, []string{"elsewhere"},
-			[]string{"loads from @DIR/elsewhere/pi-legion-envoy/package.json, but the probe passed @ROOT as Oh My Pi's one explicit extension"}, "dotenv"},
+			[]string{"pi-legion loads from @DIR/elsewhere/pi-legion/package.json, but the probe passed @ROOT as one of Oh My Pi's two explicit extensions"}, "dotenv"},
+		{"no Envoy plugin", contractCurrent, []string{"no-envoy"},
+			[]string{"pi-legion 1.57.0 loaded from @ROOT, but no pi-envoy loaded from @ENVOY, the other explicit extension a pod passes: the worker image is incomplete; build it from this daemon's commit"}, "install the @sjawhar/pi-envoy"},
+		{"an Envoy plugin at another interface", contractCurrent, []string{"envoy-mismatch"},
+			[]string{"pi-envoy at file://@REALENVOY/dist/envoy.js?mtime=1 publishes plugin interface 2; the pi-legion at @ROOT speaks 1: build the worker image from this daemon's commit"}, "install both"},
+		{"the old package beside it", contractCurrent, []string{"legacy"},
+			[]string{"the worker image loads @sjawhar/pi-legion-envoy from file://@RAWDIR/legacy/dist/legion.js beside pi-legion: build the worker image from this daemon's commit"}, "plugin uninstall"},
+		{"an Envoy plugin from another copy", contractCurrent, []string{"envoy-elsewhere"},
+			[]string{"pi-envoy loads from @DIR/elsewhere/pi-envoy/package.json, but the probe passed @ENVOY as one of Oh My Pi's two explicit extensions"}, "dotenv"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			f := newImageOmp(t, []string{"available"}, testCase.load, []string{"refuses"})
-			writeManifest(t, filepath.Join(f.dir, "elsewhere", "pi-legion-envoy", "package.json"), contractCurrent)
+			writeManifest(t, filepath.Join(f.dir, "elsewhere", "pi-legion", "package.json"), contractCurrent)
+			writeEnvoyManifest(t, filepath.Join(f.dir, "elsewhere", "pi-envoy", "package.json"))
 			gate, _ := imageGateUnder(t, f, testCase.legion, 0)
 
 			err := gate.verifyImage(context.Background())
@@ -253,8 +285,9 @@ func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 				t.Fatal("verifyImage passed, want a refusal")
 			}
 			dir, _ := filepath.EvalSymlinks(f.dir)
+			realEnvoy, _ := filepath.EvalSymlinks(gate.envoyPluginRoot)
 			for _, want := range testCase.want {
-				want = strings.NewReplacer("@ROOT", gate.pluginRoot, "@DIR", dir).Replace(want)
+				want = strings.NewReplacer("@ROOT", gate.pluginRoot, "@ENVOY", gate.envoyPluginRoot, "@REALENVOY", realEnvoy, "@DIR", dir, "@RAWDIR", f.dir).Replace(want)
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("verifyImage = %v, want it to say %q", err, want)
 				}
@@ -275,7 +308,7 @@ func TestProbeImageRunsTheThreeProbesUnderTheImagesEnvironment(t *testing.T) {
 	env := imageEnv(home)
 
 	err := ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: env, WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
+		Omp: f.path, Contract: 3, Env: env, WorkDir: t.TempDir(), PluginRoot: legionRootOf(home), EnvoyPluginRoot: envoyRootOf(home),
 		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 

@@ -1,18 +1,34 @@
 export default async function probeLegionPluginLoaded(pi) {
-  const loaded = globalThis[Symbol.for("legion.pi-envoy.legion-loaded")];
-  process.stderr.write(
-    loaded
-      ? `LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=${loaded}\n`
-      : "LEGION_PLUGIN_LOADED=no\n"
-  );
+  // The three symbols are the wire between the plugins and this probe, read by their exact
+  // `Symbol.for` strings (packages/pi-shared/src/interface.ts; the table in
+  // packages/pi-shared/AGENTS.md): this probe imports nothing of pi-shared, since it must answer
+  // about whatever build is installed. The Legion entry's factory sets its marker, an object naming
+  // where it loaded from and the Envoy interface version it speaks; the Envoy entry publishes into
+  // the interface object, created by whoever touches it first, so an object with no publisher is no
+  // Envoy plugin; and the pre-split @sjawhar/pi-legion-envoy sets its own marker, which a pane that
+  // still loads that package carries beside pi-legion's.
+  const loaded = globalThis[Symbol.for("legion.pi-legion.loaded")];
+  const envoy = globalThis[Symbol.for("legion.pi-shared.envoy-plugin-interface")];
+  const legacy = globalThis[Symbol.for("legion.pi-envoy.legion-loaded")];
+  let answer = loaded
+    ? `LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=${loaded.from}\nLEGION_PLUGIN_ENVOY_INTERFACE=${loaded.envoyInterface}\n`
+    : "LEGION_PLUGIN_LOADED=no\n";
+  const publisher = envoy?.publishers?.[0];
+  answer +=
+    publisher === undefined
+      ? "LEGION_ENVOY_INTERFACE=none\n"
+      : `LEGION_ENVOY_INTERFACE=${envoy.version}\nLEGION_ENVOY_LOADED_FROM=${publisher}\n`;
+  if (legacy !== undefined) answer += `LEGION_LEGACY_PLUGIN_LOADED_FROM=${legacy}\n`;
+  process.stderr.write(answer);
   // The task agents and skills Legion's prompts name, each resolved as a worker's use resolves it:
   // Oh My Pi's own agent and skill discovery over this launch's extension roots. A pod names its
-  // one plugin root with discovery off (LEGION_PROMPT_ROOT); a pane discovers its installed plugins.
-  // Skills are filtered as a session filters them, by the launch's own `skills` settings and
+  // two plugin roots, the Envoy plugin's then the Legion plugin's, with discovery off
+  // (LEGION_PROMPT_ROOTS, colon-separated); a pane discovers its installed plugins. Skills are
+  // filtered as a session filters them, by the launch's own `skills` settings and
   // `disabledExtensions` (session-tools.ts #applyDiscoveredSkills at the pin).
-  const root = process.env.LEGION_PROMPT_ROOT;
-  const roots = root
-    ? { explicit: [root], mode: "explicit-only", configured: [], configuredLevel: "user" }
+  const explicit = process.env.LEGION_PROMPT_ROOTS;
+  const roots = explicit
+    ? { explicit: explicit.split(":"), mode: "explicit-only", configured: [], configuredLevel: "user" }
     : undefined;
   const cwd = process.cwd();
   const agents = await resolve("LEGION_PROMPT_AGENTS", async () => {

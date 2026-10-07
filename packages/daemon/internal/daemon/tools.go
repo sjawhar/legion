@@ -71,7 +71,7 @@ func paneTools(tools map[string]string) map[string]string {
 
 // PaneTools are the gh, git and jj every pane is told, resolved from lookupEnv as boot resolves them
 // (resolveTools) and keyed by the variable a pane reads each from (paneTools). It is exported for
-// the rigs under packages/pi-envoy/scripts, which tell a worker what a pane is told.
+// the rigs under packages/pi-legion/scripts, which tell a worker what a pane is told.
 func PaneTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
 	tools, err := resolveTools(lookupEnv)
 	if err != nil {

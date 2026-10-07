@@ -77,8 +77,9 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
-// pi-legion-envoy it does not load, or loads speaking another daemon API contract than this
-// binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
+// pi-legion it does not load, loads without pi-envoy or beside the pre-split package, or loads
+// speaking another daemon API contract than this binary's, each of which would refuse the
+// controller at session start (daemon.ProbeController). The probe
 // runs `omp models`, which starts no session, so it neither registers, takes the controller role,
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it

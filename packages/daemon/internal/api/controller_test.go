@@ -86,7 +86,7 @@ func TestAControllerSecretForAnotherContractLeavesTheIncumbentControllerAsItWas(
 	}
 
 	wantRefusal(t, h.controllerSecretFor(testOperatorToken, DaemonAPIVersion+1), http.StatusConflict, fmt.Sprintf(
-		"legion controller start holds the controller's pi-legion-envoy to daemon API contract %d; this daemon requires %d: run the legion built with this daemon",
+		"legion controller start holds the controller's pi-legion to daemon API contract %d; this daemon requires %d: run the legion built with this daemon",
 		DaemonAPIVersion+1, DaemonAPIVersion))
 	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/controller/secret", "{}", http.Header{"Authorization": {"Bearer " + testOperatorToken}}),
 		http.StatusConflict, fmt.Sprintf(
@@ -143,7 +143,7 @@ func TestAControllerSpeakingAnotherContractIsRefusedNamingBoth(t *testing.T) {
 		AgentID: "agent-ses_controller", PluginContract: DaemonAPIVersion + 1,
 	}, nil)
 	wantRefusal(t, recorder, http.StatusConflict, fmt.Sprintf(
-		"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", DaemonAPIVersion+1, DaemonAPIVersion))
+		"pi-legion speaks daemon API contract %d; this daemon requires %d", DaemonAPIVersion+1, DaemonAPIVersion))
 	record, found, err := h.store.Controller(context.Background(), testProject)
 	if err != nil || !found || record.Registered() {
 		t.Fatalf("controller record = %+v, %v, %v, want the capability minted and no session registered", record, found, err)

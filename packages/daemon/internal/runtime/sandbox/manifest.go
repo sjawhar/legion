@@ -232,13 +232,13 @@ func initSessionPath(file string) (string, error) {
 	return TreeRoot + "/" + SessionsSubPath + "/" + rest, nil
 }
 
-// agentArgv is the command the shim runs: the agent with no extension but the image's Legion
-// plugin, `--resume` on the recorded session when resuming, then RPC mode and the system prompt.
-// `--no-extensions` stops Oh My Pi discovering extensions, so a repository's .omp/extensions (or an
-// `extensions:` setting) cannot register a provider or run in the agent; the plugin loads as the
-// one explicit extension, its skills with it.
+// agentArgv is the command the shim runs: the agent with no extensions but the image's Envoy and
+// Legion plugins, `--resume` on the recorded session when resuming, then RPC mode and the system
+// prompt. `--no-extensions` stops Oh My Pi discovering extensions, so a repository's
+// .omp/extensions (or an `extensions:` setting) cannot register a provider or run in the agent;
+// the two plugins load as the explicit extensions, the Envoy plugin first, their skills with them.
 func (l launch) agentArgv(agent []string) []string {
-	argv := append(slices.Clone(agent), "--no-extensions", "--extension", legionPlugin)
+	argv := append(slices.Clone(agent), "--no-extensions", "--extension", envoyPlugin, "--extension", legionPlugin)
 	if l.resumeFile != "" {
 		argv = append(argv, "--resume="+l.resumeFile)
 	}
