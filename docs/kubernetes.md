@@ -104,6 +104,22 @@ Tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is
 ephemeral merge commit); `<legion version>` only on `main` when the `legion` job released that version in the same run.
 Runs from any other ref publish the `sha-` tag only and never touch a release.
 
+A tag does not say which run published it: a pull request run publishes the `sha-` tag of its head
+too, and a pull request can edit the workflow. The digest's GitHub artifact attestation does. Every run
+except a pull request's ends with the workflow's `attest` job, which attests the pushed digest with
+`actions/attest-build-provenance`, stores the attestation with GitHub and pushes it to `ghcr.io` beside
+the image. Its Sigstore certificate names the workflow file, ref and commit from the run's OIDC token,
+which no workflow edit can change. To accept only a digest a run on `main` built:
+
+```bash
+gh attestation verify oci://ghcr.io/sjawhar/legion-worker@sha256:… --repo sjawhar/legion \
+  --signer-workflow sjawhar/legion/.github/workflows/worker-image.yaml --source-ref refs/heads/main
+```
+
+`--source-digest <40-hex commit>` also binds the commit. A pull request run attests nothing, and a run
+dispatched from another branch attests `refs/heads/<branch>`, so neither passes. The attestation is
+separate from the image's own BuildKit provenance, which the build keeps off (`provenance: false`).
+
 ### How it is built — and the iteration rule
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
@@ -132,7 +148,8 @@ Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path 
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
 unguarded. The workflow's `packages`/`contents` permissions apply to same-repo pull requests (this
-repository takes no fork PRs, whose token would be read-only).
+repository takes no fork PRs, whose token would be read-only); the `attest` job's `id-token` and
+`attestations` scopes do not, since a pull request run skips that job.
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
 — no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
