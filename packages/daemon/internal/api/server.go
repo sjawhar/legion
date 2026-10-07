@@ -119,8 +119,9 @@ type server struct {
 	loginsWarned   time.Time
 }
 
-// NewServer builds the daemon's HTTP server on bind:port — the configured address only, never
-// every interface. The caller owns its lifecycle (ListenAndServe, Shutdown).
+// NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface
+// only when bind is 0.0.0.0 or ::, as a daemon that runs as a pod binds. The caller owns its
+// lifecycle (ListenAndServe, Shutdown).
 //
 // Three audiences, three kinds of route: the state everyone reads; the claim lifecycle an agent's
 // plugin drives (register, ready, exit), authenticated by its pane's boot token and then by the

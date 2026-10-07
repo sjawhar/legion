@@ -43,8 +43,11 @@ var ErrListenerClosed = errors.New("worker stream listener closed")
 // HelloResolver maps a hello's boot token to the claim it was minted for, from the persisted
 // hash — the shim re-sends its hello on every reconnect, a daemon restart included, so a token
 // resolves for the claim's whole life. ok is false for a token nothing minted; stale is true for
-// one minted for a generation the claim has since left.
-type HelloResolver func(bootToken string) (c claim.Token, generation uint64, stale bool, ok bool)
+// one minted for a generation the claim has since left. err is the daemon failing to resolve the
+// token at all — its store did not answer — which says nothing about the token: the hello is
+// neither accepted nor refused, and its connection closes unacked, which the shim redials as it
+// does any hello it gets no ack for, resolving the token again.
+type HelloResolver func(bootToken string) (c claim.Token, generation uint64, stale bool, ok bool, err error)
 
 // LauncherResolver accepts a role launcher's independent hello. It is separate from HelloResolver:
 // a launcher never binds a claim's child shim connection or emits an agent Event.
@@ -302,7 +305,9 @@ func (l *Listener) serve(nc net.Conn) {
 }
 
 // hello reads and judges the connection's first line. It returns a registered child shim
-// connection, an independent launcher handler, or the reason it refused.
+// connection, an independent launcher handler, or the reason it refused — empty when there is
+// nothing to say: the peer went away, the listener is ending, or a child shim's boot token could
+// not be resolved, which is no refusal and is logged here (worker-stream-listener.ts:107-173).
 func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, LauncherHandler, string) {
 	if err := nc.SetReadDeadline(time.Now().Add(l.timeout)); err != nil {
 		return nil, nil, ""
@@ -369,8 +374,11 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, LauncherHandler
 	if hello.Validate() != nil {
 		return nil, nil, "malformed hello"
 	}
-	token, generation, stale, known := l.resolve(hello.BootToken)
+	token, generation, stale, known, err := l.resolve(hello.BootToken)
 	switch {
+	case err != nil:
+		l.log.Warn("worker-stream: could not resolve a hello's boot token; the shim redials", "error", err)
+		return nil, nil, ""
 	case !known:
 		return nil, nil, "unknown boot token"
 	case stale:

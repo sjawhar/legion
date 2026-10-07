@@ -12,7 +12,8 @@ removes `.legion/` before the merge: the approved head carries it. The daemon st
 operator sweep follows. After the approval, only retro's `docs/solutions/` commit leaves it
 standing on its own (*Retro*, below). A conflict-forced merge goes back to the reviewer for a
 confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
-`skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change voids it.
+`skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change to the head
+voids it.
 
 ## The reviewer
 
@@ -68,6 +69,12 @@ review posted without a completion leaves the issue in reviewing until you finis
   reviewer. Anything else above the approved head does void it, and the merger tells the
   architect the head must return to review instead of completing. A conflict-forced rebase
   after retro moves those documents with the branch; retro never re-runs.
+- **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
+  repository's instructions derive from the pull request's changed paths (a checklist named for
+  each class of path, read by a required check), retro recomputes for the whole diff at its commit
+  and writes into the live body before `legion push` (`skill://legion-retro`), since the merger
+  reports a stale body rather than rewriting it. A body edit changes no commit, so the approval
+  stands.
 
 ## The merger
 

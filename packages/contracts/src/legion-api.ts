@@ -381,12 +381,16 @@ export const LegionWaveReleaseResponse = z.strictObject({
 });
 
 /** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every
- * redemption for sixty seconds while its claim holds the registration that minted it. */
+ * redemption for sixty seconds while its claim holds the registration that minted it — or, when
+ * `push` is true (the extension judged the bash command to run `legion push`), for the daemon's
+ * longer push grant lifetime, since jj's own working-copy snapshot before the network push can
+ * outrun sixty seconds on a near-full tree volume (dispatch://LEGION-583). */
 export const LegionGrantRequest = z.strictObject({
   sessionId: nonEmptyString,
   secret: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
+  push: z.boolean().optional(),
 });
 
 /** `api.GrantRequest`, the controller-session form: the session registered with the current

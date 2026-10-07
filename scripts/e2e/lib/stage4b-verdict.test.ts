@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's own blocked, fail, pass, until_reached, cleanup, audit_verdict and audit_failure,
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
@@ -10,14 +11,8 @@ import { join } from "node:path";
 // LEGSMOKE, or none. A timed-out wait runs the script's own capacity hook and limit_pending
 // against a kubectl that answers pods (filtered by the -l selector, as the API server does) and
 // FailedScheduling events from the test's fixture.
-const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
-const rig = readFileSync(join(import.meta.dir, "rig.sh"), "utf8");
-const fnOf = (source: string, file: string, name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(source);
-  if (found === null) throw new Error(`${file} defines no ${name}()`);
-  return found[0];
-};
-const fn = (name: string) => fnOf(script, "stage4b-sandbox-tree.sh", name);
+const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
+const rigFn = scriptFunctions(join(import.meta.dir, "rig.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
@@ -114,7 +109,7 @@ root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
-tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
+tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
 operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"
 # The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
@@ -140,7 +135,7 @@ ${fn("limit_pending")}
 ${fn("on_subject")}
 ${fn("on_tree")}
 ${fn("limit_pending_blocked")}
-${fnOf(rig, "rig.sh", "until_true")}
+${rigFn("until_true")}
 ${fn("cleanup")}
 trap cleanup EXIT
 ${ending !== "timeout" ? `${ending} "the controller's model route could not be installed"` : `timeout_hook=limit_pending_blocked; ${capacity.subject === undefined ? "" : `on_tree ${capacity.subject} `}until_true 1 "the controller to take its first turn" false`}

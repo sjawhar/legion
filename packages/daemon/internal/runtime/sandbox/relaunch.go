@@ -93,6 +93,35 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 				return fail("read its tree's retained sessions", err)
 			}
 		}
+		if r.removable != nil {
+			// Computed now, under the tree's launch turn, after every other pod of the tree has
+			// finished initializing: the latest moment before this pod's own manifest is written, so
+			// a sibling that became live in the time this launch spent waiting is not judged by a
+			// list that was already stale when this launch started (dispatch://LEGION-583). Only a
+			// launch that creates the issue pod reaches here: a role started in a running issue pod
+			// runs no init container, so it has no list to carry. That guarantee is this relaunch's
+			// own, though: a pod the Sandbox controller recreates on its own (eviction, node drain,
+			// a hand deletion) runs workspace-init from this same pod template, list included,
+			// without ever passing through here again. workspace-init closes that case itself: it
+			// refuses to act on this list unless its own fetch (fetchStartedFile) started no later
+			// than the notAfter stamped below, this launch's time plus initWaitSeconds
+			// (workspace_init.go's own removableWorkspacesEnv doc comment), since a recreated pod's
+			// fetch starts hours later, whatever its own clone then takes.
+			//
+			// removableWorkspaces states the candidate rule from the daemon's own claim store;
+			// withoutLiveTreePods below checks the pod itself, a second guarantee on different
+			// evidence: it cannot tell a claim whose fail persisted StateFailed despite its own
+			// suspendProcess erroring from one truly gone, so a candidate can still have a live,
+			// non-terminal pod of this tree right now.
+			candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
+			if err != nil {
+				return fail("compute its tree's removable workspaces", err)
+			}
+			notAfter := r.now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
+			if err := l.setRemovable(r.withoutLiveTreePods(l, candidates), notAfter); err != nil {
+				return fail("build its removable-workspaces list", err)
+			}
+		}
 		minting, cancel := call(ctx)
 		provisionToken, err := r.tokens.Token(minting, l.spec.Repository.Owner())
 		cancel()
@@ -438,6 +467,29 @@ func (r *Runtime) treePods(l launch) []*corev1.Pod {
 		}
 	}
 	return pods
+}
+
+// withoutLiveTreePods drops any candidate that still has a live, non-terminal pod of l's tree (by
+// its legion.dev/issue label): a claim whose fail persisted StateFailed despite its own
+// suspendProcess erroring is indistinguishable, in the daemon's own claim store, from one truly
+// gone, so the pod itself, not that record, is checked here — a second guarantee on different
+// evidence than removableWorkspaces' own candidate rule.
+func (r *Runtime) withoutLiveTreePods(l launch, candidates []runtime.RemovableWorkspace) []runtime.RemovableWorkspace {
+	live := make(map[string]bool)
+	for _, pod := range r.treePods(l) {
+		if !terminal(pod) {
+			if issueLabel := pod.Labels[labelIssue]; issueLabel != "" {
+				live[issueLabel] = true
+			}
+		}
+	}
+	filtered := candidates[:0]
+	for _, candidate := range candidates {
+		if !live[labelValue(candidate.Issue)] {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }
 
 // treePodScheduled is whether another pod of l's tree is scheduled now: placed on a node, not

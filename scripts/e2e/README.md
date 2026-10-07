@@ -583,7 +583,8 @@ Stage 4b's gate for the Go coordinator: the Go daemon drives real issue trees on
 runtime. It runs in the production cluster's namespace `legion`, against production Dispatch, the
 production Envoy listener and production NATS, in the disposable Dispatch project LEGSMOKE and the
 smoke repository `sjawhar/legion-smoke`. The daemon runs on the devbox as the Legion daemon's
-restricted identity, and its pods dial its worker stream on the devbox's private address.
+restricted identity, with `bind: 0.0.0.0`, as a daemon that runs as a pod binds, and its pods dial
+its worker stream at `advertise_host`, the devbox's private address.
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
@@ -606,19 +607,21 @@ naming the variable and never its value.
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected
 ServiceAccount token. The run puts it in place of the placeholder in its copy of the operator route's
 `pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
-`LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (mode 0600 or tighter) holding
-a bearer of the Dispatch agents' client: the one an agent session's own Dispatch configuration
-resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
+`LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (no group or other permission
+bits) holding a bearer of the Dispatch agents' client: the one an agent session's own Dispatch
+configuration resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
 `~/.config/opencode/envoy.json` (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
 that bearer as an agent session, the actor its HTTP routes and its document websocket require.
 `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` is the Secrets Manager id of the production Envoy listener's API
 token, which `prerequisites` reads with the devbox admin role. Both bearers land in 0600 files under
-the run's scratch directory. `prerequisites` refuses the token file when it is unset, unreadable,
-open to its group or others, or empty, and refuses the other three when they are unset or malformed
-(the audience through [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), each time
-naming the variable and never its value. `preflight` reads Dispatch's `whoami` with the run's bearer
-and requires an agent session; the same read with an invalid bearer, its negative control, must be
-refused 401.
+the run's scratch directory. `prerequisites` refuses the token file when the variable is unset, or
+names something that is not a readable regular file, whose group or others have any permission bit
+(read through a symlink, from the file it names), or that holds only whitespace; each refusal names
+the variable and the path, never what the file holds. It refuses the other three when they are
+unset or malformed (the audience through
+[`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), naming the variable and never its
+value. `preflight` reads Dispatch's `whoami` with the run's bearer and requires an agent session;
+the same read with an invalid bearer, its negative control, must be refused 401.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
@@ -690,7 +693,8 @@ Three roots are set todo under `admission_cap: 2`:
   is outstanding, and is taken out the same way.
 
 **One run at a time.** The project, the durable consumer names, ports 13372 and 13373 (the rigs'
-pair; the production daemon keeps 13370 and 13371) and the namespace label
+pair; the production daemon keeps 13370 and 13371; the daemon's API takes 13372 and its worker
+stream 13373) and the namespace label
 `legion.dev/project=legsmoke` are shared.
 - The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
 - It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
@@ -779,6 +783,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
 | `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
+| `advertise-host` | the daemon's API and worker-stream listeners hold every interface (`ss -Hltn`); every pod the watch has seen ready has all six role launchers dialing the worker stream at `advertise_host` (a pod-shape rule, so the shape watcher and `pod-shape` hold every later pod to it too); each admitted root's architect registered from such a pod. The daemon's loader refuses the proof's file with `advertise_host` dropped (`bind 0.0.0.0 is not an address a pod can reach`) and with `bind: 127.0.0.1` beside it (`bind 127.0.0.1 is loopback, …`). Negative control: a recorded pod whose role launchers' `--connect` names the bind address departs from the pod shape |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node. Tree 2's planner has held for the driver: a tree 2 that left planning before the driver sent it anything fails here by name. The proof's instructions tell every phase worker that the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`) is not the driver's instruction |
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `finished-idle-planner-death` | tree 2's completed planner is idle with no pending task while its implementer owns `implementing`; the driver records its session, process incarnation and pod UID and kills only the planner launcher PID 1, once. Kubernetes restarts that container in the same issue pod, and the daemon relaunches the planner on the same session at a new process generation, in the same pod by uid, registered and ready or idle with no task pending and no new planning-task delivery, while tree 2 remains `implementing`, unheld and with its implementer live. A relaunch registers and reaches Ready in seconds, and Ready resets the launch-failure budget, so the driver cannot exhaust it; the exhausted budget's failure, its one `worker-died` and the unheld phase are `packages/daemon/internal/daemon/outbox_lifecycle_test.go`'s (`TestAFinishedWorkerThatDiesIsRelaunchedAndItsFailureHoldsNothing`). `issue-cap-moves` then removes tree 2 normally |
@@ -805,7 +810,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/<tree 1>/workspace-recovered.json` naming `legion/<tree 1>` |
 | `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; `legion status … backlog` then takes tree 1 out; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
-| `pod-shape` | every Sandbox pod whose six fixed role launchers the pod watch saw ready is judged from the spec the watch recorded for it, deleted pods included: gVisor, the operator's ServiceAccount and one projected token, the run's route ConfigMap mounted as every role's profile `models.yml`, the pool, Pod Security restricted, six role-private Secrets and split provisioning. No pod command, args or environment carries a value any provisioning or role-private Secret held at any point in the run (`lib/secret-leaks.ts`), and every such Secret was seen. The watch is complete: every pod UID the shape watcher read, the driver ended, or the daemon launched is in it. Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded |
+| `pod-shape` | every Sandbox pod whose six fixed role launchers the pod watch saw ready is judged from the spec the watch recorded for it, deleted pods included: gVisor, the operator's ServiceAccount and one projected token, the run's route ConfigMap mounted as every role's profile `models.yml`, the pool, Pod Security restricted, every role launcher's `--connect` naming `advertise_host` at the worker-stream port the daemon served when the pod was created (each daemon's from its start, in `worker-streams.jsonl`; a move waits out the second the stopped daemon could have created a pod in, since a pod's `creationTimestamp` counts whole seconds; the run assumes, without checking, that the devbox's clock, which dates each start, and the API server's agree within that second, and that by then the Agent Sandbox controller, which creates each pod after the daemon writes its Sandbox, has created the pod of every Sandbox the stopped daemon wrote), six role-private Secrets and split provisioning. No pod command, args or environment carries a value any provisioning or role-private Secret held at any point in the run (`lib/secret-leaks.ts`), and every such Secret was seen. The watch is complete: every pod UID the shape watcher read, the driver ended, or the daemon launched is in it. Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded |
 | `pod-watch-verdict` | the pod watch is complete (as at `pod-shape`); no pod of the run was Evicted or had a container OOMKilled, and every claim process the daemon found dead (`supervise: process died`) was one the driver ended. The resume that finds the tree volume lost is the exception, by its detail (`the tree volume was lost: …`), counted by `re-admission`. The memory hog was OOMKilled. Synthetic OOMKilled and process-died controls both fail |
 | `hygiene` | the daemon stopped, the teardown ran, and the run's consumers are gone; `namespace-clean` follows it |
 | `namespace-clean` | the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
@@ -1548,9 +1553,11 @@ Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check p
 (`bun test scripts/e2e/lib`, which CI runs).
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
-the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own
-bound. `round_correction_pushed ROUND` accepts the round's line only as an addition in
-`smoke_file`'s patch, never in a notes file or in a `.legion/` handoff that quotes it.
+the phase's worker runs a whole loop and the caller passes its own bound: a correction round, the
+retro, and planning, whose planner runs its gap analyst and up to three plan-review rounds before
+its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
+line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
+that quotes it.
 
 The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's

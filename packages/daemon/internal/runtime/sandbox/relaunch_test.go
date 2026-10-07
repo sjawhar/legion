@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -413,6 +415,121 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the child issue never launched after the root's workspace-init finished")
+	}
+}
+
+// The daemon computes removable-workspace candidates last, under the tree's launch turn, after
+// every other pod of the tree has finished initializing (dispatch://LEGION-583): a sibling that
+// becomes live while this launch waits out another pod's workspace-init is read as live by the
+// time the list is actually built, not as whatever it was before the wait, and its workspace is
+// kept off the list the child issue pod's own init container carries.
+func TestRemovableWorkspacesAreReadAfterATreesOtherPodsFinishInitializing(t *testing.T) {
+	var stillRemovable atomic.Bool
+	stillRemovable.Store(true)
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		if stillRemovable.Load() {
+			return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+		}
+		return nil, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	root := SandboxName(rootToken)
+	g.launcher(childToken)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, childSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(childToken)
+	g.eventually("the child issue's sandbox", func() bool { return g.sandbox(worker) != nil })
+	time.Sleep(200 * time.Millisecond)
+	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
+		t.Fatalf("the child issue's pod was set Running while the root's was still in workspace-init: %v", got)
+	}
+	// The sibling becomes live (no longer a candidate) while the worker's launch is still waiting
+	// out the root's workspace-init — exactly the window a stale, SpawnSpec-time list would have
+	// missed.
+	stillRemovable.Store(false)
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+	pod := g.pod(worker)
+	if pod == nil {
+		t.Fatal("the worker's pod does not exist")
+	}
+	got, set := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+	if set {
+		t.Errorf("the worker's init container carries LEGION_REMOVABLE_WORKSPACES=%q, want none: the sibling became live before the list was built", got)
+	}
+}
+
+// relaunch stamps notAfter, in LEGION_REMOVABLE_WORKSPACES' own combined JSON payload, at r.now()
+// plus the init-wait window (initWaitSeconds), reaching the init container alongside the list
+// itself: a pod the Sandbox controller recreates on its own (eviction, node drain, a hand
+// deletion) runs workspace-init from this same pod template without the daemon ever taking the
+// tree's launch turn again, so this is what bounds how long such a pod may still trust a list
+// that could by then be hours old (dispatch://LEGION-583).
+func TestRemovableWorkspacesCarryANotAfterTime(t *testing.T) {
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+	}
+	fixed := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable; o.Now = func() time.Time { return fixed } }))
+	g.spawn(rootSpec(t))
+
+	pod := g.pod(SandboxName(rootToken))
+	if pod == nil {
+		t.Fatal("the root's pod does not exist")
+	}
+	env := envOf(containerNamed(t, pod.Spec, initContainer))
+	got, set := env["LEGION_REMOVABLE_WORKSPACES"]
+	if !set {
+		t.Fatal("the init container carries no LEGION_REMOVABLE_WORKSPACES, want the list and its notAfter")
+	}
+	var payload struct {
+		NotAfter time.Time `json:"notAfter"`
+	}
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("LEGION_REMOVABLE_WORKSPACES = %q is not valid JSON: %v", got, err)
+	}
+	want := fixed.Add(time.Duration(g.r.initWaitSeconds()) * time.Second)
+	if !payload.NotAfter.Equal(want) {
+		t.Errorf("notAfter = %s, want exactly the fixed launch time plus the init-wait window: %s", payload.NotAfter, want)
+	}
+}
+
+// A candidate whose issue still has a live, non-terminal pod of this tree is dropped before it is
+// ever written to a pod template, regardless of what its claim record says: fail can persist
+// StateFailed even when suspendProcess itself errored (dispatch://LEGION-583), and GoneStates()
+// cannot tell that case from a claim whose process is in fact gone.
+func TestRemovableWorkspacesDropsACandidateWithALiveTreePod(t *testing.T) {
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	// A live, non-terminal pod of the tree whose own issue is the candidate's own.
+	g.spawn(testSpec(t, claim.Token("legion-legion-legion-999-reviewer"), claim.RoleReviewer, "LEGION-999"))
+	live := SandboxName(claim.Token("legion-legion-legion-999-reviewer"))
+	g.update(g.pod(live), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+
+	g.spawn(workerSpec(t))
+	worker := SandboxName(workerToken)
+	pod := g.pod(worker)
+	if pod == nil {
+		t.Fatal("the worker's pod does not exist")
+	}
+	got, set := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+	if set {
+		t.Errorf("the worker's init container carries LEGION_REMOVABLE_WORKSPACES=%q, want none: LEGION-999 has a live tree pod", got)
 	}
 }
 

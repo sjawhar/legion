@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -131,6 +132,29 @@ type launch struct {
 	// triggering role's transcript. Other stored sessions can also require an existing tree.
 	resumeFile       string
 	expectTreeVolume bool
+	// removableWorkspacesJSON is the tree's removable-workspace candidates (Options.Removable),
+	// JSON-encoded together with their expiry, one object; "" when there are none. Not set by
+	// prepare: relaunch calls setRemovable with what Options.Removable returns, last, under the
+	// tree's launch turn — prepare runs long before that turn is even requested, so a list this
+	// early could already be stale by the time a pod's manifest is actually written.
+	removableWorkspacesJSON string
+}
+
+// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON as
+// runtime.RemovableWorkspacesPayload, called from relaunch with Options.Removable's result and
+// the launch time plus initWaitSeconds, once the tree's launch turn is held. The encoding cannot
+// fail (plain strings and a time.Time), but initEnvironment has no error to return, so a refusal
+// here is relaunch's own to surface before it ever patches the Sandbox.
+func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
+	if err != nil {
+		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
+	}
+	l.removableWorkspacesJSON = string(encoded)
+	return nil
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -409,11 +433,16 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 // instructions included, as a tmux pane does.
 func kubeletLiteral(c *corev1.Container) {
 	for i := range c.Command {
-		c.Command[i] = strings.ReplaceAll(c.Command[i], "$", "$$")
+		c.Command[i] = kubeletEscape(c.Command[i])
 	}
 	for i := range c.Env {
-		c.Env[i].Value = strings.ReplaceAll(c.Env[i].Value, "$", "$$")
+		c.Env[i].Value = kubeletEscape(c.Env[i].Value)
 	}
+}
+
+// kubeletEscape is text as a container's command or env value carries it: every `$` doubled.
+func kubeletEscape(text string) string {
+	return strings.ReplaceAll(text, "$", "$$")
 }
 
 // volumes are the issue pod's shared workspace, jj config home and init-only provisioning
@@ -587,18 +616,41 @@ func fetchEnvironment() []corev1.EnvVar {
 	}
 }
 
-// initEnvironment gives shared provisioning its tree-wide storage expectation. It never carries
-// one role's session path: a missing transcript must not prevent sibling launchers from starting.
+// initEnvironment is `workspace-init provision`'s contract (research runtime §2.3), the one
+// provisioning every role of the issue pod shares. Its PATH is the image's alone, naming no
+// directory on the tree volume, so the git and jj it resolves from PATH are never ones an agent put
+// there; it carries no tool-path variables, and it is never pointed at the provisioning token. It
+// gives shared provisioning its tree-wide storage expectation and never carries one role's session
+// path: a missing transcript must not prevent sibling launchers from starting. A relaunch after the
+// volume was lost names the ref the recreated workspace is recovered from; both are
+// workspace-init's alone, never the agent's. LEGION_ROLE and LEGION_GENERATION are l.spec.Role and
+// l.spec.Generation, the launch that creates the pod, read together by workspace-init provision's
+// own candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates): a generation alone
+// does not distinguish each role's own first launch of one issue, all at generation 1 — the copies
+// of both in mainEnvironment are each role child's, carried by its launcher's start command, so
+// workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is l.removableWorkspacesJSON, set by
+// setRemovable (called from relaunch, after the daemon's candidate list is read, last, under the
+// tree's launch turn), one JSON object carrying both the list and notAfter (RFC 3339: the launch
+// time plus initWaitSeconds) together, so the two can never arrive apart; absent when the daemon
+// found none. notAfter is what bounds how long a pod the Sandbox controller recreates on its own
+// may still trust this same list, read by its own fresh workspace-fetch's start time rather than
+// wall-clock time at removal (dispatch://LEGION-583, cmd/legion/workspace_init.go's
+// removableWorkspacesEnv doc comment).
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
+		{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
+		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
 	}
 	if l.expectTreeVolume {
 		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_TREE_VOLUME", Value: "true"})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
+	}
+	if l.removableWorkspacesJSON != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
 	}
 	return append(env, xdgEnvironment()...)
 }

@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -205,14 +206,162 @@ func TestARestartOfAClaimStillLaunchingKeepsTheFullProvisioningBound(t *testing.
 	h.wantState(StateLaunching)
 }
 
-func TestRegistrationEndsTheBootWatch(t *testing.T) {
+// An agent that registers and never says it is ready never became a working agent. The deadline
+// runs again from the registration, and at it the live process is retired, one launch failure is
+// charged, and the same session is resumed one generation later. Whether its shim said hello first
+// changes nothing. The relaunched agent that says it is ready is sent the task the claim held.
+func TestARegisteredAgentThatNeverSaysReadyIsRelaunchedAtTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream bool
+	}{
+		{"registered over the API with no stream", false},
+		{"registered after its shim said hello", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.launch()
+			h.advance(testBoot)
+			if tc.stream {
+				h.connect()
+				h.advance(testBoot)
+			}
+			h.register()
+			h.wantState(StateRegistered)
+			h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+			alive := h.locator()
+
+			// Just short of the registration plus the deadline, and past any deadline armed before
+			// the registration: left alone.
+			h.advance(deadline - time.Nanosecond)
+			h.wantCalls("Suspend", 0)
+			h.wantState(StateRegistered)
+
+			h.advance(time.Nanosecond)
+			if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
+				t.Errorf("suspended %+v, want the live process whose agent never said ready", suspends[0].Locator)
+			}
+			h.wantCalls("Release", 0)
+			if resumed := h.wantCalls("Resume", 1)[0]; resumed.Spec.ResumeSessionFile != sessionFile || resumed.Spec.Generation != 2 {
+				t.Errorf("resumed %+v, want the registered session at generation 2", resumed.Spec)
+			}
+			h.wantBudgets(Budgets{LaunchFailures: 1})
+			h.wantState(StateLaunching)
+			h.wantPrompts(0)
+			if lines := h.logs.lines("the agent registered and never said it was ready"); len(lines) != 1 {
+				t.Errorf("logged %q, want one line naming the agent that never said ready", lines)
+			}
+
+			h.relaunched()
+			if prompts := h.wantPrompts(1); prompts[0].Message != "implement the plan" {
+				t.Errorf("the relaunched agent was prompted %q, want the task the claim held", prompts[0].Message)
+			}
+			h.wantBudgets(Budgets{})
+		})
+	}
+}
+
+// A daemon restart does not end the wait: a claim restored registered is watched again from the
+// restart, as a booting claim is, and relaunched at the deadline.
+func TestARegisteredClaimIsWatchedAgainAfterARestart(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateRegistered)
+	alive := h.locator()
+	h.restart()
+
+	h.advance(deadline - time.Nanosecond)
+	h.wantCalls("Suspend", 0)
+	h.advance(time.Nanosecond)
+	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != alive {
+		t.Errorf("suspended %+v, want the process whose agent never said ready", suspend.Locator)
+	}
+	if resumed := h.wantCalls("Resume", 1)[0]; resumed.Spec.ResumeSessionFile != sessionFile {
+		t.Errorf("resumed %+v, want the registered session", resumed.Spec)
+	}
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+	h.wantState(StateLaunching)
+}
+
+// The same session registering again is issued a new secret and leaves the deadline where its first
+// registration set it: an agent that keeps registering and never says ready is still relaunched.
+func TestARepeatedRegistrationDoesNotPutTheDeadlineOff(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered)
+	h.advance(deadline / 2)
+	h.register()
+	h.advance(deadline - deadline/2)
+	h.wantCalls("Suspend", 1)
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+	h.wantState(StateLaunching)
+}
+
+// A registered agent whose process is already gone at the deadline is counted once and relaunched,
+// with nothing to suspend.
+func TestARegisteredAgentWhoseProcessIsGoneAtTheDeadlineCountsOneFailureWithoutASuspension(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered)
+	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Gone})
+
+	h.advance(deadline)
+
+	h.wantCalls("Suspend", 0)
+	h.wantCalls("Resume", 1)
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+	h.wantState(StateLaunching)
+}
+
+// Relaunches whose agents keep registering and never say ready spend the launch failure budget: the
+// claim fails at launch_failure_limit instead of relaunching for ever.
+func TestAgentsThatNeverSayReadyFailTheClaimAtTheLaunchFailureLimit(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered)
+	for range testLimits().LaunchFailures - 1 {
+		h.advance(deadline)
+		h.wantState(StateLaunching)
+		h.connect()
+		h.register()
+	}
+	h.advance(deadline)
+	h.wantState(StateFailed)
+	h.wantBudgets(Budgets{LaunchFailures: testLimits().LaunchFailures})
+	h.wantCalls("Suspend", testLimits().LaunchFailures)
+}
+
+// Ready ends the boot watch: from it the claim is prompted, and no deadline remains.
+func TestReadyEndsTheBootWatch(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
 	if live := h.clock.Live(); live != 0 {
-		t.Errorf("%d timers still armed after registration", live)
+		t.Errorf("%d timers still armed once the agent is ready", live)
 	}
 	h.advance(2 * deadline)
 	h.wantCalls("Probe", 0)
 	h.wantCalls("Suspend", 0)
-	h.wantState(StateRegistered)
+	h.wantState(StateReady)
+}
+
+// A ready whose first claim write fails stays ready in memory. Its retry must persist that ready
+// state before it returns, so a restart restores ready rather than registered and never charges a
+// launch failure for an agent that was ready.
+func TestARetriedReadyAfterAClaimWriteFailureStaysReadyAcrossARestart(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered)
+	h.store.fail("PutClaim", errBoom)
+
+	err := h.handle(RequestReady{Claim: h.token, Generation: h.generation(), Session: session})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("ready over a failed claim write returned %v, want %v", err, errBoom)
+	}
+	h.wantState(StateReady)
+	if live := h.clock.Live(); live != 0 {
+		t.Fatalf("%d timers armed after failed ready, want none", live)
+	}
+
+	h.store.fail("PutClaim", nil)
+	h.ready()
+	h.restart()
+	h.wantState(StateReady)
+	h.advance(2 * deadline)
+	h.wantCalls("Suspend", 0)
+	h.wantBudgets(Budgets{})
 }

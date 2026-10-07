@@ -81,7 +81,7 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/legion/claim-session.ts`) or, for the controller, the controller session
 (`src/legion/controller-session.ts`). `package.json` declares the contract it was built against as
-`legion.daemonApiVersion` (currently 13): the claim, credential, workflow, controller, and state
+`legion.daemonApiVersion` (currently 15): the claim, credential, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
 `src/legion/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
@@ -90,7 +90,9 @@ actions run, `src/legion/handoff-actions.ts`), `LEGION_GENERATION` (set by the d
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
-when the daemon has `dispatch_url` configured. A change to either surface bumps the field and the
+when the daemon has `dispatch_url` configured — and, beside the pane, `LEGION_REMOVABLE_WORKSPACES`
+on a pod's `workspace-init provision` container, which the image's own `legion`, built from the same
+commit as this plugin, decodes strictly. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
 daemon's golden test, is what `src/legion/daemon-api-version.test.ts` pins the field to, so neither

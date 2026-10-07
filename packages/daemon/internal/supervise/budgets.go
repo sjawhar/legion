@@ -9,8 +9,9 @@ import (
 // Budgets are a claim's retry counters, each a separate policy with its own reset point.
 //
 //   - LaunchFailures: launches that never became a working agent — a spawn or resume the runtime
-//     refused, a process that died, one that never registered. Reset only by the agent's ready:
-//     a registration alone proves nothing about the next launch.
+//     refused, a process that died, one whose agent never registered or registered and never said
+//     it was ready. Reset only by the agent's ready: a registration alone proves nothing about the
+//     next launch.
 //   - Deaths: processes that died after their agent was ready and while it had work outstanding —
 //     a pending task, whose turn was running or which was sent and not yet begun. The relaunch
 //     reaches ready again whatever killed the last process, so ready cannot bound these; an agent

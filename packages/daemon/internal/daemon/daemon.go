@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -365,7 +366,8 @@ type plan struct {
 	// roleReferences are the task agents and skills the shared role prompts name
 	// (prompts.RoleReferences), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
-	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
+	// stream is the worker stream's address: the listener binds it, and every agent's shim dials
+	// it, or advertise_host at its port when the file sets one (shimAddress).
 	stream     string
 	newRuntime runtimeFactory
 	// gate is the plugin gate run before anything is opened (pluginGate); nil under a runtime with
@@ -394,9 +396,12 @@ type plan struct {
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
-// listener the stream listener, address the one every agent's shim dials, tokens the workflow's
-// App tokens (nil without a workflow), and st the store the runtime reads.
-type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error)
+// listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
+// workflow's App tokens (nil without a workflow), st the store the runtime reads, and removable the
+// tree's candidate function (removableWorkspaces), which needs sup — created before this is called
+// (openSupervision) — so it cannot be built inside the factory itself; a runtime that does not
+// provision workspaces in its own pods ignores it.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -502,7 +507,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		rt, err := tmux.New(opts)
@@ -560,6 +565,25 @@ type supervision struct {
 	stopOnce     sync.Once
 }
 
+// shimAddress is the address every agent's shim dials: the listener's bound address, or, when
+// advertiseHost (the top-level advertise_host, which only runtime: kubernetes accepts) names one,
+// that host at the bound port, the kernel's choice when worker_stream_port was 0. A bound address
+// it cannot split into tcp://host:port beside an advertiseHost is refused, never handed to pods.
+func shimAddress(bound, advertiseHost string) (string, error) {
+	if advertiseHost == "" {
+		return bound, nil
+	}
+	hostport, ok := strings.CutPrefix(bound, "tcp://")
+	if !ok {
+		return "", fmt.Errorf("advertise_host %s needs a tcp:// worker stream, and the listener bound %s", advertiseHost, bound)
+	}
+	_, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return "", fmt.Errorf("advertise_host %s: the worker stream listener's address %s: %w", advertiseHost, bound, err)
+	}
+	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
+}
+
 // openSupervision reads the claims the store holds, takes the worker stream, and builds the
 // runtime over it, for supervision's lifetime and with the workflow's App tokens (nil without a
 // workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
@@ -582,7 +606,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps, st)
+	dial, err := shimAddress(listener.Addr(), cfg.AdvertiseHost)
+	if err != nil {
+		cancel()
+		cancelStream()
+		return nil, err
+	}
+	rt, err := p.newRuntime(supervising, listener, dial, apps, st, removableWorkspaces(st.Pool(), record.NewStore(), sup))
 	if err != nil {
 		cancel()
 		cancelStream()

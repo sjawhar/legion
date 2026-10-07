@@ -86,7 +86,7 @@ func testConfig(t *testing.T) config.Config {
 	// for it. zero is a value config.Load refuses (config.go:871-874, "worker_stream_port must be a
 	// positive integer"): it is a fixture, never a configuration. The derivation from a real port
 	// is pinned by TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort.
-	port := holdPort(t)
+	port := holdPortOn(t, "127.0.0.1")
 	return config.Config{
 		Project:                                 "TEST" + randomSuffix(t),
 		Port:                                    port,
@@ -172,21 +172,24 @@ func TestThePortsHandedToADaemonCannotBeTakenBeforeItBinds(t *testing.T) {
 	}
 }
 
-// heldPorts are the listeners holdPort holds, by address, until a daemon takes one (heldListen).
+// heldPorts are the listeners holdPortOn holds, by address, until a daemon takes one (heldListen).
 var heldPorts = struct {
 	sync.Mutex
 	byAddress map[string]net.Listener
 }{byAddress: map[string]net.Listener{}}
 
-// holdPort listens on a free loopback port for t and returns it. The listener is held until a
-// daemon of t's takes it through heldListen, or t ends.
-func holdPort(t *testing.T) int {
+// holdPortOn listens on a free port of host for t and returns it. The listener is held until a
+// daemon of t's takes it through heldListen, or t ends. It is held under net.JoinHostPort(host,
+// port), the address the daemon builds from bind, not the listener's Addr(): Go reports a 0.0.0.0
+// listener as [::]:<port>, the dual-stack wildcard.
+func holdPortOn(t *testing.T, host string) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
-		t.Fatalf("hold a free port: %v", err)
+		t.Fatalf("hold a free port on %s: %v", host, err)
 	}
-	address := listener.Addr().String()
+	port := listener.Addr().(*net.TCPAddr).Port
+	address := net.JoinHostPort(host, strconv.Itoa(port))
 	heldPorts.Lock()
 	heldPorts.byAddress[address] = listener
 	heldPorts.Unlock()
@@ -196,7 +199,7 @@ func holdPort(t *testing.T) int {
 		heldPorts.Unlock()
 		_ = listener.Close()
 	})
-	return listener.Addr().(*net.TCPAddr).Port
+	return port
 }
 
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
@@ -205,13 +208,13 @@ func holdPort(t *testing.T) int {
 // rebinding: it is always port 0, resolved fresh on every bind.
 func rebindHeldPorts(t *testing.T, cfg *config.Config) {
 	t.Helper()
-	cfg.Port = holdPort(t)
+	cfg.Port = holdPortOn(t, "127.0.0.1")
 	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
 }
 
-// heldListen is the daemon's listen under test: the listener holdPort holds for address, handed
+// heldListen is the daemon's listen under test: the listener holdPortOn holds for address, handed
 // over once. An address nothing holds is refused rather than bound, since a port found free and
-// bound later is the race holdPort closes: a test that starts a daemon again on one config calls
+// bound later is the race holdPortOn closes: a test that starts a daemon again on one config calls
 // rebindHeldPorts first.
 func heldListen(network, address string) (net.Listener, error) {
 	heldPorts.Lock()
@@ -224,7 +227,7 @@ func heldListen(network, address string) (net.Listener, error) {
 	return listener, nil
 }
 
-// pollClient bounds each poll of a daemon's port: holdPort's listener queues a connection until a
+// pollClient bounds each poll of a daemon's port: holdPortOn's listener queues a connection until a
 // daemon takes the listener and serves it, and a daemon that exits before then never answers it.
 var pollClient = &http.Client{Timeout: time.Second}
 
@@ -270,7 +273,7 @@ type built struct {
 // with nothing launched for real.
 func fakeRuntime(rt *fake.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
 			record.conns, record.address, record.apps, record.store = listener, address, apps, st

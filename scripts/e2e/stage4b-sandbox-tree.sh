@@ -3,7 +3,8 @@
 # runtime, in the production cluster's namespace `legion`, against production Dispatch, the
 # production Envoy listener and production NATS, in the disposable Dispatch project LEGSMOKE and the
 # smoke repository sjawhar/legion-smoke. The daemon runs on the devbox under the Legion daemon's
-# restricted identity; its pods run the worker image under test and dial its worker stream on the
+# restricted identity, bound to every interface (`bind: 0.0.0.0`) as a daemon that runs as a pod
+# binds; its pods run the worker image under test and dial its worker stream at `advertise_host`, the
 # devbox's private address. Operator steps (exec into a pod, a Secret's hash, the namespace list,
 # the controls' pods) use the admin context. It is the production-EKS driver LEGION-206
 # Requirement 12 asks for.
@@ -122,12 +123,19 @@ providers_secret=legion-$run_label-providers
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
 # The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
-# the Legion nodes, so a run never waits for the production daemon to stop.
+# the Legion nodes, so a run never waits for the production daemon to stop. The daemon binds both on
+# every interface, and every pod dials the worker stream at advertise_host, the devbox's private
+# address ($host, read in prerequisites).
+bind=0.0.0.0
 port_daemon=13372
 port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
 # Trees the run's daemon runs at once, each on a node of its own (pool_tree_room).
 admission_cap=2
+# How long a planner the driver has told to plan gets to finish: before its handoff it runs its two
+# model-backed plan checks, the gap analyst and up to three plan-review rounds (each a subagent
+# call), so planning takes a whole loop of its own (wait_for_phase).
+plan_seconds=2700
 # One path for every run on the devbox, whatever its environment names as its state directory.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
 record=$work/sandboxes
@@ -674,7 +682,8 @@ nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@" 2> >(scrub >&2);
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
-bind: $host
+bind: $bind
+advertise_host: $host
 port: $port_daemon
 worker_stream_port: $port_worker_stream
 daemon_url: http://$host:$port_daemon
@@ -778,10 +787,25 @@ ports_ours() {
       fail "port $port is held by another process, not the run's daemon (pid $daemon_pid): ${holder:-nothing listens}"
   done
 }
+# record_stream notes, as a daemon is about to start, the worker stream it serves from then on: a
+# line {since, stream} in $evidence/worker-streams.jsonl, from which the pod shape holds each pod to
+# the stream served when the pod was created (shape_problems). A pod's creationTimestamp counts
+# whole seconds, so a stream that moved waits out the second the stopped daemon may have created a
+# pod in before it starts. That bound rests on two assumptions the run does not check: the devbox's
+# clock, which dates `since`, and the API server's, which dates creationTimestamp, agree to within
+# that second; and the pod of every Sandbox the stopped daemon wrote exists by then, though the
+# Agent Sandbox controller, not the daemon, creates each pod after the daemon writes its Sandbox.
+record_stream() {
+  local stream=tcp://$host:$port_worker_stream last=
+  [ ! -s "$evidence/worker-streams.jsonl" ] || last=$(tail -n 1 "$evidence/worker-streams.jsonl" | jq -r .stream)
+  if [ -n "$last" ] && [ "$last" != "$stream" ]; then sleep 1; fi
+  jq -nc --arg since "$(date -u +%FT%TZ)" --arg stream "$stream" '{since: $since, stream: $stream}' >>"$evidence/worker-streams.jsonl"
+}
 start_daemon() {
   # Prerequisites found both ports free, minutes before this boot; a process that took one since
   # would answer /healthz in the run's daemon's place.
   ports_free
+  record_stream
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
     -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
@@ -1082,12 +1106,20 @@ hog_oomkilled() {
 
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
-# check_pod_shape SPEC prints each way the pod object SPEC departs from the shared issue-pod shape:
-# gVisor; the operator's ServiceAccount and one projected token; all six fixed role launchers with
-# the route ConfigMap where their profiles read it; restricted security; and split provisioning
-# (only workspace-fetch reaches the provisioning credential).
+# check_pod_shape SPEC prints each way the pod object SPEC departs from the shared issue-pod shape,
+# or nothing, with its Secrets' values as they are now: gVisor; the operator's ServiceAccount and one
+# projected token; all six fixed role launchers with the route ConfigMap where their profiles read
+# it; the pool; restricted security; every role launcher dialing the worker stream the daemon served
+# when the pod was created, at advertise_host; no Secret value in a container's environment, command
+# or args; and split provisioning (only workspace-fetch reaches the provisioning credential).
+# shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
+# judges the object alone, so a pod the watch recorded is judged after it is gone, and it reads the
+# streams the run's daemons served from record_stream's record each time, so the shape watcher,
+# forked before a restart that moves the stream, holds each pod to the stream of its own creation as
+# the main shell does.
 shape_problems() {
-  jq -r --arg route "$route_configmap" --arg audience "$gateway_audience" '
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" '
+    include "stage4b-pods";
     ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
     | def role_containers: [.containers[] | select(.name as $name | $roles | index($name))];
     .spec as $s
@@ -1112,6 +1144,12 @@ shape_problems() {
              or ($c.securityContext.seccompProfile.type // $s.securityContext.seccompProfile.type) != "RuntimeDefault"
              or ($c.securityContext.capabilities.drop // []) != ["ALL"]
             then "container \($c.name) is not restricted: \({container: $c.securityContext, pod: $s.securityContext} | tostring)" else empty end)),
+      # Every role launcher dials the worker stream the daemon served when the pod was created, at
+      # advertise_host, never the unspecified address the daemon binds.
+      (served_stream($streams) as $stream
+        | if $stream == null then "the role launchers dial \(launcher_connect // "no one address"), but no worker stream was served when the pod was created (\(.metadata.creationTimestamp))"
+          else launcher_connects[] | select(.connect != $stream)
+            | "the \(.role) launcher dials \(.connect // "nothing (no --connect)"), not advertise_host at \($stream)" end),
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s | role_containers[] | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "a role launcher mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end)
@@ -1190,11 +1228,7 @@ pod_shape_verdict() {
   while IFS=$'\t' read -r uid spec; do
     problems=$(shape_problems <<<"$spec")
     [ -z "$problems" ] || printf '%s: %s\n' "$uid" "$(tr '\n' ';' <<<"$problems")"
-  done < <(jq -c 'select(.object.kind == "Pod") | .object
-      | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-      | ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
-      | [.status.containerStatuses[]? | select(.name as $name | $roles | index($name))] as $status
-      | select(($status | map(.name) | sort) == ($roles | sort) and all($status[]; .ready))' "$watch" |
+  done < <(jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods' "$watch" |
     jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
 }
 # stream_missing WATCH prints each Sandbox pod UID the run knows from another source that the watch
@@ -1404,7 +1438,9 @@ cleanup() {
   # so the warning names the line alone.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   stop_tree "$shape_pid"
-  [ -z "$tree1" ] || record_pair >/dev/null 2>&1
+  # The review pair exists only once tree-moved has named the reviewer's session; a run cut before
+  # that has nothing to record.
+  [ -z "$pair_session" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
   collect_transcripts
   stop_tree "$watch_pid"
@@ -1668,7 +1704,8 @@ gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_DISPATCH_TOKEN_FILE is unset: it names the file holding the Dispatch agents' bearer"
 [ -f "$dispatch_token_file" ] && [ -r "$dispatch_token_file" ] ||
   fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which is not a readable file"
-dispatch_token_mode=$(stat -c %a -- "$dispatch_token_file")
+# The mode is the file tr reads below, so a symlink is followed: a link's own mode is always 777.
+dispatch_token_mode=$(stat -L -c %a -- "$dispatch_token_file")
 case $dispatch_token_mode in
   *00) ;;
   *) fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, whose group or others have access (mode $dispatch_token_mode): make it 0600" ;;
@@ -1703,7 +1740,7 @@ revision=$(sed -n 's/^source: //p' <<<"$built")
 jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugin: $plugin, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugin $(jq -r .plugin "$evidence/run.json")"
-note "daemon http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
+note "daemon bind $bind, advertise_host $host: API http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
 if [ -n "$until" ]; then
   # A name no checkpoint has would run the whole proof as a development run.
   grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
@@ -2003,11 +2040,75 @@ for issue in "${specs[@]}"; do
 done
 pass
 
+begin advertise-host
+# The daemon's file names bind 0.0.0.0 and advertise_host, the devbox's private address
+# (write_legion_config). Both its listeners hold every interface; every Sandbox pod the watch has
+# seen ready dials the worker stream at advertise_host, a rule of the pod shape, so the shape
+# watcher and pod-shape hold every later pod of the run to it too; each admitted root's architect
+# registered from such a pod; and the daemon's own loader refuses the proof's file with
+# advertise_host dropped, and with a loopback bind beside it, each naming bind.
+for port in "$port_daemon" "$port_worker_stream"; do
+  sockets=$(ss -Hltn "sport = :$port")
+  while read -r _ _ _ listen _; do
+    case ${listen%:"$port"} in
+      '*' | 0.0.0.0 | '[::]') ;;
+      *) fail "port $port listens on ${listen:-nothing}, not on every interface (bind $bind)" ;;
+    esac
+  done <<<"$sockets"
+  note "port $port: $(tr -s ' ' <<<"$sockets" | paste -sd ';' -)"
+done
+stream_url="tcp://$host:$port_worker_stream"
+bad=$(pod_shape_verdict "$evidence/pod-watch.json")
+[ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
+judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u)
+note "$(grep -c . <<<"$judged") pods seen ready so far, each one's role launchers dialing advertise_host at $stream_url: $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | "\(.metadata.labels["legion.dev/tree"]) \(.metadata.labels["legion.dev/issue"])"' "$evidence/pod-watch.json" | sort -u | paste -sd ',' -)"
+for issue in "${specs[@]}"; do
+  architect=$(claim_view "$issue" architect)
+  uid=$(jq -r '.locator.sandbox.podUid // empty' <<<"$architect")
+  state=$(jq -r '.state // "none"' <<<"$architect")
+  case $state in
+    ready | working | idle) ;;
+    *) fail "$issue's architect is $state, not registered from its pod $uid" ;;
+  esac
+  grep -qxF -- "$uid" <<<"$judged" || fail "$issue's architect runs on pod $uid, which the pod watch never saw ready"
+  note "$issue's architect registered ($state) from pod $uid, whose role launchers the verdict above holds to --connect $stream_url"
+done
+# Negative control: the last ready pod the watch recorded, its role launchers' --connect edited in
+# place to the address the daemon binds, departs from the pod shape for that --connect.
+jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$evidence/pod-watch.json" | tail -1 |
+  jq -c --arg bound "tcp://$bind:$port_worker_stream" '.object.spec.containers |= map(if ((.command // []) | index("--connect")) != null
+    then .command |= (index("--connect") as $i | .[$i + 1] = $bound) else . end)' >"$work/wildcard-connect.json"
+cat "$evidence/pod-watch.json" "$work/wildcard-connect.json" >"$evidence/controls/pod-watch-wildcard-connect.json"
+control=$(pod_shape_verdict "$evidence/controls/pod-watch-wildcard-connect.json")
+grep -qF "launcher dials tcp://$bind:$port_worker_stream, not advertise_host at $stream_url" <<<"$control" ||
+  fail "the pod shape did not refuse a pod told --connect tcp://$bind:$port_worker_stream for it: ${control:-no departure}"
+note "negative control: a recorded pod whose role launchers are told --connect tcp://$bind:$port_worker_stream departs from the pod shape: $control"
+# The daemon's loader on the proof's own file: advertise_host dropped, then a loopback bind beside it.
+sed '/^advertise_host: /d' "$work/legion.yaml" >"$work/legion-no-advertise-host.yaml"
+if out=$("$work/legion" start --check-config --config "$work/legion-no-advertise-host.yaml" 2>&1); then
+  fail "legion start --check-config passed bind $bind with no advertise_host: $out"
+fi
+case $out in
+  *"bind $bind is not an address a pod can reach"*) ;;
+  *) fail "bind $bind with no advertise_host was refused without naming bind: $out" ;;
+esac
+note "bind $bind, no advertise_host: $out"
+sed 's/^bind: .*/bind: 127.0.0.1/' "$work/legion.yaml" >"$work/legion-loopback-bind.yaml"
+if out=$("$work/legion" start --check-config --config "$work/legion-loopback-bind.yaml" 2>&1); then
+  fail "legion start --check-config passed bind 127.0.0.1 beside advertise_host: $out"
+fi
+case $out in
+  *"bind 127.0.0.1 is loopback, where no pod reaches the worker stream"*) ;;
+  *) fail "bind 127.0.0.1 beside advertise_host was refused without naming bind: $out" ;;
+esac
+note "bind 127.0.0.1 beside advertise_host: $out"
+pass
+
 begin tree-separation
 on_tree "$tree1" wait_for_worker "$tree1" planner
 record_resident "$tree1" planner || fail "tree 1's planner has no session and pod to keep: $(claim_view "$tree1" planner)"
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-on_tree "$tree1" wait_for_phase "$tree1" implementing 1800
+on_tree "$tree1" wait_for_phase "$tree1" implementing "$plan_seconds"
 on_tree "$tree1" wait_for_worker "$tree1" implementer
 record_resident "$tree1" implementer || fail "tree 1's implementer has no session and pod to keep: $(claim_view "$tree1" implementer)"
 # Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
@@ -2054,7 +2155,7 @@ argv=$(pod_commands "$pod" planner)
 note "tree 2 planner container $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the planner runs with --no-extensions"; else note "the planner runs without --no-extensions"; fi
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
-on_tree "$tree2" wait_for_phase "$tree2" implementing 1800
+on_tree "$tree2" wait_for_phase "$tree2" implementing "$plan_seconds"
 pass
 
 begin finished-idle-planner-death
@@ -2639,7 +2740,7 @@ on_tree "$tree3" wait_for_worker "$tree3" planner
 # ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
 # either budget.
 send_agent "$tree3" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-on_tree "$tree3" wait_for_phase "$tree3" implementing 1800
+on_tree "$tree3" wait_for_phase "$tree3" implementing "$plan_seconds"
 on_tree "$tree3" wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
@@ -2868,7 +2969,7 @@ interrupted_needle="Your previous turn on this task was interrupted when your pr
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
 on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-on_tree "$tree4" wait_for_phase "$tree4" implementing 1800
+on_tree "$tree4" wait_for_phase "$tree4" implementing "$plan_seconds"
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
 # (b) Kills after each ready, the task outstanding, until the claim fails.
 on_tree "$tree4" wait_for_worker "$tree4" implementer
@@ -3090,10 +3191,7 @@ missing=$(stream_missing "$evidence/pod-watch.json")
 [ -z "$missing" ] || fail "the pod watch never recorded pods the run knows from other sources: $(tr '\n' ' ' <<<"$missing")"
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
-judged=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-  | ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
-  | [.status.containerStatuses[]? | select(.name as $name | $roles | index($name))] as $status
-  | select(($status | map(.name) | sort) == ($roles | sort) and all($status[]; .ready)) | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
+judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
 # The Secret-value check: the helper judges the recorded pods against every value it held, on TERM.
 stop_pid "$leaks_pid"
 leaks_pid=

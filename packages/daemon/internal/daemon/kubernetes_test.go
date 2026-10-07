@@ -256,28 +256,101 @@ func bootField(t *testing.T, logged, field string) string {
 	return ""
 }
 
-// The address every pod's shim dials derives from runtime.kubernetes's own worker_stream_port
-// (readSandbox, kubernetes.go), not a value prepare hardcodes or leaves at the zero a test's own
-// config happens to carry: a daemon configured with a distinctive port builds its plan's stream
-// address from exactly that port, before anything binds. The test above proves the bound address
-// is real and dialable; it cannot catch worker_stream_port being ignored, since testConfig's own
-// port is always 0 — this does, by configuring a nonzero one and checking prepare()'s plan
-// directly, with no listener bound.
+// The worker stream's listen address derives from bind and worker_stream_port (prepareSandbox,
+// kubernetes.go), not a value prepare hardcodes or leaves at the zero a test's own config happens to
+// carry: a daemon configured with a distinctive port builds its plan's stream address from exactly
+// that port, before anything binds, and from bind even when advertise_host names the host pods dial
+// (openSupervision substitutes that once the real listener exists). The test above proves the bound
+// address is real and dialable; it cannot catch worker_stream_port being ignored, since
+// testConfig's own port is always 0 — this does, by configuring a nonzero one and checking
+// prepare()'s plan directly, with no listener bound.
 func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) {
-	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
-	if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
-	cfg.WorkerStreamPort = 47381
+	for _, tc := range []struct{ name, bind, advertiseHost string }{
+		{"no advertise_host", "192.0.2.30", ""},
+		{"advertise_host set", "0.0.0.0", "legion-daemon-legsmoke.legion.svc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+			cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+			if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+			cfg.Bind, cfg.AdvertiseHost, cfg.WorkerStreamPort = tc.bind, tc.advertiseHost, 47381
 
-	p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
+			p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if want := "tcp://" + net.JoinHostPort(tc.bind, "47381"); p.stream != want {
+				t.Errorf("prepare's worker stream address = %q, want %q (bind and worker_stream_port)", p.stream, want)
+			}
+		})
 	}
-	if want := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)); p.stream != want {
-		t.Errorf("prepare's worker stream address = %q, want %q (derived from worker_stream_port)", p.stream, want)
+}
+
+// shimAddress is where advertise_host takes effect: the substitution openSupervision applies to the
+// listener's bound address before handing it to the runtime factory. An address it cannot split
+// beside an advertise_host is refused rather than handed to pods.
+func TestShimAddressSubstitutesAdvertiseHostsHostKeepingTheBoundPort(t *testing.T) {
+	for _, tc := range []struct{ name, bound, advertiseHost, want string }{
+		{"no advertise_host, a real bind", "tcp://192.0.2.30:13371", "", "tcp://192.0.2.30:13371"},
+		{"no advertise_host, a unix socket", "unix:///run/legion/stream.sock", "", "unix:///run/legion/stream.sock"},
+		{"advertise_host over an IPv4 wildcard bind", "tcp://0.0.0.0:34353", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:34353"},
+		{"advertise_host over an IPv6 wildcard bind", "tcp://[::]:34353", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:34353"},
+		{"advertise_host over a real bind", "tcp://192.0.2.30:13371", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:13371"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := shimAddress(tc.bound, tc.advertiseHost)
+			if err != nil || got != tc.want {
+				t.Errorf("shimAddress(%q, %q) = %q, %v, want %q", tc.bound, tc.advertiseHost, got, err, tc.want)
+			}
+		})
+	}
+	for _, bound := range []string{"unix:///run/legion/stream.sock", "tcp://0.0.0.0"} {
+		if got, err := shimAddress(bound, "legion-daemon-legsmoke.legion.svc"); err == nil || !strings.HasPrefix(err.Error(), "advertise_host legion-daemon-legsmoke.legion.svc") {
+			t.Errorf("shimAddress(%q, advertise_host) = %q, %v, want a refusal naming advertise_host", bound, got, err)
+		}
+	}
+}
+
+// The full boot, through the real fake-runtime seam: with bind 0.0.0.0 and advertise_host
+// configured, the address the runtime factory actually receives (record.address, the one
+// prepareSandbox and openSupervision together produce) is advertise_host plus the listener's real,
+// kernel-chosen port — never listener.Addr()'s own wildcard, which no pod could dial. The Service
+// name resolves nowhere here, but the listener binds every interface, so 127.0.0.1 at the advertised
+// port reaches it: the port is the stream listener's own.
+func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) {
+	cfg := workflowConfig(t, workflowNATS(t))
+	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
+	cfg.Bind, cfg.AdvertiseHost = "0.0.0.0", "legion-daemon-legsmoke.legion.svc"
+	cfg.Port = holdPortOn(t, "0.0.0.0")
+	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+	record := &built{}
+	o := fakeRuntime(fake.NewRuntime(), record)
+	o.workflowTokens = &workflowTokenRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, cfg, quietLogger(), o) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run: %v", err)
+		}
+	}()
+	awaitHealthz(t, cfg, done)
+
+	record.mu.Lock()
+	address := record.address
+	record.mu.Unlock()
+	prefix := "tcp://legion-daemon-legsmoke.legion.svc:"
+	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
+		t.Fatalf("the runtime was told to have shims dial %q, want %s<bound port>", address, prefix)
+	}
+	if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strings.TrimPrefix(address, prefix), time.Second); err != nil {
+		t.Errorf("the worker stream does not accept on 127.0.0.1 at the advertised port of %s: %v", address, err)
+	} else {
+		conn.Close()
 	}
 }
 
@@ -401,7 +474,7 @@ func TestTheOperatorsPodReachesTheSandboxRuntime(t *testing.T) {
 		VolumeMounts:   []corev1.VolumeMount{{Name: "creds", MountPath: "/etc/legion-operator/creds", ReadOnly: true}},
 	}
 	cfg.Runtime.Kubernetes.Pod = pod
-	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
@@ -434,7 +507,7 @@ func TestTheNatsSeedReachesTheSandboxRuntimeAsTheProvidersSecrets(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 			cfg.NatsNkeySeedFile = tc.key
-			opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(tc.env), quietLogger())
+			opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(tc.env), quietLogger())
 			if err != nil {
 				t.Fatalf("sandboxOptions: %v", err)
 			}
@@ -482,7 +555,7 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	cfg.WorkerStopTimeout, cfg.WorkerBootTimeout, cfg.ProbeInterval, cfg.SlowCommandTimeout = 11*time.Second, 22*time.Second, 33*time.Second, 44*time.Second
 	cfg.WorkerBootRegistrationDeadlineIntervals = 5
 
-	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
@@ -516,7 +589,7 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
 		URL: "https://secrets.internal.example", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 1800,
 	}
-	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +601,7 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 		t.Fatalf("Tools.AgentSecrets = %q", opts.Tools.AgentSecrets)
 	}
 	cfg.Runtime.Kubernetes.AgentSecrets = nil
-	opts, _ = sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	opts, _ = sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if opts.AgentSecrets != nil {
 		t.Fatalf("AgentSecrets = %+v without the block", opts.AgentSecrets)
 	}
@@ -550,7 +623,7 @@ func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 			t.Fatalf("launch secret %s: no daemon credential material may reach a pod", secret.name)
 		}
 	}
-	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

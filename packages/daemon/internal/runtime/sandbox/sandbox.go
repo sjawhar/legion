@@ -82,6 +82,7 @@ type Runtime struct {
 	launcherAuth                            launcherCredentials
 	now                                     func() time.Time
 	log                                     *slog.Logger
+	removable                               func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
@@ -250,7 +251,7 @@ func configure(opts Options) (*Runtime, error) {
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, issues: map[string]chan struct{}{},
 		trees: map[string]chan struct{}{}, launchers: newLaunchers(),
 	}

@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-legion-envoy",
-  "version": "7.10.1",
+  "version": "7.11.2",
   "license": "Apache-2.0",
   "type": "module",
   "omp": {
@@ -13,7 +13,7 @@
     ]
   },
   "legion": {
-    "daemonApiVersion": 13
+    "daemonApiVersion": 15
   },
   "repository": {
     "type": "git",

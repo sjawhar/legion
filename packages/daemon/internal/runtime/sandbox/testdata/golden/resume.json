@@ -589,6 +589,14 @@
                 "value": "480"
               },
               {
+                "name": "LEGION_ROLE",
+                "value": "tester"
+              },
+              {
+                "name": "LEGION_GENERATION",
+                "value": "2"
+              },
+              {
                 "name": "LEGION_EXPECT_TREE_VOLUME",
                 "value": "true"
               },

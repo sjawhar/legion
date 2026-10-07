@@ -73,7 +73,7 @@ comes back, with everything it knew, the next time its role is needed.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Exercises the change against the issue's acceptance criteria and reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue. | implement App |
+| `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Checks the approved head and the required checks and workflows, then sends `READY`. | implement App |
 | `awaiting_merge` | none | Waits for a person to merge the pull request. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |

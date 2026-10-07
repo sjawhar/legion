@@ -267,35 +267,34 @@ func (s *supervisor) wait() {
 // are only ever as fresh as the moment they were read. Judging the hold by that first result would
 // accept an old generation's shim after its claim has already relaunched, taking the stream slot
 // the new generation's own hello then finds "already bound to a live stream".
+//
+// A store that fails either read answers the hello with that error, never as an unknown token: the
+// failure says nothing about the token, and the listener closes the connection unrefused for the
+// shim to redial (stream.HelloResolver).
 func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration) stream.HelloResolver {
-	resolve := func(bootToken string) (api.BootToken, bool) {
+	resolve := func(bootToken string) (api.BootToken, bool, error) {
 		ctx, cancel := context.WithTimeout(s.ctx, timeout)
 		defer cancel()
-		launch, known, err := tokens.Resolve(ctx, bootToken)
-		if err != nil {
-			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
-			return api.BootToken{}, false
-		}
-		return launch, known
+		return tokens.Resolve(ctx, bootToken)
 	}
-	return func(bootToken string) (claim.Token, uint64, bool, bool) {
-		if _, known := resolve(bootToken); !known {
-			return "", 0, false, false
+	return func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		if _, known, err := resolve(bootToken); err != nil || !known {
+			return "", 0, false, false, err
 		}
 		select {
 		case <-s.restored:
 		case <-s.ctx.Done():
 			s.log.Info("worker stream: a hello's boot token was real, but the boot never became ready", "error", s.ctx.Err())
-			return "", 0, false, false
+			return "", 0, false, false, nil
 		}
-		launch, known := resolve(bootToken)
-		if !known {
-			return "", 0, false, false
+		launch, known, err := resolve(bootToken)
+		if err != nil || !known {
+			return "", 0, false, false, err
 		}
 		if _, supervised := s.Machine(launch.Claim); !supervised {
-			return "", 0, false, false
+			return "", 0, false, false, nil
 		}
-		return launch.Claim, launch.Generation, launch.Stale, true
+		return launch.Claim, launch.Generation, launch.Stale, true, nil
 	}
 }
 
