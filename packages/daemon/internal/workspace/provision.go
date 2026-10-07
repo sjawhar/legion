@@ -22,6 +22,9 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err != nil {
 		return Workspace{}, err
 	}
+	if _, err := guardWorkspace(workspace.Dir, workspace.Clone, false); err != nil {
+		return Workspace{}, err
+	}
 	if request.CredentialHelper == "" {
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
@@ -125,6 +128,10 @@ func excludeCodegraphDirectory(cloneDir string) error {
 
 // Bookmark is the jj bookmark an issue's workspace is on: its branch.
 func Bookmark(issue string) string { return "legion/" + issue }
+
+// layoutDepth is how many directories below the state directory a shared clone and a workspace
+// each sit (Location): repos/<host>/<owner>/<name>, and workspaces/<owner>/<name>/<issue>.
+const layoutDepth = 4
 
 // Location is the deterministic workspace location Provision creates for one issue, and the shared
 // clone it is a jj workspace of. The repository arrives parsed (ghrepo.Parse); a `.` or `..`

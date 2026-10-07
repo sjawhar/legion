@@ -829,8 +829,23 @@ func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
 		if _, err := os.Stat(untouched); err != nil {
 			t.Errorf("%s, outside the layout, was touched: %v", untouched, err)
 		}
+		before := len(run.Calls())
+		err = Remove(context.Background(), run, ws)
+		refused(t, "Remove", err, symlink)
+		if calls := len(run.Calls()); calls != before {
+			t.Errorf("Remove ran %d command(s) after the layout guard, want %d", calls, before)
+		}
+		if _, statErr := os.Stat(pending); statErr != nil {
+			t.Fatalf("Remove touched the unsnapshotted edit (%v), want the layout guard to refuse before rename or RemoveAll", statErr)
+		}
+
+		before = len(run.Calls())
 		var logged []string
 		err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
+		refused(t, "RemoveFinished", err, symlink)
+		if calls := len(run.Calls()); calls != before {
+			t.Errorf("RemoveFinished ran %d command(s) after the layout guard, want %d", calls, before)
+		}
 		if _, statErr := os.Stat(pending); statErr != nil {
 			t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
 		}

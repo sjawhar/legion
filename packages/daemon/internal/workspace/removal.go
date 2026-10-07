@@ -134,6 +134,9 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 	if !located(ws) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", ws)
 	}
+	if _, err := guardWorkspace(ws.Dir, ws.Clone, false); err != nil {
+		return err
+	}
 	present, err := pathExists(ws.Dir)
 	if err != nil {
 		return err

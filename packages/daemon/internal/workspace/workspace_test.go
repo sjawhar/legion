@@ -232,6 +232,37 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 	}
 }
 
+// A symlinked workspace layout directory is refused before Provision creates the workspace,
+// registers it in the clone or writes its .git and .jj outside the state layout.
+func TestProvisionRefusesASymlinkedWorkspaceLayoutBeforeCreatingAnything(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	request.Issue = "WIDGETS-43"
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(workspace.Dir)
+	if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Provision(context.Background(), run, request)
+	if err == nil || !strings.Contains(err.Error(), parent+" is a symlink") {
+		t.Fatalf("Provision through a symlinked workspace layout = %v, want a refusal naming %s", err, parent)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("Provision ran %#v before refusing the symlinked layout", calls)
+	}
+	if _, err := os.Stat(filepath.Join(outside, filepath.Base(workspace.Dir))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Provision created %s outside the layout: %v", workspace.Dir, err)
+	}
+}
+
 func commandEnv(command Command, key string) string {
 	prefix := key + "="
 	for _, entry := range command.Env {
@@ -809,9 +840,8 @@ func TestProvisionExcludesTheCodegraphDirectoryFromEveryWorkspaceOfTheClone(t *t
 // git writes a relative worktree pointer between real paths, so provisioning finds its own entry
 // through a state directory reached by a symlink: it locks it, re-adds the workspace after its
 // directory went, and removal deletes it. The state directory is the one place in the tree
-// volume's path a symlink is allowed (refuseSymlinkedLayout); a symlinked repos directory, where
-// this test once put the symlink, is refused (TestTheRunnerRefusesASymlinkedLayoutDirectory). git
-// names the workspace by its physical path, through the resolved state directory.
+// volume's path a symlink is allowed (refuseSymlinkedLayout); git names the workspace by its
+// physical path through the resolved state directory.
 func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	run := newLocalRunner(t)
 	request := provisionRequest(t)

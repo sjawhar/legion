@@ -141,7 +141,11 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	args := command.Argv[1:]
 	if command.Argv[0] == "jj" {
-		if err := disarmLegacyConfig(jjWorkspaceRoot(command), command.Clone); err != nil {
+		guarded, err := guardWorkspace(jjWorkspaceRoot(command), command.Clone, true)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := disarmLegacyConfig(guarded.jjDir, guarded.repo); err != nil {
 			return Result{}, err
 		}
 		// jj starts the git its configuration names, and a tree agent can still set that where
@@ -184,69 +188,71 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	return result, nil
 }
 
-// disarmLegacyConfig removes each legacy configuration file jj would migrate when it opens the
-// workspace at root. jj 0.38 and later (the worker image's is 0.45; the tmux daemon refuses an
-// older host jj, internal/daemon's resolveTools) keep a repository's and a workspace's own
-// configuration in the config home, under the id an id file inside `.jj` names, so nothing a tree
-// agent writes on the tree volume is read as configuration, with one exception: while the id
-// file cannot be read because it does not exist, jj migrates the legacy file beside it into the
-// config home and reads it from then on (lib/src/secure_config.rs, maybe_load_config and
+// guardedWorkspace is what a jj command has opened after guardWorkspace held each untrusted path
+// to the Location layout. disarmLegacyConfig only removes the legacy files jj would migrate.
+type guardedWorkspace struct {
+	jjDir string
+	repo  string
+}
+
+// guardWorkspace holds every refusal a jj command can reach, in order: the workspace and clone
+// layout components; the .jj a workspace command opens; the shared clone's .jj and .jj/repo; and
+// the workspace's .jj/repo pointer. Callers that will write a workspace path but not yet open jj
+// (Provision, Remove and RemoveFinished) pass requireJJ false: the same layout guard refuses a
+// symlinked target before it creates, renames or removes anything outside the layout.
+//
+// jj 0.38 and later keep a repository's and a workspace's own configuration in the config home,
+// under the id an id file inside `.jj` names. While that id is missing, jj migrates the legacy file
+// beside it into the config home and reads it (lib/src/secure_config.rs, maybe_load_config and
 // maybe_migrate_legacy_config; automatic until jj 0.49). Those are a workspace's
 // `.jj/workspace-config.toml` beside `.jj/workspace-config-id`, and its repository's
-// `config.toml` beside `config-id`. Removing the legacy file in exactly that case leaves jj to
-// open the workspace as it would with no legacy file: with an empty configuration of its own,
-// never one a tree agent wrote. dispatch://LEGION-583 measured why it matters: a planted
-// `revset-aliases."empty()" = "all()"` made the removal pass read an unpushed commit as pushed,
-// and a planted `"remote_bookmarks()"` alias broke jj's own trunk() and so every provisioning
-// after it; a pod's config home is also the one the agent's own jj reads, so a migration during
-// workspace-init would hand the planted file to the agent too. The repository's file is removed
-// only in the shared clone's own `.jj/repo` (sharedRepository), never in a directory a workspace's
-// rewritten pointer names.
+// `config.toml` beside `config-id`. Removing the legacy file leaves jj to open an empty
+// configuration of its own, never one a tree agent wrote. The worker image's jj is 0.45; the tmux
+// daemon refuses a host jj older than 0.38 (internal/daemon's resolveTools).
 //
-// The `.jj` at root must be a real directory, never a symlink or a file, or the command is
-// refused: a symlinked `.jj` would make jj open, and this function disarm, a directory outside
-// the volume's layout. A root with no `.jj` at all is refused when the command runs in a workspace
-// of a shared clone (clone set, RunCheckedIn): that workspace was provisioned with one, and without
-// it jj with no -R walks up to the nearest ancestor holding a `.jj` (cli_util.rs,
-// find_workspace_dir) and opens whatever repository a tree agent made there. RunCheckedIn also
-// names the workspace with -R, under which jj never walks up; the refusal names the missing `.jj`
-// before jj runs at all. With no clone (a command that opens the clone itself with -R, or `jj git
-// clone`, which opens none) a missing `.jj` is left for jj. A legacy file that cannot be removed
-// fails the command, since jj would read it.
+// A workspace with no `.jj` is refused when requireJJ and clone are set: it was provisioned with
+// one, and without it a jj command lacking -R walks up to an ancestor holding a `.jj`
+// (cli_util.rs, find_workspace_dir). RunCheckedIn names its workspace with -R, under which jj
+// never walks up; the refusal names the missing `.jj` before jj runs at all. A missing `.jj` with
+// no clone (a command that opens the clone itself with -R, or `jj git clone`, which opens none) is
+// left for jj.
 //
-// Each directory between the state directory and root, and between it and the clone, must be a
-// real directory too (refuseSymlinkedLayout): a symlink one level above `.jj` would make jj open,
-// and this function disarm, a copy of the clone or a workspace outside the layout just as a
-// symlinked `.jj` would. The state directory itself may be reached through a symlink.
-//
-// This holds against a file written at any time before the command runs. A tree agent writing
-// one in the instant between this check and jj's own read is outside what it closes, the trust
-// model RemoveFinished's push-safety check states: a hostile role already has every sibling
+// This holds against a tree-written path present before the command begins. A write in the instant
+// between this guard and jj's own read is outside it: a hostile role already has every sibling
 // workspace on the volume to delete directly.
-func disarmLegacyConfig(root, clone string) error {
+func guardWorkspace(root, clone string, requireJJ bool) (guardedWorkspace, error) {
 	if root == "" {
-		return nil
+		return guardedWorkspace{}, nil
+	}
+	for _, dir := range []string{root, clone} {
+		if err := refuseSymlinkedLayout(root, dir); err != nil {
+			return guardedWorkspace{}, err
+		}
+	}
+	if !requireJJ {
+		return guardedWorkspace{}, nil
 	}
 	jjDir := filepath.Join(root, ".jj")
 	info, err := os.Lstat(jjDir)
 	if errors.Is(err, fs.ErrNotExist) && clone == "" {
-		return nil
-	}
-	for _, dir := range []string{root, clone} {
-		if err := refuseSymlinkedLayout(root, dir); err != nil {
-			return err
-		}
+		return guardedWorkspace{}, nil
 	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("refusing to run jj in %s: it has no .jj of its own, which a workspace of the shared clone %s always has", root, clone)
+		return guardedWorkspace{}, fmt.Errorf("refusing to run jj in %s: it has no .jj of its own, which a workspace of the shared clone %s always has", root, clone)
 	case err != nil || !info.IsDir():
-		return fmt.Errorf("refusing to run jj in %s: its .jj is not a real directory (%v)", root, describeEntry(info, err))
+		return guardedWorkspace{}, fmt.Errorf("refusing to run jj in %s: its .jj is not a real directory (%v)", root, describeEntry(info, err))
 	}
 	repo, err := sharedRepository(jjDir, clone)
 	if err != nil {
-		return err
+		return guardedWorkspace{}, err
 	}
+	return guardedWorkspace{jjDir: jjDir, repo: repo}, nil
+}
+
+// disarmLegacyConfig removes each legacy configuration file jj would migrate. guardWorkspace has
+// already held jjDir and repo to a real workspace and the shared clone, respectively.
+func disarmLegacyConfig(jjDir, repo string) error {
 	legacy := map[string][2]string{
 		jjDir: {"workspace-config-id", "workspace-config.toml"},
 		repo:  {"config-id", "config.toml"},
@@ -263,16 +269,12 @@ func disarmLegacyConfig(root, clone string) error {
 	return nil
 }
 
-// layoutDepth is how many directories below the state directory a shared clone and a workspace
-// each sit (Location): repos/<host>/<owner>/<name>, and workspaces/<owner>/<name>/<issue>.
-const layoutDepth = 4
-
-// refuseSymlinkedLayout refuses a jj command run in root when dir, or any of the directories above
-// it up to the state directory (layoutDepth of them in all), is a symlink, naming it. Provisioning
-// creates every one of them as a real directory; a symlink there is a tree agent's, and would make
-// jj open a clone or a workspace outside the layout. The state directory itself, above them, is
-// not checked: an operator may reach it through a symlink. A component that does not exist is no
-// symlink, so it is passed over, as is an empty dir.
+// refuseSymlinkedLayout refuses an operation at root when dir, or any of the directories above it
+// up to the state directory (layoutDepth of them in all), is a symlink, naming it. Provisioning
+// creates every one as a real directory; a symlink there would make jj open, and workspace
+// creation, removal or the legacy-file disarm write into, a copy outside the workspace layout
+// below the state directory. The state directory itself is not checked: an operator may reach it
+// through a symlink. A component that does not exist is no symlink, so it is passed over.
 func refuseSymlinkedLayout(root, dir string) error {
 	for range layoutDepth {
 		if dir == "" || dir == filepath.Dir(dir) {
@@ -281,9 +283,9 @@ func refuseSymlinkedLayout(root, dir string) error {
 		info, err := os.Lstat(dir)
 		switch {
 		case err == nil && info.Mode()&fs.ModeSymlink != 0:
-			return fmt.Errorf("refusing to run jj in %s: %s is a symlink, and no directory of the tree volume's layout below its state directory is one", root, dir)
+			return fmt.Errorf("refusing workspace operation in %s: %s is a symlink, and no directory of the workspace layout below the state directory is one", root, dir)
 		case err != nil && !errors.Is(err, fs.ErrNotExist):
-			return fmt.Errorf("refusing to run jj in %s: %w", root, err)
+			return fmt.Errorf("refusing workspace operation in %s: %w", root, err)
 		}
 		dir = filepath.Dir(dir)
 	}

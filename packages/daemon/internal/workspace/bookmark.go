@@ -424,6 +424,9 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)
 	}
+	if _, err := guardWorkspace(workspace.Dir, workspace.Clone, false); err != nil {
+		return err
+	}
 	cloneDir, workspaceName := workspace.Clone, filepath.Base(workspace.Dir)
 	cloneExists, err := pathExists(filepath.Join(cloneDir, ".jj"))
 	if err != nil {
