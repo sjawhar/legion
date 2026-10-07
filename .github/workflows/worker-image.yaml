@@ -64,11 +64,12 @@ on:
       - scripts/assemble-third-party-notices.sh
 
 # Same-repo `pull_request` runs get this token too (a fork PR would get a read-only token, and this
-# repo takes no fork PRs), so it carries only what the pull request path needs: a PR that edits this
-# workflow must add a write scope to get one, and that line shows in its diff. The release note that
+# repo takes no fork PRs), so it carries only what the pull request path needs. The release note that
 # needs `contents: write` runs in release.yaml's own `worker_image_release_note` job, and the
 # attestation's `id-token` and `attestations: write` belong to the `attest` job below alone, which a
-# pull request run skips.
+# pull request run skips. A pull request runs its own head's copy of this file, so one that drops
+# that `if:` gets those scopes too; its attestation is still refused, because its certificate names
+# `refs/pull/<n>/merge`, never `refs/heads/main` (docs/kubernetes.md, "Pin by digest, never by tag").
 permissions:
   contents: read
   packages: write # ghcr.io push
@@ -196,35 +197,27 @@ jobs:
             echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # A GitHub artifact attestation of the digest the build pushed. A pull request run publishes its
-  # head's sha- tag too, and a pull request can edit this workflow, so a tag alone cannot say which
-  # run published an image. The attestation's Sigstore certificate carries the workflow file, ref and
-  # commit from the run's OIDC token, which no workflow edit can change, so
-  # `gh attestation verify oci://<image>@<digest> --repo sjawhar/legion --signer-workflow
-  # sjawhar/legion/.github/workflows/worker-image.yaml --source-ref refs/heads/main` accepts only a
-  # digest a run on main attested (docs/kubernetes.md, "Pin by digest, never by tag"). A pull request
-  # run skips this job, so its token never holds id-token. This statement is GitHub's, separate from
-  # the BuildKit provenance the build job keeps off (provenance: false and the comments above).
+  # A GitHub artifact attestation of the digest the build pushed, stored with GitHub. A pull request
+  # run publishes its head's sha- tag too, and a pull request can edit this workflow, so a tag alone
+  # cannot say which run published an image. The attestation's Sigstore certificate carries this
+  # workflow file's identity, ref and commit from the run's OIDC token, which no workflow edit can
+  # change, so the `gh attestation verify` command docs/kubernetes.md gives ("Pin by digest, never by
+  # tag") accepts a digest only when a run on main built it from the commit its tag names. Consumers
+  # name this file in that command, so moving the attestation to another workflow breaks every one
+  # of them. A pull request run skips this job (the comment above `permissions:` covers one that edits
+  # the `if:` out). This statement is GitHub's, separate from the BuildKit provenance the build job
+  # keeps off (provenance: false and the comments above).
   attest:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
-    # write stores the attestation with GitHub; packages: write pushes it to ghcr.io beside the image.
+    # write stores the attestation with GitHub.
     permissions:
       id-token: write
       attestations: write
-      packages: write
     steps:
-      # push-to-registry reads the registry credential from the Docker config this writes.
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ needs.build.outputs.image }}
           subject-digest: ${{ needs.build.outputs.digest }}
-          push-to-registry: true

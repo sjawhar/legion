@@ -82,7 +82,11 @@ Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, L
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for any tag, `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>`
 prints it. Tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>`
-for a release.
+for a release. A tag does not say which build published it, and a pull request's build publishes a
+`sha-` tag too. Every build except a pull request's carries a GitHub artifact attestation, and
+`docs/kubernetes.md` in the repository ("Pin by digest, never by tag") gives the
+`gh attestation verify` command that accepts an image only when `main` built it from the commit its
+tag names.
 
 If your repositories need more than the image carries, build your own image `FROM` it by digest,
 put the extra commands in `/usr/local/bin` or `/usr/bin`, and pin `runtime.kubernetes.image` to your

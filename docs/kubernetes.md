@@ -105,23 +105,38 @@ ephemeral merge commit); `<legion version>` only on `main` when the `legion` job
 Runs from any other ref publish the `sha-` tag only and never touch a release.
 
 A tag does not say which run published it: a pull request run publishes the `sha-` tag of its head
-too, a pull request can edit the workflow, and when two runs build one commit the tag names whichever
-pushed last. The digest's GitHub artifact attestation does. Every run except a pull request's ends
+too, when two runs build one commit the tag names whichever pushed last, and a pull request can edit
+the workflow, whose token can push, to point a `sha-` tag at any digest already in the package. The
+digest's GitHub artifact attestation does say. Every run except a pull request's ends
 with the workflow's `attest` job, which attests the pushed digest with
-`actions/attest-build-provenance`, stores the attestation with GitHub and pushes it to `ghcr.io` beside
-the image, under the tag `sha256-<image digest hex>`: an index of that image's attestations (the OCI
-referrers tag scheme), not an image. The attestation's Sigstore certificate names the workflow file,
-ref and commit from the run's OIDC token, which no workflow edit can change. To accept only a digest a
-run on `main` built:
+`actions/attest-build-provenance` and stores the attestation with GitHub. Its Sigstore certificate
+carries what the run's OIDC token says, which no workflow edit can change: its identity is the
+workflow file at the ref it was read from, and its source ref and source digest are the ref and commit
+the run started on. To accept a digest only when a run on `main` built it from commit `<C>`, the
+commit its `sha-` tag names:
 
 ```bash
 gh attestation verify oci://ghcr.io/sjawhar/legion-worker@sha256:… --repo sjawhar/legion \
-  --signer-workflow sjawhar/legion/.github/workflows/worker-image.yaml --source-ref refs/heads/main
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/main \
+  --source-ref refs/heads/main --source-digest <C, all 40 hex digits>
 ```
 
-`--source-digest <40-hex commit>` also binds the commit. A pull request run attests nothing, and a run
-dispatched from another branch attests `refs/heads/<branch>`, so neither passes. The attestation is
-separate from the image's own BuildKit provenance, which the build keeps off (`provenance: false`).
+What each flag refuses:
+
+- `--cert-identity` matches the identity exactly. `--signer-workflow` matches it only as a prefix, so
+  it would also accept a workflow whose path merely starts with `worker-image.yaml`.
+- `--source-ref` refuses a run started on another branch that calls
+  `sjawhar/legion/.github/workflows/worker-image.yaml@main`: that run's identity names `refs/heads/main`,
+  and its source ref names the other branch.
+- `--source-digest` refuses an image a run on `main` built from another commit, such as an older
+  `main` image a pull request run pointed `sha-<C>` at.
+
+A pull request run attests nothing. A pull request that edits the workflow to attest anyway gets
+`refs/pull/<n>/merge` in both the identity and the source ref, and a run dispatched from another
+branch gets `refs/heads/<branch>` in both, so the first two flags each refuse them.
+
+The attestation is separate from the image's own BuildKit provenance, which the build keeps off
+(`provenance: false`).
 
 ### How it is built — and the iteration rule
 
@@ -151,8 +166,9 @@ Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path 
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
 unguarded. The workflow's `packages`/`contents` permissions apply to same-repo pull requests (this
-repository takes no fork PRs, whose token would be read-only); the `attest` job's `id-token` and
-`attestations` scopes do not, since a pull request run skips that job.
+repository takes no fork PRs, whose token would be read-only). The `attest` job's `id-token` and
+`attestations` scopes reach a pull request run only if it drops that job's `if:`, and its attestation
+then names `refs/pull/<n>/merge`, which the verify command above refuses.
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
 — no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
