@@ -39,20 +39,19 @@ type ControllerSecretResponse struct {
 	DesignGate config.DesignGate `json:"designGate"`
 }
 
-// ControllerRole is the role a controller registration names (claim.RoleController): the operator's
-// controller holds no claim, and the daemon's own (`controller: daemon`) holds one on no issue.
-const ControllerRole = string(claim.RoleController)
-
 // ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
-// registered with the controller capability: the project's controller role token
-// (claim.ControllerToken), ControllerRole, the capability's generation, and the secret its
+// registered as the project's controller: the project's controller role token
+// (claim.ControllerToken), the role claim.RoleController, a generation, and the secret its
 // controller grants authenticate with. It has no tree and no issue; a claim's registration is
 // claim.RegisterResponse.
 type ControllerRegisterResponse struct {
 	ClaimToken claim.Token `json:"claimToken"`
-	Role       string      `json:"role"`
-	Generation uint64      `json:"generation"`
-	Secret     string      `json:"secret"`
+	Role       claim.Role  `json:"role"`
+	// Generation is the generation of the capability the operator's controller registered with,
+	// and, for the daemon's own controller (`controller: daemon`), the generation of the launch
+	// that registered, which its agent names on `claims/ready`.
+	Generation uint64 `json:"generation"`
+	Secret     string `json:"secret"`
 }
 
 // controllerSecret is `legion controller start`'s one daemon call: the operator's bearer, compared
@@ -151,7 +150,7 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		"session", req.SessionID, "agent", req.AgentID)
 	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: token,
-		Role:       ControllerRole,
+		Role:       claim.RoleController,
 		Generation: record.Generation,
 		Secret:     secret,
 	})
@@ -164,11 +163,12 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 // takes the registration first, behind the generation and same-agent fences every claim's has, and
 // persists the session, its transcript and the issued secret's hash; then the session is recorded
 // as the project's controller — the record admission's wakes, the controller grant route and the
-// state read — with the boot token's hash as its capability, which revokes every earlier
-// controller's grants. That capability registers nothing on its own: under `controller: daemon` a
-// token no launch resolves is refused, so the token of a launch since replaced, which a restart
-// forgets, never registers outside its claim's fence. The answer is the operator's controller's
-// registration, its generation the launch's, which the agent's ready names.
+// state read — under a fresh capability, which revokes every earlier controller's grants. That
+// capability is the hash of a secret nobody holds, never the boot token's: the operator's
+// capability path compares a token with it, and a daemon restarted under `controller: operator`
+// forgets the tokens of launches since replaced, so a recorded boot token would register there
+// outside its claim's generation fence. The answer is the operator's controller's registration, its
+// generation the launch's, which the agent's ready names.
 func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest, launch BootToken, m *supervise.Machine) {
 	ctx := context.WithoutCancel(r.Context())
 	secret := rand.Text()
@@ -181,7 +181,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 		s.claimFailure(w, "register", launch.Claim, err)
 		return
 	}
-	generation, err := s.controller.MintController(ctx, s.project, capabilityHash(req.BootToken))
+	generation, err := s.controller.MintController(ctx, s.project, capabilityHash(rand.Text()))
 	if err != nil {
 		s.log.Error("api: record the launched controller's capability", "claim", launch.Claim, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
@@ -198,7 +198,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 		"session", req.SessionID, "agent", req.AgentID, "pluginContract", req.PluginContract)
 	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: launch.Claim,
-		Role:       ControllerRole,
+		Role:       claim.RoleController,
 		Generation: launch.Generation,
 		Secret:     secret,
 	})

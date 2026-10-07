@@ -1,10 +1,11 @@
 // Package controller is the project's controller as the daemon's record holds it: the capability
-// it registered with — the one `legion controller start` fetched with the operator's bearer, or,
-// under `controller: daemon`, the boot token of the daemon's own launch — and the session that
-// registered with it, which `controllerLocator` reports. The operator's controller is no process
-// of the daemon's, which has nothing of it to stop or resume; Prober reads that session's liveness
-// from the Envoy role registry. The daemon's own controller is a claim it supervises
-// (internal/daemon's controllerKeeper).
+// a session registers with — the one `legion controller start` fetched with the operator's bearer,
+// or, under `controller: daemon`, one nobody holds, minted when a launch of the daemon's own
+// controller registered with its boot token — and the session that registered, which
+// `controllerLocator` reports. The operator's controller is no process of the daemon's, which has
+// nothing of it to stop or resume; Prober reads that session's liveness from the Envoy role
+// registry. The daemon's own controller is a claim it supervises (internal/daemon's
+// controllerKeeper).
 package controller
 
 import "time"

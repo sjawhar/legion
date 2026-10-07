@@ -77,7 +77,7 @@ func TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage(t *testing.T) {
 	if err := decoder.Decode(&registration); err != nil {
 		t.Fatalf("decode %s as the controller's registration: %v", body, err)
 	}
-	if registration.ClaimToken != token || registration.Role != api.ControllerRole || registration.Generation != launch.Generation || registration.Secret == "" {
+	if registration.ClaimToken != token || registration.Role != claim.RoleController || registration.Generation != launch.Generation || registration.Secret == "" {
 		t.Fatalf("the controller's registration = %+v, want %s, role controller, generation %d, a secret", registration, token, launch.Generation)
 	}
 	state := d.state()
@@ -238,5 +238,63 @@ func TestADaemonSwitchedBackToTheOperatorStopsItsControllersClaim(t *testing.T) 
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion}, true); status != http.StatusOK {
 		t.Fatalf("the operator's controller secret = %d %s, want 200", status, body)
+	}
+}
+
+// A daemon switched back to `controller: operator` registers no earlier launch of the controller it
+// stopped. Once the claim has relaunched, a restart forgets the earlier launch's boot token, which
+// then resolves to no launch and reaches the operator's capability path; registered there it would
+// sit outside the claim's generation fence and mint controller grants. Neither the capability the
+// launch registered under nor the one the stop mints in its place is a token anyone holds, and the
+// stop ends the record's registration, so the state names no dead pod's session.
+func TestASwitchedBackDaemonRegistersNoEarlierLaunchOfItsController(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	first := controllerLaunched(t, rt, token)
+	dialShim(t, record.address, first.BootToken)
+	testwait.Eventually(t, "the hello to reach the controller's machine", func() bool {
+		return d.claim(token).State == string(supervise.StateShimConnected)
+	})
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: first.BootToken, SessionID: "ses_first", OmpSessionFile: "/sessions/controller.jsonl",
+		AgentID: "ses_first", PluginContract: api.DaemonAPIVersion,
+	}, false); status != http.StatusOK {
+		t.Fatalf("register the controller's first launch = %d; body %s", status, body)
+	}
+	// The pod dies and the machine resumes its session as a second launch, which has not
+	// registered when the daemon restarts.
+	rt.Emit(runtime.Observation{Locator: *d.claim(token).Locator, Kind: runtime.Gone, Detail: "pod gone"})
+	testwait.Eventually(t, "the controller's relaunch", func() bool {
+		c := d.claim(token)
+		return c.Generation == first.Generation+1 && c.State == string(supervise.StateLaunching)
+	})
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchOperator
+	d = startDaemon(t, cfg, o)
+	if state := d.claim(token).State; state != string(supervise.StateRetired) {
+		t.Fatalf("the controller's claim is %s once the operator's daemon booted, want retired", state)
+	}
+	if locator := d.state().ControllerLocator; locator != nil {
+		t.Errorf("controllerLocator = %+v once the operator's daemon stopped the controller, want none", locator)
+	}
+	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: first.BootToken, SessionID: "ses_stale", OmpSessionFile: "/sessions/stale.jsonl",
+		AgentID: "ses_stale", PluginContract: api.DaemonAPIVersion,
+	}, false)
+	if status != claim.InvalidBootToken.Status || !strings.Contains(string(body), claim.InvalidBootToken.Message) {
+		t.Fatalf("the first launch's boot token registered on the operator's daemon = %d %s, want %d %q",
+			status, body, claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
 	}
 }

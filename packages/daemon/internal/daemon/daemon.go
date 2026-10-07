@@ -28,7 +28,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -700,32 +699,6 @@ func (s *supervision) start(boot context.Context) error {
 	return nil
 }
 
-// stopLaunchedController ends the daemon's own controller's claim on a daemon that leaves the
-// controller to its operator (`controller: operator`), and returns its token when it stopped one. A
-// claim an earlier boot under `controller: daemon` stored would otherwise be re-adopted and
-// relaunched at every death, its pod contending with the operator's `legion controller start` for
-// the one controller record, which the register route refuses it on this daemon. The stop releases
-// its process (its Sandbox, under the Sandbox runtime) and retires the claim before anything
-// relaunches it. A stop that fails refuses the boot, naming the claim, rather than leave this
-// daemon supervising a controller it does not run.
-func (s *supervision) stopLaunchedController(ctx context.Context) (claim.Token, error) {
-	token := claim.ControllerToken(s.plan.project)
-	m, ok := s.supervisor.Machine(token)
-	if !ok {
-		return "", nil
-	}
-	state := m.Claim().State
-	if state == supervise.StateRetired {
-		return "", nil
-	}
-	s.log.Warn("controller: stopping the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator",
-		"claim", token, "state", state)
-	if err := m.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
-		return "", fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
-	}
-	return token, nil
-}
-
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
 // prove an unrecorded launch's pane is gone, so callers must not launch the claim again until this
 // returns true. Each attempt reads the claims as they are now: a later retry must know the claims
@@ -924,47 +897,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		return nil
 	})
 	return group.Wait()
-}
-
-// watchController is the daemon's one line about the controller it never launches, under either
-// runtime: every sweep interval it reads the project's controller record, and when no session holds
-// it, or the Envoy role registry says the session is gone, it says so and how to start one, at most
-// once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was reached;
-// Unknown is never a death verdict, so it says nothing more.
-func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
-	prober := controller.NewProber(controller.ProberOptions{
-		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
-	})
-	ticker := time.NewTicker(p.orphanSweep)
-	defer ticker.Stop()
-	var logged time.Time
-	for {
-		record, _, err := st.Controller(ctx, p.project)
-		liveness := controller.Gone
-		switch {
-		case err != nil:
-			liveness = controller.Unknown
-			if ctx.Err() == nil {
-				log.Warn("controller: read its record", "error", err)
-			}
-		case record.Registered():
-			liveness = prober.Probe(ctx, record.Session)
-		}
-		switch liveness {
-		case controller.Alive:
-			logged = time.Time{}
-		case controller.Gone:
-			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {
-				log.Warn("controller not registered; run legion controller start", "project", cfg.Project)
-				logged = time.Now()
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
 }
 
 // source answers the state route out of the daemon's own store: the daemon itself, the cap it

@@ -2,12 +2,17 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -138,6 +143,84 @@ func (k *controllerKeeper) ready(c supervise.Claim) {
 		k.log.Info("controller: the start message waits behind the controller's pending delivery", "claim", c.Token)
 	default:
 		k.log.Error("controller: hand the daemon's controller its start message", "claim", c.Token, "error", err)
+	}
+}
+
+// stopLaunchedController ends the daemon's own controller's claim on a daemon that leaves the
+// controller to its operator (`controller: operator`), and returns its token when it stopped one. A
+// claim an earlier boot under `controller: daemon` stored would otherwise be re-adopted and
+// relaunched at every death, its pod contending with the operator's `legion controller start` for
+// the one controller record, which the register route refuses it on this daemon. First it mints
+// that record a capability nobody holds (the hash of a secret it discards), which ends the
+// registration of the controller it stops: the state's controllerLocator then names no dead pod's
+// session, no grant mints for it, and no capability any launch registered under survives the
+// switch. The operator's next `legion controller start` mints the capability its controller
+// registers with. Then the stop releases the claim's process (its Sandbox, under the Sandbox
+// runtime) and retires the claim before anything relaunches it. The mint comes first so that a stop
+// that fails leaves the claim, and the record with it, to stop again at the next boot; a retired
+// claim is never stopped, so a capability the operator has minted since is never replaced. A mint
+// or a stop that fails refuses the boot, naming the claim, rather than leave this daemon
+// supervising a controller it does not run.
+func (s *supervision) stopLaunchedController(ctx context.Context) (claim.Token, error) {
+	token := claim.ControllerToken(s.plan.project)
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		return "", nil
+	}
+	state := m.Claim().State
+	if state == supervise.StateRetired {
+		return "", nil
+	}
+	s.log.Warn("controller: stopping the controller an earlier boot under controller: daemon launched, and ending its registration; this daemon leaves the controller to its operator",
+		"claim", token, "state", state)
+	unheld := sha256.Sum256([]byte(rand.Text()))
+	if _, err := s.supervisor.store.MintController(ctx, s.plan.project, unheld[:]); err != nil {
+		return "", fmt.Errorf("end the registration of %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+	}
+	if err := m.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
+		return "", fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+	}
+	return token, nil
+}
+
+// watchController is the daemon's one line about the controller it never launches, under either
+// runtime: every sweep interval it reads the project's controller record, and when no session holds
+// it, or the Envoy role registry says the session is gone, it says so and how to start one, at most
+// once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was reached;
+// Unknown is never a death verdict, so it says nothing more.
+func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
+	prober := controller.NewProber(controller.ProberOptions{
+		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
+	})
+	ticker := time.NewTicker(p.orphanSweep)
+	defer ticker.Stop()
+	var logged time.Time
+	for {
+		record, _, err := st.Controller(ctx, p.project)
+		liveness := controller.Gone
+		switch {
+		case err != nil:
+			liveness = controller.Unknown
+			if ctx.Err() == nil {
+				log.Warn("controller: read its record", "error", err)
+			}
+		case record.Registered():
+			liveness = prober.Probe(ctx, record.Session)
+		}
+		switch liveness {
+		case controller.Alive:
+			logged = time.Time{}
+		case controller.Gone:
+			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {
+				log.Warn("controller not registered; run legion controller start", "project", cfg.Project)
+				logged = time.Now()
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

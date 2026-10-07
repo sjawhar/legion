@@ -168,7 +168,7 @@ func TestAControllerRegistersWithTheMintedCapability(t *testing.T) {
 	}
 	var registration ControllerRegisterResponse
 	decodeInto(t, recorder, &registration)
-	if registration.ClaimToken != claim.ControllerToken(testProject) || registration.Role != ControllerRole ||
+	if registration.ClaimToken != claim.ControllerToken(testProject) || registration.Role != claim.RoleController ||
 		registration.Generation != 1 || registration.Secret == "" || registration.Secret == capability {
 		t.Fatalf("registration = %+v, want %s, role controller, generation 1, and a secret of its own",
 			registration, claim.ControllerToken(testProject))
@@ -309,11 +309,10 @@ func TestAnOperatorsDaemonRefusesTheRegistrationOfALaunchedController(t *testing
 }
 
 // A daemon that launches its own controller (`controller: daemon`) registers no controller through
-// the capability path: a token no launch resolves is refused, even one whose hash the controller
-// record holds. That record holds the boot token of the launch that last registered, and a daemon
-// restart forgets the tokens of launches since replaced, so the token of a controller pod the
-// daemon replaced would otherwise register through it, outside its claim's generation fence, and
-// mint controller grants.
+// the capability path, which is the operator's: a token no launch resolves is refused there before
+// the controller record is read. A daemon restart forgets the tokens of launches since replaced, so
+// the token of a controller pod the daemon replaced is such a token, and the record's registration
+// is left as it was.
 func TestASupersededControllerLaunchNeverRegistersAfterARestart(t *testing.T) {
 	h := newControllerHarness(t, true)
 	token, first := h.launchController()
@@ -334,6 +333,21 @@ func TestASupersededControllerLaunchNeverRegistersAfterARestart(t *testing.T) {
 	if after.Session != "ses_first" || after.Generation != before.Generation {
 		t.Fatalf("controller record = %+v, want ses_first's registration at generation %d untouched", after, before.Generation)
 	}
+}
+
+// The capability a launched controller's registration records is no launch's boot token but the
+// hash of a secret nobody holds. The operator's capability path compares a token with it, and a
+// daemon restarted under `controller: operator` forgets the tokens of launches since replaced, so a
+// boot token recorded there would register through that path, outside its claim's generation
+// fence, whatever state the restart found the claim in: here one nothing has stopped.
+func TestALaunchedControllersBootTokenNeverRegistersAsTheOperatorsCapability(t *testing.T) {
+	h := newControllerHarness(t, true)
+	token, first := h.launchController()
+	h.registeredController(first, "ses_first")
+	h.relaunch(token)
+	h.restartAPI(false)
+
+	wantRefusal(t, h.register(first, "ses_stale"), claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
 }
 
 // wantFailure holds a response to the status and the stable code of one credential or workflow
