@@ -23,9 +23,12 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   inlines that snapshot into each pod it runs, and `legion probe-image`, given no `--role-references`,
   resolves the task agents and skills named by the prompts the image's own `legion` embeds
   (`packages/daemon/cmd/legion/probe_image.go`);
-- `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
-  `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
-  (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
+- `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
+  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
+  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion` and each linked into the
+  isolated OMP profile `legion` (`OMP_PROFILE=legion`; plugins resolve to
+  `/home/legion/.omp/profiles/legion/plugins/node_modules`). A pod loads the two as Oh My Pi's
+  explicit extensions, the Envoy plugin first, with discovery off;
 - `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
   CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
   queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`);
@@ -53,7 +56,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
 `~/.omp/profiles/legion`). Mount writable volumes below the profile directory, never at `/home/legion`
-itself: everything the image-time probe proved lives under `HOME` — the plugin link and its lock at
+itself: everything the image-time probe proved lives under `HOME` — the two plugin links and their lock at
 `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image: nothing in it is pinned to an npm
@@ -61,24 +64,27 @@ version.
 
 ### The image is probed before it publishes
 
-The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
+The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion` with
+`pi-envoy` beside it, the two at one plugin interface version and without the pre-split package
 (`packages/daemon/internal/daemon/bootgate.go`). The image build's final step runs `legion version`,
 requiring the commit the workflow built, then `legion probe-image`: the same two probes, run by the
 daemon's own code, plus a third only the image runs — the session-storage probe, which prints
-`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the plugin held to
-the daemon API contract (`legion.daemonApiVersion`) and every task agent and skill Legion's prompts
-name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
+`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the Legion plugin held to
+the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface held to the one the
+Legion plugin speaks, and every task agent and skill Legion's prompts
+name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the Legion plugin ships
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
-`ce-simplify-code` with Legion's other skills in `dist/skills`), so a build whose OMP or plugin is
+`ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
+`dispatch`, `dispatch-first`, `dispatch-brainstorming` and `envoy` skills in its), so a build whose OMP or plugins are
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
 leaves those agents' models unresolved (`--skip-agent-models`), printing
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
 tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). To run it yourself:
-`docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
-(`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the probe loads it the same way; without
+`docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
+(both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH`, the corepack shims fetching their shipped default pnpm and yarn into a scratch
@@ -115,8 +121,9 @@ request against `main` whose diff touches any of those files — building the PR
 only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
-whole — the Dockerfile (`packages/daemon/docker/**`), the plugin and what it bundles (`packages/pi-envoy/**`,
-`packages/envoy-client/**`, `packages/contracts/**`) and the skills (`skills/**`); the OMP pin
+whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,
+`packages/pi-legion/**`, `packages/pi-shared/**`, `packages/envoy-client/**`, `packages/contracts/**`), the skills (`skills/**`) and the
+prepack that stages them (`scripts/pi-plugin-prepack.sh`); the OMP pin
 (`.omp-pin`); the whole Go module the image compiles `legion` from (`packages/daemon/**`) and its build
 inputs; the context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's
 behaviour — the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's
@@ -168,7 +175,7 @@ release schedule, and the deployment's repo owns its reproducibility.
 ### Entrypoint
 
 The image's `ENTRYPOINT` is `["legion"]`, so `docker run --rm <image> version` and
-`docker run --rm <image> probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
+`docker run --rm <image> probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 work. A pod never relies on it — the Kubernetes runtime sets every container's `command` explicitly (see
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) below). To run anything else in the image,
 override it: `docker run --rm --entrypoint sh <image> -c '…'`.
@@ -235,10 +242,12 @@ repository. A pod that dies loses those local files as it does today — the con
 
 ### The extension under SQL storage
 
-`@sjawhar/pi-legion-envoy` recognises a `task` subagent inside a Legion worker without looking for the
-parent's transcript on disk: the extension records which session it bootstrapped in the process, and a later
-session start in the same process with a different transcript path is a subagent (`packages/pi-envoy/AGENTS.md`).
-Nothing in the extension reads the two variables, and it needs no other change for SQL storage.
+The Legion plugin (`@sjawhar/pi-legion`) recognises a `task` subagent inside a Legion worker without looking
+for the parent's transcript on disk: its claim session records which session it bootstrapped on the interface
+the two plugins share, and a later session start in the same process with a different transcript path is a
+subagent (the check is `@legion/pi-shared/subagent-session`, which both plugins run;
+`packages/pi-envoy/AGENTS.md`, the subagent convention, and `packages/pi-shared/AGENTS.md`).
+Nothing in either plugin reads the two variables, and neither needs any other change for SQL storage.
 
 ### Selecting the store
 
@@ -321,8 +330,8 @@ The probe cache records whether the token was seen (`sessionStorageProbed: true`
 `pvc` on an image that printed the token is reused under `postgres`; one cached without the field —
 written by an older daemon, or for an image that never printed it — is ignored under `postgres`, logged
 `it records no session-storage probe, and this daemon runs session_store: postgres`, and the probe pod
-runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-legion-envoy` plugin from one
-checkout, an image that prints the token also carries the plugin's storage-independent subagent guard
+runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` plugins from one
+checkout, an image that prints the token also carries the plugins' storage-independent subagent guard
 ([The extension under SQL storage](#the-extension-under-sql-storage)).
 
 ## Kubernetes runtime: the Go daemon on Agent Sandbox
@@ -798,7 +807,7 @@ Four prerequisites and caveats the configuration cannot check for you:
   Secret only.
 - **The daemon host still needs the tmux runtime's toolchain.** Until the daemon itself runs in the
   cluster (LEGION-25), `runtime: kubernetes` changes where the *agents* run, not what the daemon boots
-  with: it still resolves OMP and the `pi-legion-envoy` plugin through mise for its two boot probes, and
+  with: it still resolves OMP and the `pi-legion` and `pi-envoy` plugins through mise for its two boot probes, and
   still needs `jj`, `git`, `gh`, and `tmux` on its PATH (the environment resolver and the plugin
   contract check run before the runtime is chosen). A host missing any of them refuses to start
   exactly as a tmux daemon would.
@@ -1033,8 +1042,8 @@ that was a daemon-machine path re-pointed at its pod location:
 | :--- | :--- | :--- |
 | `PATH` | `/legion/worker-bin:` + the image's PATH | the pane's `gh` shim first, as on tmux |
 | `GH_CONFIG_DIR` | `/legion/gh` | `gh` |
-| `LEGION_GRANT_FILE` | `/var/run/legion/grant/<role token>-grant` | the pi-envoy extension (writes), `legion credential`/`gh`/`handoff complete` (read) |
-| `LEGION_STATE_DIR` | `/legion` | the extension's jj attribution overlay |
+| `LEGION_GRANT_FILE` | `/var/run/legion/grant/<role token>-grant` | the pi-legion extension (writes), `legion credential`/`gh`/`handoff complete` (read) |
+| `LEGION_STATE_DIR` | `/legion` | the pi-legion extension's jj attribution overlay |
 | `LEGION_CREDENTIAL_HELPER` | `!/opt/legion/bin/legion credential` | what `workspace-init` wrote into the clone's git config |
 | `DISPATCH_TOKEN_FILE` | `/var/run/legion/providers/DISPATCH_TOKEN` | `resolveDispatchConfig` (when the deployment sets `dispatch_url`) |
 | `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE` | `/legion/workspaces/<owner>/<repo>/<key-lower>` | the extension; also the container's `workingDir` |
@@ -1080,10 +1089,11 @@ through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, no
 
 ### Contract discipline
 
-For a daemon contract change, first merge the worker image and plugin release, then set
-`runtime.kubernetes.image` to its digest, install the plugin release in the Legion profile, restart
+For a daemon contract change, first merge the worker image and the two plugin releases, then set
+`runtime.kubernetes.image` to its digest, install both plugin releases (`@sjawhar/pi-envoy`,
+`@sjawhar/pi-legion`) in the Legion profile, restart
 the daemon, and relaunch every live root, worker, and controller. The boot log is the checklist:
-each line naming an older or unrecorded `pi-legion-envoy` process identifies one process to relaunch.
+each line naming an older or unrecorded `pi-legion` process identifies one process to relaunch.
 ### Volume retention
 
 Node loss reattaches the EBS volume and resumes the same OMP session. Volume loss is a whole-tree
@@ -1235,7 +1245,8 @@ keeping nothing until the daemon has answered, the command:
    holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
-   refuses a pi-legion-envoy it does not load, or one speaking another daemon API contract;
+   refuses a pi-legion it does not load, or one speaking another daemon API contract, loaded without
+   pi-envoy or with a pi-envoy at another plugin interface version, or loaded beside the pre-split package;
 3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` and
    the contract step 2 held the plugin to (`{"pluginContract": <N>}`). The daemon compares the token
    in constant time, then refuses a contract that is not its own with 409, naming both, before it
@@ -1261,7 +1272,7 @@ keeping nothing until the daemon has answered, the command:
 A refusal before the secret is written removes the directories made for the probe, so the state
 directory is as it was.
 
-**How the daemon sees it.** The session's pi-envoy extension registers on
+**How the daemon sees it.** The session's pi-legion extension registers on
 `POST /legion/v1/claims/register` with the capability and takes the controller role. The daemon
 records `controllerLocator: {runtime, external: true, sessionId, registeredAt}` (`legion state
 --json`, `GET /legion/v1/state`), `runtime` being the daemon's own. On every orphan sweep it reads

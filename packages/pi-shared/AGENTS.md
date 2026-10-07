@@ -5,7 +5,12 @@ plugins — `@sjawhar/pi-envoy` (`extensions/envoy.ts`) and `@sjawhar/pi-legion`
 (`extensions/legion.ts`) — both compile in: the versioned in-process interface between them, the
 host types, and the modules both entries use. Each plugin's `bun build` inlines it into its own
 bundle, as it inlines `@legion/contracts` and `@legion/envoy-client`; only `@oh-my-pi/*` stays
-external. Nothing here imports either plugin's source.
+external. Nothing here imports either plugin's source, and neither plugin's shipped code imports
+the other's: that rule covers every non-test `.ts` under each plugin's `extensions/` and `src/`
+(`test/cross-imports.ts`, below) and never a test, so the two cross-entry tests
+`packages/pi-legion/extensions/legion-role-claim.test.ts` and
+`packages/pi-legion/extensions/legion-phase-stall-omp.test.ts` may load
+`packages/pi-envoy/extensions/envoy.ts` by relative path.
 
 ## The interface (`src/interface.ts`)
 
@@ -49,7 +54,7 @@ would be the last instance's, not the pane's
 (`docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md`). `roleClaim.regained`
 stays the one listener slot it is, written only by the paths that establish a Legion identity.
 
-## Test harness (`test/`)
+## Test harness and the shared test rules (`test/`)
 
 `test/omp-harness.ts` runs the real Oh My Pi binary (`LEGION_TEST_OMP`) for each plugin's
 `*-omp.test.ts`; `test/omp-natives.ts` shares one natives cache per binary with the Go tests;
@@ -57,6 +62,17 @@ stays the one listener slot it is, written only by the paths that establish a Le
 `spawnRpc` takes **absolute** extension paths — this module lives in another package than its
 callers, so `import.meta.dir` here is not the caller's — and callers pass
 `path.join(import.meta.dir, "envoy.ts")`.
+
+## Where to look
+
+| Task | Location | Notes |
+| --- | --- | --- |
+| The interface | `src/interface.ts`, `src/interface.test.ts` | The key, the version, the types, `envoyPluginInterface`, `publishEnvoyPluginInterface`, `readEnvoyPluginInterface`, the test seam; the test holds the get-or-create order independence, the second publisher at the same and at another version, the three readings, and the exact `Symbol.for` strings the Go probe reads |
+| Modules both entries use | `src/role-claim-bridge.ts`, `src/injected-user-turns.ts`, `src/subagent-session.ts`, `src/tool-result.ts`, `src/pi-types.ts`, `src/omp-host.d.ts` | Each resolves the interface at each use; `omp-host.d.ts` is the ambient `@oh-my-pi/pi-coding-agent` declaration each plugin's `tsconfig` includes |
+| Skills guard rules | `test/skills-guard.ts` | What `packages/pi-envoy/src/skills-guard.test.ts` and `packages/pi-legion/src/skills-guard.test.ts` run over each plugin's staged partition: `stageSkills(<package name>)` stages it through `scripts/pi-plugin-prepack.sh --stage-skills`, exactly as the prepack does; `oversizedFiles` (a file at or over Oh My Pi's 51,200-byte spill threshold), `longSkillBodies` (a `SKILL.md` of 500 lines or more), `misnamedSkills` (a frontmatter `name` that is not the directory's), `brokenSkillLinks` (a `skill://<name>/<path>[#anchor]` link naming a missing file or heading, resolved against the repository's `skills/`, where both partitions live), and `brokenRelativeLinks` (a `](../…)` or `](./…)` link outside a code fence that leaves the staged partition or names no file: a cross-partition link is written `skill://<name>/<path>`) |
+| Skills partition | `test/skills-partition.test.ts` | Stages both partitions and holds them to the repository's `skills/`: together they are every skill directory, none is in both, each staged skill is a copy of the repository's, and a package the prepack does not know (`@sjawhar/pi-shared`) has none |
+| No cross import | `test/cross-imports.ts` | `shippedSources(<package root>)` is every `.ts` under its `extensions/` and `src/` that is not a `*.test.ts`; `crossImports(<package root>, <sibling root>)` reports each relative import of those files that resolves into the sibling's directory. `packages/pi-envoy/src/no-cross-import.test.ts` and `packages/pi-legion/src/no-cross-import.test.ts` each run it against the other plugin |
+| Real-binary harness | `test/omp-harness.ts`, `test/omp-natives.ts`, `test/omp-natives.test.ts`, `test/host-registry.ts` | Above |
 
 ## Checks
 
