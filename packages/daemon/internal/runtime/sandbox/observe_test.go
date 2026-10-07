@@ -342,6 +342,48 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			},
 			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://xxxxx@192.0.2.9:4222,nats://xxxxx@192.0.2.10:4222,nats://xxxxx@192.0.2.11:4222",
 		},
+		"NATS moved, naming no query token in an old pod": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222?token=nats-old-token"}
+			},
+			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+		},
+		"NATS configured now names no query token": {
+			now: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222?token=nats-current-token"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://192.0.2.9:4222",
+		},
+		"Envoy moved to a URL with a query token": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020?access_token=envoy-old-token"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"Envoy configured now names no query token": {
+			now: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020?access_token=envoy-current-token"
+			},
+			want: "ENVOY_URL " + testOptions().EnvoyURL + ", now http://192.0.2.9:9020",
+		},
+		"NATS moved, naming no fragment in an old pod": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222#token=nats-old-token"}
+			},
+			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+		},
+		"Envoy moved to a URL with a fragment token": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020#access_token=envoy-old-token"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"NATS moved, preserving an at sign in a path": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222/route@blue"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222/route@blue, now nats://192.0.2.250:4222",
+		},
 		"Envoy moved to a URL with raw commas in its userinfo": {
 			launched: func(o *Options) {
 				o.EnvoyURL = "http://user,more:password,more@192.0.2.9:9020"

@@ -167,20 +167,25 @@ func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 	return moved
 }
 
-// namedURL is one endpoint value as movedAddresses names it: "(unset)" for none, and otherwise the
-// URL with any userinfo shown as xxxxx. A single endpoint is parsed whole: raw commas are valid in
-// its userinfo. An invalid value with an @ is redacted whole too, so an unexpected input does not
-// turn the log into a credential reader.
+// namedURL is the log boundary for one endpoint value: an existing pod can hold a value a previous
+// daemon accepted, or a direct Options caller supplied, even when this daemon's current loader no
+// longer accepts it. It names "(unset)" for none; otherwise it removes userinfo, queries and
+// fragments. Raw commas are valid in userinfo, so a single endpoint is always parsed whole. An
+// invalid unexpected endpoint with @, ? or # is redacted whole too, so it cannot make the detail a
+// credential reader.
 func namedURL(address string) string {
 	if address == "" {
 		return "(unset)"
 	}
 	u, err := url.Parse(address)
-	if err == nil && u.User != nil {
-		u.User = url.User("xxxxx")
+	if err == nil {
+		if u.User != nil {
+			u.User = url.User("xxxxx")
+		}
+		u.RawQuery, u.Fragment, u.ForceQuery = "", "", false
 		return u.String()
 	}
-	if strings.Contains(address, "@") {
+	if strings.ContainsAny(address, "@?#") {
 		return "xxxxx"
 	}
 	return address
@@ -200,15 +205,19 @@ func namedNATSURLs(urls []string) string {
 	return strings.Join(named, ",")
 }
 
-// namedNATSPodValue names the ENVOY_NATS_URL an existing pod holds. mainEnvironment comma-joined
-// the old daemon's list, but raw commas are valid in userinfo, so that string cannot safely be
-// split back into its URLs. When it has an @, redact the whole field; otherwise no userinfo is
-// present and it is safe to show.
+// namedNATSPodValue names the ENVOY_NATS_URL an existing pod holds, which can be from the same
+// older grammar namedURL handles. mainEnvironment comma-joined the old daemon's list, but raw
+// commas are valid in userinfo, so URL boundaries cannot always be recovered. A raw @ beside a
+// comma is ambiguous — it may be a list separator plus userinfo, or a literal path character — so
+// the whole field is xxxxx. A single parseable endpoint with an @ in its path stays useful; parsed
+// userinfo, queries and fragments still redact the whole field.
 func namedNATSPodValue(address string) string {
 	if address == "" {
 		return "(unset)"
 	}
-	if strings.Contains(address, "@") {
+	u, err := url.Parse(address)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		(strings.Contains(address, ",") && strings.Contains(address, "@")) {
 		return "xxxxx"
 	}
 	return address

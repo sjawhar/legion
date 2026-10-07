@@ -642,6 +642,28 @@ func TestLoadRefuses(t *testing.T) {
 			want: "daemon_url must not include a query string or fragment",
 		},
 		{
+			name: "nats_urls entry with a query string",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222?token=token"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222?token=token" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "nats_urls entry with a fragment",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222#fragment"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222#fragment" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "envoy_url with a query string",
+			body: minimalFile + "envoy_url: https://envoy.example?access_token=token\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
+		},
+		{
+			name: "envoy_url with a fragment",
+			body: minimalFile + "envoy_url: https://envoy.example#fragment\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
+		},
+		{
 			name: "worker_stream_port zero",
 			body: minimalFile + "worker_stream_port: 0\n",
 			want: "worker_stream_port must be a positive integer",

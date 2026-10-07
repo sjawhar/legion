@@ -388,6 +388,9 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
 worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+`envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
+or fragment. This is a breaking configuration change for a file that has either; put credentials in
+URL userinfo or in a Secret, never in a query.
 `advertise_host` is an IP address or a DNS name, the host alone, and only `runtime: kubernetes`
 accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
 `0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
@@ -626,12 +629,14 @@ pod lacks counting as unset. A pod holding any other value is reported `stale_ad
 `alive` (`ObservationKind`, `internal/runtime/runtime.go`), and the observation's detail names each
 address that moved, with the value the pod holds and the one a new pod is handed
 (`LEGION_DAEMON_URL http://192.0.2.5:13370, now http://192.0.2.7:13370`). The supervisor logs
-that detail, so a single URL's user and password are named `xxxxx` there
-(`nats://xxxxx@nats.example:4222`), since the daemon's log has readers a pod's spec does not. A
-pod's `ENVOY_NATS_URL` joins its old daemon's NATS list with commas, and raw commas are valid in
-URL userinfo, so an old value with userinfo is named only `xxxxx`, never split back into URLs. A pod
-this runtime launched always compares equal, so only the pods a daemon under another configuration
-launched are ever
+that detail, so a single URL's userinfo is named `xxxxx` and its query and fragment are omitted
+(`nats://xxxxx@nats.example:4222`), since the daemon's log has readers a pod's spec does not. This
+also covers a pod an earlier daemon launched before the current endpoint grammar refused queries
+and fragments. A pod's `ENVOY_NATS_URL` joins its old daemon's NATS list with commas, and raw
+commas are valid in URL userinfo: a raw `@` beside a comma is ambiguous, so the old field is named
+only `xxxxx`, never split back into URLs. A single parsed NATS URL with an `@` only in its path is
+safe to name. A pod this runtime launched always compares equal, so only the pods a daemon under
+another configuration launched are ever
 reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
 variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods launched
 after it. The supervisor relaunches each reported claim at once, through the launch path a death

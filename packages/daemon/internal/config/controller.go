@@ -120,7 +120,7 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	if cfg.EnvoyURL, err = required("envoy_url"); err != nil {
 		return ControllerConfig{}, err
 	}
-	if _, err := validURL(cfg.EnvoyURL, "envoy_url"); err != nil {
+	if _, err := endpointURL(cfg.EnvoyURL, "envoy_url"); err != nil {
 		return ControllerConfig{}, err
 	}
 	if node, set := values["nats_urls"]; set {
