@@ -214,6 +214,11 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 // clone`, which opens none) a missing `.jj` is left for jj. A legacy file that cannot be removed
 // fails the command, since jj would read it.
 //
+// Each directory between the state directory and root, and between it and the clone, must be a
+// real directory too (refuseSymlinkedLayout): a symlink one level above `.jj` would make jj open,
+// and this function disarm, a copy of the clone or a workspace outside the layout just as a
+// symlinked `.jj` would. The state directory itself may be reached through a symlink.
+//
 // This holds against a file written at any time before the command runs. A tree agent writing
 // one in the instant between this check and jj's own read is outside what it closes, the trust
 // model RemoveFinished's push-safety check states: a hostile role already has every sibling
@@ -224,9 +229,15 @@ func disarmLegacyConfig(root, clone string) error {
 	}
 	jjDir := filepath.Join(root, ".jj")
 	info, err := os.Lstat(jjDir)
-	switch {
-	case errors.Is(err, fs.ErrNotExist) && clone == "":
+	if errors.Is(err, fs.ErrNotExist) && clone == "" {
 		return nil
+	}
+	for _, dir := range []string{root, clone} {
+		if err := refuseSymlinkedLayout(root, dir); err != nil {
+			return err
+		}
+	}
+	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("refusing to run jj in %s: it has no .jj of its own, which a workspace of the shared clone %s always has", root, clone)
 	case err != nil || !info.IsDir():
@@ -248,6 +259,33 @@ func disarmLegacyConfig(root, clone string) error {
 		if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("remove %s, which jj would migrate into the configuration it reads: %w", file, err)
 		}
+	}
+	return nil
+}
+
+// layoutDepth is how many directories below the state directory a shared clone and a workspace
+// each sit (Location): repos/<host>/<owner>/<name>, and workspaces/<owner>/<name>/<issue>.
+const layoutDepth = 4
+
+// refuseSymlinkedLayout refuses a jj command run in root when dir, or any of the directories above
+// it up to the state directory (layoutDepth of them in all), is a symlink, naming it. Provisioning
+// creates every one of them as a real directory; a symlink there is a tree agent's, and would make
+// jj open a clone or a workspace outside the layout. The state directory itself, above them, is
+// not checked: an operator may reach it through a symlink. A component that does not exist is no
+// symlink, so it is passed over, as is an empty dir.
+func refuseSymlinkedLayout(root, dir string) error {
+	for range layoutDepth {
+		if dir == "" || dir == filepath.Dir(dir) {
+			return nil
+		}
+		info, err := os.Lstat(dir)
+		switch {
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return fmt.Errorf("refusing to run jj in %s: %s is a symlink, and no directory of the tree volume's layout below its state directory is one", root, dir)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("refusing to run jj in %s: %w", root, err)
+		}
+		dir = filepath.Dir(dir)
 	}
 	return nil
 }

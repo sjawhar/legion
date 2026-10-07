@@ -1222,17 +1222,19 @@ closed by removing that file before each jj command provisioning and removal run
 (`disarmLegacyConfig`, `internal/workspace/config.go`), the repository's only in the shared
 clone's own `.jj/repo`. Every jj command run in a workspace names it with `-R`, so jj never walks
 up to an ancestor's `.jj`. A jj command is refused when the `.jj` it would open, or the shared
-clone's `.jj` or `.jj/repo`, is a symlink or anything but a real directory; when it runs in a
-workspace that has no `.jj`; and when the workspace's `.jj/repo` names any other directory,
-followed through symlinks and `..` as jj itself follows it, or is neither a directory nor a
-regular file. The worker image's jj is 0.45; on the tmux runtime,
-which runs the host's jj through the same code, the daemon refuses to start with a jj older than
-0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38 `.jj/repo/config.toml` is the
-repository's live configuration. It snapshots the candidate's own working copy with `--config`
-overrides that hold the snapshot's working-copy filter and signing programs off even so
-(`snapshotOverrides`, `internal/workspace/removal.go`), keeps the workspace whenever that snapshot
-leaves anything unaccounted for — an untracked path, anything on stderr, or a nested repository the
-snapshot cannot see at all — and otherwise removes it only once every
+clone's `.jj` or `.jj/repo`, is a symlink or anything but a real directory; when any directory of
+the layout between the state directory and a workspace or the shared clone (`repos/<host>/<owner>/
+<name>`, `workspaces/<owner>/<name>/<issue>`) is a symlink, which the refusal names (the state
+directory itself may be one); when it runs in a workspace that has no `.jj`; and when the
+workspace's `.jj/repo` names any other directory, followed through symlinks and `..` as jj itself
+follows it, or is neither a directory nor a regular file. The worker image's jj is 0.45; on the
+tmux runtime, which runs the host's jj through the same code, the daemon refuses to start with a
+jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38
+`.jj/repo/config.toml` is the repository's live configuration. It snapshots the candidate's own
+working copy with `--config` overrides that hold the snapshot's working-copy filter and signing
+programs off even so (`snapshotOverrides`, `internal/workspace/removal.go`), keeps the workspace
+whenever that snapshot leaves anything unaccounted for — an untracked path, anything on stderr, or
+a nested repository the snapshot cannot see at all — and otherwise removes it only once every
 commit it holds is reachable from a remote bookmark or the recorded merged pull-request head,
 renaming its directory aside before the slower recursive delete so a kill mid-delete is finished, not
 re-judged, on the next pass. A removed workspace's gitignored content is deleted with it: nothing

@@ -807,22 +807,32 @@ func TestProvisionExcludesTheCodegraphDirectoryFromEveryWorkspaceOfTheClone(t *t
 }
 
 // git writes a relative worktree pointer between real paths, so provisioning finds its own entry
-// through a symlinked repos directory: it locks it, re-adds the workspace after its directory went,
-// and removal deletes it.
+// through a state directory reached by a symlink: it locks it, re-adds the workspace after its
+// directory went, and removal deletes it. The state directory is the one place in the tree
+// volume's path a symlink is allowed (refuseSymlinkedLayout); a symlinked repos directory, where
+// this test once put the symlink, is refused (TestTheRunnerRefusesASymlinkedLayoutDirectory). git
+// names the workspace by its physical path, through the resolved state directory.
 func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	run := newLocalRunner(t)
 	request := provisionRequest(t)
-	if err := os.MkdirAll(request.StateDir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(request.StateDir), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(request.StateDir, "repos")); err != nil {
+	if err := os.Symlink(t.TempDir(), request.StateDir); err != nil {
 		t.Fatal(err)
 	}
 	workspace, err := Provision(context.Background(), run, request)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
+	physical, err := filepath.EvalSymlinks(workspace.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical == workspace.Dir {
+		t.Fatalf("test setup: %s is not reached through the symlinked state directory", workspace.Dir)
+	}
+	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[physical] {
 		t.Errorf("provisioning left the workspace's git worktree unlocked: %v", locked)
 	}
 	if err := os.RemoveAll(workspace.Dir); err != nil {
@@ -831,8 +841,8 @@ func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	if _, err := Provision(context.Background(), run, request); err != nil {
 		t.Fatalf("re-provision the registered missing workspace: %v", err)
 	}
-	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
-		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != physical {
+		t.Errorf("git in the re-added workspace answers %q, want %q", got, physical)
 	}
 	if err := Remove(context.Background(), run, workspace); err != nil {
 		t.Fatalf("remove: %v", err)

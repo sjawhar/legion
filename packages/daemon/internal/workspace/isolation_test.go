@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -622,6 +623,12 @@ func TestTheRunnerRefusesAWorkspaceWithNoJJOfItsOwn(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "it has no .jj") {
 		t.Errorf("jj in a workspace with no .jj below a repository = %v, want a refusal naming the missing .jj", err)
 	}
+	// RunCheckedIn names the workspace with -R, under which jj never walks up to the parent's
+	// repository, even when the .jj goes between the runner's check and jj's start.
+	calls := run.Calls()
+	if last := calls[len(calls)-1].Argv; len(last) < 2 || last[len(last)-2] != "-R" || last[len(last)-1] != ws.Dir {
+		t.Errorf("RunCheckedIn ran %q, want it to end with -R %s", last, ws.Dir)
+	}
 	if strings.Contains(listed.Stdout, "all()") {
 		t.Errorf("jj read the alias planted in the parent's repository:\n%s", listed.Stdout)
 	}
@@ -714,6 +721,123 @@ func TestTheRunnerRefusesASymlinkedJJ(t *testing.T) {
 		}
 		if _, err := os.Stat(untouched); err != nil {
 			t.Errorf("%s, outside the volume, was touched: %v", untouched, err)
+		}
+	})
+}
+
+// A directory of the tree volume's layout above a .jj, the shared clone's own directory, the
+// repos directory or a workspace's repository directory, replaced with a symlink to a copy
+// outside the layout, refuses every jj command there, naming the symlink, before jj opens the copy
+// or the runner removes its planted legacy file. A pushed workspace holding an edit no jj command
+// snapshotted, reached through a symlinked parent, is kept, never removed. The state directory
+// itself may be a symlink (TestGitWorktreeEntriesThroughASymlinkedClone).
+func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
+	log := []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"}
+	// moveBehindASymlink copies dir outside the layout, moves dir aside and links dir to the
+	// copy; it returns the copy.
+	moveBehindASymlink := func(t *testing.T, dir string) string {
+		t.Helper()
+		copied := filepath.Join(t.TempDir(), "copied")
+		runSetup(t, "", "cp", "-a", dir, copied)
+		if err := os.Rename(dir, dir+"-moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(copied, dir); err != nil {
+			t.Fatal(err)
+		}
+		return copied
+	}
+	// plant writes a legacy configuration file in dir with its id removed, so the runner would
+	// remove it were dir disarmed; it returns the file.
+	plant := func(t *testing.T, dir, id, legacy string) string {
+		t.Helper()
+		if err := os.Remove(filepath.Join(dir, id)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		file := filepath.Join(dir, legacy)
+		if err := os.WriteFile(file, []byte("[user]\nname = \"not the volume's\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return file
+	}
+	refused := func(t *testing.T, name string, err error, symlink string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), symlink+" is a symlink") {
+			t.Errorf("%s = %v, want a refusal naming the symlink %s", name, err, symlink)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		link func(ws Workspace) string
+	}{
+		{"the shared clone's own directory", func(ws Workspace) string { return ws.Clone }},
+		{"the repos directory above it", func(ws Workspace) string {
+			return filepath.Dir(filepath.Dir(filepath.Dir(ws.Clone)))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			ws, err := Provision(context.Background(), run, provisionRequest(t))
+			if err != nil {
+				t.Fatalf("provision: %v", err)
+			}
+			symlink := tc.link(ws)
+			copied := moveBehindASymlink(t, symlink)
+			rel, err := filepath.Rel(symlink, filepath.Join(ws.Clone, ".jj", "repo"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			untouched := plant(t, filepath.Join(copied, rel), "config-id", "config.toml")
+			_, err = RunChecked(context.Background(), run, append(slices.Clip(log), "-R", ws.Clone), nil, "")
+			refused(t, "a command on the clone", err, symlink)
+			_, err = RunCheckedIn(context.Background(), run, ws, log)
+			refused(t, "a command in a workspace of it", err, symlink)
+			if _, err := os.Stat(untouched); err != nil {
+				t.Errorf("%s, outside the layout, was touched: %v", untouched, err)
+			}
+		})
+	}
+
+	t.Run("a workspace's repository directory", func(t *testing.T) {
+		run := newLocalRunner(t)
+		ws, err := Provision(context.Background(), run, provisionRequest(t))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runSetup(t, ws.Dir, "jj", "status")
+		runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+		symlink := filepath.Dir(ws.Dir)
+		copied := moveBehindASymlink(t, symlink)
+		jjDir := filepath.Join(copied, filepath.Base(ws.Dir), ".jj")
+		// The copy names the shared clone's repository by absolute path, so only the symlinked
+		// parent is wrong.
+		if err := os.WriteFile(filepath.Join(jjDir, "repo"), []byte(filepath.Join(ws.Clone, ".jj", "repo")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		untouched := plant(t, jjDir, "workspace-config-id", "workspace-config.toml")
+		pending := filepath.Join(ws.Dir, "pending.txt")
+		if err := os.WriteFile(pending, []byte("never snapshotted\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = RunCheckedIn(context.Background(), run, ws, log)
+		refused(t, "a command in the workspace", err, symlink)
+		if _, err := os.Stat(untouched); err != nil {
+			t.Errorf("%s, outside the layout, was touched: %v", untouched, err)
+		}
+		var logged []string
+		err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
+		if _, statErr := os.Stat(pending); statErr != nil {
+			t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
+		}
+		for _, line := range logged {
+			if strings.Contains(line, "removed WIDGETS-42's workspace") {
+				t.Errorf("logged %q, want the workspace kept", line)
+			}
 		}
 	})
 }
