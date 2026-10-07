@@ -43,11 +43,9 @@ test("one line, no source, when both ids are set but agree", () => {
   expect(lines[0]?.status.id).toBe("sess-1");
 });
 
-// LEGION-587's review (round 2): the request's id is never verified by a signature - any
-// enrolled process may claim any session - so a request-only line must say where it came from
-// even with no enrollment id to disambiguate against, or it reads as the broker's own verified
-// fact when it is not.
-test("one line, labeled request, when only the request's id is set - the common host-session case", () => {
+// A request-only id - the common host-session case - resolves as a `request`-sourced line, so the
+// renderer can tell it from the enrollment's; it carries no preamble on screen.
+test("one line, source request, when only the request's id is set - the common host-session case", () => {
   const session: CredentialSession = { enrollment: null, request: "sess-1" };
   const lines = credentialSessionLines(session, [runningAgent()], false);
   expect(lines).toEqual([
