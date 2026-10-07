@@ -1,5 +1,5 @@
 {
-  "completed": "2026-10-07T10:20:43.346150273Z",
+  "completed": "2026-10-07T11:01:02.683676841Z",
   "deviations": [
     "Pod envoyAbsent sentence says 'the other explicit extension a pod passes' rather than the plan's 'the second', since argv passes the Envoy root first; the pod notLoaded/elsewhere/installInto sentences say 'one of Oh My Pi's two explicit extensions' / 'an explicit extension beside the Envoy plugin root …'; a pod-lane sentence for an Envoy loaded from another copy than the root was added; a probe answer whose interface lines the gate cannot parse is refused as unreadable rather than passed.",
     "The name check's allowlist is exact paths or directory prefixes; beyond the plan's list it names packages/pi-legion/extensions/legion.ts and legion.test.ts (the refusal naming the old package as the thing to uninstall), packages/pi-legion/AGENTS.md (which quotes it), the Go tests planting the legacy marker, .github/workflows/release.yaml (the first-release seed), .legion/, docs/superpowers/, and the four CHANGELOGs that name the old package; interface.test.ts is not on it (it names only the symbol string).",
@@ -23,9 +23,10 @@
     "packages/daemon/docker/worker.Dockerfile, packages/envoy/docker/Dockerfile, .dockerignore",
     "scripts/e2e/lib/{pack-plugin,install-plugin-profile}.sh, scripts/e2e/{stage1-skeleton,stage2-tmux-supervision,stage3-devbox-workflow,stage3-4b13b-acceptance,stage4b-sandbox-tree,controller-start-tmux,dispatch-user-turns}.sh, scripts/e2e/README.md",
     "AGENTS.md, README.md, docs/kubernetes.md, docs/site/src/content/docs/legion/running-legion.md, packages/claude-envoy/{AGENTS,README}.md, .dispatch/architecture/{pi-envoy,pi-legion,pi-shared}.md, biome.json, package.json, bun.lock",
-    "round 1: skills/dispatch-first/SKILL.md (line 53), packages/pi-shared/test/skills-guard.ts (agentDispatches, bundledAgents, shippedAgents, unresolvedAgentDispatches), packages/pi-envoy/src/skills-guard.test.ts, skills/AGENTS.md, packages/pi-shared/AGENTS.md, .github/workflows/envoy-and-contracts.yaml (pi_legion filter), docs/site/media/walkthroughs/legion-operator/record-casts.sh"
+    "round 1: skills/dispatch-first/SKILL.md (line 53), packages/pi-shared/test/skills-guard.ts (agentDispatches, bundledAgents, shippedAgents, unresolvedAgentDispatches), packages/pi-envoy/src/skills-guard.test.ts, skills/AGENTS.md, packages/pi-shared/AGENTS.md, .github/workflows/envoy-and-contracts.yaml (pi_legion filter), docs/site/media/walkthroughs/legion-operator/record-casts.sh",
+    "round 2: packages/envoy-client/src/dispatch-execute.ts (SPEC_CHECK_REMINDER), packages/envoy-client/src/__tests__/{dispatch-advice,dispatch-execute}.test.ts, packages/claude-envoy/dist/{envoy-channel,session-hook}.js"
   ],
-  "headSha": "8962eb69fd39759b766a5fe05cd58f8192502073",
+  "headSha": "adc58ad2c606cdc0136ac6b6af76d47dad448c73",
   "issue": "LEGION-247",
   "learningsHelpful": [],
   "learningsInjected": [],
@@ -57,6 +58,14 @@
       "negativeControl": "With skills/dispatch-first/SKILL.md:53 reverted to the pre-fix text, the guard fails: `\u003cstaged\u003e/skills/dispatch-first/SKILL.md dispatches plan-gap-analyst, which neither this plugin nor Oh My Pi ships` (1 fail); restored afterwards.",
       "observed": "10 pass, 0 fail (the injected text reaches the request; the guard resolved every task(agent=…) in the four Envoy skills against the plugin's agents (none) plus the binary's bundled reviewer, scout, security-reviewer, sonic, task); the packed skill carries one dispatch, task(agent=\"scout\"), the name plan-gap-analyst once in prose, and the tarball carries no agents/.",
       "surface": "The pinned Oh My Pi (18.6.0) running the Envoy entry alone with the dispatch-first skill injected into the model's request (packages/pi-envoy/extensions/dispatch-first-omp.test.ts through packages/pi-shared's harness), the Envoy partition's guard reading the binary's bundled agents with `omp agents unpack`, and the release's exact pack of @sjawhar/pi-envoy"
+    },
+    {
+      "command": "cd packages/envoy-client \u0026\u0026 bun test src/__tests__/dispatch-advice.test.ts src/__tests__/dispatch-execute.test.ts -t 'fresh reader|dispatch_request_approval (sends|says|on a document approved)'; cd packages/claude-envoy \u0026\u0026 bun run check-dist",
+      "criterion": "A session without LEGION_ROLE loads the Envoy plugin only, and what that plugin's Dispatch tool results say names nothing that install cannot resolve (round 2, finding 1)",
+      "headSha": "adc58ad2c606cdc0136ac6b6af76d47dad448c73",
+      "negativeControl": "The pre-fix pins asserting the whole instruction was `plan-gap-analyst` no longer hold against the new text (the repinned tests would fail on the old reminder), and grep over packages/envoy-client/src, packages/pi-envoy and the four Envoy skills finds plan-gap-analyst only inside the two Legion-conditioned clauses and the test pins.",
+      "observed": "4 pass, 0 fail: the two results that carry the reminder name task(agent=\"scout\") for every session and the Legion plugin's plan-gap-analyst only in its Legion clause; the two results that must not carry it do not; check-dist: dist/ matches a fresh build (the bundles carry the new sentence once).",
+      "surface": "The Envoy plugin's dispatch_issue (with a spec) and dispatch_request_approval tool results, driven through executeDispatchTool against the Dispatch stand-in (packages/envoy-client/src/__tests__/dispatch-advice.test.ts, dispatch-execute.test.ts), and the committed claude-envoy bundles that inline the same string"
     }
   ],
   "pullRequest": "https://github.com/sjawhar/legion/pull/1831",
@@ -70,6 +79,14 @@
       "fixHead": "8962eb69fd39759b766a5fe05cd58f8192502073",
       "reviewedHead": "536e915caa5af1363d79b05caece94a5bf1da009",
       "round": 1
+    },
+    {
+      "findings": [
+        "Finding 1 (skills/dispatch-first/SKILL.md:53; thread 4206015406): SPEC_CHECK_REMINDER in packages/envoy-client/src/dispatch-execute.ts:191, appended to the dispatch_issue result (with a spec) and dispatch_request_approval's, still told every session to run plan-gap-analyst. Reworded to the skill's wording (task(agent=\"scout\") on Oh My Pi, or the host's read-only agent; the Legion plugin's plan-gap-analyst only for a Legion architect's spec); the two positive pins (dispatch-advice.test.ts:253, dispatch-execute.test.ts:3840) assert both audiences, the two absence pins stay; packages/claude-envoy/dist rebuilt with the pinned Bun (check-dist: matches a fresh build). Round 1's two threads were resolved by legion threads resolve on the reviewer's Accepted:."
+      ],
+      "fixHead": "adc58ad2c606cdc0136ac6b6af76d47dad448c73",
+      "reviewedHead": "42a9100a7c8f7946cadec7288db1ab6ff3d5fe59",
+      "round": 2
     }
   ],
   "schemaVersion": 1,
