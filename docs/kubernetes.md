@@ -105,11 +105,14 @@ ephemeral merge commit); `<legion version>` only on `main` when the `legion` job
 Runs from any other ref publish the `sha-` tag only and never touch a release.
 
 A tag does not say which run published it: a pull request run publishes the `sha-` tag of its head
-too, and a pull request can edit the workflow. The digest's GitHub artifact attestation does. Every run
-except a pull request's ends with the workflow's `attest` job, which attests the pushed digest with
+too, a pull request can edit the workflow, and when two runs build one commit the tag names whichever
+pushed last. The digest's GitHub artifact attestation does. Every run except a pull request's ends
+with the workflow's `attest` job, which attests the pushed digest with
 `actions/attest-build-provenance`, stores the attestation with GitHub and pushes it to `ghcr.io` beside
-the image. Its Sigstore certificate names the workflow file, ref and commit from the run's OIDC token,
-which no workflow edit can change. To accept only a digest a run on `main` built:
+the image, under the tag `sha256-<image digest hex>`: an index of that image's attestations (the OCI
+referrers tag scheme), not an image. The attestation's Sigstore certificate names the workflow file,
+ref and commit from the run's OIDC token, which no workflow edit can change. To accept only a digest a
+run on `main` built:
 
 ```bash
 gh attestation verify oci://ghcr.io/sjawhar/legion-worker@sha256:… --repo sjawhar/legion \
