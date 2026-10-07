@@ -232,6 +232,49 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 	}
 }
 
+// jj git clone names neither a workspace root nor a clone yet. Its empty guarded root must leave
+// the process working directory alone: specifically, no legacy disarm may turn config.toml into a
+// relative path and remove the caller's file while the clone still succeeds.
+func TestEnsureRepoCloneDoesNotDisarmTheCallersWorkingDirectory(t *testing.T) {
+	run := newLocalRunner(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	config := filepath.Join(cwd, "config.toml")
+	if err := os.WriteFile(config, []byte("[user]\nname = \"caller\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clone := filepath.Join(t.TempDir(), "clone")
+
+	if err := ensureRepoClone(context.Background(), run, clone, run.remote, nil); err != nil {
+		t.Fatalf("ensureRepoClone: %v", err)
+	}
+	if _, err := os.Stat(config); err != nil {
+		t.Errorf("jj git clone removed %s from its caller's working directory: %v", config, err)
+	}
+	if _, err := os.Stat(filepath.Join(clone, ".jj")); err != nil {
+		t.Errorf("ensureRepoClone did not complete %s: %v", clone, err)
+	}
+}
+
+// The two command constructors reject an empty Location component rather than building -R "":
+// jjWorkspaceRoot treats -R "" as no -R, the rootless path that once made the legacy disarm remove
+// config.toml from the daemon current working directory.
+func TestCloneAndWorkspaceCommandBuildersRefuseAnEmptyDirectory(t *testing.T) {
+	if _, err := onClone("", "log", "-r", "@"); err == nil || !strings.Contains(err.Error(), "clone directory is required") {
+		t.Errorf("onClone with an empty clone = %v, want a refusal", err)
+	}
+	run := newLocalRunner(t)
+	if _, err := RunCheckedIn(context.Background(), run, Workspace{}, []string{"jj", "log", "-r", "@"}); err == nil || !strings.Contains(err.Error(), "workspace directory is required") {
+		t.Errorf("RunCheckedIn with an empty workspace = %v, want a refusal", err)
+	}
+	if _, err := RunCheckedIn(context.Background(), run, Workspace{Dir: t.TempDir()}, []string{"jj", "log", "-r", "@"}); err == nil || !strings.Contains(err.Error(), "clone directory is required") {
+		t.Errorf("RunCheckedIn with an empty clone = %v, want a refusal", err)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("empty Location checks ran %#v", calls)
+	}
+}
+
 // A symlinked workspace layout directory is refused before Provision creates the workspace,
 // registers it in the clone or writes its .git and .jj outside the state layout.
 func TestProvisionRefusesASymlinkedWorkspaceLayoutBeforeCreatingAnything(t *testing.T) {

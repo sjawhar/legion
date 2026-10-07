@@ -190,7 +190,7 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 		return nil
 	}
 	workspaceName := filepath.Base(ws.Dir)
-	unpushed, err := RunChecked(ctx, run, onClone(ws.Clone, "log", "-r", unpushedRevset(workspaceName, mergedHead), "--no-graph", "-T", `commit_id ++ "\n"`), nil, "")
+	unpushed, err := runCheckedOnClone(ctx, run, ws.Clone, "log", "-r", unpushedRevset(workspaceName, mergedHead), "--no-graph", "-T", `commit_id ++ "\n"`)
 	if err != nil {
 		return err
 	}

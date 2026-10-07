@@ -251,8 +251,14 @@ func guardWorkspace(root, clone string, requireJJ bool) (guardedWorkspace, error
 }
 
 // disarmLegacyConfig removes each legacy configuration file jj would migrate. guardWorkspace has
-// already held jjDir and repo to a real workspace and the shared clone, respectively.
+// already held jjDir and repo to a real workspace and the shared clone, respectively. An empty
+// jjDir is a command that opens no workspace yet (jj git clone): it is an invariant that disarming
+// only operates on a path the guard actually resolved, never a relative path that falls through to
+// the daemon's current working directory.
 func disarmLegacyConfig(jjDir, repo string) error {
+	if jjDir == "" {
+		return nil
+	}
 	legacy := map[string][2]string{
 		jjDir: {"workspace-config-id", "workspace-config.toml"},
 		repo:  {"config-id", "config.toml"},
@@ -484,10 +490,17 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 // RunCheckedIn is RunChecked for a jj command run in ws's own workspace. It names the workspace
 // with -R, so jj opens ws.Dir itself and never searches its parent directories for a `.jj`, and
 // names ws's shared clone so the runner can hold the workspace's `.jj` and `.jj/repo` to it
-// (Command.Clone, disarmLegacyConfig).
+// (Command.Clone, guardWorkspace). Both Location paths must be non-empty: otherwise -R "" is
+// exactly the rootless command an empty guard cannot bind to a workspace.
 func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
+	}
+	if ws.Dir == "" {
+		return Result{}, errors.New("workspace directory is required")
+	}
+	if ws.Clone == "" {
+		return Result{}, errors.New("workspace clone directory is required")
 	}
 	argv = append(slices.Clip(argv), "-R", ws.Dir)
 	result, err := run.Run(ctx, Command{Argv: argv, Dir: ws.Dir, Clone: ws.Clone, Timeout: run.Timeout()})
@@ -527,18 +540,31 @@ func commandFailure(argv []string, result Result) error {
 // onClone is a jj command against the shared clone: never a snapshot of its working copy, which
 // would run the working-copy filter, fsmonitor and signing programs a tree agent can configure,
 // and never colored, so every read parses. `jj workspace add` is the one command on the clone jj
-// refuses --ignore-working-copy on (createWorkspace).
-func onClone(cloneDir string, args ...string) []string {
-	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir)
+// refuses --ignore-working-copy on (createWorkspace). cloneDir must be non-empty, so it never
+// builds -R "" — jjWorkspaceRoot treats that exactly as no -R.
+func onClone(cloneDir string, args ...string) ([]string, error) {
+	if cloneDir == "" {
+		return nil, errors.New("workspace clone directory is required")
+	}
+	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir), nil
+}
+
+// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal.
+func runCheckedOnClone(ctx context.Context, run Runner, cloneDir string, args ...string) (Result, error) {
+	argv, err := onClone(cloneDir, args...)
+	if err != nil {
+		return Result{}, err
+	}
+	return RunChecked(ctx, run, argv, nil, "")
 }
 
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
-	setting, err := RunChecked(ctx, run, onClone(cloneDir, "config", "get", "git.abandon-unreachable-commits"), nil, "")
+	setting, err := runCheckedOnClone(ctx, run, cloneDir, "config", "get", "git.abandon-unreachable-commits")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(setting.Stdout) != "false" {
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "config", "set", "--repo", "git.abandon-unreachable-commits", "false"), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "config", "set", "--repo", "git.abandon-unreachable-commits", "false"); err != nil {
 			return err
 		}
 	}
@@ -549,7 +575,11 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", "exact:"+branch)
 	}
-	_, err = RunChecked(ctx, run, onClone(cloneDir, fetch...), source.env, "")
+	argv, err := onClone(cloneDir, fetch...)
+	if err != nil {
+		return err
+	}
+	_, err = RunChecked(ctx, run, argv, source.env, "")
 	return err
 }
 
@@ -577,7 +607,10 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 // through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
+		probe, err := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
+		if err != nil {
+			return err
+		}
 		present, err := RunChecked(ctx, run, probe, nil, "")
 		if err != nil {
 			return err
@@ -585,7 +618,10 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if strings.TrimSpace(present.Stdout) == "" {
 			continue
 		}
-		unset := onClone(cloneDir, "config", "unset", "--repo", key)
+		unset, err := onClone(cloneDir, "config", "unset", "--repo", key)
+		if err != nil {
+			return err
+		}
 		removed, err := runCommand(ctx, run, unset, nil, "")
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)

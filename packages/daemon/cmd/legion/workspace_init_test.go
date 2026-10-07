@@ -612,7 +612,17 @@ func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := workspace.NewRunner(100*time.Millisecond, map[string]string{"jj": jj, "git": git})
-	err = writeRecoveryMarker(context.Background(), run, workspace.Workspace{Dir: t.TempDir()}, "LEGION-42", "legion/LEGION-42")
+	clone, dir := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(clone, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".jj", "repo"), []byte(filepath.Join(clone, ".jj", "repo")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = writeRecoveryMarker(context.Background(), run, workspace.Workspace{Dir: dir, Clone: clone}, "LEGION-42", "legion/LEGION-42")
 	if err == nil || !strings.Contains(err.Error(), "command timed out: jj log -r @ --no-graph -T commit_id") {
 		t.Fatalf("writeRecoveryMarker = %v, want the timed-out jj log named", err)
 	}

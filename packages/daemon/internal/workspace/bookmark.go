@@ -106,7 +106,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			wayOut(cloneDir, "bookmark", "forget", workspace.Bookmark),
 			deleteOnGitHub(workspace))
 	case origin.present:
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "track", remote), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "bookmark", "track", remote); err != nil {
 			return err
 		}
 		revision = origin.added[0]
@@ -127,7 +127,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		// After main resolves, so the one line naming the set-aside commits is never a start that
 		// did not happen.
 		if len(setAside) > 0 {
-			if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "delete", workspace.Bookmark), nil, ""); err != nil {
+			if _, err := runCheckedOnClone(ctx, run, cloneDir, "bookmark", "delete", workspace.Bookmark); err != nil {
 				return err
 			}
 			log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
@@ -165,7 +165,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			return commandFailure(add, result)
 		}
 		// The add failed before creating a git worktree, and the stale entry went above.
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "forget", workspaceName); err != nil {
 			return err
 		}
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
@@ -186,7 +186,10 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 // refusal.
 func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
+	read, err := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
+	if err != nil {
+		return nil, err
+	}
 	result, err := RunChecked(ctx, run, read, nil, "")
 	if err != nil {
 		return nil, err
@@ -259,9 +262,14 @@ func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, e
 
 // wayOut is a command a refusal prints for an operator to run from a shell: the jj command on the
 // shared clone that onClone builds, so it takes no snapshot of the clone's working copy, in
-// backticks.
+// backticks. A zero clone has no runnable command; the operational callers reject it before a
+// refusal reaches this formatter.
 func wayOut(cloneDir string, args ...string) string {
-	return "`" + shellprefix.Command(onClone(cloneDir, args...)) + "`"
+	argv, err := onClone(cloneDir, args...)
+	if err != nil {
+		return "`<invalid workspace clone directory>`"
+	}
+	return "`" + shellprefix.Command(argv) + "`"
 }
 
 // deleteOnGitHub is the printed command that deletes the issue's branch on GitHub.
@@ -310,7 +318,10 @@ const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "
 // conflicted and at least one on a conflicted row, and one row per place: a commit jj cannot load
 // prints an error value where its id goes, which a workspace add would take as a revision.
 func readBookmark(ctx context.Context, run Runner, workspace Workspace, name string) (bookmarkRows, error) {
-	list := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
+	list, err := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
+	if err != nil {
+		return bookmarkRows{}, err
+	}
 	result, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
@@ -435,7 +446,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	registered := false
 	var commits []string
 	if cloneExists {
-		listed, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "list", "-T", `name ++ "\n"`), nil, "")
+		listed, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "list", "-T", `name ++ "\n"`)
 		if err != nil {
 			return err
 		}
@@ -447,7 +458,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	if registered {
-		own, err := RunChecked(ctx, run, onClone(cloneDir, "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`), nil, "")
+		own, err := runCheckedOnClone(ctx, run, cloneDir, "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`)
 		if err != nil {
 			return err
 		}
@@ -472,11 +483,11 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	}
 	if registered {
 		if len(commits) > 0 {
-			if _, err := RunChecked(ctx, run, onClone(cloneDir, "abandon", "-r", strings.Join(commits, " | ")), nil, ""); err != nil {
+			if _, err := runCheckedOnClone(ctx, run, cloneDir, "abandon", "-r", strings.Join(commits, " | ")); err != nil {
 				return err
 			}
 		}
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "forget", workspaceName); err != nil {
 			return err
 		}
 	}

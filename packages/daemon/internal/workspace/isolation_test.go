@@ -767,6 +767,26 @@ func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
 		}
 	}
 
+	// The state directory itself is outside the held layout: a pod or operator may reach its tree
+	// volume through a symlink. Provision and a command in the resulting workspace both work.
+	t.Run("a symlinked state directory is allowed", func(t *testing.T) {
+		run := newLocalRunner(t)
+		request := provisionRequest(t)
+		if err := os.MkdirAll(filepath.Dir(request.StateDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), request.StateDir); err != nil {
+			t.Fatal(err)
+		}
+		ws, err := Provision(context.Background(), run, request)
+		if err != nil {
+			t.Fatalf("Provision through a symlinked state directory: %v", err)
+		}
+		if _, err := RunCheckedIn(context.Background(), run, ws, log); err != nil {
+			t.Fatalf("jj in a workspace below a symlinked state directory: %v", err)
+		}
+	})
+
 	for _, tc := range []struct {
 		name string
 		link func(ws Workspace) string
