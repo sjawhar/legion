@@ -80,8 +80,14 @@ func TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage(t *testing.T) {
 	if registration.ClaimToken != token || registration.Role != api.ControllerRole || registration.Generation != launch.Generation || registration.Secret == "" {
 		t.Fatalf("the controller's registration = %+v, want %s, role controller, generation %d, a secret", registration, token, launch.Generation)
 	}
-	if locator := d.state().ControllerLocator; locator == nil || locator.SessionID != "ses_controller" {
+	state := d.state()
+	if locator := state.ControllerLocator; locator == nil || locator.SessionID != "ses_controller" {
 		t.Fatalf("controllerLocator = %+v, want the daemon's controller's session", locator)
+	}
+	// The controller is the project's, never an issue's worker; the strict client's own parse of
+	// this shape is packages/contracts' state-controller-claim fixture.
+	if view, listed := state.Issues[""]; listed {
+		t.Fatalf("the state lists the controller's claim as an issue keyed \"\": %+v", view)
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/grants",
 		api.GrantRequest{SessionID: "ses_controller", Secret: registration.Secret}, false); status != http.StatusOK {

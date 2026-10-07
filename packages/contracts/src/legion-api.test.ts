@@ -40,6 +40,9 @@ const schemas: Record<string, z.ZodType> = {
   "state.json": LegionStateResponse,
   "state-stage3.json": LegionStateResponse,
   "state-operator-claim.json": LegionStateResponse,
+  // Written by internal/projection's own golden test: what the state route projects while the
+  // daemon's own controller (`controller: daemon`) holds its claim on no issue.
+  "state-controller-claim.json": LegionStateResponse,
   "register.json": LegionRegisterResponse,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,

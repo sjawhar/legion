@@ -2700,6 +2700,9 @@ async function launchedController(options: {
   readonly order?: "envoy.ts" | "legion.ts";
   /** The daemon's answer to every `/legion/v1/grants`, in place of a minted grant. */
   readonly grant?: () => Response;
+  /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
+   * replaced by `daemonProject`: `state.json` unless a test names another. */
+  readonly stateFixture?: string;
 }): Promise<{
   readonly token: string;
   readonly registration: Record<string, unknown>;
@@ -2744,7 +2747,11 @@ async function launchedController(options: {
   const requests: DaemonRequest[] = [];
   const goldenState = JSON.parse(
     await readFile(
-      path.join(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
+      path.join(
+        import.meta.dir,
+        "../../contracts/fixtures/daemon-api",
+        options.stateFixture ?? "state.json"
+      ),
       "utf8"
     )
   );
@@ -2884,9 +2891,14 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   // `controller: daemon`: the pod carries its launch's boot token, never a capability fetched over
   // the operator's bearer. The session registers with that token and, holding the role and the
-  // topic, reports ready, which is when the daemon hands it the start message.
+  // topic, reports ready, which is when the daemon hands it the start message. The state it reads
+  // first is the daemon's own while that daemon holds the controller's claim (internal/projection's
+  // golden), which the plugin's strict client parses.
   test("a controller the daemon launched registers with its boot token, then reports ready once it holds the role", async () => {
-    const controller = await launchedController({ sessionId: "ses_controller_pod" });
+    const controller = await launchedController({
+      sessionId: "ses_controller_pod",
+      stateFixture: "state-controller-claim.json",
+    });
     const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
     await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
