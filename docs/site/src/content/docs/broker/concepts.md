@@ -187,9 +187,9 @@ what its environment holds (`printenv NAME` prints it). A session holding a gran
 the value: approve a secret only for a session you would trust with the value itself.
 
 A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
-approver or its enrollment's operator revokes it in Dispatch, or when its enrollment ends. A grant
-the session got without asking is revoked like any other, and when its operator revokes it the
-session asks for approval before it gets the same secrets again (the operator
+approver or its enrollment's operator revokes it in Dispatch or from one of their machines, or when
+its enrollment ends. A grant the session got without asking is revoked like any other, and when its
+operator revokes it the session asks for approval before it gets the same secrets again (the operator
 [withholds](#owner-and-tier-who-may-have-which-secret) them, even when the grant had already
 ended); a session revoking its own grant, and anyone but the operator revoking one, withholds
 nothing. To end every session's automatic access to a secret, change its tags

@@ -91,8 +91,8 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 // and when.
 type requestDecision struct {
 	// Who decided it: the approver's login, "session:<enrollment id>" (the session cancelled it),
-	// "launcher:<credential id>" (its launcher ended the session) or "broker" (the session's lease
-	// lapsed).
+	// "launcher:<credential id>" (its launcher ended the session, or its operator ended its machine
+	// login from one of their machines) or "broker" (the session's lease lapsed).
 	By string `json:"by"`
 	// When it was decided.
 	At time.Time `json:"at"`
