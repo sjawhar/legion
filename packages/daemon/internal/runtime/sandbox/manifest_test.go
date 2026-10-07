@@ -581,6 +581,24 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 	}
 }
 
+// The project controller's launch (`controller: daemon`) is a valid spec — on the controller role,
+// with no issue, tree or repository — that this runtime refuses by name: an issue pod's launchers are
+// its issue's workflow roles, and a claim on no issue has no issue pod.
+func TestTheControllersLaunchIsRefused(t *testing.T) {
+	r, err := configure(testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec(t, claim.ControllerToken(testProject), claim.RoleController, "")
+	spec.Tree, spec.Env, spec.Repository = "", map[string]string{}, ghrepo.Repository{}
+	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
+		t.Fatalf("the controller's spec is refused by the shared check (%v); this test is about the runtime's own refusal", err)
+	}
+	if _, err := r.prepare(spec); err == nil || !strings.Contains(err.Error(), "no pod for the project controller") {
+		t.Fatalf("prepare the controller's launch: %v, want the runtime's refusal", err)
+	}
+}
+
 // New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
 // does not choose.

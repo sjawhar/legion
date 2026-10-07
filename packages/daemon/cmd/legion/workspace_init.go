@@ -75,17 +75,19 @@ type volumeLostError string
 
 func (e volumeLostError) Error() string { return string(e) }
 
-// workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's two init containers,
-// which prepare an issue's jj workspace on the tree's persistent volume before the main
-// container's worker-shim starts, and the one list of them `legion workspace-init --help` names.
-// `fetch` is the first: the one process of the pod that holds the provisioning token, in a
-// container that mounts nothing a tree agent can write. `provision` is the second: all the tree
-// volume's work, in a container the provisioning Secret is not mounted in. Each one's log lines go
-// to stdout and its refusals and failures to stderr — together the init log the runtime quotes —
-// with exit 1, or 3 for a lost volume.
+// workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
+// prepare a pod's persistent volume before the main container's worker-shim starts, and the one
+// list of them `legion workspace-init --help` names. A tree pod runs two, which prepare an issue's
+// jj workspace on the tree's volume: `fetch` is the first, the one process of the pod that holds the
+// provisioning token, in a container that mounts nothing a tree agent can write; `provision` is the
+// second, all the tree volume's work, in a container the provisioning Secret is not mounted in. The
+// controller's pod (`controller: daemon`) runs `controller` alone, on the volume its own Sandbox
+// owns. Each one's log lines go to stdout and its refusals and failures to stderr — together the init
+// log the runtime quotes — with exit 1, or 3 for a lost volume.
 var workspaceInitCommands = map[string]command{
-	"fetch":     runWorkspaceFetch,
-	"provision": runWorkspaceProvision,
+	"fetch":      runWorkspaceFetch,
+	"provision":  runWorkspaceProvision,
+	"controller": runWorkspaceController,
 }
 
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -113,6 +115,49 @@ func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io
 		return code
 	}
 	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout), stderr)
+}
+
+const workspaceControllerUsage = "legion workspace-init controller [--root /legion]"
+
+func runWorkspaceController(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("workspace-init controller", "usage: "+workspaceControllerUsage, stderr)
+	root := flags.String("root", "/legion", "the controller's volume root directory")
+	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
+		return code
+	}
+	return workspaceInitExit(flags, workspaceController(*root), stderr)
+}
+
+// workspaceController prepares the controller's volume: the sessions directory Oh My Pi's
+// sessions are mounted from, and nothing else — the controller works no repository and holds no
+// GitHub credential, so it gets no workspace and no gh shim. On a resume it holds the controller to
+// the session it recorded, as workspace-init holds a tree agent: a session gone from the volume
+// means the volume was lost (the controller's volume holds nothing else to tell a lost volume from
+// a lost file), which the runtime reads from workspaceLostExitCode, so the daemon relaunches a
+// fresh controller rather than resuming one no attempt can find.
+func workspaceController(root string) error {
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("--root must be an absolute path (got %q)", root)
+	}
+	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
+		return errors.New(provisionTokenFileEnv + " is set: the controller's pod holds no provisioning token")
+	}
+	sessions := filepath.Join(root, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", sessions, err)
+	}
+	session, set := os.LookupEnv("LEGION_RESUME_SESSION_FILE")
+	if !set {
+		return nil
+	}
+	present, err := pathPresent(session)
+	if err != nil {
+		return fmt.Errorf("stat the recorded OMP session file %s: %w", session, err)
+	}
+	if !present {
+		return volumeLostError(fmt.Sprintf("The controller's volume holds no recorded OMP session file (%s): the volume was lost", session))
+	}
+	return nil
 }
 
 // parseWorkspaceInitFlags parses one subcommand's flags, refusing a positional argument; a false

@@ -491,6 +491,7 @@ export default function legionExtension(pi: PiApi): void {
     daemon: roleDaemon,
     persistedTranscript,
     pi,
+    exitProcess: (code) => exitProcess(code),
   });
 
   /**

@@ -384,7 +384,13 @@ func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState
 	}
 }
 
+// applyTerminal applies a claim's ready or failure as a workflow fact. The daemon's own controller
+// (`controller: daemon`) holds a claim on no issue, so neither is a workflow fact for it: its
+// relaunch is the controller keeper's (controllerKeeper).
 func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, state supervise.ClaimState) error {
+	if c.Role == claim.RoleController {
+		return nil
+	}
 	var fact intake.Fact
 	switch state {
 	case supervise.StateReady:

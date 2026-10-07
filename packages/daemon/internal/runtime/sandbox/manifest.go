@@ -159,17 +159,22 @@ func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter 
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
-// shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A pod provisions its
-// workspace from a repository, so a spec with none is refused, and so is a secret named for the
-// provisioning token, the one key the runtime writes whose pointer the worker container is never
-// told (the boot token's and the Dispatch bearer's pointers are runtime-owned, so the shared
-// refusal already covers them).
+// shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. The project controller's
+// launch (`controller: daemon`) is refused: an issue pod's launchers are its issue's six workflow
+// roles, and this runtime has no pod for a claim on no issue. A pod provisions its workspace from a
+// repository, so a spec with none is refused, and so is a secret named for the provisioning token,
+// the one key the runtime writes whose pointer the worker container is never told (the boot
+// token's and the Dispatch bearer's pointers are runtime-owned, so the shared refusal already
+// covers them).
 func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return launch{}, err
 	}
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("sandbox launch %s: "+format, append([]any{spec.Claim}, args...)...)
+	}
+	if spec.Role == claim.RoleController {
+		return launch{}, refuse("the issue-pod runtime has no pod for the project controller: its launchers are an issue's workflow roles, and the controller's claim is on no issue")
 	}
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)

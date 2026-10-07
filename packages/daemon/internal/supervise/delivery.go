@@ -290,9 +290,10 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 }
 
 // adopt hands the working copy the role's App identity before every task reaches the agent, so
-// the task's commits are authored by the bot. A failure keeps the task from being sent.
+// the task's commits are authored by the bot. A failure keeps the task from being sent. The
+// controller works no checkout and has no App, so it adopts nothing.
 func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
-	if m.deps.Identity == nil {
+	if m.deps.Identity == nil || role == claim.RoleController {
 		return nil
 	}
 	if loc == nil {

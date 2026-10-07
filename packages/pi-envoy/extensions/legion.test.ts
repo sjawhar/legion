@@ -495,6 +495,7 @@ interface ClaimPane {
   readonly errors: string[];
   readonly intervals: (() => void)[];
   readonly tools: RegisteredTool[];
+  readonly commands: RegisteredCommand[];
   readonly activeTools: string[];
   readonly entries: AppendedEntry[];
   readonly title: HostTitle;
@@ -651,6 +652,7 @@ async function claimPane(options: {
     errors,
     intervals,
     tools: fixture.tools,
+    commands: fixture.commands,
     activeTools: fixture.activeTools,
     entries: fixture.entries,
     title: fixture.title,
@@ -766,6 +768,44 @@ describe("Legion OMP extension", () => {
       })
     ).rejects.toThrow(
       "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller. Launch OMP with one of them in its environment before running /legion-claim-controller."
+    );
+  });
+  // A root architect's or phase worker's pane carries its claim's boot token, which is not the
+  // controller's. `/legion-claim-controller` run there is a takeover by hand, which needs the
+  // operator's capability: it stops before any daemon call, so it never registers the worker's own
+  // token (whose re-registration would replace its claim's capability) and never exits the worker.
+  test("/legion-claim-controller in a phase worker's pane calls no daemon route and does not exit", async () => {
+    const goldenState = JSON.parse(
+      await readFile(
+        path.join(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
+        "utf8"
+      )
+    );
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_worker",
+      // The daemon serves its state for the pane's project, so a claim that went on would reach
+      // claims/register.
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/state"
+          ? Response.json({ ...goldenState, daemon: { ...goldenState.daemon, project: "OMP" } })
+          : undefined,
+    });
+    expect(pane.exits).toEqual([]);
+    const booted = pane.requests.length;
+    const claimCommand = pane.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+
+    const refusal = await claimCommand.handler("", pane.context).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    expect(daemonRequests(pane.requests.slice(booted))).toEqual([]);
+    expect(pane.exits).toEqual([]);
+    expect(String(refusal)).toContain(
+      "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller."
     );
   });
   test("a claim registers, claims its Envoy role, and reports ready through the claim routes alone", async () => {
@@ -2729,6 +2769,9 @@ async function launchedController(options: {
   /** LEGION_CONTROLLER_START_MESSAGE, the text `legion controller start` carries for the
    * extension to send as the session's first turn; a fixed literal unless a test says otherwise. */
   readonly startMessage?: string;
+  /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
+   * replaced by `daemonProject`: `state.json` unless a test names another. */
+  readonly stateFixture?: string;
 }): Promise<{
   readonly token: string;
   readonly registration: Record<string, unknown>;
@@ -2776,7 +2819,11 @@ async function launchedController(options: {
   const requests: DaemonRequest[] = [];
   const goldenState = JSON.parse(
     await readFile(
-      path.join(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
+      path.join(
+        import.meta.dir,
+        "../../contracts/fixtures/daemon-api",
+        options.stateFixture ?? "state.json"
+      ),
       "utf8"
     )
   );
@@ -2805,6 +2852,7 @@ async function launchedController(options: {
       });
     }
     if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
+    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: "no route" }, { status: 404 });
     }
@@ -3065,6 +3113,87 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
     ]);
+  });
+
+  // `controller: daemon`: the pod carries its launch's boot token, never a capability fetched over
+  // the operator's bearer. The session registers with that token and, holding the role and the
+  // topic, reports ready, which is when the daemon hands it the start message. The state it reads
+  // first is the daemon's own while that daemon holds the controller's claim (internal/projection's
+  // golden), which the plugin's strict client parses. The pod carries no
+  // LEGION_CONTROLLER_START_MESSAGE, and the session sends no start message of its own: the
+  // daemon's delivery at ready is its one start message.
+  test("a controller the daemon launched registers with its boot token, then reports ready once it holds the role", async () => {
+    const controller = await launchedController({
+      sessionId: "ses_controller_pod",
+      stateFixture: "state-controller-claim.json",
+    });
+    const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
+    await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
+    delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+    process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    try {
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_pod")
+      );
+    } finally {
+      delete process.env.LEGION_BOOT_TOKEN_FILE;
+    }
+    expect(daemonRequests(controller.requests)).toEqual([
+      { path: "/legion/v1/state", body: undefined },
+      {
+        path: "/legion/v1/claims/register",
+        body: {
+          bootToken: "launch-boot-token",
+          sessionId: "ses_controller_pod",
+          ompSessionFile: "/tmp/ses_controller_pod.jsonl",
+          agentId: "ses_controller_pod",
+          pluginContract: pkg.legion.daemonApiVersion,
+        },
+      },
+      {
+        path: "/legion/v1/claims/ready",
+        body: {
+          claimToken: controller.token,
+          sessionId: "ses_controller_pod",
+          secret: controller.registration.secret,
+          generation: controller.registration.generation,
+        },
+      },
+    ]);
+    const paths = controller.requests.map((request) => request.path);
+    expect(paths.indexOf("/v1/roles/set")).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
+    expect(controller.sentUserMessages).toEqual([]);
+    expect(controller.exits).toEqual([]);
+  });
+
+  // Nobody reads a daemon-launched controller's session, so a claim it cannot complete exits Oh My
+  // Pi and the daemon relaunches it, as a pane's failed boot does.
+  test("a daemon-launched controller whose registration is refused exits", async () => {
+    const controller = await launchedController({
+      sessionId: "ses_controller_pod",
+      register: () => Response.json({ error: "invalid boot token" }, { status: 403 }),
+    });
+    const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
+    await writeFile(bootFile, "stale-boot-token\n", { mode: 0o600 });
+    delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+    process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    try {
+      // The test's exit hook throws in place of exiting; the throw ends the handler.
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_pod")
+      );
+    } catch {
+      // process would exit
+    } finally {
+      delete process.env.LEGION_BOOT_TOKEN_FILE;
+    }
+    expect(controller.exits).toEqual([1]);
+    expect(controller.requests.map((request) => request.path)).not.toContain(
+      "/legion/v1/claims/ready"
+    );
   });
 
   test("claims with the capability LEGION_CONTROLLER_SECRET_FILE names over LEGION_CONTROLLER_SECRET, and /legion-claim-controller moves the role to a hand-started session", async () => {

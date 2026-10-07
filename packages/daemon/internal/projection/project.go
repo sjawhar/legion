@@ -138,6 +138,12 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	}
 
 	for _, current := range claims {
+		// The daemon's own controller (`controller: daemon`) holds a claim on no issue: the state
+		// shows it as the project's controller (controllerLocator), never as an issue's worker,
+		// since an issue keyed "" refuses the whole document at every strict client.
+		if claim.IsController(current.Role, current.Issue, current.Tree) {
+			continue
+		}
 		claimView := claimViews[current.Token]
 		view, known := projected.Issues[current.Issue]
 		if !known {

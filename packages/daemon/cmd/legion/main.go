@@ -73,8 +73,8 @@ var commands = map[string]commandEntry{
 	"threads":        {runThreads, "resolve a pull request's review threads whose opener accepted the reply"},
 	"push":           {runPush, "push the issue branch (@-) to legion/<issue>, the one push every phase worker uses"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
-	"workspace-init": {runWorkspaceInit, "a Sandbox pod's two init containers: fetch the repository, provision the issue's workspace"},
-	"controller":     {runController, "start the controller, the interactive Oh My Pi session an operator talks to"},
+	"workspace-init": {runWorkspaceInit, "a Sandbox pod's init containers: fetch the repository, provision the issue's workspace, prepare the controller's volume"},
+	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
 }
 
 // helpRequested says whether a command's first argument asks for its usage.

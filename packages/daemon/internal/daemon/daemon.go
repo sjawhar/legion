@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -83,6 +83,9 @@ type overrides struct {
 	environ []string
 	// orphanSweep is how often orphans are reconciled; zero is orphanSweepInterval.
 	orphanSweep time.Duration
+	// controllerRetry is the first wait before a failed daemon-launched controller is retried; zero
+	// is controllerRetryFirst.
+	controllerRetry time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -386,6 +389,8 @@ type plan struct {
 	claimsCheck func(ctx context.Context, st *store.Store) error
 	clock       supervise.Clock
 	orphanSweep time.Duration
+	// controllerRetry is the controller keeper's first wait before it retries a failed controller.
+	controllerRetry time.Duration
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
@@ -440,11 +445,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if orphanSweep == 0 {
 		orphanSweep = orphanSweepInterval
 	}
+	controllerRetry := o.controllerRetry
+	if controllerRetry == 0 {
+		controllerRetry = controllerRetryFirst
+	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
-		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
@@ -659,10 +668,24 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // is relaunched only after boot orphan reconciliation proves any pre-crash pane absent or reaped;
 // a failed listing leaves it queued and uncertain until the bounded retry succeeds. Only then are
 // hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
+// A daemon that leaves the controller to its operator first stops the controller's claim an
+// earlier boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
+// retired. The only controller claim among the unrecorded launches is a launch a crash cut short,
+// and by then the stop has retired it, so launchUnfinished would not relaunch it: its
+// ReleaseUncertainLaunch acts only on a launch-uncertain claim (supervise/machine.go:427-431).
+// Dropping that token is a second guard beside that check, so boot does not report the retired
+// claim as an unrecorded launch.
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
 		return err
+	}
+	if s.cfg.ControllerLaunch != config.ControllerLaunchDaemon {
+		if err := s.stopLaunchedController(boot); err != nil {
+			return err
+		}
+		controller := claim.ControllerToken(s.plan.project)
+		unfinished = slices.DeleteFunc(unfinished, func(token claim.Token) bool { return token == controller })
 	}
 	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
 	if s.reconcileBootOrphans(boot) {
@@ -840,6 +863,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
 	}
+	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
+	// its ready; otherwise watchController says when the operator's is missing.
+	var keeper *controllerKeeper
+	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
+		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
+	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -852,24 +881,25 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
 		},
-		StateTransactions: st,
-		Supervisor:        s.supervisor,
-		BootTokens:        s.tokens,
-		Project:           p.project,
-		OperatorToken:     p.operatorToken,
-		Controller:        st,
-		DesignGate:        cfg.Gates.Design,
-		Log:               s.log,
-		Pool:              st.Pool(),
-		Handlers:          handlers,
-		Record:            records,
-		Dispatch:          client,
-		Tokens:            tokens,
-		GitHubOwner:       githubOwner(cfg),
-		Grants:            grants,
-		Releaser:          s.supervisor.deps.Runtime,
-		Trees:             st,
-		ClaimReady:        claimReady,
+		StateTransactions:  st,
+		Supervisor:         s.supervisor,
+		BootTokens:         s.tokens,
+		Project:            p.project,
+		OperatorToken:      p.operatorToken,
+		Controller:         st,
+		DesignGate:         cfg.Gates.Design,
+		ControllerLaunched: keeper != nil,
+		Log:                s.log,
+		Pool:               st.Pool(),
+		Handlers:           handlers,
+		Record:             records,
+		Dispatch:           client,
+		Tokens:             tokens,
+		GitHubOwner:        githubOwner(cfg),
+		Grants:             grants,
+		Releaser:           s.supervisor.deps.Runtime,
+		Trees:              st,
+		ClaimReady:         claimReadyHook(keeper, claimReady),
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -889,51 +919,14 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		group.Go(func() error { return workflow.run(serving) })
 	}
 	group.Go(func() error {
-		watchController(serving, st, cfg, p, s.log)
+		if keeper != nil {
+			keeper.run(serving, p.orphanSweep)
+		} else {
+			watchController(serving, st, cfg, p, s.log)
+		}
 		return nil
 	})
 	return group.Wait()
-}
-
-// watchController is the daemon's one line about the controller it never launches, under either
-// runtime: every sweep interval it reads the project's controller record, and when no session holds
-// it, or the Envoy role registry says the session is gone, it says so and how to start one, at most
-// once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was reached;
-// Unknown is never a death verdict, so it says nothing more.
-func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
-	prober := controller.NewProber(controller.ProberOptions{
-		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
-	})
-	ticker := time.NewTicker(p.orphanSweep)
-	defer ticker.Stop()
-	var logged time.Time
-	for {
-		record, _, err := st.Controller(ctx, p.project)
-		liveness := controller.Gone
-		switch {
-		case err != nil:
-			liveness = controller.Unknown
-			if ctx.Err() == nil {
-				log.Warn("controller: read its record", "error", err)
-			}
-		case record.Registered():
-			liveness = prober.Probe(ctx, record.Session)
-		}
-		switch liveness {
-		case controller.Alive:
-			logged = time.Time{}
-		case controller.Gone:
-			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {
-				log.Warn("controller not registered; run legion controller start", "project", cfg.Project)
-				logged = time.Now()
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
 }
 
 // source answers the state route out of the daemon's own store: the daemon itself, the cap it

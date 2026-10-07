@@ -1,4 +1,4 @@
--- 0034_resident_roles.up.sql — a phase worker stays live from its role's first assignment until
+-- 0035_resident_roles.up.sql — a phase worker stays live from its role's first assignment until
 -- its issue closes, so no transition suspends the role whose phase it ends.
 --
 -- Such a suspend named the phase it ended ("leaves") and finished without acting once the issue was

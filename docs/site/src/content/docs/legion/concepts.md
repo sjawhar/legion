@@ -28,10 +28,12 @@ section can use the words without stopping to explain them.
 
 ## The controller
 
-The controller is the one Legion agent a person talks to directly. The operator starts it with
-`legion controller start` in a terminal on their own machine, and it runs there as an interactive
-Oh My Pi session; closing that terminal leaves the project without a controller until someone runs
-the command again. The daemon wakes it when something needs a judgment no tree owns:
+The controller is the one Legion agent a person talks to directly. By default (`controller:
+operator`) the operator starts it with `legion controller start` in a terminal on their own machine,
+and it runs there as an interactive Oh My Pi session; closing that terminal leaves the project
+without a controller until someone runs the command again. Under `controller: daemon` (Kubernetes
+only) the daemon launches it as a pod in the cluster and relaunches it when it dies; a person
+reaches it through Dispatch. The daemon wakes it when something needs a judgment no tree owns:
 
 - a new `triage` issue labelled `legion` to admit, park, or leave alone;
 - a free admission slot to fill (see [Admission](#admission-and-the-legion-label));

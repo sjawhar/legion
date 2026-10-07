@@ -33,15 +33,6 @@ import (
 // a secret file.
 const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
 
-// controllerStartMessage is the controller's first prompt: `legion controller start` carries it to
-// Oh My Pi as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment), and the pi-legion-envoy
-// extension sends it as the session's first user turn once its claim succeeds — before it opens
-// the live Envoy subscription a wake could arrive on — so every start and restart runs the skill's
-// start procedure with nothing typed, deterministically, rather than racing a wake for the
-// session's one first turn (LEGION-392 found the race: Oh My Pi's own positional-argument first
-// message can lose it).
-const controllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
-
 // controllerCommands is `legion controller`'s subcommands, the one list of them `legion controller
 // --help` names.
 var controllerCommands = map[string]command{
@@ -71,8 +62,8 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 	return code
 }
 
-// controllerStart is `legion controller start`, the operator's side of a controller the daemon
-// cannot launch itself (LEGION-206 Requirement 11). In order, and nothing is kept, and nothing
+// controllerStart is `legion controller start`, the operator's side of the controller under
+// `controller: operator`, where the daemon launches none. In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
 // file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
@@ -90,10 +81,10 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
 // deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved
 // invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`, and
-// LEGION_CONTROLLER_START_MESSAGE in its environment for the extension to send as the first turn
-// — in the foreground with the same environment, and answer its exit code. A refusal before the
-// secret is written removes the directories made for the probe, so the state directory is as it
-// was.
+// daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the
+// extension to send as the first turn — in the foreground with the same environment, and answer
+// its exit code. A refusal before the secret is written removes the directories made for the
+// probe, so the state directory is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
 	absolute, err := filepath.EvalSymlinks(configPath)
 	if err == nil {
@@ -151,10 +142,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// One environment, probed and then launched: the operator's own with the controller's set on
 	// top, later pairs replacing inherited values of the same name. The controller is pane-side, so
 	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
-	// dropped by value and by pointer; its pane seed pointer is the controller's set's.
+	// dropped by value and by pointer; its pane seed pointer is the controller's set's. A pane's boot
+	// token, which a start from inside a Legion pane inherits, is dropped too: the plugin takes a
+	// controller carrying one for a controller the daemon launched (`controller: daemon`).
 	env := processEnvironment()
 	delete(env, natsauth.DaemonSeedVariable)
 	delete(env, natsauth.DaemonSeedFileVariable)
+	delete(env, "LEGION_BOOT_TOKEN")
+	delete(env, "LEGION_BOOT_TOKEN_FILE")
 	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
@@ -180,7 +175,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
 	}
-	controllerPrompt, err := composer.ControllerPromptPath()
+	controllerPrompts, err := composer.ControllerPromptPaths(false)
 	if err != nil {
 		return 0, err
 	}
@@ -205,7 +200,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// runs its start procedure at once and deterministically, never racing a wake for the one
 	// first-turn slot.
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
-		RolePromptPaths:            []string{controllerPrompt},
+		RolePromptPaths:            controllerPrompts,
 		Addressing:                 daemon.DesignGateFragment(designGate),
 		DeploymentInstructionsPath: instructionsFile,
 	})
@@ -237,7 +232,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
 // directory's gh shim and legion launcher first in the agent's bash tool as on every pane, and
 // LEGION_CONTROLLER_START_MESSAGE, which the pi-legion-envoy extension sends as the session's
-// first turn once its claim succeeds (controllerStartMessage). Secrets travel as `<NAME>_FILE`
+// first turn once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
 // pointers only. Later pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
 	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
@@ -259,7 +254,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
 		{"LEGION_GRANT_FILE", runtime.GrantFile(stateDir, legionclaim.Token(token))},
-		{"LEGION_CONTROLLER_START_MESSAGE", controllerStartMessage},
+		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})

@@ -1258,6 +1258,32 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	}
 }
 
+// The daemon's controller holds a claim on no issue, so its ready and its failure are no workflow
+// facts: neither a live terminal nor a replayed one reaches the workflow, which would otherwise look
+// for an issue record no controller has and stop the daemon on the error. Its relaunch is the
+// controller keeper's (controllerKeeper).
+func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	handler := &outboxFactHandler{}
+	w := &workflowRuntime{pool: pool, handlers: []intake.Handler{handler}, log: quietLogger(), failed: make(chan error, 1)}
+	controller := supervise.Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, Generation: 2}
+	for _, state := range []supervise.ClaimState{supervise.StateReady, supervise.StateFailed} {
+		controller.State = state
+		if err := w.replayTerminal(context.Background(), []supervise.Claim{controller}); err != nil {
+			t.Fatalf("replay the controller's %s: %v", state, err)
+		}
+		w.terminal(controller, state)
+	}
+	if got := handler.facts(); len(got) != 0 {
+		t.Fatalf("workflow facts = %#v, want none for the controller", got)
+	}
+	select {
+	case err := <-w.failed:
+		t.Fatalf("the workflow failed on the controller's terminal state: %v", err)
+	default:
+	}
+}
+
 // The answer supervise asks for before it sends a queued task: is the issue still in the phase
 // the task was queued for. The role is not what is compared — one role runs several phases — and
 // a task of no phase never reaches this answer at all, which is supervise's own rule.

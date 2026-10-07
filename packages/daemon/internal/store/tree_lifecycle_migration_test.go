@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -12,20 +13,23 @@ import (
 // migration opens epoch one for each workflow root (under the normalized project token its claims
 // use, not the issue row's Dispatch key) and for each operator tree no workflow issue backs, and
 // binds the existing claims to it. Without that, the first relaunch of a live claim would be
-// refused as unbound and its next start as having no lifecycle.
+// refused as unbound and its next start as having no lifecycle. The project controller's claim
+// (0032, on no tree) opens no lifecycle and binds none, and its launch is never refused for it.
 func TestTheLifecycleMigrationOpensEpochOneForTreesAdmittedBeforeIt(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 31)
+	migrateThrough(t, store, 32)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1),
 		       ('LEGION-209', 'LEGION-208', 'LEGION', 'child', 'implementing', 1, 'in_progress', 'B', 1)`); err != nil {
 		t.Fatal(err)
 	}
+	controller := supervise.Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, State: supervise.StateIdle, Generation: 3}
 	for _, c := range []supervise.Claim{
 		{Token: claim.Token("legion-legion-legion-209-implementer"), Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, State: supervise.StateIdle, Generation: 2},
 		{Token: claim.Token("legion-legion-legion-300-architect"), Project: "legion", Tree: "LEGION-300", Issue: "LEGION-300", Role: claim.RoleArchitect, State: supervise.StateIdle, Generation: 1},
+		controller,
 	} {
 		if _, err := store.Pool().Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
 			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
@@ -66,5 +70,30 @@ func TestTheLifecycleMigrationOpensEpochOneForTreesAdmittedBeforeIt(t *testing.T
 		if err := store.CheckLaunch(ctx, c); err != nil {
 			t.Fatalf("relaunch check of %s after the migration: %v", token, err)
 		}
+	}
+	var lifecycles int
+	if err := store.Pool().QueryRow(ctx, `select count(*) from tree_lifecycles where tree = ''`).Scan(&lifecycles); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycles != 0 {
+		t.Fatalf("the migration opened %d lifecycles for tree '', the controller's claim's; want none", lifecycles)
+	}
+	loaded, err := store.Claims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(loaded, func(l supervise.Claim) bool { return l.Token == controller.Token })
+	if i < 0 {
+		t.Fatalf("the controller's claim is gone after the migration: %v", loaded)
+	}
+	if loaded[i].TreeEpoch != 0 {
+		t.Fatalf("the controller's claim after the migration is bound to epoch %d, want none", loaded[i].TreeEpoch)
+	}
+	if err := store.CheckLaunch(ctx, loaded[i]); err != nil {
+		t.Fatalf("relaunch check of the controller's claim after the migration: %v", err)
+	}
+	admitted, err := store.AdmitClaim(ctx, loaded[i])
+	if err != nil || admitted.TreeEpoch != 0 {
+		t.Fatalf("admit the controller's claim: epoch %d, %v; want it written at epoch zero", admitted.TreeEpoch, err)
 	}
 }

@@ -45,8 +45,14 @@ package api
 // payload change bumps this number and the image probe pairs the daemon with an image that reads
 // it, rather than removal stopping on every pod still running an older image.
 //
+// 14: LEGION-592 -- the daemon-launched controller (`controller: daemon`): a Sandbox pod's worker
+// container may carry `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`, which the plugin must
+// answer by registering on `POST /legion/v1/claims/register` with the launch's boot token and
+// reporting ready on `claims/ready`. A plugin built before it reads that pod as the operator's
+// controller, throws for want of `LEGION_CONTROLLER_SECRET`, and never registers, so the image probe
+// must refuse such an image rather than leave the controller's keeper relaunching it forever.
+//
 // 15: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
 // issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
-// generation, with the incarnation `<pod uid>/<generation>`. 14 is reserved by sjawhar/legion#1824
-// (LEGION-592, the daemon-launched controller), not skipped.
+// generation, with the incarnation `<pod uid>/<generation>`.
 const DaemonAPIVersion = 15

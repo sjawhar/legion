@@ -1,7 +1,8 @@
--- 0032_tree_lifecycle.up.sql - each tree's durable admission and cleanup barrier. Claims and starts
+-- 0033_tree_lifecycle.up.sql - each tree's durable admission and cleanup barrier. Claims and starts
 -- bind the open epoch; a cleanup reservation refuses them until API-confirmed
 -- release, and only a fresh root admission opens the next epoch. Keyed by the normalized project
--- token claims and runtime labels use (claim.ProjectToken), not the issue row's Dispatch key.
+-- token claims and runtime labels use (claim.ProjectToken), not the issue row's Dispatch key. The
+-- project controller's claim (0032, tree '') belongs to no tree and binds no lifecycle.
 create table tree_lifecycles (
     project text not null,
     tree text not null,
@@ -26,7 +27,7 @@ on conflict do nothing;
 insert into tree_lifecycles (project, tree, epoch, authority)
 select distinct c.project, c.tree, 1, 'operator'
 from claims c
-where not exists (select 1 from issues i where i.key = c.tree)
+where c.tree <> '' and not exists (select 1 from issues i where i.key = c.tree)
 on conflict do nothing;
 
 update claims c set tree_epoch = 1

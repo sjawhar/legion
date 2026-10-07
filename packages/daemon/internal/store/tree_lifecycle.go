@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/wait"
@@ -34,9 +35,14 @@ func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, aut
 
 // AdmitClaim binds a new or reactivated claim to an open lifecycle and writes both in one short
 // globally serialized transaction. The caller receives the epoch it must carry through every later
-// launch; runtime work happens after this transaction commits.
+// launch; runtime work happens after this transaction commits. The project controller's claim
+// (`controller: daemon`) belongs to no tree, so it binds no lifecycle: it is written at epoch zero.
 func (s *Store) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if claim.IsController(c.Role, c.Issue, c.Tree) {
+			c.TreeEpoch = 0
+			return putClaim(ctx, tx, c)
+		}
 		epoch, err := treelifecycle.BindWork(ctx, tx, c.Project, c.Tree)
 		if err != nil {
 			return err
@@ -52,8 +58,12 @@ func (s *Store) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Cl
 
 // CheckLaunch rejects a delayed claim before it can persist StateLaunching or call a runtime after
 // the tree lifecycle reserved cleanup. The machine returns this named error directly, so outbox
-// retry preserves its claim and launch budget.
+// retry preserves its claim and launch budget. The project controller's claim, on no tree, has no
+// cleanup to meet.
 func (s *Store) CheckLaunch(ctx context.Context, c supervise.Claim) error {
+	if claim.IsController(c.Role, c.Issue, c.Tree) {
+		return nil
+	}
 	return s.Tx(ctx, func(tx pgx.Tx) error {
 		if err := treelifecycle.CheckWork(ctx, tx, c.Project, c.Tree, c.TreeEpoch); err != nil {
 			return fmt.Errorf("launch claim %s: %w", c.Token, err)

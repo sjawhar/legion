@@ -707,7 +707,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 			for _, queued := range []struct {
 				since int
 				kind  record.OutboxKind
-			}{{20, record.OutboxKindControllerNotice}, {33, record.OutboxKindIssueSuspend}} {
+			}{{20, record.OutboxKindControllerNotice}, {34, record.OutboxKindIssueSuspend}} {
 				if version < queued.since {
 					continue
 				}

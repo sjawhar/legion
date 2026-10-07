@@ -1,4 +1,4 @@
--- 0033_issue_suspend.up.sql — an issue's close suspends its Sandbox in a durable effect of its own,
+-- 0034_issue_suspend.up.sql — an issue's close suspends its Sandbox in a durable effect of its own,
 -- apart from the per-role stops before it and the tree cleanup after it.
 --
 -- The list names every kind the daemon writes, and `issue_branch` ahead of the separate change
