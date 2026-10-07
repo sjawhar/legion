@@ -2463,7 +2463,7 @@ controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` launches Oh My
-# Pi with (daemon.ControllerStartMessage, internal/daemon/controller_keeper.go), and the model answers it.
+# Pi with (daemon.ControllerStartMessage, internal/daemon/controller.go), and the model answers it.
 controller_started_itself() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do

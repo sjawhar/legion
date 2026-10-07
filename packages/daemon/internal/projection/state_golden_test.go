@@ -82,7 +82,10 @@ func sandboxLocator(token claim.Token, uid string) *runtime.Locator {
 
 // golden pins the state document Project's caller serves: Go writes it (`-update`), and
 // `packages/contracts/src/legion-api.test.ts` parses it through the strict schema the plugin reads
-// the state with. A fixture that differs from what Go now writes is stale.
+// the state with. A fixture that differs from what Go now writes is stale. It is internal/api's
+// golden helper with this package's command in its message: the daemon-api fixtures are written
+// from two packages, so a state-shape change takes both `-update` runs whether or not the helper is
+// shared. Once a third package writes one, the helper moves into an internal/testgolden package.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()
 	encoded, err := json.MarshalIndent(value, "", "  ")

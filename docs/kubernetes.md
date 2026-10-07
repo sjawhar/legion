@@ -1542,11 +1542,18 @@ it as they reach the operator's controller: it subscribes to
 **Switching back.** To hand the controller back to a person, set `controller: operator` (or drop
 the key), drop `runtime.kubernetes.resources.controller`, which the daemon refuses at boot unless
 `controller: daemon`, and restart the daemon. At boot, before it re-adopts or relaunches anything,
-that daemon ends the controller record's registration, minting it a capability nobody holds, and
-stops the controller's claim the earlier boot left: its Sandbox is released and the claim retires
-(`legion claims list` shows it `retired`), logged as `controller: stopping the controller an earlier
-boot under controller: daemon launched, and ending its registration; this daemon leaves the
-controller to its operator`. A daemon that cannot do either refuses to boot, naming the claim. The
+that daemon stops the controller's claim the earlier boot left, unless it is retired already: its
+Sandbox is released and the claim retires (`legion claims list` shows it `retired`), logged as
+`controller: stopping the controller an earlier boot under controller: daemon launched; this daemon
+leaves the controller to its operator`. Then, whether it stopped the claim at this boot or found it
+retired, it ends the controller record's registration while the record still names that claim's
+session, minting it a capability nobody holds, logged as `controller: ending the registration of the
+controller an earlier boot under controller: daemon launched; this daemon leaves the controller to
+its operator`; a record naming another session, the operator's controller's once it has
+registered, or none, is left as it is. A daemon that cannot stop the claim refuses to boot, naming
+it (`stop legion-<project>-controller, …`), with the record untouched; one that stopped it but
+cannot end its registration refuses naming it too (`end the registration of
+legion-<project>-controller, …`), and the next boot, finding the claim retired, ends it. The
 claim route refuses a launch of that claim on such a daemon (409, `legion-<project>-controller is a
 launch of the daemon's own controller, and this daemon leaves the controller to its operator
 (controller: operator)`), and the token of an earlier launch is an invalid boot token, so no pod of

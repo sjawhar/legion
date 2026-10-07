@@ -163,12 +163,10 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 // takes the registration first, behind the generation and same-agent fences every claim's has, and
 // persists the session, its transcript and the issued secret's hash; then the session is recorded
 // as the project's controller — the record admission's wakes, the controller grant route and the
-// state read — under a fresh capability, which revokes every earlier controller's grants. That
-// capability is the hash of a secret nobody holds, never the boot token's: the operator's
-// capability path compares a token with it, and a daemon restarted under `controller: operator`
-// forgets the tokens of launches since replaced, so a recorded boot token would register there
-// outside its claim's generation fence. The answer is the operator's controller's registration, its
-// generation the launch's, which the agent's ready names.
+// state read — under controller.UnheldCapability, which revokes every earlier controller's grants
+// and keeps the boot token out of the record, whose invariant that function's doc states. The
+// answer is the operator's controller's registration, its generation the launch's, which the
+// agent's ready names.
 func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest, launch BootToken, m *supervise.Machine) {
 	ctx := context.WithoutCancel(r.Context())
 	secret := rand.Text()
@@ -181,7 +179,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 		s.claimFailure(w, "register", launch.Claim, err)
 		return
 	}
-	generation, err := s.controller.MintController(ctx, s.project, capabilityHash(rand.Text()))
+	generation, err := s.controller.MintController(ctx, s.project, controller.UnheldCapability())
 	if err != nil {
 		s.log.Error("api: record the launched controller's capability", "claim", launch.Claim, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))

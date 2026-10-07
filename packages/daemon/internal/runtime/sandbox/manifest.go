@@ -347,8 +347,8 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
-	enrolled := r.enrolls(l.spec.Role)
-	if enrolled {
+	broker := r.enrolledWith(l.spec.Role)
+	if broker != nil {
 		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir,
 			"--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile,
 			"--agent-secrets-bin", r.tools.AgentSecrets)
@@ -381,7 +381,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
-			}, providersMounts, r.agentSecretsMounts(enrolled), r.pod.VolumeMounts),
+			}, providersMounts, agentSecretsMounts(broker), r.pod.VolumeMounts),
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
@@ -478,13 +478,12 @@ func kubeletEscape(text string) string {
 // alone), the feed workspace-fetch fills and workspace-init reads, on the node's disk because it
 // holds a clone of the repository, three in-memory directories — the main container's state
 // directory, workspace-fetch's TMPDIR, and the XDG config home workspace-init and the main
-// container share — the agent-secrets volumes when the pod is enrolled (enrolls), the providers
-// Secret's configured keys when there are any, and the operator's volumes. The controller's pod has
-// the tree volume (its own), the boot projection, the state directory and the config home, the
-// providers Secret and the operator's volumes: it provisions nothing, so it has no provisioning
-// token, feed or TMPDIR.
+// container share — the agent-secrets volumes when the pod is enrolled (enrolledWith), the
+// providers Secret's configured keys when there are any, and the operator's volumes. The
+// controller's pod has the tree volume (its own), the boot projection, the state directory and the
+// config home, the providers Secret and the operator's volumes: it provisions nothing, so it has no
+// provisioning token, feed or TMPDIR.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
-	enrolled := r.enrolls(l.spec.Role)
 	var boot []corev1.KeyToPath
 	providers, _ := r.providers()
 	for _, name := range sortedKeys(l.secrets) {
@@ -497,49 +496,51 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	bootProjection := corev1.Volume{Name: bootVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 		SecretName: secretName(l.name), Items: boot, DefaultMode: new(int32(0o440)),
 	}}}
-	if l.controller {
-		return slices.Concat([]corev1.Volume{
+	state := corev1.Volume{Name: stateVolume, VolumeSource: memory}
+	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
+	own := []corev1.Volume{tree, bootProjection, state, config}
+	if !l.controller {
+		own = []corev1.Volume{
 			tree, bootProjection,
-			{Name: stateVolume, VolumeSource: memory},
-			{Name: configVolume, VolumeSource: memory},
-		}, r.agentSecretsVolumes(enrolled), providers, r.pod.Volumes)
+			{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
+				DefaultMode: new(int32(0o440)),
+			}}},
+			{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			state,
+			{Name: tempVolume, VolumeSource: memory},
+			config,
+		}
 	}
-	return slices.Concat([]corev1.Volume{
-		tree, bootProjection,
-		{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
-			DefaultMode: new(int32(0o440)),
-		}}},
-		{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		{Name: stateVolume, VolumeSource: memory},
-		{Name: tempVolume, VolumeSource: memory},
-		{Name: configVolume, VolumeSource: memory},
-	}, r.agentSecretsVolumes(enrolled), providers, r.pod.Volumes)
+	return slices.Concat(own, agentSecretsVolumes(r.enrolledWith(l.spec.Role)), providers, r.pod.Volumes)
 }
 
-// enrolls is whether a pod launched for role is enrolled with the secrets broker: every pod is when
-// the runtime enrolls pods (runtime.kubernetes.agent_secrets), but the controller's, which holds no
-// human-tier key. podTemplate (the shim's flags and the worker container's mounts), volumes,
-// mainEnvironment and handedAddresses all ask it, so the pod a launch builds and the one row 9
-// compares a running pod with agree.
-func (r *Runtime) enrolls(role claim.Role) bool {
-	return r.agentSecrets != nil && role != claim.RoleController
-}
-
-// agentSecretsVolumes are the two volumes an enrolled pod carries: the projected token for the
-// broker's audience — one source, alone in its volume, the shape the cluster's admission policy
-// admits per token — and the memory-backed key directory. None when the pod is not enrolled.
-func (r *Runtime) agentSecretsVolumes(enrolled bool) []corev1.Volume {
-	if !enrolled {
+// enrolledWith is the secrets broker a pod launched for role enrolls with, nil when it enrolls with
+// none: every pod enrolls when the runtime enrolls pods (runtime.kubernetes.agent_secrets), but the
+// controller's, which holds no human-tier key. podTemplate (the shim's flags and the worker
+// container's mounts), volumes, mainEnvironment and handedAddresses all ask it and read the broker
+// from its answer, so the pod a launch builds and the one row 9 compares a running pod with agree,
+// and no caller reads a broker it was not handed.
+func (r *Runtime) enrolledWith(role claim.Role) *AgentSecrets {
+	if role == claim.RoleController {
 		return nil
 	}
-	a := r.agentSecrets
-	expiry := int64(math.Ceil(a.TokenExpiry.Seconds()))
+	return r.agentSecrets
+}
+
+// agentSecretsVolumes are the two volumes a pod enrolled with broker carries: the projected token
+// for the broker's audience — one source, alone in its volume, the shape the cluster's admission
+// policy admits per token — and the memory-backed key directory. None when broker is nil.
+func agentSecretsVolumes(broker *AgentSecrets) []corev1.Volume {
+	if broker == nil {
+		return nil
+	}
+	expiry := int64(math.Ceil(broker.TokenExpiry.Seconds()))
 	return []corev1.Volume{
 		{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 			DefaultMode: new(int32(0o440)),
 			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-				Audience: a.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
+				Audience: broker.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
 			}}},
 		}}},
 		{Name: agentSecretsKeyVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -548,11 +549,11 @@ func (r *Runtime) agentSecretsVolumes(enrolled bool) []corev1.Volume {
 	}
 }
 
-// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes: the
-// token read-only, and the key directory writable so the client can persist its key and
-// enrollment id across a pod's own lifetime. Neither when the pod is not enrolled.
-func (r *Runtime) agentSecretsMounts(enrolled bool) []corev1.VolumeMount {
-	if !enrolled {
+// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes of a pod
+// enrolled with broker: the token read-only, and the key directory writable so the client can
+// persist its key and enrollment id across a pod's own lifetime. Neither when broker is nil.
+func agentSecretsMounts(broker *AgentSecrets) []corev1.VolumeMount {
+	if broker == nil {
 		return nil
 	}
 	return []corev1.VolumeMount{
@@ -776,8 +777,8 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
-	if r.enrolls(spec.Role) {
-		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
+	if broker := r.enrolledWith(spec.Role); broker != nil {
+		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
 	env = append(env, xdgEnvironment()...)
@@ -815,9 +816,9 @@ type handedAddress struct{ name, value string }
 // holds those until it is replaced (evaluate, row 9).
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
 func (r *Runtime) handedAddresses(role claim.Role) []handedAddress {
-	broker := ""
-	if r.enrolls(role) {
-		broker = r.agentSecrets.URL
+	brokerURL := ""
+	if broker := r.enrolledWith(role); broker != nil {
+		brokerURL = broker.URL
 	}
 	return []handedAddress{
 		{connectFlag, r.streamURL},
@@ -825,7 +826,7 @@ func (r *Runtime) handedAddresses(role claim.Role) []handedAddress {
 		{"ENVOY_NATS_URL", strings.Join(r.natsURLs, ",")},
 		{"ENVOY_URL", r.envoyURL},
 		{"DISPATCH_URL", r.dispatchURL},
-		{"AGENT_SECRETS_URL", broker},
+		{"AGENT_SECRETS_URL", brokerURL},
 	}
 }
 

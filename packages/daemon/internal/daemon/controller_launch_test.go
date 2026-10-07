@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -30,6 +31,28 @@ func controllerLaunched(t *testing.T, rt *fake.Runtime, token claim.Token) runti
 		return false
 	})
 	return lastLaunch(t, rt, token)
+}
+
+// registeredLaunch connects launch's shim to the daemon and registers its agent as session, as the
+// controller's pod does, and returns the registration the agent is answered with.
+func registeredLaunch(t *testing.T, d *daemon, record *built, launch runtime.SpawnSpec, session string) api.ControllerRegisterResponse {
+	t.Helper()
+	dialShim(t, record.address, launch.BootToken)
+	testwait.Eventually(t, "the hello to reach the controller's machine", func() bool {
+		return d.claim(launch.Claim).State == string(supervise.StateShimConnected)
+	})
+	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: launch.BootToken, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
+		AgentID: session, PluginContract: api.DaemonAPIVersion,
+	}, false)
+	if status != http.StatusOK {
+		t.Fatalf("register the controller's launch as %s = %d; body %s", session, status, body)
+	}
+	var registration api.ControllerRegisterResponse
+	if err := json.Unmarshal(body, &registration); err != nil {
+		t.Fatalf("decode %s as the controller's registration: %v", body, err)
+	}
+	return registration
 }
 
 // Under `controller: daemon` the daemon launches the project's controller itself, with nobody
@@ -296,5 +319,124 @@ func TestASwitchedBackDaemonRegistersNoEarlierLaunchOfItsController(t *testing.T
 	if status != claim.InvalidBootToken.Status || !strings.Contains(string(body), claim.InvalidBootToken.Message) {
 		t.Fatalf("the first launch's boot token registered on the operator's daemon = %d %s, want %d %q",
 			status, body, claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
+	}
+}
+
+// A daemon switched back to `controller: operator` whose stop of the controller fails refuses to
+// boot with the controller record as it was, so a daemon switched to `controller: daemon` again
+// re-adopts a controller whose registration still mints its grants, and an operator's daemon whose
+// stop then succeeds completes the switch. Ending the registration ahead of a stop that then failed
+// would leave that pod running, re-adopted with its registration gone: every grant refused and
+// every wake dropped, with nothing to heal it until the pod died.
+func TestASwitchedBackDaemonWhoseStopFailsLeavesItsControllerRegistered(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	registration := registeredLaunch(t, d, &record, controllerLaunched(t, rt, token), "ses_pod")
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchOperator
+	refused := errors.New("the cluster refused the Sandbox delete")
+	rt.FailReleaseOf(token, refused)
+	err = run(context.Background(), cfg, quietLogger(), o)
+	if err == nil || !strings.Contains(err.Error(), "stop "+string(token)) || !strings.Contains(err.Error(), refused.Error()) {
+		t.Fatalf("the operator's daemon whose stop of the controller failed booted with %v, want a refusal naming the stop of %s", err, token)
+	}
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt.FailReleaseOf(token, nil)
+	d = startDaemon(t, cfg, o)
+	if locator := d.state().ControllerLocator; locator == nil || locator.SessionID != "ses_pod" {
+		t.Errorf("controllerLocator = %+v after the refused switch back, want the re-adopted pod's session ses_pod", locator)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/grants",
+		api.GrantRequest{SessionID: "ses_pod", Secret: registration.Secret}, false); status != http.StatusOK {
+		t.Errorf("the re-adopted controller's grant = %d %s, want 200", status, body)
+	}
+	if state := d.claim(token).State; state == string(supervise.StateRetired) {
+		t.Errorf("the controller's claim is %s after the refused switch back, want it re-adopted", state)
+	}
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchOperator
+	d = startDaemon(t, cfg, o)
+	if state := d.claim(token).State; state != string(supervise.StateRetired) {
+		t.Errorf("the controller's claim is %s once the operator's daemon stopped it, want retired", state)
+	}
+	if locator := d.state().ControllerLocator; locator != nil {
+		t.Errorf("controllerLocator = %+v once the operator's daemon stopped the controller, want none", locator)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/grants",
+		api.GrantRequest{SessionID: "ses_pod", Secret: registration.Secret}, false); status != http.StatusForbidden {
+		t.Errorf("the stopped controller's grant = %d %s, want 403", status, body)
+	}
+}
+
+// A daemon switched back to `controller: operator` ends the registration the controller it stopped
+// still holds, and only that one. A claim `legion claims stop` retired under `controller: daemon`
+// keeps its session, which the record still names, so the switch back ends that registration even
+// though it stops nothing; once the operator's controller has registered, a later boot leaves the
+// operator's registration alone.
+func TestASwitchedBackDaemonEndsOnlyItsStoppedControllersRegistration(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	registration := registeredLaunch(t, d, &record, controllerLaunched(t, rt, token), "ses_pod")
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil, true); status != http.StatusOK {
+		t.Fatalf("stop the controller's claim = %d; body %s", status, body)
+	}
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchOperator
+	d = startDaemon(t, cfg, o)
+	if locator := d.state().ControllerLocator; locator != nil {
+		t.Errorf("controllerLocator = %+v once the operator's daemon booted, want the stopped controller's registration ended", locator)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/grants",
+		api.GrantRequest{SessionID: "ses_pod", Secret: registration.Secret}, false); status != http.StatusForbidden {
+		t.Errorf("the stopped controller's grant = %d %s, want 403", status, body)
+	}
+	status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion}, true)
+	if status != http.StatusOK {
+		t.Fatalf("the operator's controller secret = %d %s, want 200", status, body)
+	}
+	var secret api.ControllerSecretResponse
+	if err := json.Unmarshal(body, &secret); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: secret.Secret, SessionID: "ses_operator", OmpSessionFile: "/sessions/operator.jsonl",
+		AgentID: "ses_operator", PluginContract: api.DaemonAPIVersion,
+	}, false); status != http.StatusOK {
+		t.Fatalf("register the operator's controller = %d; body %s", status, body)
+	}
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	d = startDaemon(t, cfg, o)
+	if locator := d.state().ControllerLocator; locator == nil || locator.SessionID != "ses_operator" {
+		t.Errorf("controllerLocator = %+v after another boot, want the operator's controller ses_operator", locator)
 	}
 }

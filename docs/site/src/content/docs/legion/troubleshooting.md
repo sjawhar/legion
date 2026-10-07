@@ -75,8 +75,17 @@ legion start --config legion.yaml --check-config
   under controller: daemon launched, since this daemon leaves the controller to its operator
   (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
   daemon could not stop the pod it launched before; the end of the line says why (most often the
-  cluster refused the Sandbox's deletion). Fix that and start the daemon again, or set
-  `controller: daemon` back.
+  cluster refused the Sandbox's deletion). The refusal leaves the pod and its registration as they
+  were. Fix the cause and start the daemon again, or set `controller: daemon` back, which re-adopts
+  that controller with its registration, grants and wakes still working.
+- **The daemon refuses to boot: `end the registration of legion-<project>-controller, the controller
+  an earlier boot under controller: daemon launched, since this daemon leaves the controller to its
+  operator (controller: operator): …` (or `read the controller record to end the registration of
+  …`).** The daemon stopped its controller's pod but could not write the controller record; the end
+  of the line is the store's error. Start the daemon again once Postgres answers: the next boot finds
+  the claim retired and ends the registration then. Until it does, the state's `controllerLocator`
+  names the stopped pod's session, which nothing can use, since the pod's Secret went with its
+  Sandbox.
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.

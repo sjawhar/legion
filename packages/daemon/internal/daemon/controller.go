@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -146,41 +144,61 @@ func (k *controllerKeeper) ready(c supervise.Claim) {
 	}
 }
 
-// stopLaunchedController ends the daemon's own controller's claim on a daemon that leaves the
-// controller to its operator (`controller: operator`), and returns its token when it stopped one. A
+// stopLaunchedController ends the daemon's own controller on a daemon that leaves the controller to
+// its operator (`controller: operator`), and returns its claim's token when it stopped the claim. A
 // claim an earlier boot under `controller: daemon` stored would otherwise be re-adopted and
 // relaunched at every death, its pod contending with the operator's `legion controller start` for
-// the one controller record, which the register route refuses it on this daemon. First it mints
-// that record a capability nobody holds (the hash of a secret it discards), which ends the
-// registration of the controller it stops: the state's controllerLocator then names no dead pod's
-// session, no grant mints for it, and no capability any launch registered under survives the
-// switch. The operator's next `legion controller start` mints the capability its controller
-// registers with. Then the stop releases the claim's process (its Sandbox, under the Sandbox
-// runtime) and retires the claim before anything relaunches it. The mint comes first so that a stop
-// that fails leaves the claim, and the record with it, to stop again at the next boot; a retired
-// claim is never stopped, so a capability the operator has minted since is never replaced. A mint
-// or a stop that fails refuses the boot, naming the claim, rather than leave this daemon
-// supervising a controller it does not run.
+// the one controller record, which the register route refuses it on this daemon. First it stops
+// the claim, unless it is retired already: the stop releases its process (its Sandbox, under the
+// Sandbox runtime) and retires it before anything relaunches it. Then it ends the claim's
+// registration (endLaunchedRegistration), for a claim retired before this boot too. The stop comes
+// first: a stop that fails refuses the boot with the record untouched, so a daemon switched to
+// `controller: daemon` again re-adopts a controller whose registration, grants and wakes still
+// work, where a record ended ahead of a pod that kept running would leave that pod unable to act
+// until it died. A registration ending that fails after the stop is retried at the next boot,
+// since the retired claim still names its session. Either failure refuses the boot, naming the
+// claim, rather than leave this daemon supervising a controller it does not run.
 func (s *supervision) stopLaunchedController(ctx context.Context) (claim.Token, error) {
 	token := claim.ControllerToken(s.plan.project)
 	m, ok := s.supervisor.Machine(token)
 	if !ok {
 		return "", nil
 	}
-	state := m.Claim().State
-	if state == supervise.StateRetired {
-		return "", nil
+	var stopped claim.Token
+	if state := m.Claim().State; state != supervise.StateRetired {
+		s.log.Warn("controller: stopping the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator",
+			"claim", token, "state", state)
+		if err := m.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
+			return "", fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+		}
+		stopped = token
 	}
-	s.log.Warn("controller: stopping the controller an earlier boot under controller: daemon launched, and ending its registration; this daemon leaves the controller to its operator",
-		"claim", token, "state", state)
-	unheld := sha256.Sum256([]byte(rand.Text()))
-	if _, err := s.supervisor.store.MintController(ctx, s.plan.project, unheld[:]); err != nil {
-		return "", fmt.Errorf("end the registration of %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+	if err := s.endLaunchedRegistration(ctx, m.Claim()); err != nil {
+		return "", err
 	}
-	if err := m.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
-		return "", fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+	return stopped, nil
+}
+
+// endLaunchedRegistration mints the controller record controller.UnheldCapability while the record
+// still names c's session, the stopped controller's registration: the state's controllerLocator
+// then names no dead pod's session, no grant mints for it, and no capability a launch registered
+// under survives the switch. A record naming any other session, the operator's controller's after a
+// `legion controller start`, or none, is left as it is. It runs at boot, before the API serves, so
+// no registration can come between the read and the mint.
+func (s *supervision) endLaunchedRegistration(ctx context.Context, c supervise.Claim) error {
+	record, found, err := s.supervisor.store.Controller(ctx, s.plan.project)
+	if err != nil {
+		return fmt.Errorf("read the controller record to end the registration of %s, the controller an earlier boot under controller: daemon launched: %w", c.Token, err)
 	}
-	return token, nil
+	if !found || c.Session == "" || record.Session != c.Session {
+		return nil
+	}
+	s.log.Warn("controller: ending the registration of the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator",
+		"claim", c.Token, "session", c.Session)
+	if _, err := s.supervisor.store.MintController(ctx, s.plan.project, controller.UnheldCapability()); err != nil {
+		return fmt.Errorf("end the registration of %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", c.Token, err)
+	}
+	return nil
 }
 
 // watchController is the daemon's one line about the controller it never launches, under either
