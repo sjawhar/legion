@@ -185,16 +185,13 @@ const (
 	// StaleAddress: the process the locator recorded is running, but holds an address a process
 	// launched now is not handed — one of the addresses a runtime hands every new process from the
 	// daemon's configuration (the worker stream it dials, the daemon's API, NATS, Envoy, Dispatch,
-	// the secrets broker) moved since this one was launched. Only the Sandbox runtime reports it: a
-	// pod's argv and environment are fixed at its launch, and the daemon restarted with another
-	// configuration, on another host for one. The detail names each address that moved. The
-	// process may never reach the daemon or a service again from what it holds, so the supervisor
-	// relaunches the claim at once, through the launch path a death uses, onto a process handed the
-	// current addresses: a Resume of its recorded session, or a Spawn over its existing Sandbox
-	// when it has not registered yet. The observation is never charged, since the process did
-	// nothing wrong; a relaunch the runtime refuses is charged as any launch failure is. Distinct
-	// from a "stale" event (Handle's own fence vocabulary, an observation of an incarnation the
-	// claim no longer holds): this one names the claim's current, live incarnation.
+	// the secrets broker) moved since this one was launched, as each does when the daemon restarts
+	// with its key changed (the worker stream's: `advertise_host`, `bind` when no `advertise_host` is
+	// set, `worker_stream_port`). Only the Sandbox runtime reports it, since a pod's argv and
+	// environment are fixed at its launch. The detail names each address that moved. The
+	// supervisor's response is its own (supervise's repoint). Distinct from a "stale" event (Handle's
+	// own fence vocabulary, an observation of an incarnation the claim no longer holds): this one
+	// names the claim's current, live incarnation.
 	StaleAddress ObservationKind = "stale_address"
 )
 
