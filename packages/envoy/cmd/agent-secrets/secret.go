@@ -138,6 +138,15 @@ func ownerTag(owner, email string) string {
 	return owner
 }
 
+// ownerTierTags is the owner and tier tags, which create and retag always send together
+// (cmdSecretRetag says why).
+func ownerTierTags(owner, tier string) []smtypes.Tag {
+	return []smtypes.Tag{
+		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
+		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
+	}
+}
+
 // secretStdin is where create and set read a secret's value from; tests replace it.
 var secretStdin io.Reader = os.Stdin
 
@@ -593,10 +602,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 		Name:         aws.String(s.id(slug)),
 		KmsKeyId:     aws.String(s.settings.KMSKeyARN),
 		SecretString: aws.String(value),
-		Tags: []smtypes.Tag{
-			{Key: aws.String(policy.TagOwner), Value: aws.String(ownerValue)},
-			{Key: aws.String(policy.TagTier), Value: aws.String(*tier)},
-		},
+		Tags:         ownerTierTags(ownerValue, *tier),
 	}); err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -684,10 +690,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	if _, err := s.sm.TagResource(s.ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(id),
-		Tags: []smtypes.Tag{
-			{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
-			{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
-		},
+		Tags:     ownerTierTags(owner, tier),
 	}); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		// IAM leaves a shared secret's owner and tier to administrators: one held shared, or one a
