@@ -98,11 +98,15 @@ Where the digest is published:
 - the job summary of every `Worker Image` run (Actions → Worker Image → the run → Summary);
 - the body of the `legion-v<version>` GitHub release, under "Worker image", when `release.yaml` released
   `legion` in the same run (`gh release view legion-v<version> --json body -q .body`);
-- `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for any published tag.
+- `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or
+  `<legion version>` worker-image tag.
 
-Tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the PR head, never the
-ephemeral merge commit); `<legion version>` only on `main` when the `legion` job released that version in the same run.
-Runs from any other ref publish the `sha-` tag only and never touch a release.
+Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
+PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion` job
+released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
+only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
+referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
+inspecting one does not print a worker-image digest.
 
 A tag does not say which run published it: a pull request run publishes the `sha-` tag of its head
 too, when two runs build one commit the tag names whichever pushed last, and a pull request can edit
@@ -118,10 +122,13 @@ commit its `sha-` tag names:
 ```bash
 gh attestation verify oci://ghcr.io/sjawhar/legion-worker@sha256:… --repo sjawhar/legion \
   --cert-identity https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/main \
-  --source-ref refs/heads/main --source-digest <C, all 40 hex digits>
+  --source-ref refs/heads/main --source-digest <C, all 40 hex digits> \
+  --deny-self-hosted-runners
 ```
 
-What each flag refuses:
+This human-facing command states the whole acceptance policy. The Legion release follower adds
+`--format json` when it parses the verified certificate fields; that changes output only, not what
+the command accepts:
 
 - `--cert-identity` matches the identity exactly. `--signer-workflow` matches it only as a prefix, so
   it would also accept a workflow whose path merely starts with `worker-image.yaml`.
@@ -130,10 +137,11 @@ What each flag refuses:
   and its source ref names the other branch.
 - `--source-digest` refuses an image a run on `main` built from another commit, such as an older
   `main` image a pull request run pointed `sha-<C>` at.
+- `--deny-self-hosted-runners` refuses an otherwise matching attestation from a self-hosted runner.
 
 A pull request run attests nothing. A pull request that edits the workflow to attest anyway gets
 `refs/pull/<n>/merge` in both the identity and the source ref, and a run dispatched from another
-branch gets `refs/heads/<branch>` in both, so the first two flags each refuse them.
+branch gets `refs/heads/<branch>` in both, so the first two policy flags each refuse them.
 
 The attestation is separate from the image's own BuildKit provenance, which the build keeps off
 (`provenance: false`).
