@@ -61,6 +61,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
+	case errors.Is(err, requests.ErrSessionIDInvalid):
+		writeError(w, http.StatusBadRequest, "SESSION_ID_INPUT", err.Error())
+		return
 	case errors.Is(err, policy.ErrUnknownSecret):
 		writeError(w, http.StatusBadRequest, "UNKNOWN_SECRET", err.Error())
 		return

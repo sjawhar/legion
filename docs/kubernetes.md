@@ -358,9 +358,10 @@ runtime:
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
       volumes: [...]
       volume_mounts: [...]
-bind: <the daemon host's own address>   # pods dial tcp://<bind>:<worker_stream_port>
+bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
+advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: 13371
-daemon_url: http://<the daemon host's own address>:13370
+daemon_url: http://<the address pods reach the daemon at>:13370
 ```
 
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
@@ -383,12 +384,21 @@ proofs run on the example, each with its own copy of its ConfigMap.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
-`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every address a pod is handed must be one a pod can reach, so
-`bind`, `daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
-nor the unspecified address. `legion start --check-config` runs all of it without starting the
-daemon, writing a file or running a key command, and then every refusal boot makes from the files
-and the environment before its first write, in boot's words: the operator, Envoy and Dispatch
-bearers' files, the NATS nkey seed, the instructions file, and the runtime's own
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every
+address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
+and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
+worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+`advertise_host` is an IP address or a DNS name, the host alone, and only `runtime: kubernetes`
+accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
+`0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
+Pods dial it at the port the worker stream listens on, so the Service exposes `worker_stream_port`
+as that same port number. A daemon on a fixed host (a devbox or a VM) leaves `advertise_host` unset
+and binds that host's own address, which pods then dial. A loopback `bind` is refused either way: a
+listener bound only to loopback answers no Service and no pod. `legion start --check-config` runs
+all of it without starting the daemon, writing a file or running a key command, and then every
+refusal boot makes from the files and the environment before its first write, in boot's words: the
+operator, Envoy and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the
+runtime's own
 reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
 where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
 what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
@@ -466,16 +476,80 @@ at error as `NATS refused the daemon a permission: its NATS user lacks that gran
 handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
 logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
 `NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
-with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects run out) at error,
-once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
-then names the same cause as the connection's last error.
+with its `server`, and a terminal close (a fatal server `-ERR`) at error, once, as `NATS
+connection closed` with its `error`. Reconnects never run out: the connection never drops a
+server from its pool for having failed too many times, so an outage mid-run shows as `NATS
+connection lost` and then, once NATS answers again, `NATS connection restored` — never a close —
+at nats.go's own default 2 s reconnect wait. A server that keeps refusing to reconnect for any
+reason short of the two shapes that do close it — an unrecognized server `-ERR`, or the same
+authorization error twice in a row (nats.go's own terminal-close rules) — never closes the
+connection and so never logs either of those two lines again: a repeating handshake failure, say
+a server that accepts the TCP connection but never completes the protocol handshake, retries
+silently behind the one `NATS connection lost` line. A separate warn, `NATS has not
+reconnected`, covers that gap: first after 3 minutes down, then every 3 minutes after that while
+the connection stays down, naming the downtime so far and the connection's own last-seen error —
+usually empty during a plain refused dial, since nats.go clears it on every failed attempt, and naming the failure's
+own cause while a handshake keeps failing, since nats.go leaves that one in place until the
+connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
+retried one second doubling to one minute, forever, logged at warn as `boot probe failed
+transiently; waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and
+`detail`.
+
+A malformed seed refuses the boot immediately at startup, before any network connection is
+attempted. A NATS authorization violation at connect time is the same: the server said no
+synchronously, and the boot refuses it at once. An EOF during the NATS handshake also refuses at
+once — the connection simply closed, and nats.go returns that synchronously too — though no crash
+in the audited journal took this shape, so refusing rather than waiting here is a judgment call.
+
+A NATS permission violation on a JetStream call (a refused consumer or stream grant) is reported
+asynchronously: the server tells the connection of it well before the blocked call's own attempt
+bound runs out, but the blocked call itself does not return early on that report — it waits out
+its own bound exactly as a call that will never get an answer does. Only once that bound runs
+out, at 30 seconds, does the boot learn of the violation at all, by folding the connection's own
+last-reported error into the one the blocked call returns, so it recognizes the refusal by name
+and refuses outright. A clustered JetStream that is itself unavailable — every server reachable,
+none of them answering the API request — surfaces the exact same way at the exact same
+30-second bound: a bare request timeout, nothing in its own text to say why, nothing to fold in.
+The boot cannot tell that shape from a permission violation whose report never arrived — the two
+take the same 30 seconds either way, so timing offers no way to distinguish them — and refuses
+both rather than waiting on either.
+
+A Postgres failure while reconciling admission is not covered by either wait: an error Postgres
+itself returns exits as soon as it comes back, and only Postgres accepting a connection and then
+never answering waits out the same 30-second bound before the boot gives up.
+
+Several shapes an operator should know wait forever rather than exit, none of them obviously
+"network trouble" on their face: a Dispatch 401 or 403 (a bad or revoked bearer token); a NATS or
+Dispatch host that does not resolve (a typo in `nats_urls` or `dispatch_url`'s hostname); a
+non-Dispatch 4xx, such as an HTML 404 from a `dispatch_url` whose path is wrong but whose host
+answers; and a TLS failure that is not certificate verification (a protocol mismatch, a stalled
+handshake). Each of these waits silently: no line is logged beyond the generic `boot probe failed
+transiently` warn above, though its own `detail` carries the error's own text (`UNAUTHORIZED:
+...`, `no such host`), not a separate line calling out the credential or configuration problem by
+name.
+
+A Dispatch 401 or 403 is the one with an operational consequence worth naming plainly: the daemon
+does not exit on one, so nothing re-reads `dispatch_token_file` until an operator restarts it by
+hand to pick up a corrected or renewed token.
+
+With several `nats_urls`, or a clustered NATS whose advertised addresses this daemon cannot reach,
+an authorization violation on one server can surface as a dial failure, or the generic "nats: no
+servers available for connection" answer, from a different server nats.go tries next, so the boot
+waits and the logged `detail` may never name the authorization error at all (LEGION-580).
+
+While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
+the API port is already bound by this point (the same as during the image probe, both before this
+gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
+reports the daemon's PID alive but not yet answering. A pane's own `bash` calls (each one mints
+its own grant first), `legion credential`, `gh`, `handoff complete` and `controller start` all
+wait on that same API, so none of them succeeds until the daemon actually serves.
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and each boot line must name the daemon's own user: the
-daemon's `legion daemon connects to NATS` line reads `paneUser=false` (#1494). Only then is the
-`legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
-the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
+every daemon gets it and restarts, and its `legion daemon connects to NATS` line must read
+`paneUser=false` (#1494). Only then is the `legion-pane` seed written. A clean boot line
+proves the user, not every grant: the check before the pane seed is written also has each daemon
+consume a Dispatch and a GitHub event with no error
 line, and searches each daemon's log for `NATS refused the daemon`, since a missing grant on the
 exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots healthy and
 consumes both events, and that error line is its only sign. `legion-pane` is never granted the
@@ -494,7 +568,7 @@ main container:
 2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
    read-only feed. The workspace starts at the issue's branch, `legion/<KEY>`, which the daemon
    created on GitHub at `main` before the issue's architect or planner started.
-3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
+3. `worker` runs `legion worker-shim --connect tcp://<advertise_host, or bind with none set>:<worker_stream_port>
    --boot-token-file …` with Oh My Pi under it.
 
 The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each worker Sandbox
@@ -643,7 +717,12 @@ so no process that can read the token may touch the tree volume. The Go coordina
   /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
   reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the tree volume nor the config home.
+  It mounts neither the tree volume nor the config home. Every other provisioning command is bounded
+  by `workspace.CommandTimeout` (5 minutes, fixed), but this one clone's duration follows the
+  repository's size and the network's speed, not a fixed step in provisioning: it runs under
+  `workspace.FetchTimeout` (30 minutes) instead. The daemon's own registration deadline (below,
+  "Liveness rules") carries a matching bound under Kubernetes, so this wider bound has room to run
+  before the daemon would otherwise retire the pod for an agent that never registered.
 - **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
   Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
   `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
@@ -706,9 +785,12 @@ reads the same `runtime.kubernetes` key with different rules, and refuses the ex
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
 required, and a `gateway` block is refused as removed (LEGION-270: a pod's model route is the
-operator's `pod` below); `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
-dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
-(`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
+operator's `pod` below); every pod dials the worker stream at `tcp://<advertise_host, or bind with
+none set>:<worker_stream_port>`, so that address must be one pods reach, never `0.0.0.0` or
+loopback — `bind` itself may be `0.0.0.0` only once `advertise_host` names the address instead, so
+a daemon whose own pod restarts onto a new IP can still bind every interface and be reached through
+its Service; and no Legion URL a pod is handed (`daemon_url`, `envoy_url`, `dispatch_url`, each
+`nats_urls` entry) may name a loopback or
 unspecified host (`packages/daemon/internal/config/kubernetes.go`). It also reads
 `runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
 source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
@@ -1146,21 +1228,51 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 - pod carrying a `deletionTimestamp`, or in phase `Succeeded` or `Failed` → **dead (gone)**; for a
   `Failed` pod the last 20 log lines of the failing container (the init container when it exited
   non-zero, else the main one) are quoted in the daemon log;
-- `Pending` with the `workspace-init` init container **running** → **alive**, whatever the pod's age: the
-  pod is provisioning its working copy (a clone or fetch of up to `slow_command_timeout_seconds` each, or
-  a wait behind another pod's lock on the shared clone), and a live initialiser is a live process — as
-  the tmux runtime's own in-process provisioning is. The boot watchdog re-arms on it, bounded by its
-  registration deadline (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`,
-  default 360 s), after which it retires the pod and spawns the next generation. The pod's own lock wait
-  is sized from that same deadline: the runtime sets `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` on the init
-  container to the deadline plus one more interval (default 480 s), and `workspace-init` passes it to
-  `flock --timeout`, so the init container never gives up on a wait the daemon would still tolerate,
-  whatever the deployment configures (a manual `legion workspace-init` without the variable waits 900 s);
+- `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
+  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
+  bounded by its own `workspace.FetchTimeout` rather than `workspace.CommandTimeout`;
+  `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; or a wait behind another
+  pod's lock on the shared clone), and a live initialiser is a live process — as the tmux runtime's
+  own in-process provisioning is. The boot watchdog re-arms on it, bounded by its registration
+  deadline (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default
+  360 s, 6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchTimeout`
+  (30 min) plus the lock-wait budget `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` is sized by
+  (`sandbox.Runtime.ProvisionBound`; 8 min at the defaults, so 38 min total) until the shim's first
+  hello, which can only arrive once both init containers have finished: from there the daemon
+  re-arms the base deadline alone, the same one a tmux pane runs under throughout. A pod that
+  never says hello is retired at launch plus the base deadline plus the full bound, armed as one
+  (44 min at the defaults); one that says hello and never registers is retired at hello plus the
+  base deadline alone (6 min from the hello). A tmux pane carries no bound to begin with, since it
+  starts the agent at once with no init phase.
+
+  The runtime's own wait for a tree's other pods to finish initializing before this one provisions
+  (`awaitTreeInitialized`, bounded by `treeWaitBound`) is the sibling's own full pre-hello deadline
+  — base plus `ProvisionBound`, the same sum the registration deadline above arms while a claim is
+  still launching — plus one more boot interval of headroom (46 min at the defaults): the same
+  relationship `ceil(boot) × (intervals + 1)` holds against `boot × intervals` alone for the lock
+  wait. A launch waiting on a sibling therefore never gives up before the daemon's own deadline for
+  that sibling would, up to the sibling's own hello: a sibling this wait still counts as
+  initializing has not reached its hello yet, so its own deadline has not re-armed past hello
+  either. Two mechanisms together keep two pods from actually provisioning the shared clone at
+  once: `lockTree` holds the tree's launch turn only until the new pod is in the store, well before
+  that pod's own init finishes, so by itself it would let a third pod start initializing while a
+  second one still is; `awaitTreeInitialized` is what closes that gap, since no new pod is ever
+  created while an existing tree pod is still initializing. Because of those two mechanisms, the
+  lock wait itself (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout`
+  `workspace-init` passes when contending for another pod's hold on the shared clone) almost never
+  actually contends, so it is sized as a safety net for whatever can still race around them — the
+  `ceil(boot) × (intervals + 1)` lock-wait budget alone (`sandbox.Runtime`'s own `initWaitSeconds`),
+  with no added `FetchTimeout` — rather than as a budget matched against another pod's own
+  remaining registration deadline (a manual `legion workspace-init` without the variable waits
+  900 s);
 - `Pending` with the init container **terminated non-zero** → **dead (gone)**, its log tail quoted
   (`restartPolicy: Never` turns the pod `Failed` moments later);
-- otherwise `Pending` for longer than `worker_boot_timeout_seconds` (unscheduled, image pull, volume
-  mount) → **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it
-  and its stop deletes the pod;
+- `Pending`, unscheduled (`PodScheduled=False`), for longer than `worker_boot_timeout_seconds` →
+  **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it and
+  its stop deletes the pod. A pod already scheduled but stuck before either init container starts
+  — an image pull or a volume mount that never finishes — is not caught here: it stays **alive**
+  under the next rule, bounded only by the registration deadline above, the same as any other pod
+  still provisioning;
 - otherwise `Pending`, or `Running` — registered stream or not (a booting or redialing shim is not
   death; the boot watchdog decides) → **alive**;
 - phase `Unknown` → **unknown**;

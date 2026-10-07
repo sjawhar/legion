@@ -333,6 +333,11 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: "dispatch_url must be a valid URL",
 		},
 		{
+			name: "dispatch_url has a scheme that is not http or https",
+			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: htp://127.0.0.1:8080\n", 1),
+			want: `dispatch_url must be http or https, not "htp"`,
+		},
+		{
 			name: "dispatch_url is the /mcp endpoint",
 			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: http://127.0.0.1:8080/mcp/\n", 1),
 			want: "dispatch_url must be the dispatch service base URL, not the /mcp endpoint",
@@ -998,6 +1003,8 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		modelled  = "modelled"
 		tossed    = "tossed"
 		migration = "migration-only"
+		// kubernetesOnly is a modelled key the tmux file this test loads refuses by name.
+		kubernetesOnly = "kubernetes-only"
 	)
 	for _, tc := range []struct {
 		key   string
@@ -1010,6 +1017,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "postgres_dsn", class: modelled},
 		{key: "port", line: "port: 13370", class: modelled},
 		{key: "bind", line: "bind: 127.0.0.1", class: modelled},
+		{key: "advertise_host", line: "advertise_host: legion-daemon.legion.svc", class: kubernetesOnly, want: "advertise_host is not used when runtime is tmux: every pane dials the daemon's own unix socket; remove advertise_host"},
 		{key: "runtime", line: "runtime: tmux", class: modelled},
 		{key: "admission_cap", line: "admission_cap: 4", class: modelled},
 
@@ -1084,6 +1092,58 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 				if err.Error() != tc.want {
 					t.Errorf("Load error = %q, want %q", err.Error(), tc.want)
 				}
+			}
+		})
+	}
+}
+
+// advertise_host is the host of every pod's `--connect tcp://<host>:<port>`, which the shim reads as
+// a URL (shim.ParseAddress, internal/shim/config.go) and refuses with anything beyond a host and a
+// port, and the daemon adds the port itself (shimAddress, internal/daemon/daemon.go). So the loader
+// refuses, by its exact message, every value that is not an IP address or a DNS name: under
+// runtime: kubernetes, the one runtime that reads advertise_host, so no other refusal can stand in
+// for this one, rather than `legion start --check-config` passing a file no pod boots on.
+func TestAdvertiseHostMustBeABareHost(t *testing.T) {
+	const refused = "advertise_host must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself"
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"a scheme", "http://legion-daemon.legion.svc", refused + " (http://legion-daemon.legion.svc)"},
+		{"a port", "legion-daemon.legion.svc:13371", refused + " (legion-daemon.legion.svc:13371)"},
+		{"brackets", `"[::1]"`, refused + " ([::1])"},
+		{"an underscore", "legion_daemon.legion.svc", refused + " (legion_daemon.legion.svc)"},
+		{"a path", "legion-daemon.legion.svc/x", refused + " (legion-daemon.legion.svc/x)"},
+		{"a trailing slash", "legion-daemon.legion.svc/", refused + " (legion-daemon.legion.svc/)"},
+		{"a user", "legion@legion-daemon.legion.svc", refused + " (legion@legion-daemon.legion.svc)"},
+		{"a query", `"legion-daemon.legion.svc?x"`, refused + " (legion-daemon.legion.svc?x)"},
+		{"a fragment", `"legion-daemon.legion.svc#x"`, refused + " (legion-daemon.legion.svc#x)"},
+		{"a space", `"legion daemon"`, refused + " (legion daemon)"},
+		{"a space inside a DNS name", `"legion daemon.legion.svc"`, refused + " (legion daemon.legion.svc)"},
+		{"a zoned IPv6 address", `"fe80::1%eth0"`, refused + " (fe80::1%eth0)"},
+		{"blank", `""`, "advertise_host must not be empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("LoadForValidation error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A bare host name and a bare IP address, IPv6 included, both pass under runtime: kubernetes, the
+// one runtime that reads advertise_host.
+func TestAdvertiseHostAcceptsABareHostOrIPAddress(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"a DNS name", "legion-daemon.legion.svc"},
+		{"an IPv4 address", "192.0.2.10"},
+		{"a bare IPv6 address", "2001:db8::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"advertise_host: "+tc.value+"\n"), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.AdvertiseHost != tc.value {
+				t.Errorf("AdvertiseHost = %q, want %q", cfg.AdvertiseHost, tc.value)
 			}
 		})
 	}

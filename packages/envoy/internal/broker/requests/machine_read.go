@@ -233,14 +233,28 @@ func (m *Machine) RecordKind(ctx context.Context, recordID string) (string, erro
 	return kind, err
 }
 
+// Session is the two possibly-differing session ids a credential-request record can name, read
+// independently (LEGION-587): Enrollment is the id the requesting session's own enrollment stated
+// when it enrolled (enrollments.session_id — agentbox's --session-id, or the Legion daemon's
+// worker claim session), Request is the id the request itself stated as an unsigned override in
+// its body at Create time (requests.session_id). Either is empty when that id was never set; a
+// machine login (kind launcher_credential, which has no request row and no requesting enrollment)
+// always answers both empty. An id outlives its enrollment's revocation: enrollments.session_id is
+// never cleared, only revoked_at is set, so the join below still finds it.
+type Session struct {
+	Request    string
+	Enrollment string
+}
+
 // PendingSummary is one still-undecided credential-request record for GET /v1/pending: its id,
 // kind, the plain identifiers its request object names (secret names for agent_secret, the single
-// host for launcher_credential), and when it was requested.
+// host for launcher_credential), when it was requested, and the session it names.
 type PendingSummary struct {
 	RecordID    string
 	Kind        string
 	Identifiers []string
 	RequestedAt time.Time
+	Session     Session
 }
 
 // pendingForApproverQuery is PendingForApprover's whole SQL text, pulled out so
@@ -260,7 +274,18 @@ type PendingSummary struct {
 // guarantees the index path, not the literal alone. A later change to the terminal event list must
 // change this literal too, which TestPendingForApproverTerminalEventsLiteralMatchesTheList pins
 // against record.TerminalEventNames().
-const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
+//
+// The two left joins read each row's session (LEGION-587): req on requests.record_id, the same
+// column requests_record (0008_lookup_indexes.up.sql) already indexes for ReadRecord, and enr on
+// credential_requests' own enrollment_id, its primary-key lookup into enrollments.
+// TestPendingForApproverAvoidsSequentialScans checks only credential_requests and
+// credential_request_events for a sequential scan; it pins nothing about how Postgres joins in
+// req and enr (a hash join over requests and enrollments, measured locally at 5,000 enrollments —
+// free to change with the planner's own cost estimates, and not this test's concern).
+const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at, coalesce(req.session_id, ''), coalesce(enr.session_id, '')
+	from credential_requests cr
+	left join requests req on req.record_id = cr.id
+	left join enrollments enr on enr.id = cr.enrollment_id
 	where (
 		cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
 		or cr.approver=$1 and cr.kind='launcher_credential' and not exists (
@@ -289,9 +314,9 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 	defer rows.Close()
 	var out []PendingSummary
 	for rows.Next() {
-		var id, kind, canonical string
+		var id, kind, canonical, requestSession, enrollmentSession string
 		var createdAt time.Time
-		if err := rows.Scan(&id, &kind, &canonical, &createdAt); err != nil {
+		if err := rows.Scan(&id, &kind, &canonical, &createdAt, &requestSession, &enrollmentSession); err != nil {
 			return nil, err
 		}
 		body, err := record.ParseBody(canonical)
@@ -306,7 +331,10 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 		for i, d := range obj.Details {
 			identifiers[i] = d.Identifier
 		}
-		out = append(out, PendingSummary{RecordID: id, Kind: kind, Identifiers: identifiers, RequestedAt: createdAt})
+		out = append(out, PendingSummary{
+			RecordID: id, Kind: kind, Identifiers: identifiers, RequestedAt: createdAt,
+			Session: Session{Request: requestSession, Enrollment: enrollmentSession},
+		})
 	}
 	return out, rows.Err()
 }
@@ -338,16 +366,22 @@ type RecordDetail struct {
 	ExpiresAt       time.Time
 	RequestedAt     time.Time
 	Decided         *RecordDecision
+	Session         Session
 }
 
 // ReadRecord reads a credential-request record's full detail by id, for GET
 // /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
 // pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
-	var canonical, approver, kind string
+	var canonical, approver, kind, requestSession, enrollmentSession string
 	var createdAt, expiresAt time.Time
-	if err := m.Store.Pool.QueryRow(ctx, `select body, approver, kind, created_at, expires_at from credential_requests where id=$1`, recordID).
-		Scan(&canonical, &approver, &kind, &createdAt, &expiresAt); err != nil {
+	if err := m.Store.Pool.QueryRow(ctx, `select cr.body, cr.approver, cr.kind, cr.created_at, cr.expires_at,
+			coalesce(req.session_id, ''), coalesce(enr.session_id, '')
+		from credential_requests cr
+		left join requests req on req.record_id = cr.id
+		left join enrollments enr on enr.id = cr.enrollment_id
+		where cr.id=$1`, recordID).
+		Scan(&canonical, &approver, &kind, &createdAt, &expiresAt, &requestSession, &enrollmentSession); err != nil {
 		return RecordDetail{}, err
 	}
 	body, err := record.ParseBody(canonical)
@@ -376,6 +410,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		RecordID: recordID, Kind: kind, State: "pending", Approver: approver, Enrollment: enr,
 		Identifiers: identifiers, Service: service, Reason: obj.Reason, LifetimeSeconds: body.LifetimeSeconds,
 		RulesVersion: body.RulesVersion, ExpiresAt: expiresAt, RequestedAt: createdAt,
+		Session: Session{Request: requestSession, Enrollment: enrollmentSession},
 	}
 	// Whether the record is still pending follows PendingForApprover's rule: an agent_secret record
 	// by its request's state, a machine login by its terminal event. A decided record's terminal

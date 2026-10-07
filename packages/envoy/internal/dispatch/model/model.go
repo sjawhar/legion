@@ -293,6 +293,11 @@ type SearchResponse struct {
 	Limit     int   `json:"limit"`
 	Offset    int   `json:"offset"`
 	TookMS    int64 `json:"took_ms"`
+	// Degraded names why search fell back to keyword-only ranking this request - today only
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no Bedrock
+	// credentials configured, the query's own embedding timed out, or Bedrock answered an error) -
+	// and is empty when meaning search ran normally.
+	Degraded string `json:"degraded,omitempty"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.

@@ -1213,6 +1213,13 @@ export interface SearchResultsPage {
  * `exactOptionalPropertyTypes`). */
 export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
 
+/** `SearchResponse.degraded`'s one value today: meaning search could not run for this request (no
+ * Bedrock credentials configured, the query's own embedding timed out, or Bedrock answered an
+ * error) and search fell back to keyword-only ranking. Generated into Go as
+ * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
+ * `search-answer.ts` compares against cannot drift apart. */
+export const SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
+
 /** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
  * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
  * search paging omits all four and always answers its first page regardless of any offset
@@ -1220,6 +1227,13 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
 export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
+  /**
+   * Why this search fell back to keyword-only ranking - today only
+   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no Bedrock credentials configured, the
+   * query's own embedding timed out, or Bedrock answered an error) - absent when meaning search
+   * ran normally.
+   */
+  readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {
@@ -2379,3 +2393,91 @@ export const AskFollowerEventPayloadSchema = z.object({
   session_id: z.string().optional(),
   by: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
 });
+
+/** One job of a `DeliveryRun`: the two fields the delivery timeline's drill-down shows for a
+ *  failed job, in `failed_jobs` and `root_failing_job`. */
+export interface DeliveryRunJob {
+  readonly name: string;
+  readonly completed_at: string | null;
+}
+
+/**
+ * One population pull request on `GET /api/v1/delivery/timeline` (LEGION-567): the facts LEGION-294
+ * defines plus the two fields the server derives at read time from the stored facts,
+ * `deployed_status` and (on `DeliveryRun`) `root_failing_job`.
+ */
+export interface DeliveryPR {
+  /** "owner/repo#N". */
+  readonly id: string;
+  readonly repo: string;
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly author: string;
+  readonly created_at: string | null;
+  readonly merged_at: string | null;
+  readonly first_commit_at: string | null;
+  readonly additions: number | null;
+  readonly deletions: number | null;
+  /** True until the completing GitHub fetch (or a reconcile pass) fills the row. */
+  readonly partial: boolean;
+  readonly rework: boolean;
+  readonly issue: string | null;
+  readonly sessions: readonly string[];
+  /**
+   * `parent_agent` and `session` (this field's `sessions` above) resolve to the same set of
+   * sessions today (LEGION-567: no grouping link exists); `parent_agent` is the
+   * resolved Dispatch session title (or the bare id if none was ever recorded), `session` is the
+   * raw id — kept as two fields for the SPA's existing facet vocabulary and so a real grouping
+   * link, if one is added later, needs no API shape change.
+   */
+  readonly parent_agent: string | null;
+  readonly deploy_run: number | null;
+  readonly deployed_at: string | null;
+  readonly deployed_status: "deployed" | "waiting" | "not_tracked";
+  /** Set once this pull request's completing fetch answered a permanent 404/410 from GitHub (or
+   *  could not resolve which installation covers its repository): why, for the drill-down. Null
+   *  for every normal row. */
+  readonly unfetchable_reason: string | null;
+}
+
+/** One `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a successful production deploy
+ *  (size by `prs`, the PRs it shipped first) or a pipeline failure (`failed_jobs`,
+ *  `root_failing_job`). */
+export interface DeliveryRun {
+  readonly id: number;
+  readonly url: string;
+  readonly head_sha: string;
+  readonly head_at: string;
+  readonly started_at: string;
+  readonly completed_at: string | null;
+  readonly conclusion: "success" | "failure" | "cancelled" | null;
+  readonly failed_jobs: readonly DeliveryRunJob[];
+  /** The earliest-finishing failed job that isn't a summary/guard job, falling back to the
+   *  earliest failed job overall; null on a run with no failed job. */
+  readonly root_failing_job: DeliveryRunJob | null;
+  /** The PRs this run shipped first. */
+  readonly prs: readonly string[];
+}
+
+/**
+ * `GET /api/v1/delivery/timeline?from&to&<facets>`: merges, deploys, pipeline failures and
+ * waiting-to-deploy PRs within `[from, to)` and the given facets. `runs` holds `kind: "deploy"`
+ * runs only; a deploy's shipped PRs are `prs[].deploy_run`.
+ */
+export interface DeliveryTimelineResponse {
+  readonly window: { readonly from: string; readonly to: string };
+  readonly prs: readonly DeliveryPR[];
+  readonly runs: readonly DeliveryRun[];
+  readonly freshness: {
+    readonly last_event_at: string | null;
+    readonly last_reconcile_at: string | null;
+    /** The most recent reconcile pass's failure (a missing permission, a rate limit, any other
+     *  error), named rather than a generic staleness indicator; null once a pass has succeeded. */
+    readonly last_error: string | null;
+    /** Population pull requests whose completing fetch answered a permanent 404/410 from GitHub
+     *  (the pull request or its repository no longer exists, or no longer reaches the App) --
+     *  never retried again automatically. */
+    readonly unfetchable_count: number;
+  };
+}

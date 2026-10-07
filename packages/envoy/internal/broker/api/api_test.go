@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,12 +246,20 @@ type wireDecided struct {
 	CredentialID *string   `json:"credential_id"`
 }
 
+// wireSession is a record's or a pending entry's "session" field (LEGION-587): the request's own
+// override and its requesting enrollment's id, read independently.
+type wireSession struct {
+	Request    *string `json:"request"`
+	Enrollment *string `json:"enrollment"`
+}
+
 type wireRecord struct {
 	RecordID        string              `json:"record_id"`
 	Kind            string              `json:"kind"`
 	State           string              `json:"state"`
 	Approver        string              `json:"approver"`
 	Enrollment      *wireEnrollmentInfo `json:"enrollment"`
+	Session         wireSession         `json:"session"`
 	Identifiers     []string            `json:"identifiers"`
 	Service         *string             `json:"service"`
 	Reason          string              `json:"reason"`
@@ -283,10 +292,11 @@ type wireRequestStatus struct {
 }
 
 type wirePendingEntry struct {
-	RecordID    string    `json:"record_id"`
-	Kind        string    `json:"kind"`
-	Identifiers []string  `json:"identifiers"`
-	RequestedAt time.Time `json:"requested_at"`
+	RecordID    string      `json:"record_id"`
+	Kind        string      `json:"kind"`
+	Identifiers []string    `json:"identifiers"`
+	RequestedAt time.Time   `json:"requested_at"`
+	Session     wireSession `json:"session"`
 }
 
 type wireApproverGrant struct {
@@ -615,16 +625,18 @@ func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 }
 
 // TestAgentSecretRequestLifecycle drives an approval-needing agent_secret request end to end:
-// creation (session proof), the UI's pending list and record read (with an enrollment and no code
-// required), approval by the record's approver, the session's own status/values reads, the UI's
-// grant list, and human revocation, refused for any login but the approver's.
+// creation (session proof, naming an explicit session_id override), the UI's pending list and
+// record read (with an enrollment, its session, and no code required), approval by the record's
+// approver, the session's own status/values reads, the UI's grant list, and human revocation,
+// refused for any login but the approver's.
 func TestAgentSecretRequestLifecycle(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
 
+	const sessionID = "sess-agent-secret-lifecycle"
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it for the demo", "DEEL_API_KEY")
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-		map[string]any{"request": compact, "session_id": nil})
+		map[string]any{"request": compact, "session_id": sessionID})
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/requests = %d, want 200: %s", status, body)
 	}
@@ -648,6 +660,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 			if p.Kind != "agent_secret" || len(p.Identifiers) != 1 || p.Identifiers[0] != "DEEL_API_KEY" {
 				t.Fatalf("pending entry = %+v, want kind=agent_secret identifiers=[DEEL_API_KEY]", p)
 			}
+			if p.Session.Request == nil || *p.Session.Request != sessionID || p.Session.Enrollment != nil {
+				t.Fatalf("pending entry session = %+v, want request=%s and no enrollment session_id (this box enrolled none)", p.Session, sessionID)
+			}
 		}
 	}
 	if !found {
@@ -664,6 +679,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	}
 	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
 		t.Fatalf("record enrollment = %+v, want kind=box operator=%s and no slot", readBack.Enrollment, testApprover)
+	}
+	if readBack.Session.Request == nil || *readBack.Session.Request != sessionID || readBack.Session.Enrollment != nil {
+		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
 	}
 
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
@@ -688,6 +706,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	decidedRead := decode[wireRecord](t, body)
 	if decidedRead.State != "approved" || decidedRead.Decided == nil || decidedRead.Decided.Event != "approved" || decidedRead.Decided.CredentialID != nil {
 		t.Fatalf("decided record read = %+v, want state=approved with its approved event and a null credential_id", decidedRead)
+	}
+	if decidedRead.Session.Request == nil || *decidedRead.Session.Request != sessionID {
+		t.Fatalf("decided record session = %+v, want request=%s still named after approval", decidedRead.Session, sessionID)
 	}
 
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
@@ -816,6 +837,27 @@ func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 		map[string]any{"request": compact, "session_id": nil})
 	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "MIXED_APPROVERS" {
 		t.Fatalf("POST /v1/requests (DEEL_API_KEY, SHARED_KEY) = %d %s, want 400 MIXED_APPROVERS", status, body)
+	}
+}
+
+// TestCreateRequestWithInvalidSessionIDIs400SessionIDInput pins, over real HTTP, that a
+// session_id override that is too long is refused 400 SESSION_ID_INPUT at record time
+// (LEGION-587's hardening). requests.TestCreateRefusesAnInvalidSessionID (machine_test.go)
+// already exercises Machine.Create's validSessionID bound directly (too-long, whitespace,
+// control-character, and the exact-128 boundary); this pins the same bound at the HTTP handler
+// boundary, the way UNKNOWN_SECRET and MIXED_APPROVERS are already covered above.
+func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "DEEL_API_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": strings.Repeat("a", 129)})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests (session_id too long) = %d, want 400: %s", status, body)
+	}
+	werr := decode[wireError](t, body)
+	if werr.Code != "SESSION_ID_INPUT" {
+		t.Fatalf("code = %q, want SESSION_ID_INPUT", werr.Code)
 	}
 }
 

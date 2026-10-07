@@ -233,21 +233,45 @@ func (s *supervisor) wait() {
 
 // helloResolver maps a shim's hello to the launch its boot token was minted for, once every stored
 // claim is supervised. A token of a claim this daemon does not supervise — another project's row
-// in a shared database — is unknown: its connection would have no machine to report to.
+// in a shared database — is unknown: its connection would have no machine to report to. The token
+// is resolved first, bounded by timeout: the worker-stream port is plaintext and
+// reachable from any pod, Hello2 requires only a non-empty string, and holding an unresolved
+// connection with no deadline would let any client pin a goroutine and a file descriptor for the
+// whole boot wait by sending a garbage token, with no cap on how many could. Only a token
+// ClaimByBootTokenHash proves real — a durable Postgres fact independent of supervision — goes on
+// to wait for restoration: a live pane reconnecting while the boot's readiness gate still waits
+// out an unreachable NATS or Dispatch (daemon.go's run, LEGION-580) is held, not rejected, on
+// s.ctx alone with no deadline of its own, since the shim it answers waits for hello_ack the same
+// way and supervision.stop cancels s.ctx before the stream closes, releasing every held hello
+// rather than leaving one to time out mid-boot naming a credential problem that does not exist.
+// The token is resolved again once restoration ends, under a fresh bound: restore (s.start, ahead
+// of close(s.restored)) can relaunch a claim that was mid-launch across the restart to a new
+// generation before this hello is ever judged, and the first resolve's generation and Stale flag
+// are only ever as fresh as the moment they were read. Judging the hold by that first result would
+// accept an old generation's shim after its claim has already relaunched, taking the stream slot
+// the new generation's own hello then finds "already bound to a live stream".
 func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration) stream.HelloResolver {
-	return func(bootToken string) (claim.Token, uint64, bool, bool) {
+	resolve := func(bootToken string) (api.BootToken, bool) {
 		ctx, cancel := context.WithTimeout(s.ctx, timeout)
 		defer cancel()
-		select {
-		case <-s.restored:
-		case <-ctx.Done():
-			return "", 0, false, false
-		}
 		launch, known, err := tokens.Resolve(ctx, bootToken)
 		if err != nil {
 			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
+			return api.BootToken{}, false
+		}
+		return launch, known
+	}
+	return func(bootToken string) (claim.Token, uint64, bool, bool) {
+		if _, known := resolve(bootToken); !known {
 			return "", 0, false, false
 		}
+		select {
+		case <-s.restored:
+		case <-s.ctx.Done():
+			s.log.Info("worker stream: a hello's boot token was real, but the boot never became ready", "error", s.ctx.Err())
+			return "", 0, false, false
+		}
+		launch, known := resolve(bootToken)
 		if !known {
 			return "", 0, false, false
 		}

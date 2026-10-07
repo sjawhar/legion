@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -25,9 +26,6 @@ import (
 const (
 	batchSize           = 100
 	retryInterval       = 5 * time.Second
-	retryBaseDelay      = time.Second
-	retryMaxDelay       = 5 * time.Minute
-	deadLetterAttempts  = 10
 	compactInterval     = 24 * time.Hour
 	documentTopicPrefix = "notifications.dispatch.document."
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
@@ -230,29 +228,18 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 
 func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {
 	attempts++
-	if attempts == deadLetterAttempts {
+	if attempts == retry.DeadLetterAttempts {
 		slog.Error("dispatch outbox: event reached dead-letter threshold", "event_id", eventID, "attempts", attempts)
 	}
 	_, err := deps.Store.Pool.Exec(ctx, `
 		update events
 		set attempt_count = $2, next_attempt_at = $3
 		where id = $1 and published_at is null
-	`, eventID, attempts, time.Now().Add(retryDelay(attempts)))
+	`, eventID, attempts, time.Now().Add(retry.Delay(attempts)))
 	if err != nil {
 		return fmt.Errorf("schedule event retry: %w", err)
 	}
 	return nil
-}
-
-func retryDelay(attempts int) time.Duration {
-	delay := retryBaseDelay
-	for attempt := 1; attempt < attempts && delay < retryMaxDelay; attempt++ {
-		delay *= 2
-	}
-	if delay > retryMaxDelay {
-		return retryMaxDelay
-	}
-	return delay
 }
 
 // publish publishes event to each of its destinations. A destination NATS denies (a role route
