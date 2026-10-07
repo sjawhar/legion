@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -139,7 +140,8 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 // runtime built) has nothing to compare, and row 9 must never read it as stale for want of it. A
 // variable the container lacks holds "", as mainEnvironment leaves unset an address the runtime
 // hands none of. A handed value is compared as the pod spec carries it, escaped against the
-// kubelet's expansion (kubeletLiteral).
+// kubelet's expansion (kubeletLiteral). A pod is compared with what a pod launched now for the
+// role its role label names is handed.
 func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == mainContainer })
 	if i < 0 {
@@ -155,7 +157,7 @@ func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 		held[v.Name] = v.Value
 	}
 	var moved []string
-	for _, a := range r.handedAddresses() {
+	for _, a := range r.handedAddresses(claim.Role(pod.Labels[labelRole])) {
 		if handed := kubeletEscape(a.value); held[a.name] != handed {
 			heldName, handedName := namedURL(held[a.name]), namedURL(handed)
 			if a.name == "ENVOY_NATS_URL" {

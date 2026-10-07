@@ -4,6 +4,12 @@
 
 ### Added
 
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 - Pictures reach the model (LEGION-541): a Dispatch tool result carries its `images` as image
   blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
   pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn
@@ -41,6 +47,12 @@
   reference (`references/brainstorming.md`) is gone; its process is in the new skill.
 
 ### Changed
+
+- `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
+  pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
+  release registers it with the launch's boot token, where an earlier one reads it as the
+  operator's controller and never registers. Install this release with a Go `legion` built from
+  the same commit; the daemon's image probe refuses a worker image whose plugin declares 13.
 
 - `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
   claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command

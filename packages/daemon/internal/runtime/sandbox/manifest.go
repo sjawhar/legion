@@ -67,11 +67,12 @@ const (
 const podUser = 1000
 
 // runtimeOwned are the main container's variables the runtime sets itself: exactly the names
-// mainEnvironment sets (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the
-// shared validator refuses in a spec's Env and as a secret's pointer, and CheckPod in the
-// operator's pod. The image probe's container sets none of its own.
+// mainEnvironment sets for a tree agent or the controller
+// (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the shared validator refuses
+// in a spec's Env and as a secret's pointer, and CheckPod in the operator's pod. The image probe's
+// container sets none of its own.
 var runtimeOwned = map[string]bool{
-	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
+	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"DISPATCH_URL": true, "LEGION_GH_PATH": true,
@@ -108,18 +109,22 @@ func legionMountPaths() []string {
 type launch struct {
 	spec runtime.SpawnSpec
 	name string
-	// workspace is the issue's workspace workspace-init provisions on the tree volume
-	// (workspace.Location under TreeRoot).
+	// workspace is the main container's working directory: the issue's workspace workspace-init
+	// provisions on the tree volume (workspace.Location under TreeRoot), or the controller's own
+	// volume's root, TreeRoot.
 	workspace string
-	// secrets are the claim Secret's keys beside the provisioning token, each reaching the main
-	// container as a `<NAME>_FILE` pointer: the boot token, the spec's but the providers Secret's
-	// own (Options.ProvidersSecrets, which the runtime points at the providers mount whatever the
-	// spec carries), and the Dispatch bearer when Dispatch is configured.
+	// secrets are the claim Secret's keys each reaching the main container as a `<NAME>_FILE`
+	// pointer, beside a tree pod's provisioning token: the boot token, the spec's but the providers
+	// Secret's own (Options.ProvidersSecrets, which the runtime points at the providers mount whatever
+	// the spec carries), and the Dispatch bearer when Dispatch is configured.
 	secrets map[string]string
-	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec's claim
-	// being it.
+	// root is the claim whose Sandbox owns the volume the pod mounts: the tree's root claim, or the
+	// controller's own; isRoot is spec's claim being it.
 	root   claim.Token
 	isRoot bool
+	// controller is the project controller's launch (`controller: daemon`): a pod on a volume of
+	// its own, which provisions no workspace and is told nothing of a tree, an issue or GitHub.
+	controller bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
@@ -152,11 +157,12 @@ func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter 
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
-// shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A pod provisions its
-// workspace from a repository, so a spec with none is refused, and so is a secret named for the
-// provisioning token, the one key the runtime writes whose pointer the worker container is never
-// told (the boot token's and the Dispatch bearer's pointers are runtime-owned, so the shared
-// refusal already covers them).
+// shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A tree pod provisions its
+// workspace from a repository, so a tree claim's spec with none is refused, and so is a secret
+// named for the provisioning token, the one key the runtime writes whose pointer the worker
+// container is never told (the boot token's and the Dispatch bearer's pointers are runtime-owned,
+// so the shared refusal already covers them). The controller's launch has no repository and no
+// workspace: it works in its own volume's root, which its Sandbox owns.
 func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return launch{}, err
@@ -167,16 +173,22 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	if spec.Repository.IsZero() {
-		return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
-	}
-	working, err := workspace.Location(TreeRoot, spec.Repository, spec.Issue)
-	if err != nil {
-		return launch{}, refuse("%v", err)
-	}
-	root, err := claim.NewToken(spec.Project, spec.Tree, claim.RoleArchitect)
-	if err != nil {
-		return launch{}, refuse("the tree's root claim: %v", err)
+	l := launch{spec: spec, name: SandboxName(spec.Claim)}
+	if spec.Role == claim.RoleController {
+		l.workspace, l.root, l.isRoot, l.controller = TreeRoot, spec.Claim, true, true
+	} else {
+		if spec.Repository.IsZero() {
+			return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
+		}
+		working, err := workspace.Location(TreeRoot, spec.Repository, spec.Issue)
+		if err != nil {
+			return launch{}, refuse("%v", err)
+		}
+		root, err := claim.NewToken(spec.Project, spec.Tree, claim.RoleArchitect)
+		if err != nil {
+			return launch{}, refuse("the tree's root claim: %v", err)
+		}
+		l.workspace, l.root, l.isRoot = working.Dir, root, claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree)
 	}
 	prompt, err := systemPrompt(spec.Prompt)
 	if err != nil {
@@ -193,10 +205,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if r.dispatchToken != "" {
 		secrets[dispatchTokenKey] = r.dispatchToken
 	}
-	l := launch{
-		spec: spec, name: SandboxName(spec.Claim), workspace: working.Dir, secrets: secrets,
-		root: root, isRoot: claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree), prompt: prompt,
-	}
+	l.secrets, l.prompt = secrets, prompt
 	if spec.ResumeSessionFile != "" {
 		if l.initResumeFile, err = initSessionPath(spec.ResumeSessionFile); err != nil {
 			return launch{}, refuse("%v", err)
@@ -270,14 +279,15 @@ func (l launch) agentArgv(agent []string) []string {
 	return append(argv, "--mode", "rpc", "--append-system-prompt", l.prompt)
 }
 
-// labels are every object of the claim's labels (decision 1).
+// labels are every object of the claim's labels (decision 1). The controller's carry no tree and
+// no issue: a tree pod's anti-affinity refuses a node holding a pod with any other tree label, and
+// the controller belongs to no tree.
 func (r *Runtime) labels(spec runtime.SpawnSpec) map[string]string {
-	return map[string]string{
-		labelProject: r.project,
-		labelTree:    labelValue(spec.Tree),
-		labelIssue:   labelValue(spec.Issue),
-		labelRole:    string(spec.Role),
+	labels := map[string]string{labelProject: r.project, labelRole: string(spec.Role)}
+	if spec.Role != claim.RoleController {
+		labels[labelTree], labels[labelIssue] = labelValue(spec.Tree), labelValue(spec.Issue)
 	}
+	return labels
 }
 
 // sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
@@ -320,6 +330,11 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 // the feed; workspace-init mounts the tree volume, the feed read-only, and the config home, and
 // does all the tree volume's work from the feed, with no credential.
 //
+// The controller's pod (`controller: daemon`) mounts its own volume the same way and runs the agent
+// the same way, but provisions nothing: one init container makes its sessions directory and holds a
+// resume to its session (`legion workspace-init controller`), it is placed on any Legion node, and
+// it is never enrolled with the secrets broker, since it holds no human-tier key.
+//
 // colocate is whether another pod of the tree is scheduled right now, which decides the pod's
 // affinity. The controller applies a template only to the next pod it creates, so the template is
 // rebuilt for every relaunch.
@@ -332,7 +347,8 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
-	if r.agentSecrets != nil {
+	broker := r.enrolledWith(l.spec.Role)
+	if broker != nil {
 		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir,
 			"--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile,
 			"--agent-secrets-bin", r.tools.AgentSecrets)
@@ -349,39 +365,10 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 		RuntimeClassName:  new(gvisor),
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
-		Affinity:          r.affinity(l.spec.Tree, colocate),
+		Affinity:          r.affinity(l, colocate),
 		PriorityClassName: r.scheduling.PriorityClass,
 		Volumes:           r.volumes(l),
-		InitContainers: []corev1.Container{{
-			Name:       fetchContainer,
-			Image:      r.image,
-			Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository.String(), "--feed", FeedDir},
-			Env:        fetchEnvironment(),
-			WorkingDir: FeedDir,
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
-				{Name: tempVolume, MountPath: initTempDir},
-				{Name: feedVolume, MountPath: FeedDir},
-			},
-			Resources:       resources,
-			SecurityContext: restrictedContainer(),
-		}, {
-			Name:  initContainer,
-			Image: r.image,
-			Command: []string{
-				legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
-				"--credential-helper", helper, "--feed", FeedDir,
-			},
-			Env:        r.initEnvironment(l),
-			WorkingDir: TreeRoot,
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: treeVolume, MountPath: TreeRoot},
-				{Name: feedVolume, MountPath: FeedDir, ReadOnly: true},
-				{Name: configVolume, MountPath: xdgConfigHome},
-			},
-			Resources:       resources,
-			SecurityContext: restrictedContainer(),
-		}},
+		InitContainers:    r.initContainers(l, resources, helper),
 		Containers: []corev1.Container{{
 			Name:       mainContainer,
 			Image:      r.image,
@@ -394,7 +381,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
-			}, providersMounts, r.agentSecretsMounts(), r.pod.VolumeMounts),
+			}, providersMounts, agentSecretsMounts(broker), r.pod.VolumeMounts),
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
@@ -412,6 +399,60 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 		},
 		Spec: spec,
 	}
+}
+
+// initContainers are a launch's init containers: a tree pod's workspace-fetch and workspace-init,
+// or the controller's one workspace-init, which mounts its volume alone. `workspace-init
+// controller` provisions nothing and waits on no lock: it is told the image's PATH and, on a
+// resume, the session it must find.
+func (r *Runtime) initContainers(l launch, resources corev1.ResourceRequirements, helper string) []corev1.Container {
+	legion := r.tools.Legion
+	if l.controller {
+		env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
+		if l.initResumeFile != "" {
+			env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})
+		}
+		return []corev1.Container{{
+			Name:            initContainer,
+			Image:           r.image,
+			Command:         []string{legion, "workspace-init", "controller", "--root", TreeRoot},
+			Env:             env,
+			WorkingDir:      TreeRoot,
+			VolumeMounts:    []corev1.VolumeMount{{Name: treeVolume, MountPath: TreeRoot}},
+			Resources:       resources,
+			SecurityContext: restrictedContainer(),
+		}}
+	}
+	return []corev1.Container{{
+		Name:       fetchContainer,
+		Image:      r.image,
+		Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository.String(), "--feed", FeedDir},
+		Env:        fetchEnvironment(),
+		WorkingDir: FeedDir,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
+			{Name: tempVolume, MountPath: initTempDir},
+			{Name: feedVolume, MountPath: FeedDir},
+		},
+		Resources:       resources,
+		SecurityContext: restrictedContainer(),
+	}, {
+		Name:  initContainer,
+		Image: r.image,
+		Command: []string{
+			legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
+			"--credential-helper", helper, "--feed", FeedDir,
+		},
+		Env:        r.initEnvironment(l),
+		WorkingDir: TreeRoot,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: treeVolume, MountPath: TreeRoot},
+			{Name: feedVolume, MountPath: FeedDir, ReadOnly: true},
+			{Name: configVolume, MountPath: xdgConfigHome},
+		},
+		Resources:       resources,
+		SecurityContext: restrictedContainer(),
+	}}
 }
 
 // kubeletLiteral escapes a container's command and env values against the kubelet's expansion,
@@ -437,8 +478,11 @@ func kubeletEscape(text string) string {
 // alone), the feed workspace-fetch fills and workspace-init reads, on the node's disk because it
 // holds a clone of the repository, three in-memory directories — the main container's state
 // directory, workspace-fetch's TMPDIR, and the XDG config home workspace-init and the main
-// container share — the providers Secret's configured keys when there are any, and the operator's
-// volumes.
+// container share — the agent-secrets volumes when the pod is enrolled (enrolledWith), the
+// providers Secret's configured keys when there are any, and the operator's volumes. The
+// controller's pod has the tree volume (its own), the boot projection, the state directory and the
+// config home, the providers Secret and the operator's volumes: it provisions nothing, so it has no
+// provisioning token, feed or TMPDIR.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	var boot []corev1.KeyToPath
 	providers, _ := r.providers()
@@ -446,39 +490,57 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
 	}
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
-	return slices.Concat([]corev1.Volume{
-		{Name: treeVolume, VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.root)},
-		}},
-		{Name: bootVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: secretName(l.name), Items: boot, DefaultMode: new(int32(0o440)),
-		}}},
-		{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
-			DefaultMode: new(int32(0o440)),
-		}}},
-		{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		{Name: stateVolume, VolumeSource: memory},
-		{Name: tempVolume, VolumeSource: memory},
-		{Name: configVolume, VolumeSource: memory},
-	}, r.agentSecretsVolumes(), providers, r.pod.Volumes)
+	tree := corev1.Volume{Name: treeVolume, VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.root)},
+	}}
+	bootProjection := corev1.Volume{Name: bootVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+		SecretName: secretName(l.name), Items: boot, DefaultMode: new(int32(0o440)),
+	}}}
+	state := corev1.Volume{Name: stateVolume, VolumeSource: memory}
+	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
+	own := []corev1.Volume{tree, bootProjection, state, config}
+	if !l.controller {
+		own = []corev1.Volume{
+			tree, bootProjection,
+			{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
+				DefaultMode: new(int32(0o440)),
+			}}},
+			{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			state,
+			{Name: tempVolume, VolumeSource: memory},
+			config,
+		}
+	}
+	return slices.Concat(own, agentSecretsVolumes(r.enrolledWith(l.spec.Role)), providers, r.pod.Volumes)
 }
 
-// agentSecretsVolumes are the two volumes an enrolled pod carries: the projected token for the
-// broker's audience — one source, alone in its volume, the shape the cluster's admission policy
-// admits per token — and the memory-backed key directory. None when the runtime enrolls no
-// pod.
-func (r *Runtime) agentSecretsVolumes() []corev1.Volume {
-	a := r.agentSecrets
-	if a == nil {
+// enrolledWith is the secrets broker a pod launched for role enrolls with, nil when it enrolls with
+// none: every pod enrolls when the runtime enrolls pods (runtime.kubernetes.agent_secrets), but the
+// controller's, which holds no human-tier key. podTemplate (the shim's flags and the worker
+// container's mounts), volumes, mainEnvironment and handedAddresses all ask it and read the broker
+// from its answer, so the pod a launch builds and the one row 9 compares a running pod with agree,
+// and no caller reads a broker it was not handed.
+func (r *Runtime) enrolledWith(role claim.Role) *AgentSecrets {
+	if role == claim.RoleController {
 		return nil
 	}
-	expiry := int64(math.Ceil(a.TokenExpiry.Seconds()))
+	return r.agentSecrets
+}
+
+// agentSecretsVolumes are the two volumes a pod enrolled with broker carries: the projected token
+// for the broker's audience — one source, alone in its volume, the shape the cluster's admission
+// policy admits per token — and the memory-backed key directory. None when broker is nil.
+func agentSecretsVolumes(broker *AgentSecrets) []corev1.Volume {
+	if broker == nil {
+		return nil
+	}
+	expiry := int64(math.Ceil(broker.TokenExpiry.Seconds()))
 	return []corev1.Volume{
 		{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 			DefaultMode: new(int32(0o440)),
 			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-				Audience: a.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
+				Audience: broker.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
 			}}},
 		}}},
 		{Name: agentSecretsKeyVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -487,11 +549,11 @@ func (r *Runtime) agentSecretsVolumes() []corev1.Volume {
 	}
 }
 
-// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes: the
-// token read-only, and the key directory writable so the client can persist its key and
-// enrollment id across a pod's own lifetime. Neither when the runtime enrolls no pod.
-func (r *Runtime) agentSecretsMounts() []corev1.VolumeMount {
-	if r.agentSecrets == nil {
+// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes of a pod
+// enrolled with broker: the token read-only, and the key directory writable so the client can
+// persist its key and enrollment id across a pod's own lifetime. Neither when broker is nil.
+func agentSecretsMounts(broker *AgentSecrets) []corev1.VolumeMount {
+	if broker == nil {
 		return nil
 	}
 	return []corev1.VolumeMount{
@@ -671,13 +733,20 @@ func (r *Runtime) ProvisionBound() time.Duration {
 // them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
 // daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
 // runtime.GrantFile on the state volume, which is empty at start: the extension makes its
-// directory. POD_UID is the pod's own incarnation, from the downward API.
+// directory. POD_UID is the pod's own incarnation, from the downward API. The controller is told
+// LEGION_CONTROLLER=1, its pane marker, where a tree agent is told its tree and issue, and nothing a
+// tree agent alone needs: a workspace, the tool paths and credential helper of a checkout, uv's
+// directories on a tree volume, or the secrets broker.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	var env []corev1.EnvVar
 	add := func(name, value string) { env = append(env, corev1.EnvVar{Name: name, Value: value}) }
-	add("LEGION_TREE", spec.Tree)
-	add("LEGION_ISSUE", spec.Issue)
+	if l.controller {
+		add("LEGION_CONTROLLER", "1")
+	} else {
+		add("LEGION_TREE", spec.Tree)
+		add("LEGION_ISSUE", spec.Issue)
+	}
 	add("LEGION_ROLE", string(spec.Role))
 	add("LEGION_GENERATION", strconv.FormatUint(spec.Generation, 10))
 	add("LEGION_PROJECT", spec.Project)
@@ -685,7 +754,9 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("LEGION_DAEMON_URL", r.daemonURL)
 	}
 	add("LEGION_STATE_DIR", StateDir)
-	add("LEGION_WORKSPACE", l.workspace)
+	if !l.controller {
+		add("LEGION_WORKSPACE", l.workspace)
+	}
 	if len(r.natsURLs) > 0 {
 		add("ENVOY_NATS_URL", strings.Join(r.natsURLs, ","))
 	}
@@ -695,23 +766,27 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	if r.dispatchURL != "" {
 		add("DISPATCH_URL", r.dispatchURL)
 	}
-	add("LEGION_GH_PATH", r.tools.GH)
-	add("LEGION_GIT_PATH", r.tools.Git)
-	add("LEGION_JJ_PATH", r.tools.JJ)
-	add("LEGION_CREDENTIAL_HELPER", credentialHelper)
+	if !l.controller {
+		add("LEGION_GH_PATH", r.tools.GH)
+		add("LEGION_GIT_PATH", r.tools.Git)
+		add("LEGION_JJ_PATH", r.tools.JJ)
+		add("LEGION_CREDENTIAL_HELPER", credentialHelper)
+	}
 	legionDir := filepath.Dir(r.tools.Legion)
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
-	if r.agentSecrets != nil {
-		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
+	if broker := r.enrolledWith(spec.Role); broker != nil {
+		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
 	env = append(env, xdgEnvironment()...)
-	add("UV_PYTHON_INSTALL_DIR", uvPythonDir(spec.Issue))
-	add("UV_CACHE_DIR", uvCacheDir)
-	add("UV_LINK_MODE", uvLinkMode)
+	if !l.controller {
+		add("UV_PYTHON_INSTALL_DIR", uvPythonDir(spec.Issue))
+		add("UV_CACHE_DIR", uvCacheDir)
+		add("UV_LINK_MODE", uvLinkMode)
+	}
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})
@@ -734,15 +809,16 @@ const connectFlag = "--connect"
 // variable the runtime leaves unset.
 type handedAddress struct{ name, value string }
 
-// handedAddresses are every address a pod launched now carries (podTemplate, mainEnvironment): the
-// worker stream listener the shim dials, then the daemon's API, NATS, Envoy, Dispatch and the
-// secrets broker as the agent's environment names them. A pod's are fixed at its creation, so a pod
-// a daemon launched under other addresses holds those until it is replaced (evaluate, row 9).
+// handedAddresses are every address a pod launched now for role carries (podTemplate,
+// mainEnvironment): the worker stream listener the shim dials, then the daemon's API, NATS, Envoy,
+// Dispatch and the secrets broker as the agent's environment names them, the broker only for a pod
+// that enrolls. A pod's are fixed at its creation, so a pod a daemon launched under other addresses
+// holds those until it is replaced (evaluate, row 9).
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
-func (r *Runtime) handedAddresses() []handedAddress {
-	broker := ""
-	if r.agentSecrets != nil {
-		broker = r.agentSecrets.URL
+func (r *Runtime) handedAddresses(role claim.Role) []handedAddress {
+	brokerURL := ""
+	if broker := r.enrolledWith(role); broker != nil {
+		brokerURL = broker.URL
 	}
 	return []handedAddress{
 		{connectFlag, r.streamURL},
@@ -750,7 +826,7 @@ func (r *Runtime) handedAddresses() []handedAddress {
 		{"ENVOY_NATS_URL", strings.Join(r.natsURLs, ",")},
 		{"ENVOY_URL", r.envoyURL},
 		{"DISPATCH_URL", r.dispatchURL},
-		{"AGENT_SECRETS_URL", broker},
+		{"AGENT_SECRETS_URL", brokerURL},
 	}
 }
 
@@ -791,9 +867,13 @@ func (r *Runtime) tolerations() []corev1.Toleration {
 // label, the image probe's, never counts. With colocate — another pod of the tree scheduled right
 // now — it also requires that pod's node: the tree volume is a single-node EBS volume every tree
 // pod mounts, so a pod placed on another node would fail to attach it; with no other pod
-// scheduled, any node will do.
-func (r *Runtime) affinity(tree string, colocate bool) *corev1.Affinity {
-	tree = labelValue(tree)
+// scheduled, any node will do. The controller's pod has no tree and shares no volume, so it has no
+// affinity: any Legion node will do, and no tree pod counts it as another tree's.
+func (r *Runtime) affinity(l launch, colocate bool) *corev1.Affinity {
+	if l.controller {
+		return nil
+	}
+	tree := labelValue(l.spec.Tree)
 	affinity := &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
 			LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{

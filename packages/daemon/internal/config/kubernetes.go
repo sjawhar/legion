@@ -36,8 +36,9 @@ type Kubernetes struct {
 	Kubeconfig string
 	Context    string
 	Scheduling Scheduling
-	// Resources are each role's container requests and limits. A role absent here gets none,
-	// which is the default for every role: one tree runs per node, and the pool's floor sizes it.
+	// Resources are each role's container requests and limits, and the controller's under
+	// `controller: daemon`. A role absent here gets none, which is the default for every role: one
+	// tree runs per node, and the pool's floor sizes it.
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
@@ -752,7 +753,9 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 	return tolerations, nil
 }
 
-// readResources is a mapping of role to that role's requests and limits.
+// readResources is a mapping of role to that role's requests and limits: each workflow role, and
+// the controller, whose pod a daemon under `controller: daemon` launches (resolveControllerLaunch
+// refuses its key otherwise).
 func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	const key = kubernetesKey + ".resources"
 	if value == nil {
@@ -761,15 +764,16 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping of role to requests and limits", key)
 	}
-	roles := make([]string, len(claim.Roles))
-	for i, role := range claim.Roles {
-		roles[i] = string(role)
+	roles := make([]string, 0, len(claim.Roles)+1)
+	for _, role := range claim.Roles {
+		roles = append(roles, string(role))
 	}
+	roles = append(roles, string(claim.RoleController))
 	var resources map[claim.Role]RoleResources
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		name, entry := value.Content[i].Value, value.Content[i+1]
 		role := claim.Role(name)
-		if !claim.IsRole(role) {
+		if !claim.IsRole(role) && role != claim.RoleController {
 			return nil, fmt.Errorf("%s key %q must be a role (%s)", key, name, strings.Join(roles, ", "))
 		}
 		if _, exists := resources[role]; exists {
@@ -836,7 +840,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"envoy_url", file.EnvoyURL == nil, "a pod cannot reach the loopback listener it defaults to"},
 		{"nats_urls", len(file.NatsURLs) == 0, "every pod's Envoy client connects to NATS"},
 		{"envoy_token_file", file.EnvoyTokenFile == nil, "every pod receives the Envoy bearer"},
-		{"operator_token_file", file.OperatorTokenFile == nil, "the daemon cannot launch the controller there; legion controller start presents this token"},
+		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
 		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},
