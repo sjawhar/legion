@@ -1,19 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's own blocked, fail, pass, until_reached, cleanup, audit_verdict and audit_failure,
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
 // passed as a STAGE4B_UNTIL run's last checkpoint), with the teardown's cluster, NATS and GitHub
 // helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
 // LEGSMOKE, or none.
-const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage4b-sandbox-tree.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
