@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	k8stesting "k8s.io/client-go/testing"
@@ -82,6 +83,52 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		}
 		return status
 	}
+	// launchedUnder is a pod whose containers are the ones a runtime with testOptions edited by edit
+	// creates, as a daemon under that configuration left it running.
+	launchedUnder := func(edit func(*Options)) func(*corev1.Pod) {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		containers := podOf(t, r, workerSpec(t), false).Containers
+		return func(p *corev1.Pod) { p.Spec.Containers = containers }
+	}
+	unmoved := func(*Options) {}
+	// withoutConnect drops the tester launcher's --connect and its address, as no pod this runtime
+	// builds is.
+	withoutConnect := func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if c := &p.Spec.Containers[i]; c.Name == workerContainer {
+				flag := slices.Index(c.Command, connectFlag)
+				c.Command = slices.Delete(slices.Clone(c.Command), flag, flag+2)
+			}
+		}
+	}
+	// withRecord annotates the Sandbox of objects with value as the tester's address record.
+	withRecord := func(objects []k8sruntime.Object, value string) []k8sruntime.Object {
+		s := objects[0].(*unstructured.Unstructured)
+		s.SetAnnotations(map[string]string{addressesAnnotation(claim.RoleTester): value})
+		return objects
+	}
+	// recordUnder is the tester's record of generation, as a runtime with testOptions edited by edit
+	// writes it when it starts that generation.
+	recordUnder := func(edit func(*Options), generation uint64) string {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := r.recordFor(generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	movedDaemon := func(o *Options) { o.DaemonURL = movedDaemonURL }
+	pending := corev1.PodStatus{Phase: corev1.PodPending}
 	for _, tc := range []struct {
 		row           string
 		objects       []k8sruntime.Object
@@ -244,6 +291,71 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 				condition(conditionFinished, "True", "PodFailed", 1), condition(conditionReady, "False", "PodFailed", 1),
 			}, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodPending}),
 			want: runtime.Alive,
+		},
+		{
+			row:      "8 a role launcher dialing the stream a pod created now is handed, with no record, is alive",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "8 a role launcher with no --connect is never read as stale for want of it",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream), withoutConnect),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:     "9 a moved worker stream, before the launcher's state is read",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL},
+			absent:  []string{"disconnected", "LEGION_DAEMON_URL"},
+		},
+		{
+			row:     "9 a pending pod dialing a moved worker stream",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, pending, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL},
+		},
+		{
+			row:      "8 a generation recorded with every address a generation started now is handed",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(unmoved, 1)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "9 a generation started with a moved daemon URL",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 1)),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail:   []string{"role container tester runs generation 1", "LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL},
+			absent:   []string{connectFlag, "ENVOY_URL"},
+		},
+		{
+			row: "9 every moved address of a generation is named",
+			objects: withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(func(o *Options) {
+				o.DaemonURL, o.EnvoyURL = movedDaemonURL, "http://192.0.2.9:9020"
+			}, 1)),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail: []string{
+				"LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL,
+				"ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+			},
+			absent: []string{"ENVOY_NATS_URL"},
+		},
+		{
+			row:      "8 the record of another generation is not compared",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 2)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "9 an unreadable record proves nothing about the generation's addresses",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), "{not json"),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail:   []string{"the address record " + addressesAnnotation(claim.RoleTester) + " is unreadable"},
 		},
 		{
 			row:     "a phase the mapping has no row for is uncertain",

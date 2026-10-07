@@ -28,7 +28,8 @@ import (
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
-// "create secret", "update secret", "delete secret".
+// "create secret", "update secret", "delete secret", and "record addresses", the role's address
+// record written before its generation starts (recordAddresses).
 func steps(t *testing.T, writes []action, sandboxName string) []string {
 	t.Helper()
 	var out []string
@@ -41,6 +42,8 @@ func steps(t *testing.T, writes []action, sandboxName string) []string {
 			out = append(out, "run")
 		case w.resource == "sandboxes" && w.verb == "patch" && modePatched(t, w.patch, modeSuspended):
 			out = append(out, "suspend")
+		case w.resource == "sandboxes" && w.verb == "patch" && addressRecordPatch(w.patch):
+			out = append(out, "record addresses")
 		case w.resource == "sandboxes":
 			out = append(out, w.verb+" sandbox")
 		case w.resource == "secrets":
@@ -65,7 +68,7 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	spec := workerSpec(t)
 	loc := g.spawn(spec)
 	name := SandboxName(workerToken)
-	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run")
+	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run", "record addresses")
 	for _, w := range g.writes() {
 		if w.verb == "create" && w.resource == "sandboxes" {
 			if mode, _, _ := unstructured.NestedString(w.object.(*unstructured.Unstructured).Object, "spec", "operatingMode"); mode != modeSuspended {
@@ -113,7 +116,7 @@ func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
 		t.Fatalf("containers root=%q worker=%q", root.Sandbox.Container, worker.Sandbox.Container)
 	}
 	for _, write := range g.writes()[writes:] {
-		if write.resource == "sandboxes" || write.name == secretName(root.Sandbox.Name) {
+		if (write.resource == "sandboxes" && !addressRecordPatch(write.patch)) || write.name == secretName(root.Sandbox.Name) {
 			t.Fatalf("worker start rewrote issue pod initialization: %+v", write)
 		}
 	}
@@ -132,7 +135,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	t.Run("suspended", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
 		loc := g.spawn(workerSpec(t))
-		expectSteps(t, steps(t, g.writes(), name), "create secret", "run")
+		expectSteps(t, steps(t, g.writes(), name), "create secret", "run", "record addresses")
 		if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
 			t.Fatalf("locator %+v over sandbox %s", loc, g.sandbox(name).UID)
 		}
@@ -144,7 +147,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 		})
 		g.suspendDelay = 50 * time.Millisecond
 		loc := g.spawn(workerSpec(t))
-		expectSteps(t, steps(t, g.writes(), name), "suspend", "create secret", "run")
+		expectSteps(t, steps(t, g.writes(), name), "suspend", "create secret", "run", "record addresses")
 		if loc.Sandbox.PodUID == "uid-pod-old" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
 			t.Fatalf("returned %s; the old pod was uid-pod-old, the pod now is %s", loc.Sandbox.PodUID, g.pod(name).UID)
 		}
@@ -162,7 +165,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 			_ = g.dyn.Tracker().Delete(sandboxGVR, testNamespace, name)
 		}()
 		loc := g.spawn(workerSpec(t))
-		expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run")
+		expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run", "record addresses")
 		if s := g.sandbox(name); s.UID == "uid-sandbox-going" || deletedAt.IsZero() {
 			t.Fatalf("spawned into sandbox %s, before the old one was deleted", s.UID)
 		}
@@ -248,7 +251,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectSteps(t, steps(t, g.writes(), name), "suspend", "update secret", "run")
+	expectSteps(t, steps(t, g.writes(), name), "suspend", "update secret", "run", "record addresses")
 	if loc.Sandbox.PodUID == "uid-pod-dead" || loc.Sandbox.PodUID != string(g.pod(name).UID) || loc.Sandbox.Generation != 2 {
 		t.Fatalf("resumed at %+v; the pod now is %s", loc.Sandbox, g.pod(name).UID)
 	}
@@ -381,7 +384,7 @@ func TestASecretOwnedByAnEarlierSandboxIsReplaced(t *testing.T) {
 		}}},
 	}})
 	g.spawn(workerSpec(t))
-	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "delete secret", "create secret", "run")
+	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "delete secret", "create secret", "run", "record addresses")
 	if secret := g.secret(secretName(name)); secret.UID == "uid-secret-old" || secret.OwnerReferences[0].UID != g.sandbox(name).UID {
 		t.Fatalf("secret %s owned by %+v", secret.UID, secret.OwnerReferences)
 	}

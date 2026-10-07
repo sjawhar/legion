@@ -108,6 +108,11 @@ dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 dispatch_actor=legion-e2e4b-proof-human-$$
 envoy_url=${LEGION_E2E_ENVOY_URL:-}
 nats_url=${LEGION_E2E_NATS_URL:-}
+# The ENVOY_URL the run's daemon hands its role processes (write_legion_config), and the run input a
+# role's own is checked against (pod_endpoint_mismatch): LEGION_E2E_ENVOY_URL itself until
+# address-moved-env-same-pod respells its host.
+handed_envoy_url=$envoy_url
+handed_envoy_source=LEGION_E2E_ENVOY_URL
 # The operator's pod configuration (deploy/kubernetes/operator-route): the model route, overlay,
 # ServiceAccount and projected token every pod carries. Legion holds none of it. The run creates its
 # own copy of the ConfigMap it mounts, labelled with the run's label, which the teardown
@@ -125,7 +130,8 @@ opchild="S4BOP-${$}1"
 # The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
 # the Legion nodes, so a run never waits for the production daemon to stop. The daemon binds both on
 # every interface, and every pod dials the worker stream at advertise_host, the devbox's private
-# address ($host, read in prerequisites).
+# address ($host, read in prerequisites). address-moved-stream-new-pod swaps the two, moving the
+# worker stream within the pair the devbox admits.
 bind=0.0.0.0
 port_daemon=13372
 port_worker_stream=13373
@@ -434,6 +440,70 @@ takeover_ordered() {
 }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
+# live_claims prints, as one JSON array sorted by token, every claim of the run that runs a process,
+# as `legion claims` shows it: its tree, issue, role, generation, issue pod (name and uid),
+# incarnation, session file, state and budgets.
+live_claims() {
+  claims_cli list --json | jq -ce '[.claims[] | select(.locator != null)
+    | {token, tree, issue, role, generation, pod: .locator.sandbox.name, podUid: .locator.sandbox.podUid,
+       incarnation: .locator.incarnation, sessionFile, state, budgets}] | sort_by(.token)'
+}
+# claims_relaunched BEFORE AFTER prints, as one JSON array, each claim of the live_claims read BEFORE
+# that the read AFTER shows at another generation or incarnation, with what it was. A claim AFTER
+# leaves out runs no process now, which is no relaunch.
+claims_relaunched() {
+  jq -cn --argjson b "$1" --argjson a "$2" \
+    '[$b[] as $c | $a[] | select(.token == $c.token and (.generation != $c.generation or .incarnation != $c.incarnation))
+      | {token, generation, incarnation, was: ($c | {generation, incarnation})}]'
+}
+# claims_left BEFORE: no claim of the live_claims read BEFORE still runs the incarnation it ran then.
+claims_left() {
+  local claims
+  claims=$(live_claims) || return 1
+  jq -e --argjson b "$1" '[$b[] as $c | .[] | select(.token == $c.token and .incarnation == $c.incarnation)] | length == 0' <<<"$claims" >/dev/null
+}
+# claim_relaunched WAS: the claim WAS (a live_claims entry) runs exactly its next generation (one
+# launch: a refused one moves the generation too) at a new incarnation, and its agent is registered
+# and ready.
+claim_relaunched() {
+  claims_cli list --json | jq -e --argjson was "$1" '.claims[] | select(.token == $was.token)
+    | .generation == $was.generation + 1 and .locator != null and .locator.incarnation != $was.incarnation
+      and (.state | IN("ready", "idle", "working"))' >/dev/null
+}
+# pod_connect POD prints the one address every role launcher of pod POD dials (stage4b-pods.jq's
+# launcher_connect), empty when they name none or differ, as the operator reads the pod.
+pod_connect() { op get pod "$1" -o json | jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; launcher_connect // ""'; }
+# pod_resume POD ROLE prints the --resume=<session file> word ROLE's running generation was started
+# with, read from the command lines in its container (pod_commands), empty with none.
+pod_resume() { pod_commands "$1" "$2" | { grep -o -- '--resume=[^ ]*' || true; } | sort -u | paste -sd ' ' -; }
+# upper_host URL prints URL, a scheme and an authority alone (the run's Envoy input, prerequisites),
+# with its authority upper-cased: the same server, since a host is named case-insensitively, spelled
+# as another address.
+upper_host() { printf '%s://%s\n' "${1%%://*}" "$(tr '[:lower:]' '[:upper:]' <<<"${1#*://}")"; }
+# on_handed_addresses POD ROLE WHO: every role launcher of pod POD dials the worker stream the daemon
+# serves now (pod_connect), and ROLE's Oh My Pi there is told the daemon's API and the run's services
+# as the daemon hands them now (pod_endpoint_mismatch), or the check fails naming WHO.
+on_handed_addresses() {
+  local connect mismatch stream=tcp://$host:$port_worker_stream
+  connect=$(pod_connect "$1") || fail "the operator could not read pod $1"
+  [ "$connect" = "$stream" ] || fail "$3's role launchers dial ${connect:-no one address}, not $stream"
+  if mismatch=$(pod_endpoint_mismatch "$1" "$2"); then fail "$3 has $mismatch"; fi
+}
+# claims_on_handed_addresses: from one read of `legion claims`, every claim of the run that runs a
+# process runs it on the addresses the daemon hands now (on_handed_addresses). A read that fails, or
+# shows no such claim, fails the check rather than passing with nothing judged.
+claims_on_handed_addresses() {
+  local claims token pod role
+  claims=$(live_claims) || fail "legion claims could not be read"
+  [ "$(jq length <<<"$claims")" -gt 0 ] || fail "legion claims shows no claim that runs a process"
+  for token in $(jq -r '.[].token' <<<"$claims"); do
+    pod=$(jq -r --arg t "$token" '.[] | select(.token == $t) | .pod' <<<"$claims")
+    role=$(jq -r --arg t "$token" '.[] | select(.token == $t) | .role' <<<"$claims")
+    on_handed_addresses "$pod" "$role" "$token's $role in pod $pod"
+    note "$token: pod $pod's launchers dial tcp://$host:$port_worker_stream; its $role is told LEGION_DAEMON_URL http://$host:$port_daemon and the run's services"
+  done
+  note "all $(jq length <<<"$claims") claims that run a process are on the addresses the daemon hands now"
+}
 # take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
 # bearer, and waits for Dispatch to show it and for the tree's pods to be gone.
 take_out() {
@@ -629,7 +699,7 @@ pod_endpoint_mismatch() {
   for name in DISPATCH_URL ENVOY_URL ENVOY_NATS_URL LEGION_DAEMON_URL; do
     case "$name" in
       DISPATCH_URL) want=$dispatch_base source=LEGION_E2E_DISPATCH_URL ;;
-      ENVOY_URL) want=$envoy_url source=LEGION_E2E_ENVOY_URL ;;
+      ENVOY_URL) want=$handed_envoy_url source=$handed_envoy_source ;;
       ENVOY_NATS_URL) want=$nats_url source=LEGION_E2E_NATS_URL ;;
       LEGION_DAEMON_URL) want="http://$host:$port_daemon" source= ;;
     esac
@@ -666,12 +736,13 @@ read_bearers() {
   [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer for LEGION_E2E_ENVOY_TOKEN_SECRET_ID"
 }
 # scrub replaces each production service's host with the variable that names it: the run prints
-# none of them, and a tool's error (a refused connection, an unresolved name) may carry one.
+# none of them, and a tool's error (a refused connection, an unresolved name) may carry one. A host
+# is matched in any case, since address-moved-env-same-pod hands the Envoy host upper-cased.
 scrub() {
   local args=() i names=(LEGION_E2E_DISPATCH_URL LEGION_E2E_ENVOY_URL LEGION_E2E_NATS_URL LEGION_E2E_MODEL_GATEWAY_URL) h
   for i in "${!service_hosts[@]}"; do
     h=${service_hosts[$i]%%:*}
-    [ -n "$h" ] && args+=(-e "s#${h//./\\.}#<${names[$i]}>#g")
+    [ -n "$h" ] && args+=(-e "s#${h//./\\.}#<${names[$i]}>#gI")
   done
   if [ "${#args[@]}" -eq 0 ]; then cat; else sed "${args[@]}"; fi
 }
@@ -690,7 +761,7 @@ daemon_url: http://$host:$port_daemon
 postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/legion?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
-envoy_url: $envoy_url
+envoy_url: $handed_envoy_url
 envoy_token_file: $work/envoy-token
 nats_urls:
   - $nats_url
@@ -2668,8 +2739,48 @@ note "the merger's launcher restart and pod replacement led to $relaunches resum
 [ "$relaunches" -ge 2 ] || fail "the daemon relaunched the merger $relaunches times after its launcher restart and pod replacement"
 pass
 
+# The supervisor's line for a role process holding an address the daemon no longer hands
+# (supervise/repoint.go): restart-mid-tree must log none, each address-moved checkpoint one per claim.
+stale_msg="supervise: the process is alive at a stale address; replacing it with one at the current address"
+# judge_relaunched WAS DETAIL MOVES: the claim WAS (a live_claims entry), which an address-moved
+# checkpoint's restart found stale, runs its next generation, registered and ready
+# (claim_relaunched), in the pod `legion claims` records for it, resuming its unchanged session file;
+# it was charged no launch and no death; and since the restart (stale_before, failed_before) the
+# daemon logged exactly one stale-address replacement of it, whose detail ends DETAIL (its moved
+# addresses, MOVES in a failure, which never prints DETAIL), and no failed launch. It leaves the claim
+# as `legion claims` shows it in $judged and the --resume word its role runs in $judged_resume.
+judged=
+judged_resume=
+judge_relaunched() {
+  local was=$1 token claim pod role uid session_file stale refused
+  token=$(jq -r .token <<<"$was")
+  on_tree "$(jq -r .tree <<<"$was")" until_true 900 "$token to run its next generation, registered and ready" claim_relaunched "$was"
+  claim=$(claims_cli list --json | jq -ce --arg t "$token" '.claims[] | select(.token == $t)') || fail "legion claims shows no claim $token"
+  pod=$(jq -r .locator.sandbox.name <<<"$claim")
+  role=$(jq -r .role <<<"$claim")
+  uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
+  [ "$uid" = "$(jq -r .locator.sandbox.podUid <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .locator.sandbox.podUid <<<"$claim")"
+  session_file=$(jq -r .sessionFile <<<"$was")
+  [ "$(jq -r .sessionFile <<<"$claim")" = "$session_file" ] || fail "$token's session file moved: $session_file → $(jq -r .sessionFile <<<"$claim")"
+  judged_resume=$(pod_resume "$pod" "$role")
+  if [ -n "$session_file" ]; then
+    [ "$judged_resume" = "--resume=$session_file" ] || fail "$token's $role in pod $pod runs ${judged_resume:-no --resume}, not --resume=$session_file"
+  fi
+  jq -e --argjson was "$was" '.budgets.launchFailures == 0 and .budgets.deaths == $was.budgets.deaths' <<<"$claim" >/dev/null ||
+    fail "$token's budgets read $(jq -c .budgets <<<"$claim"), want launchFailures 0 and deaths $(jq -r .budgets.deaths <<<"$was")"
+  stale=$(log_lines "$stale_msg" | tail -n "+$((stale_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)]')
+  [ "$(jq length <<<"$stale")" = 1 ] || fail "the daemon logged $(jq length <<<"$stale") stale-address replacements of $token since the restart, want one"
+  jq -e --arg want "$2" '.[0].detail | endswith($want)' <<<"$stale" >/dev/null ||
+    fail "$token's stale-address replacement names other moves than $3"
+  refused=$(log_lines "supervise: launch failed" | tail -n "+$((failed_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)] | length')
+  [ "$refused" = 0 ] || fail "the daemon logged $refused failed launches of $token since the restart"
+  judged=$claim
+}
+
 begin restart-mid-tree
 before=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.incarnation, podUid: .locator.sandbox.podUid, container: .locator.sandbox.container}')
+live_before=$(live_claims) || fail "legion claims could not be read"
+stale_before=$(log_lines "$stale_msg" | wc -l)
 stop_pid "$daemon_pid"
 daemon_pid=
 start_daemon
@@ -2678,6 +2789,148 @@ on_tree "$tree1" until_true 300 "the merger to be re-adopted" sh -c \
 after=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.incarnation, podUid: .locator.sandbox.podUid, container: .locator.sandbox.container}')
 [ "$before" = "$after" ] || fail "the restart relaunched the merger: $before → $after"
 note "the daemon restarted and re-adopted the merger as it was: $after"
+# The address-moved checkpoints' negative control: at the same addresses no role process is
+# replaced. A boot evaluates every re-adopted claim as it joins the watch, but a role is judged on its
+# Sandbox's address record only once its launcher, which redials every second, has reported its child
+# to the new daemon; a claim evaluated before that is evaluated again a probe interval later
+# (probe_interval_seconds, 30 s by default, which the run's legion.yaml leaves unset). So 75 s after
+# the merger is re-adopted every live role has been judged on its record, and a relaunch writes its
+# next generation before it starts it. A claim of another tree may have ended its phase meanwhile (no
+# process now); none may be relaunched.
+sleep 75
+live_after=$(live_claims) || fail "legion claims could not be read"
+moved=$(claims_relaunched "$live_before" "$live_after")
+[ "$moved" = "[]" ] || fail "the restart at the same addresses relaunched claims: $moved"
+for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$live_before"); do
+  jq -e --arg t "$token" 'any(.[]; .token == $t)' <<<"$live_after" >/dev/null || fail "$token runs no process after the restart at the same addresses"
+done
+for token in $(jq -r '.[].token' <<<"$live_after"); do
+  claim=$(jq -c --arg t "$token" '.[] | select(.token == $t)' <<<"$live_after")
+  pod=$(jq -r .pod <<<"$claim")
+  uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
+  [ "$uid" = "$(jq -r .podUid <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .podUid <<<"$claim")"
+  note "$token: issue pod $pod uid $uid and generation $(jq -r .generation <<<"$claim") unchanged across the restart, its launchers dialling $(pod_connect "$pod")"
+done
+stale=$(log_lines "$stale_msg" | wc -l)
+[ "$stale" = "$stale_before" ] || fail "the restart at the same addresses logged $((stale - stale_before)) stale-address replacements"
+note "no stale-address replacement logged since the restart"
+pass
+
+begin address-moved-env-same-pod
+# The daemon restarts with one address it hands its role processes respelled: envoy_url with its
+# host upper-cased (upper_host), the same Envoy listener, so only the ENVOY_URL each role generation
+# is handed differs, and the worker stream and the API stay where they were. The issue Sandbox
+# records, per role, the sha256 of each address that role's running generation was started with
+# (annotation legion.dev/addresses-<role>), so the runtime reports every live role stale_address
+# naming ENVOY_URL alone, and its claim's supervisor relaunches it at once through its launch path
+# (docs/kubernetes.md, "A pod whose address moved"): its next generation in the same issue pod, whose
+# launchers dial the unchanged stream, resuming the same session, told the new spelling, with no
+# launch charged. restart-mid-tree, at the same addresses, relaunched nothing. The respelling stays
+# for the rest of the run.
+live_before=$(live_claims) || fail "legion claims could not be read"
+jq -e --arg t "$tree1" 'any(.[]; .tree == $t)' <<<"$live_before" >/dev/null || fail "no claim of tree $tree1 runs a process for the respelling to relaunch"
+old_envoy_url=$handed_envoy_url
+new_envoy_url=$(upper_host "$handed_envoy_url")
+[ "$new_envoy_url" != "$old_envoy_url" ] || fail "LEGION_E2E_ENVOY_URL's host has no lower-case letter to upper-case"
+stale_before=$(log_lines "$stale_msg" | wc -l)
+failed_before=$(log_lines "supervise: launch failed" | wc -l)
+stop_pid "$daemon_pid"
+daemon_pid=
+handed_envoy_url=$new_envoy_url
+handed_envoy_source="LEGION_E2E_ENVOY_URL with its host upper-cased"
+write_legion_config
+start_daemon
+note "the daemon restarted handing ENVOY_URL as LEGION_E2E_ENVOY_URL with its host upper-cased, its worker stream tcp://$host:$port_worker_stream and API http://$host:$port_daemon unmoved"
+# The detail each stale observation ends with (internal/runtime/sandbox/observe.go, evaluate):
+# ENVOY_URL alone, each spelling named by its scheme, host and port, which for the run's input (no
+# userinfo and no path, prerequisites) is the whole URL. It is compared, never printed: it names a
+# production host.
+env_detail="started with addresses a generation started now is not handed: ENVOY_URL $old_envoy_url, now $new_envoy_url"
+# Tree 1's claims are the driver's to hold still, so each is judged in full.
+for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$live_before"); do
+  was=$(jq -c --arg t "$token" '.[] | select(.token == $t)' <<<"$live_before")
+  judge_relaunched "$was" "$env_detail" "ENVOY_URL alone"
+  pod=$(jq -r .locator.sandbox.name <<<"$judged")
+  role=$(jq -r .role <<<"$judged")
+  [ "$(jq -r .locator.sandbox.podUid <<<"$judged")" = "$(jq -r .podUid <<<"$was")" ] ||
+    fail "$token's $role runs in pod uid $(jq -r .locator.sandbox.podUid <<<"$judged"): the respelling replaced its issue pod $(jq -r .podUid <<<"$was")"
+  on_handed_addresses "$pod" "$role" "$token's $role in pod $pod"
+  note "$token: generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$judged") in issue pod $pod, uid $(jq -r .podUid <<<"$was") unchanged, $(jq -r .state <<<"$judged"); its launchers dial the unmoved stream; its $role is told ENVOY_URL with the host upper-cased and the run's other services; ${judged_resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$judged"); one stale-address replacement logged, naming ENVOY_URL alone"
+done
+# Every other tree's claims move too, though their own workflow may end a phase meanwhile: once each
+# has left the generation it ran, none has left its issue pod, and every claim of the run is on the
+# addresses the daemon hands now.
+on_tree "$tree1" until_true 900 "every claim of the run to leave the generation it ran before the respelling" claims_left "$live_before"
+live_after=$(live_claims) || fail "legion claims could not be read"
+replaced=$(jq -cn --argjson b "$live_before" --argjson a "$live_after" \
+  '[$b[] as $c | $a[] | select(.token == $c.token and .podUid != $c.podUid) | {token, podUid, was: $c.podUid}]')
+[ "$replaced" = "[]" ] || fail "the respelling replaced issue pods: $replaced"
+claims_on_handed_addresses
+pass
+
+begin address-moved-stream-new-pod
+# The daemon restarts with its API and worker-stream ports swapped, the rigs' pair the devbox admits
+# from the Legion nodes, so every role launcher dials a worker stream the daemon no longer serves and
+# every role generation was handed a LEGION_DAEMON_URL it no longer serves. A launcher's --connect is
+# in the issue pod's spec, fixed for the pod's life, and a launcher never redials elsewhere, so the
+# runtime reports every live role stale_address naming --connect, before it reads the role's
+# launcher, and the first of an issue's roles its supervisor relaunches replaces the issue pod; the
+# issue's other roles resume into that new pod, whose six launchers dial the new stream
+# (docs/kubernetes.md, "A pod whose address moved"): each at its next generation, the same session
+# resumed, told the new API, with no launch charged. The ports stay swapped for the rest of the run.
+live_before=$(live_claims) || fail "legion claims could not be read"
+jq -e --arg t "$tree1" 'any(.[]; .tree == $t)' <<<"$live_before" >/dev/null || fail "no claim of tree $tree1 runs a process for the move to replace"
+old_stream=tcp://$host:$port_worker_stream
+old_daemon_url=http://$host:$port_daemon
+stale_before=$(log_lines "$stale_msg" | wc -l)
+failed_before=$(log_lines "supervise: launch failed" | wc -l)
+stop_pid "$daemon_pid"
+daemon_pid=
+read -r port_daemon port_worker_stream <<<"$port_worker_stream $port_daemon"
+write_legion_config
+new_stream=tcp://$host:$port_worker_stream
+new_daemon_url=http://$host:$port_daemon
+start_daemon
+note "the daemon restarted with its API at $new_daemon_url and its worker stream at $new_stream, moved from $old_daemon_url and $old_stream"
+# The detail each stale observation ends with (internal/runtime/sandbox/observe.go, evaluate): the
+# stream the role's launcher dials, which is read before anything the generation was handed, and
+# no other address.
+stream_detail="holds addresses a pod launched now is not handed: --connect $old_stream, now $new_stream"
+for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$live_before"); do
+  was=$(jq -c --arg t "$token" '.[] | select(.token == $t)' <<<"$live_before")
+  judge_relaunched "$was" "$stream_detail" "--connect alone, from $old_stream to $new_stream"
+  pod=$(jq -r .locator.sandbox.name <<<"$judged")
+  role=$(jq -r .role <<<"$judged")
+  [ "$(jq -r .locator.sandbox.podUid <<<"$judged")" != "$(jq -r .podUid <<<"$was")" ] ||
+    fail "$token's $role still runs in issue pod uid $(jq -r .podUid <<<"$was"), whose launchers dial the stream the daemon moved from"
+  on_handed_addresses "$pod" "$role" "$token's $role in its new pod $pod"
+  note "$token: issue pod $pod uid $(jq -r .podUid <<<"$was") → $(jq -r .locator.sandbox.podUid <<<"$judged") at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$judged"), $(jq -r .state <<<"$judged"); its launchers dial $new_stream; its $role is told LEGION_DAEMON_URL $new_daemon_url and the run's services; ${judged_resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$judged"); one stale-address replacement logged, naming --connect alone"
+done
+# An issue's roles share its one pod, so each of tree 1's issues runs every role in the one pod that
+# replaced its stale one.
+split=$(live_claims | jq -c --arg t "$tree1" '[.[] | select(.tree == $t)] | group_by(.issue)
+  | map({issue: .[0].issue, pods: (map(.podUid) | unique)}) | map(select(.pods | length != 1))') || fail "legion claims could not be read"
+[ "$split" = "[]" ] || fail "an issue of tree $tree1 runs its roles in more than one pod: $split"
+# Every other tree's claims move too, though their own workflow may end a phase meanwhile: once each
+# has left the incarnation it ran, every claim of the run is on the new addresses.
+on_tree "$tree1" until_true 900 "every claim of the run to leave the pod it ran before the move" claims_left "$live_before"
+claims_on_handed_addresses
+# The pod shape follows the move (shape_problems): record_stream noted the new stream as the daemon
+# started, the shape watcher, forked on the old port, checks each pod the move launched against it
+# (a departure there would abort this wait), and every pod the watch has seen ready, before the move
+# and after, dials the stream the daemon served when the pod was created.
+jq -e -s --arg old "$old_stream" --arg new "$new_stream" '.[-2].stream == $old and .[-1].stream == $new' "$evidence/worker-streams.jsonl" >/dev/null ||
+  fail "record_stream's last two records are not $old_stream then $new_stream: $(tail -n 2 "$evidence/worker-streams.jsonl" | paste -sd ' ' -)"
+note "worker streams the run's daemons served: $(jq -r -s 'map("\(.stream) from \(.since)") | join(", ")' "$evidence/worker-streams.jsonl")"
+shape_checked() {
+  local uid uids
+  uids=$(live_claims | jq -r '.[].podUid' | sort -u) || return 1
+  for uid in $uids; do grep -qF " $uid " "$evidence/pods-checked.txt" || return 1; done
+}
+until_true 300 "the shape watcher to check every pod the run's claims run in since the move" shape_checked
+bad=$(pod_shape_verdict "$evidence/pod-watch.json")
+[ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
+note "the shape watcher checked every pod the run's claims run in since the move, and each of the $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l) pods seen ready so far dials the stream served when it was created"
 pass
 
 begin controller

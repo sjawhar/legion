@@ -9,7 +9,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,15 +335,27 @@ func newDynamic(t *testing.T, objects ...*unstructured.Unstructured) *dynamicfak
 }
 
 // generationTracker stores what a Sandbox patch leaves as the API server does for a CRD with a
-// status subresource, as the Sandbox's is: with metadata.generation bumped, in the same write,
-// hence one watch event. The fake's tracker leaves the generation alone.
+// status subresource, as the Sandbox's is: with metadata.generation bumped when the patch changed
+// its spec, in the same write, hence one watch event, and left alone when it changed only metadata
+// (an annotation). The fake's tracker leaves the generation alone.
 type generationTracker struct{ k8stesting.ObjectTracker }
 
 func (t generationTracker) Patch(gvr schema.GroupVersionResource, obj k8sruntime.Object, ns string, opts ...metav1.PatchOptions) error {
-	if object, err := metaOf(obj); err == nil && gvr == sandboxGVR {
+	if object, err := metaOf(obj); err == nil && gvr == sandboxGVR && t.specChanged(gvr, obj, ns, object.GetName()) {
 		object.SetGeneration(object.GetGeneration() + 1)
 	}
 	return t.ObjectTracker.Patch(gvr, obj, ns, opts...)
+}
+
+// specChanged is whether obj, a patch's result, holds another spec than the stored object.
+func (t generationTracker) specChanged(gvr schema.GroupVersionResource, obj k8sruntime.Object, ns, name string) bool {
+	stored, err := t.ObjectTracker.Get(gvr, ns, name)
+	if err != nil {
+		return true
+	}
+	before, isBefore := stored.(*unstructured.Unstructured)
+	after, isAfter := obj.(*unstructured.Unstructured)
+	return !isBefore || !isAfter || !reflect.DeepEqual(before.Object["spec"], after.Object["spec"])
 }
 
 // advance moves the runtime's clock.
@@ -606,7 +620,11 @@ func (g *rig) launcher(token claim.Token) {
 }
 
 // connect is one fake launcher process's connection for token, replacing any earlier one.
-func (g *rig) connect(token claim.Token) {
+func (g *rig) connect(token claim.Token) { g.connectRunning(token, 0) }
+
+// connectRunning is a fake launcher connection for token whose launcher already runs generation
+// running (0 for none), as one that survived a daemon restart reports its child at once.
+func (g *rig) connectRunning(token claim.Token, running uint64) {
 	server, client := net.Pipe()
 	pod := g.pod(SandboxName(token))
 	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
@@ -614,9 +632,12 @@ func (g *rig) connect(token claim.Token) {
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
 	go func() {
 		writer := shimwire.NewWriter(client)
-		_ = writer.WriteFrame(shimwire.LauncherState{})
+		first := shimwire.LauncherState{}
+		if running != 0 {
+			first.Child = &shimwire.LauncherChild{Generation: running, PID: 42}
+		}
+		_ = writer.WriteFrame(first)
 		reader := bufio.NewReader(client)
-		var running uint64
 		for {
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
@@ -731,14 +752,36 @@ func sandboxLocator(token claim.Token, uid string) runtime.Locator {
 	}
 }
 
-// patchOps decodes a JSON patch body.
+// patchOps decodes a JSON patch body. A role's address record (recordAddresses) is the one merge
+// patch the runtime sends a Sandbox, and holds no operations.
 func patchOps(t *testing.T, body string) []map[string]any {
 	t.Helper()
+	if addressRecordPatch(body) {
+		return nil
+	}
 	var ops []map[string]any
 	if err := json.Unmarshal([]byte(body), &ops); err != nil {
 		t.Fatalf("patch %q: %v", body, err)
 	}
 	return ops
+}
+
+// addressRecordPatch is whether a Sandbox patch body is a role's address record alone: a merge
+// patch of metadata, which changes nothing of the pod.
+func addressRecordPatch(body string) bool {
+	var patch struct {
+		Metadata struct {
+			UID         string            `json:"uid"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(body), &patch); err != nil || len(patch.Metadata.Annotations) != 1 {
+		return false
+	}
+	for key := range patch.Metadata.Annotations {
+		return strings.HasPrefix(key, "legion.dev/addresses-")
+	}
+	return false
 }
 
 // modePatched reports whether a patch body sets operatingMode to mode.

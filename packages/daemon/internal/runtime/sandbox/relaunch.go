@@ -46,9 +46,13 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 
 // relaunch ensures the issue pod once, then starts only this role's worker-shim through its
 // authenticated launcher. An existing healthy issue pod is never suspended or reinitialized when
-// another role starts or one role recovers. The claim passed its tree's lifecycle check before the
-// call (supervise's checkLaunch), so the tree's cleanup, which waits for every claim of the tree to
-// retire, lists whatever Sandbox this creates.
+// another role starts or one role recovers; a pod whose launchers dial a stream other than the one
+// a pod created now is handed is not healthy, since they never redial (dialsStaleStream), so the
+// first role relaunched after the stream moved replaces it, and its siblings resume into the new
+// pod. Before each start the Sandbox records the addresses the generation is handed
+// (recordAddresses). The claim passed its tree's lifecycle check before the call (supervise's
+// checkLaunch), so the tree's cleanup, which waits for every claim of the tree to retire, lists
+// whatever Sandbox this creates.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -69,7 +73,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
-	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || !r.launcherBound(ctx, s, pod) {
+	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || r.dialsStaleStream(pod) || !r.launcherBound(ctx, s, pod) {
 		if s.mode() != modeSuspended {
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
@@ -171,6 +175,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err := r.launchers.stop(starting, spec.Claim, string(pod.UID), r.stopFrame(stale)); err != nil {
 			return fail(fmt.Sprintf("stop its earlier generation %d", stale), err)
 		}
+	}
+	if err := r.recordAddresses(starting, s, spec.Role, spec.Generation); err != nil {
+		return fail("record the addresses its generation is handed", err)
 	}
 	if err := r.launchers.start(starting, spec.Claim, string(pod.UID), launcherCommand(l, r)); err != nil {
 		return fail("start through its authenticated launcher", err)

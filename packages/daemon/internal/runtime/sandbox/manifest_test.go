@@ -652,6 +652,52 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	}
 }
 
+// handedAddresses is exactly the addresses a role process launched now carries, every optional
+// address configured: each address-valued argument of every role launcher's command and of the
+// generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
+// variable the runtime itself sets in the generation's environment, an address being a value with a
+// scheme. An address added to a launch and not to handedAddresses is one the daemon could move
+// without any role it re-adopts being relaunched (evaluate).
+func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
+	opts := testOptions()
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	l, err := r.prepare(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := launcherCommand(l, r)
+	carried := map[string]string{}
+	words := [][]string{start.Argv[:slices.Index(start.Argv, "--")]}
+	for _, c := range podOf(t, r, spec, false).Containers {
+		words = append(words, c.Command)
+	}
+	for _, command := range words {
+		for i := 1; i < len(command); i++ {
+			if strings.Contains(command[i], "://") {
+				carried[command[i-1]] = command[i]
+			}
+		}
+	}
+	for _, pair := range start.Env {
+		if name, value, _ := strings.Cut(pair, "="); runtimeOwned[name] && strings.Contains(value, "://") {
+			carried[name] = value
+		}
+	}
+	handed := map[string]string{}
+	for _, a := range r.handedAddresses() {
+		handed[a.name] = a.value
+	}
+	if !maps.Equal(carried, handed) {
+		t.Errorf("a role launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+	}
+}
+
 // The Dispatch bearer is the runtime's to carry, not the spec's: with Dispatch configured, every
 // claim's Secret holds it as DISPATCH_TOKEN and the worker container reads it through
 // DISPATCH_TOKEN_FILE; without it, neither exists.

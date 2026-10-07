@@ -742,6 +742,75 @@ Every pod runs:
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
 `shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
 
+### A pod whose address moved
+
+A role process's addresses are fixed when it is launched, and nothing changes a running process's
+argv or environment. The daemon hands every role process six from its configuration. The worker
+stream listener, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in every
+role container's launcher command (item 3 of the anatomy list above), so it is fixed for the issue
+pod's life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
+My Pi in the start command its launcher receives, never in the pod spec, so they are fixed for that
+generation's life: `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL`
+(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and `AGENT_SECRETS_URL`
+(`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts with its key changed,
+and with no `advertise_host` set the stream also moves when the daemon restarts on another host. A
+daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
+re-adoption alone would leave the role holding the old addresses: a launcher dialling a stale
+stream never reaches the new daemon, and a stale `LEGION_DAEMON_URL` fails every call the agent
+makes to the daemon's API (its credential helper, `legion gh`, its phase completion) while its
+stream still works.
+
+So the runtime compares a role's addresses with what it hands now on every evaluation of the role
+(each watch event, the probe-interval sweep, each probe):
+
+- **The stream** is read from the role container's launcher command in the pod spec, before the
+  launcher's own state, since a launcher on a stale stream would only ever read as disconnected.
+- **The other five** are read from a record on the issue Sandbox (`addresses.go`). Before it sends a
+  generation's start command, the daemon merge-patches the role's own annotation,
+  `legion.dev/addresses-<role>`, with the generation and, for each of the five, its variable, its
+  name and the sha256 of its whole value. The patch carries the Sandbox's uid, so a Sandbox deleted
+  and recreated meanwhile is never written, and it leaves every other role's annotation as it was.
+  A later daemon reads the record from its informer cache, with no API read of its own, and compares
+  the digests once the role's launcher reports it runs that generation. A role with no record, or a
+  record of another generation, is never stale, so a generation started before records existed is
+  not relaunched for want of one; a record that cannot be read is named as moved, and the relaunch
+  writes a fresh one. The record holds no raw value: a URL's credentials travel only in the start
+  command, never into a cluster object.
+
+A role holding any other value is reported `stale_address` rather than `alive` (`ObservationKind`,
+`internal/runtime/runtime.go`), and the observation's detail names each address that moved, with
+the name it holds and the one a generation started now is handed (`--connect
+tcp://192.0.2.5:13371, now tcp://192.0.2.7:13371`, or `ENVOY_URL https://envoy.internal.example, now
+https://ENVOY.INTERNAL.EXAMPLE`). The supervisor logs that detail, so every printed endpoint is
+constructed from its scheme, host and port alone, adding `xxxxx@` when userinfo is present. Path,
+query and fragment never appear, which also protects a value an earlier daemon accepted before the
+current endpoint grammar refused queries and fragments, and a value that yields no scheme and host
+is named only `xxxxx`. `ENVOY_NATS_URL` is named entry by entry from the URLs the loader accepted,
+never by splitting the joined value, since raw commas are valid in userinfo. A role this daemon
+started always compares equal, so only the roles a daemon under another configuration started are
+ever reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
+variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods created
+after it.
+
+The supervisor relaunches each reported claim at once, through the launch path a death uses: a
+`Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
+replaces follows from what moved. An issue pod whose launchers dial a stale stream is not healthy,
+so the first of its roles relaunched replaces the pod, under the issue's lock, and the issue's other
+roles resume into the new pod, whose six launchers dial the current stream. A role whose
+environment alone moved starts its next generation in the same pod, handed the current addresses,
+and the pod and its other roles are left as they are. The stale observation is never charged, since
+the process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
+A turn the stale process was in used the addresses it holds and ends with the relaunch, so the turn
+is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
+recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
+instead, as it is when its process dies.
+
+The record costs one API write per generation started, the annotation's patch (844 bytes in the
+runtime's tests, with Dispatch and the broker unset), where a start in a running issue pod made none
+before. Stage 4b drives both cases with real agents on the cluster: `address-moved-env-same-pod`
+respells `envoy_url`'s host, and `address-moved-stream-new-pod` swaps the daemon's API and
+worker-stream ports ([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh)).
+
 ### A shell on the tree volume
 
 Some of provisioning's refusals name `jj` commands against the tree's shared clone,

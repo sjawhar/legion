@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -62,6 +63,12 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // evaluate is the observation mapping for one recorded role process. Pod loss applies to every
 // role in the issue, but a live pod is judged through the recorded role container: Ready changes
 // during a neighbour's container restart and is never a whole-pod death verdict.
+//
+// A live pod whose role launcher dials a stream other than the one a pod created now is handed is
+// StaleAddress, before its launcher's state is read: that launcher never reaches this daemon, so
+// its state would only ever read disconnected. A role running its recorded generation whose
+// Sandbox records it was started with other addresses than a generation started now is handed
+// (movedEnvironment) is StaleAddress too. Either names each moved address, never its credentials.
 func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
 	observe := func(kind runtime.ObservationKind, format string, args ...any) runtime.Observation {
 		return runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
@@ -103,10 +110,16 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	}
 	switch pod.Status.Phase {
 	case corev1.PodPending, "":
+		if moved := r.movedStream(pod, loc.Sandbox.Container); len(moved) > 0 {
+			return observe(runtime.StaleAddress, "pod %s (uid %s) holds addresses a pod launched now is not handed: %s", name, pod.UID, strings.Join(moved, "; "))
+		}
 		return observe(runtime.Alive, "pod %s (uid %s) %s", name, pod.UID, phaseOf(pod))
 	case corev1.PodRunning:
 	default:
 		return observe(runtime.Uncertain, "pod %s (uid %s) phase %s", name, pod.UID, pod.Status.Phase)
+	}
+	if moved := r.movedStream(pod, loc.Sandbox.Container); len(moved) > 0 {
+		return observe(runtime.StaleAddress, "pod %s (uid %s) holds addresses a pod launched now is not handed: %s", name, pod.UID, strings.Join(moved, "; "))
 	}
 	status := containerStatus(pod, loc.Sandbox.Container)
 	if status == nil {
@@ -117,6 +130,10 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	// Kubernetes restarts the container.
 	state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
 	if connected && state.Child != nil && state.Child.Generation == loc.Sandbox.Generation {
+		if moved := r.movedEnvironment(v.sandbox, claim.Role(loc.Sandbox.Container), loc.Sandbox.Generation); len(moved) > 0 {
+			return observe(runtime.StaleAddress, "pod %s (uid %s) role container %s runs generation %d, started with addresses a generation started now is not handed: %s",
+				name, pod.UID, loc.Sandbox.Container, state.Child.Generation, strings.Join(moved, "; "))
+		}
 		return observe(runtime.Alive, "pod %s (uid %s) role container %s runs generation %d", name, pod.UID, loc.Sandbox.Container, state.Child.Generation)
 	}
 	if ended := status.State.Terminated; ended != nil {

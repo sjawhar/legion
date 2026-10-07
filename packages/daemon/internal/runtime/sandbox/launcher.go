@@ -325,7 +325,7 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 
 func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	dir := generationDir(l.spec.Generation)
-	shim := []string{r.tools.Legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety"}
+	shim := []string{r.tools.Legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety"}
 	if r.mountsProviders() {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}

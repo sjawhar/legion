@@ -411,7 +411,7 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			Name:  string(role),
 			Image: r.image,
 			Command: []string{
-				r.tools.Legion, "launcher", "--connect", r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
+				r.tools.Legion, "launcher", connectFlag, r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
 				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
 				"--stop-grace", r.terminationGrace.String(),
 			},
@@ -760,6 +760,39 @@ func (r *Runtime) launchEnvironment(l launch) ([]corev1.EnvVar, []string) {
 		}
 	}
 	return resolved, plain
+}
+
+// connectFlag is the flag naming the worker stream listener a role's launcher and its worker-shim
+// dial.
+const connectFlag = "--connect"
+
+// handedAddress is one address the runtime hands every role process it launches from the daemon's
+// configuration: name is where the process carries it, the launcher's connectFlag or one of
+// mainEnvironment's variables, and value is what a process launched now carries there, "" for a
+// variable the runtime leaves unset.
+type handedAddress struct{ name, value string }
+
+// handedAddresses are every address a role process launched now carries: the worker stream
+// listener its launcher dials (launcherContainers, fixed when the issue pod is created), then the
+// daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment names them
+// (mainEnvironment, carried by each generation's start command, launcherCommand). The stream is
+// fixed for the pod's life, so a pod a daemon created under another stream dials it until the pod
+// is replaced; the other five are fixed for the generation's life, and the Sandbox records them
+// per role (recordAddresses) so a daemon restarted under other addresses can tell (evaluate).
+// TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
+func (r *Runtime) handedAddresses() []handedAddress {
+	broker := ""
+	if r.agentSecrets != nil {
+		broker = r.agentSecrets.URL
+	}
+	return []handedAddress{
+		{connectFlag, r.streamURL},
+		{"LEGION_DAEMON_URL", r.daemonURL},
+		{"ENVOY_NATS_URL", strings.Join(r.natsURLs, ",")},
+		{"ENVOY_URL", r.envoyURL},
+		{"DISPATCH_URL", r.dispatchURL},
+		{"AGENT_SECRETS_URL", broker},
+	}
 }
 
 // podPath is a main container's PATH: worker-bin, then the directory of the `legion` every
