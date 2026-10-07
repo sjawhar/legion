@@ -107,62 +107,98 @@ func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Ro
 	return nil
 }
 
+// movedAddress is one thing a role process holds that one launched now is not handed: where it
+// carries it (connectFlag, one of the variables mainEnvironment sets, or agentSecretsTokenVolume),
+// what it holds there and what a process launched now is handed, each named so it carries no
+// credential (namedURL, enrollmentName).
+type movedAddress struct{ variable, held, handed string }
+
+// String is the one way an observation's detail names a moved address: `<variable> <held>, now
+// <handed>`.
+func (m movedAddress) String() string { return m.variable + " " + m.held + ", now " + m.handed }
+
+// describeMoved is moved as an observation's detail names them, one after another.
+func describeMoved(moved []movedAddress) string {
+	named := make([]string, len(moved))
+	for i, m := range moved {
+		named[i] = m.String()
+	}
+	return strings.Join(named, "; ")
+}
+
 // movedEnvironment compares role's recorded generation with the addresses a generation launched now
-// is handed, as "<variable> <recorded>, now <handed>" for each that moved. A Sandbox with no record
-// of role, or a record of another generation, has nothing to compare: a generation started before
-// records existed is never read as stale for want of one. A record that cannot be read proves
-// nothing about the generation's addresses, so it is named as moved, and the relaunch that follows
-// writes a fresh one.
-func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint64) []string {
+// is handed, one movedAddress for each that moved, its held name the record's. A Sandbox with no
+// record of role, or a record of another generation, has nothing to compare: a generation started
+// before records existed is never read as stale for want of one. A record that cannot be read is an
+// error, which proves nothing about the generation's addresses: evaluate reads it as stale, and the
+// relaunch that follows writes a fresh one.
+func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint64) ([]movedAddress, error) {
 	raw, ok := s.Annotations[addressesAnnotation(role)]
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	var record addressRecord
 	if err := json.Unmarshal([]byte(raw), &record); err != nil {
-		return []string{fmt.Sprintf("the address record %s is unreadable (%v)", addressesAnnotation(role), err)}
+		return nil, fmt.Errorf("the address record %s is unreadable (%v)", addressesAnnotation(role), err)
 	}
 	if record.Generation != generation {
-		return nil
+		return nil, nil
 	}
-	var moved []string
+	var moved []movedAddress
 	for _, a := range r.environmentAddresses(role) {
 		i := slices.IndexFunc(record.Addresses, func(held recordedAddress) bool { return held.Variable == a.name })
 		switch {
 		case i < 0:
-			moved = append(moved, fmt.Sprintf("%s (unrecorded), now %s", a.name, r.addressName(a)))
+			moved = append(moved, movedAddress{a.name, "(unrecorded)", r.addressName(a)})
 		case record.Addresses[i].SHA256 != addressDigest(a.value):
-			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, record.Addresses[i].Name, r.addressName(a)))
+			moved = append(moved, movedAddress{a.name, record.Addresses[i].Name, r.addressName(a)})
 		}
 	}
-	return moved
+	return moved, nil
 }
 
 // movedStream compares the stream the named role container's launcher dials with the one a pod
-// created now is handed, as "--connect <held>, now <handed>" when it moved. A container that is
-// absent or runs no connectFlag (never one this runtime built) has nothing to compare. The handed
-// value is compared as the pod spec carries it, escaped against the kubelet's expansion
-// (kubeletLiteral).
-func (r *Runtime) movedStream(pod *corev1.Pod, container string) []string {
+// created now is handed; ok is whether it moved. A container that is absent or runs no connectFlag
+// (never one this runtime built) has nothing to compare. The handed value is compared as the pod
+// spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
+func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, bool) {
 	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == container })
 	if i < 0 {
-		return nil
+		return movedAddress{}, false
 	}
 	command := pod.Spec.Containers[i].Command
 	flag := slices.Index(command, connectFlag)
 	if flag < 0 || flag+1 >= len(command) {
-		return nil
+		return movedAddress{}, false
 	}
 	if held, handed := command[flag+1], kubeletEscape(r.streamURL); held != handed {
-		return []string{fmt.Sprintf("%s %s, now %s", connectFlag, namedURL(held), namedURL(handed))}
+		return movedAddress{connectFlag, namedURL(held), namedURL(handed)}, true
 	}
-	return nil
+	return movedAddress{}, false
 }
 
 // dialsStaleStream is whether any role launcher of pod dials a stream other than the one a pod
 // created now is handed: a launcher never redials elsewhere, so the pod must be replaced.
 func (r *Runtime) dialsStaleStream(pod *corev1.Pod) bool {
-	return slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool { return len(r.movedStream(pod, c.Name)) > 0 })
+	return slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool {
+		_, moved := r.movedStream(pod, c.Name)
+		return moved
+	})
+}
+
+// movedInPod is what pod holds, for role, that a pod created now is not handed: the stream its
+// launcher dials (movedStream) and the secrets broker's enrollment its next generation is started
+// against (movedEnrollment). Both are fixed for the pod's life, so either moved means the pod must
+// be replaced before role can run as one launched now.
+func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
+	var moved []movedAddress
+	if stream, ok := r.movedStream(pod, string(role)); ok {
+		moved = append(moved, stream)
+	}
+	if enrollment, ok := r.movedEnrollment(pod, role); ok {
+		moved = append(moved, enrollment)
+	}
+	return moved
 }
 
 // namedURL is the log boundary for one endpoint value: an existing pod or record can hold a value a

@@ -46,9 +46,10 @@ type podKind interface {
 	colocate(r *Runtime, l launch) bool
 	affinity(r *Runtime, l launch, colocate bool) *corev1.Affinity
 	// readyNewPod readies what a new pod needs before relaunch writes its launcher Secrets and sets
-	// its Sandbox, s, running. release gives back what it holds once relaunch is done with the new
-	// pod.
-	readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandbox) (release func(), err error)
+	// its Sandbox, s, running, and returns the release of what it holds meanwhile, which relaunch
+	// calls once it is done with the new pod. On an error it holds nothing: it has given back
+	// whatever it took, and returns no release.
+	readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandbox) (func(), error)
 }
 
 // podKindOf is the kind a Sandbox's labels name: an issue pod's carry legion.dev/issue, the project
@@ -217,30 +218,37 @@ func (issuePod) affinity(r *Runtime, l launch, colocate bool) *corev1.Affinity {
 	return affinity
 }
 
-// readyNewPod takes the tree's launch turn and, under it, waits until no other pod of the tree is
-// initializing (awaitTreeInitialized), reads whether workspace-init must find the tree volume
-// holding retained sessions, lists the tree's removable workspaces, mints the provisioning token for
-// the repository's owner, and writes it to the pod's init-only provisioning Secret. The turn is the
-// one release gives back, so relaunch holds it until its new pod is in the store, where the next
-// relaunch's wait sees it.
-func (issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandbox) (release func(), err error) {
-	release, err = r.lockTree(ctx, l.spec.Tree)
+// readyNewPod takes the tree's launch turn and readies the pod under it (provision), then hands the
+// turn's release back, so relaunch holds the turn until its new pod is in the store, where the next
+// relaunch's wait sees it. A launch that cannot be readied gives the turn back itself and returns
+// the error: the next launch of the tree is never left waiting on a turn nobody holds.
+func (pod issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandbox) (func(), error) {
+	unlock, err := r.lockTree(ctx, l.spec.Tree)
 	if err != nil {
 		return nil, fmt.Errorf("take its tree's launch turn: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			release()
-			release = nil
-		}
-	}()
+	if err := pod.provision(ctx, r, l, s); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
+}
+
+// provision is what a new issue pod needs before it starts, run under the tree's launch turn: it
+// waits until no other pod of the tree is initializing (awaitTreeInitialized), reads whether
+// workspace-init must find the tree volume holding retained sessions, lists the tree's removable
+// workspaces, mints the provisioning token for the repository's owner, and writes it to the pod's
+// init-only provisioning Secret.
+func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	if err := r.awaitTreeInitialized(ctx, *l); err != nil {
-		return nil, fmt.Errorf("wait for its tree's other pods to finish initializing: %w", err)
+		return fmt.Errorf("wait for its tree's other pods to finish initializing: %w", err)
 	}
 	if !l.expectTreeVolume && l.spec.WorkspaceRecoveredFrom == "" {
-		if l.expectTreeVolume, err = r.store.TreeHasSessions(ctx, r.project, l.spec.Tree); err != nil {
-			return nil, fmt.Errorf("read its tree's retained sessions: %w", err)
+		sessions, err := r.store.TreeHasSessions(ctx, r.project, l.spec.Tree)
+		if err != nil {
+			return fmt.Errorf("read its tree's retained sessions: %w", err)
 		}
+		l.expectTreeVolume = sessions
 	}
 	if r.removable != nil {
 		// Computed now, under the tree's launch turn, after every other pod of the tree has finished
@@ -264,11 +272,11 @@ func (issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandb
 		// this tree right now.
 		candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
 		if err != nil {
-			return nil, fmt.Errorf("compute its tree's removable workspaces: %w", err)
+			return fmt.Errorf("compute its tree's removable workspaces: %w", err)
 		}
 		notAfter := r.now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
 		if err := l.setRemovable(r.withoutLiveTreePods(*l, candidates), notAfter); err != nil {
-			return nil, fmt.Errorf("build its removable-workspaces list: %w", err)
+			return fmt.Errorf("build its removable-workspaces list: %w", err)
 		}
 	}
 	owner := l.spec.Repository.Owner()
@@ -276,16 +284,16 @@ func (issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandb
 	token, err := r.tokens.Token(minting, owner)
 	cancel()
 	if err != nil {
-		return nil, fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
+		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
 	}
 	if err := r.upsertSecret(ctx, corev1.Secret{
 		ObjectMeta: r.secretMeta(s, *l, secretName(s.Name)),
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{provisionTokenKey: []byte(token)},
 	}); err != nil {
-		return nil, fmt.Errorf("write its provisioning secret: %w", err)
+		return fmt.Errorf("write its provisioning secret: %w", err)
 	}
-	return release, nil
+	return nil
 }
 
 // controllerPod is the project controller's pod (`controller: daemon`): the controller's launcher

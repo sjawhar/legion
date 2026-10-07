@@ -3162,8 +3162,9 @@ until_true 300 "the controller's report message on $report" report_posted
 # last preceding message entry is an assistant message with stopReason `stop`, a turn that had
 # genuinely finished. A start turn that ends in an unretried error fails the check. The report's
 # call is the controller's first call that posts a dispatch_message on the report issue, by any of
-# the three ways Oh My Pi gives the model to call the tool: the dispatch_message tool itself, a
-# write to its xd://dispatch_message device, or eval code that calls tool.dispatch_message(...).
+# the three ways Oh My Pi gives the model to call the tool (lib/omp-tool-calls.jq's calls): the
+# dispatch_message tool itself, a write to its xd://dispatch_message device, or eval code that calls
+# tool.dispatch_message(...).
 # Only the assistant's own calls count, so a tool result that quotes the tool's name (a skill
 # file) or a message on another issue is not the report's call.
 # report_after_tick succeeds when the report's call came on such a turn, and otherwise prints why.
@@ -3171,14 +3172,12 @@ report_after_tick() {
   local file verdicts=
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    verdicts+=$(jq -R -s -r --arg tick "summary: tick on $project" --arg report "$report" '
+    verdicts+=$(jq -R -s -r -L "$root/scripts/e2e/lib" --arg tick "summary: tick on $project" --arg report "$report" 'include "omp-tool-calls";
       def names_report: test("(^|[^0-9A-Za-z-])" + $report + "($|[^0-9])");
       def posts_report:
-        any(.message.content[]? | select(.type? == "toolCall");
-          (.name == "dispatch_message" and .arguments.issue? == $report)
-          or (.name == "write" and ((.arguments.path? // "") | test("^\\s*xd://dispatch_message\\s*$"))
-            and (((.arguments.content? // "") | fromjson? // {}) | .issue?) == $report)
-          or (.name == "eval" and ((.arguments.code? // "") | test("\\btool\\.dispatch_message\\s*\\(") and names_report)));
+        any(.message.content[]? | select(calls("dispatch_message"));
+          if .name == "eval" then (.arguments.code? // "") | tostring | names_report
+          else call_arguments.issue? == $report end);
       [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
       | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
       | ([$msgs[] | select(.m.message.role == "assistant" and (.m | posts_report)) | .i] | first) as $call

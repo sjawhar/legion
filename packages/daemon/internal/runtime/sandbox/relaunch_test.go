@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -819,6 +820,136 @@ func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 	if len(tokens.bounded) != 1 || !tokens.bounded[0] {
 		t.Fatalf("mints bounded: %v, want one with a deadline", tokens.bounded)
 	}
+}
+
+// A step of an issue pod's preparation that fails — the wait for the tree's other pods to finish
+// initializing, the retained-sessions read, the removable-workspaces read, the provisioning-token
+// mint (a GitHub outage), the provisioning Secret's write — fails that launch with its error and
+// nothing more: the launch returns it, never panics, gives the tree's launch turn back, and the
+// tree's next launch, once the failure passes, launches.
+func TestAFailedStepOfAnIssuePodsPreparationReleasesTheTreesTurn(t *testing.T) {
+	failure := errors.New("the step failed")
+	for name, tc := range map[string]struct {
+		// fail arms the failure for the next launch only; the spec it returns is that launch's.
+		fail func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec)
+		want string
+	}{
+		"the wait for the tree's other pods": {
+			fail: func(t *testing.T, _ *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
+				return withOptions(func(*Options) {}), func(g *rig) runtime.SpawnSpec {
+					// The root's pod stays in workspace-init, so the child's launch waits for it,
+					// until the launch's own deadline (failedLaunch's) ends the wait.
+					g.autoStart.Store(false)
+					g.spawn(rootSpec(t))
+					return childSpec(t)
+				}
+			},
+			want: "wait for its tree's other pods to finish initializing",
+		},
+		"the retained-sessions read": {
+			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
+				store := &sessionsFailingStore{treeStore: newTreeStore(), failed: failed, err: failure}
+				return withOptions(func(o *Options) { o.Store = store }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
+			},
+			want: "read its tree's retained sessions",
+		},
+		"the removable-workspaces read": {
+			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
+				removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+					if failed.CompareAndSwap(false, true) {
+						return nil, failure
+					}
+					return nil, nil
+				}
+				return withOptions(func(o *Options) { o.Removable = removable }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
+			},
+			want: "compute its tree's removable workspaces",
+		},
+		"the provisioning-token mint": {
+			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
+				tokens := &outageTokens{failed: failed}
+				return withOptions(func(o *Options) { o.Tokens = tokens }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
+			},
+			want: "mint the provisioning token for sjawhar",
+		},
+		"the provisioning Secret's write": {
+			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
+				return withOptions(func(*Options) {}), func(g *rig) runtime.SpawnSpec {
+					provisioning := secretName(SandboxName(rootToken))
+					g.kube.PrependReactor("create", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+						if a.(k8stesting.CreateAction).GetObject().(*corev1.Secret).Name == provisioning && failed.CompareAndSwap(false, true) {
+							return true, nil, failure
+						}
+						return false, nil, nil
+					})
+					return rootSpec(t)
+				}
+			},
+			want: "write its provisioning secret",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var failed atomic.Bool
+			option, arm := tc.fail(t, &failed)
+			g := newRig(t, nil, option)
+			spec := arm(g)
+			g.launcher(spec.Claim)
+			if err := failedLaunch(t, g, spec); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Spawn = %v, want the failure of %s", err, name)
+			}
+			taking, cancel := context.WithTimeout(g.ctx, time.Second)
+			defer cancel()
+			unlock, err := g.r.lockTree(taking, testTree)
+			if err != nil {
+				t.Fatalf("the tree's launch turn is still held after the failed launch: %v", err)
+			}
+			unlock()
+			if root := g.pod(SandboxName(rootToken)); root != nil && spec.Claim != rootToken {
+				g.update(root, func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+			}
+			g.autoStart.Store(true)
+			g.spawn(spec)
+		})
+	}
+}
+
+// failedLaunch is a launch of spec expected to fail within a second, its panic turned into the
+// test's failure, so a launch that panics fails its own subtest by name rather than the binary.
+func failedLaunch(t *testing.T, g *rig, spec runtime.SpawnSpec) error {
+	t.Helper()
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("Spawn panicked: %v", p)
+		}
+	}()
+	launching, cancel := context.WithTimeout(g.ctx, time.Second)
+	defer cancel()
+	_, err := g.r.Spawn(launching, spec)
+	return err
+}
+
+// sessionsFailingStore is a treeStore whose next retained-sessions read fails, once.
+type sessionsFailingStore struct {
+	*treeStore
+	failed *atomic.Bool
+	err    error
+}
+
+func (s *sessionsFailingStore) TreeHasSessions(ctx context.Context, project, tree string) (bool, error) {
+	if s.failed.CompareAndSwap(false, true) {
+		return false, s.err
+	}
+	return s.treeStore.TreeHasSessions(ctx, project, tree)
+}
+
+// outageTokens refuses its next installation token, once, as a GitHub outage would.
+type outageTokens struct{ failed *atomic.Bool }
+
+func (o *outageTokens) Token(ctx context.Context, owner string) (string, error) {
+	if o.failed.CompareAndSwap(false, true) {
+		return "", errors.New("no installation token: GitHub is down")
+	}
+	return staticTokens{}.Token(ctx, owner)
 }
 
 // A Running patch the server applied but whose answer never arrived (a client timeout) is as

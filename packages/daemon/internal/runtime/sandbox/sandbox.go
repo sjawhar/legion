@@ -797,9 +797,10 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 
 // deleteFenced deletes the Sandbox name once, fenced by fence, and forgets its launchers'
 // credentials; msg and attrs log the delete. Its caller holds the pod's launch turn. One already
-// gone is gone, and one the fence refuses, replaced or written since, is kept: neither is an error.
-// Deletion propagates in the background, a custom resource's default, so its Secrets and volume go
-// after it through their owner references.
+// gone is gone, and one the fence refuses, replaced or written since, is kept and logged with
+// attrs, since its owner's next decision is the orphan sweep's: neither is an error. Deletion
+// propagates in the background, a custom resource's default, so its Secrets and volume go after it
+// through their owner references.
 func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
 	deleting, cancel := call(ctx)
 	defer cancel()
@@ -811,6 +812,8 @@ func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Pr
 	case apierrors.IsNotFound(err):
 		r.forgetLauncherCredentials(name)
 	case apierrors.IsConflict(err):
+		r.log.Info("sandbox runtime: kept a sandbox written since its delete was decided; the orphan sweep decides it again",
+			append([]any{"sandbox", name, "uid", *fence.UID, "error", err}, attrs...)...)
 	default:
 		return fmt.Errorf("delete sandbox %s: %w", name, err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,7 +146,7 @@ func TestAnIssuePodDialingAStaleStreamIsReplacedAndEveryRoleResumesIntoTheNewPod
 		if obs.Kind != runtime.StaleAddress || obs.Locator != loc {
 			t.Fatalf("%s: %s at %+v, want StaleAddress at the recorded locator: %s", loc.Claim, obs.Kind, obs.Locator, obs.Detail)
 		}
-		if want := connectFlag + " " + testOptions().StreamURL + ", now " + movedStreamURL; !strings.Contains(obs.Detail, want) {
+		if want := (movedAddress{connectFlag, testOptions().StreamURL, movedStreamURL}).String(); !strings.Contains(obs.Detail, want) {
 			t.Errorf("%s's detail %q lacks %q", loc.Claim, obs.Detail, want)
 		}
 		if strings.Contains(obs.Detail, "LEGION_DAEMON_URL") {
@@ -209,7 +210,7 @@ func TestARoleToldAStaleDaemonURLGetsANewGenerationInTheSamePod(t *testing.T) {
 	if obs.Kind != runtime.StaleAddress || obs.Locator != loc {
 		t.Fatalf("%s at %+v, want StaleAddress at the recorded locator: %s", obs.Kind, obs.Locator, obs.Detail)
 	}
-	if want := "LEGION_DAEMON_URL " + testOptions().DaemonURL + ", now " + movedDaemonURL; !strings.Contains(obs.Detail, want) {
+	if want := (movedAddress{"LEGION_DAEMON_URL", testOptions().DaemonURL, movedDaemonURL}).String(); !strings.Contains(obs.Detail, want) {
 		t.Errorf("detail %q lacks %q", obs.Detail, want)
 	}
 	if strings.Contains(obs.Detail, connectFlag) {
@@ -234,13 +235,13 @@ func TestARoleToldAStaleDaemonURLGetsANewGenerationInTheSamePod(t *testing.T) {
 	})
 }
 
-// Enrolling a running deployment with the secrets broker (runtime.kubernetes.agent_secrets) moves
-// each workflow role's environment, AGENT_SECRETS_URL from unset, and the role is reported
-// StaleAddress as for any address that moved. But a generation of a role that enrolls is started
-// with the shim's agent-secrets flags, which name a token projection and a key directory only a pod
-// created enrolled carries, and the shim refuses to start without its token file. So the relaunch
-// replaces the issue pod rather than start the role in one that cannot run it, the new pod mounts
-// both for every role, and a sibling resumes into that same new pod.
+// Enrolling a running deployment with the secrets broker (runtime.kubernetes.agent_secrets) leaves
+// every issue pod without the broker's token projection and its roles' key directories, which a
+// generation of a role that enrolls is started against: the shim's agent-secrets flags name both,
+// and the shim refuses to start without its token file. So the role is reported StaleAddress, its
+// detail naming the projection the pod lacks, and the relaunch replaces the issue pod rather than
+// start the role in one that cannot run it; the new pod mounts both for every role, and a sibling
+// resumes into that same new pod.
 func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
@@ -257,7 +258,7 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 	if obs.Kind != runtime.StaleAddress || obs.Locator != testerLoc {
 		t.Fatalf("%s at %+v, want StaleAddress at the recorded locator: %s", obs.Kind, obs.Locator, obs.Detail)
 	}
-	if want := "AGENT_SECRETS_URL (unset), now " + broker.URL; !strings.Contains(obs.Detail, want) {
+	if want := (movedAddress{agentSecretsTokenVolume, "(unset)", enrollmentName(brokerTokenProjection(broker))}).String(); !strings.Contains(obs.Detail, want) {
 		t.Errorf("detail %q lacks %q", obs.Detail, want)
 	}
 
@@ -292,6 +293,108 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 	}
 	if newReviewer.Sandbox.PodUID != newTester.Sandbox.PodUID {
 		t.Fatalf("the reviewer resumed into pod %s, want the tester's new pod %s", newReviewer.Sandbox.PodUID, newTester.Sandbox.PodUID)
+	}
+}
+
+// A broker enrollment changed under running roles — another audience or token expiry, which only a
+// daemon restart brings — is read on every role of the pod at once: each is StaleAddress at its
+// re-adoption, naming the projection the pod holds and the one a pod created now carries, so the
+// supervisor relaunches every one of them uncharged (supervise's repoint), rather than leaving them
+// running until some unrelated relaunch replaces the pod under the rest. Relaunched together, as the
+// supervisor's machines relaunch them, they move into one new pod, and no role is ever reported
+// gone or not the recorded process on the way.
+func TestChangingTheBrokersAudienceMovesEveryRoleOfThePodTogether(t *testing.T) {
+	before := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	now := before
+	now.Audience = "agent-secrets-next"
+	g := newRig(t, nil, withOptions(func(o *Options) { o.AgentSecrets = &before }))
+	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
+	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
+	name := testerLoc.Sandbox.Name
+
+	r2 := secondRuntime(t, g, func(o *Options) { o.AgentSecrets = &now })()
+	if err := r2.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &testerLoc}, {Claim: otherToken, Locator: &reviewerLoc}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	observations, err := r2.Observe(g.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := (movedAddress{agentSecretsTokenVolume, enrollmentName(brokerTokenProjection(&before)), enrollmentName(brokerTokenProjection(&now))}).String()
+	seen := []runtime.Observation{next(t, observations), next(t, observations)}
+	for _, loc := range []runtime.Locator{testerLoc, reviewerLoc} {
+		obs := observationOf(t, seen, loc)
+		if obs.Kind != runtime.StaleAddress || obs.Locator != loc || !strings.Contains(obs.Detail, stale) {
+			t.Fatalf("%s: %s at %+v (%s), want StaleAddress at the recorded locator naming %q", loc.Claim, obs.Kind, obs.Locator, obs.Detail, stale)
+		}
+	}
+
+	// Every observation from here on: none may say a role is gone or not the recorded process.
+	var mu sync.Mutex
+	var later []runtime.Observation
+	collecting, stop := context.WithCancel(g.ctx)
+	defer stop()
+	go func() {
+		for {
+			select {
+			case obs := <-observations:
+				mu.Lock()
+				later = append(later, obs)
+				mu.Unlock()
+			case <-collecting.Done():
+				return
+			}
+		}
+	}()
+	// Both relaunches begin before either replaces the pod, as the supervisor's machines begin theirs
+	// on the observations above: the pod's launch turn is held until both are waiting on it.
+	held, err := r2.lockPod(g.ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type relaunched struct {
+		loc runtime.Locator
+		err error
+	}
+	results := make(chan relaunched, 2)
+	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+	reviewer.Generation, reviewer.BootToken, reviewer.ResumeSessionFile = 2, "boot-reviewer-g2", resumeSession
+	for _, relaunch := range []struct {
+		prev runtime.Locator
+		spec runtime.SpawnSpec
+	}{{testerLoc, tester}, {reviewerLoc, reviewer}} {
+		go func() {
+			loc, err := r2.Resume(g.ctx, &relaunch.prev, relaunch.spec)
+			results <- relaunched{loc, err}
+		}()
+	}
+	g.eventually("both relaunches to wait on the pod's launch turn", func() bool {
+		_, testerWatched := r2.recorded(workerToken)
+		_, reviewerWatched := r2.recorded(otherToken)
+		return !testerWatched && !reviewerWatched
+	})
+	held()
+	var pods []string
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("a relaunch failed, which the supervisor would charge: %v", result.err)
+		}
+		pods = append(pods, result.loc.Sandbox.PodUID)
+	}
+	if pods[0] != pods[1] || pods[0] == testerLoc.Sandbox.PodUID {
+		t.Fatalf("the roles relaunched into pods %v, want one new pod in place of %s", pods, testerLoc.Sandbox.PodUID)
+	}
+	if pod := g.pod(name); r2.lacksEnrollment(pod, claim.Roles) {
+		t.Fatalf("the new pod lacks the enrollment the runtime has now: %+v", pod.Spec.Volumes)
+	}
+	stop()
+	mu.Lock()
+	defer mu.Unlock()
+	for _, obs := range later {
+		if obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess {
+			t.Errorf("%s was reported %s on the way (%s)", obs.Locator.Claim, obs.Kind, obs.Detail)
+		}
 	}
 }
 

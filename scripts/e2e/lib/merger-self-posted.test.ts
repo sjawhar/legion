@@ -1,19 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // merger_self_posted, taken from stage3-4b13b-acceptance.sh by name and run against a merger's
 // session written as Oh My Pi writes it: the 4b.13b acceptance's soft check that the merger never
 // posts or publishes READY itself (the daemon posts the packet the merger completes with). Oh My
 // Pi gives the model three ways to call dispatch_message and envoy_publish, and each must count:
 // the tool itself, a write to its xd:// device, and eval code that calls tool.<name>(...).
-const script = readFileSync(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage3-4b13b-acceptance.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"));
 const dir = mkdtempSync(join(tmpdir(), "merger-self-posted-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -52,6 +48,7 @@ function selfPosts(...entries: unknown[]): unknown[] {
       "bash",
       "-c",
       `set -Eeuo pipefail
+script_lib=${JSON.stringify(import.meta.dir)}
 claim_session_file() { printf '%s\\n' "$SESSION"; }
 ${fn("merger_self_posted")}
 merger_self_posted LEGSMOKE-1
@@ -103,6 +100,18 @@ describe("merger_self_posted", () => {
   test("eval that only reads Dispatch, a READY in its code included, is no self-post", () => {
     const code = `const t = await tool.dispatch_read({ issue: "LEGSMOKE-1" });\nt.text.includes("READY");`;
     expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a write is a device call only to the tool's own device path", () => {
+    const write = (path: string): Call =>
+      tool("write", {
+        path,
+        content: JSON.stringify({ issue: "LEGSMOKE-1", body: ready }),
+        i: "Post",
+      });
+    expect(selfPosts(assistant(write(" xd://dispatch_message ")))).toHaveLength(1);
+    expect(selfPosts(assistant(write("xd://dispatch_messages")))).toHaveLength(0);
+    expect(selfPosts(assistant(write("notes/xd://dispatch_message.md")))).toHaveLength(0);
   });
 
   test("the completion that carries the packet, and a tool result quoting the tools, are no self-post", () => {

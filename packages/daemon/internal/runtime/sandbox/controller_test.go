@@ -3,9 +3,11 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -409,7 +411,8 @@ func TestReleasingTheControllerWaitsForItsPodsLaunchTurn(t *testing.T) {
 // decides on the claims it was told before it began, and a release on the store's copy. A
 // controller relaunched into the Sandbox since writes it (every start records its addresses), so a
 // delete fenced to the read conflicts and the Sandbox, volume and session included, stays for the
-// next decision, which deletes it once nothing has written it since.
+// next decision, which deletes it once nothing has written it since. The Sandbox kept is logged,
+// named, so an operator who released the controller can see why its Sandbox is still there.
 func TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays(t *testing.T) {
 	for name, deleteIt := range map[string]func(g *rig) error{
 		"the orphan sweep": func(g *rig) error { return g.r.ReconcileOrphans(g.ctx, nil, 0) },
@@ -427,7 +430,10 @@ func TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays(t *testing.T) {
 				},
 				afterGet: func(string) {},
 			}
-			g = newRig(t, nil, withSandboxHooks(hooks))
+			logs := &lockedLog{}
+			g = newRig(t, nil, withSandboxHooks(hooks), withOptions(func(o *Options) {
+				o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			}))
 			g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))
 			g.spawn(controllerSpec(t))
 			setResourceVersion(g, sandboxName, "rv-read")
@@ -443,6 +449,9 @@ func TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays(t *testing.T) {
 			if g.sandbox(sandboxName) == nil {
 				t.Fatal("a controller Sandbox written since the delete was decided was deleted")
 			}
+			if kept := logs.String(); !strings.Contains(kept, "kept a sandbox written since its delete was decided") || !strings.Contains(kept, "sandbox="+sandboxName) {
+				t.Errorf("the runtime logged %q, want the kept Sandbox %s named", kept, sandboxName)
+			}
 
 			g.eventually("the store to hold the Sandbox as written", func() bool { return storedVersion(g, sandboxName) == "rv-relaunched" })
 			if err := deleteIt(g); err != nil {
@@ -453,6 +462,24 @@ func TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lockedLog is a log the runtime's goroutines write to while a test reads it.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }
 
 // setResourceVersion stamps the Sandbox name in the tracker with version, as a write to it would:

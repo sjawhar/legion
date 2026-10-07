@@ -34,9 +34,10 @@
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
-# The key command's record is read with this script's own reader: an ACCEPT_ROOT from before the
-# record has no reader to run.
-unserved_reader=$(cd "$(dirname "$0")" && pwd)/lib/model-gateway-unserved.sh
+# The key command's record is read with this script's own reader, and an agent's tool calls with this
+# script's own lib/omp-tool-calls.jq: an ACCEPT_ROOT from before either has none to run.
+script_lib=$(cd "$(dirname "$0")" && pwd)/lib
+unserved_reader=$script_lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
@@ -596,22 +597,18 @@ merger_summary() {
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
 # merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
-# made any of the three ways Oh My Pi gives the model to call dispatch_message and envoy_publish:
-# the tool itself, a write to its xd:// device, or eval code that calls tool.<name>(...). Any
-# publish counts; a message counts when its body starts with READY, which in eval code is a string
-# literal that starts with it.
+# made any of the three ways Oh My Pi gives the model to call dispatch_message and envoy_publish
+# (lib/omp-tool-calls.jq's calls). Any publish counts; a message counts when its body starts with
+# READY, which in eval code is a string literal that starts with it.
 merger_self_posted() {
   local f
   f=$(claim_session_file "$1" merger) || return 1
-  jq -s -c '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-    | select(.type == "toolCall") | ((.arguments.code? // "") | tostring) as $code
-    | select(.name == "dispatch_message" or .name == "envoy_publish" or
-        (.name == "write" and ((.arguments.path // "") | test("xd://(dispatch_message|envoy_publish)"))) or
-        (.name == "eval" and ($code | test("\\btool\\.(dispatch_message|envoy_publish)\\s*\\("))))
-    | select(.name == "envoy_publish" or ((.arguments.path // "") | test("envoy_publish")) or
-        ($code | test("\\btool\\.envoy_publish\\s*\\(")) or
-        ((.arguments.body // ((.arguments.content // "{}") | fromjson? // {} | .body) // "") | ltrimstr(" ") | startswith("READY")) or
-        ($code | test("[`\"\u0027]\\s*READY")))
+  jq -s -c -L "$script_lib" 'include "omp-tool-calls";
+    [.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
+    | select(calls("dispatch_message") or calls("envoy_publish"))
+    | select(calls("envoy_publish") or
+        ((call_arguments.body // "") | tostring | ltrimstr(" ") | startswith("READY")) or
+        ((.arguments.code? // "") | tostring | test("[`\"\u0027]\\s*READY")))
     | {name, arguments}]' "$f"
 }
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }

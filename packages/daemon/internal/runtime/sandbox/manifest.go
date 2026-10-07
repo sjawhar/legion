@@ -471,12 +471,9 @@ func (r *Runtime) agentSecretsVolumes(roles []claim.Role) []corev1.Volume {
 			continue
 		}
 		if volumes == nil {
-			expiry := int64(math.Ceil(broker.TokenExpiry.Seconds()))
 			volumes = []corev1.Volume{{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 				DefaultMode: new(int32(0o440)),
-				Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-					Audience: broker.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
-				}}},
+				Sources:     []corev1.VolumeProjection{{ServiceAccountToken: brokerTokenProjection(broker)}},
 			}}}}
 		}
 		volumes = append(volumes, corev1.Volume{Name: roleVolume(agentSecretsKeyVolume, role), VolumeSource: corev1.VolumeSource{
@@ -484,6 +481,13 @@ func (r *Runtime) agentSecretsVolumes(roles []claim.Role) []corev1.Volume {
 		}})
 	}
 	return volumes
+}
+
+// brokerTokenProjection is the ServiceAccount token a pod enrolled with broker projects for it: the
+// configured audience and expiry, at AgentSecretsTokenFile.
+func brokerTokenProjection(broker *AgentSecrets) *corev1.ServiceAccountTokenProjection {
+	expiry := int64(math.Ceil(broker.TokenExpiry.Seconds()))
+	return &corev1.ServiceAccountTokenProjection{Audience: broker.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile}
 }
 
 // agentSecretsMounts are role's launcher container's mounts of the agent-secrets volumes when it
@@ -500,38 +504,68 @@ func agentSecretsMounts(broker *AgentSecrets, role claim.Role) []corev1.VolumeMo
 	}
 }
 
-// lacksEnrollment is whether pod lacks an agent-secrets volume a pod of roles created now carries
-// (agentSecretsVolumes): the key directory of each role that enrolls (enrolledWith), by name, or
-// the projection of the broker's token, by the three fields the shim's token file depends on — its
-// audience, expiry and path. Such a role is started with the shim's agent-secrets flags
-// (launcherCommand), which name both, and the shim refuses to start without its token file; a
-// pod's volumes are fixed when it is created. So a pod made before the runtime enrolled, or under
-// another audience or expiry, cannot run a role that enrolls now, and relaunch replaces it, as it
-// replaces a pod whose launchers dial a moved stream. Nothing else of a stored volume is compared:
-// a field the API server's defaulting or an admission webhook adds, or another projection source
-// beside the token's, changes nothing the shim reads, and reading it as a lack would rebuild the
-// pod and re-provision its workspace at every role's relaunch.
+// lacksEnrollment is whether pod lacks, for some role of roles, the secrets broker's enrollment a
+// generation of that role started now runs against (movedEnrollment).
 func (r *Runtime) lacksEnrollment(pod *corev1.Pod, roles []claim.Role) bool {
-	held := map[string]corev1.Volume{}
+	return slices.ContainsFunc(roles, func(role claim.Role) bool {
+		_, moved := r.movedEnrollment(pod, role)
+		return moved
+	})
+}
+
+// movedEnrollment compares the agent-secrets volumes a generation of role started now runs against
+// (agentSecretsVolumes) with what pod carries; ok is whether pod lacks them. Such a role is started
+// with the shim's agent-secrets flags (launcherCommand), which name its key directory and the
+// broker's token file, and the shim refuses to start without its token file; a pod's volumes are
+// fixed when it is created. So a pod made before the runtime enrolled, or under another audience or
+// expiry, cannot run a role that enrolls now, and must be replaced, as a pod whose launchers dial a
+// moved stream must. The role's key directory is compared by name, and the token's projection by
+// the three fields the shim's token file depends on: its audience, expiry and path. Nothing else of
+// a stored volume is compared: a field the API server's defaulting or an admission webhook adds, or
+// another projection source beside the token's, changes nothing the shim reads, and reading it as a
+// lack would rebuild the pod and re-provision its workspace at every relaunch. A role that does not
+// enroll (enrolledWith) lacks nothing.
+func (r *Runtime) movedEnrollment(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
+	broker := r.enrolledWith(role)
+	if broker == nil {
+		return movedAddress{}, false
+	}
+	want, keyDir := brokerTokenProjection(broker), roleVolume(agentSecretsKeyVolume, role)
+	var held *corev1.ServiceAccountTokenProjection
+	hasKeyDir := false
 	for _, volume := range pod.Spec.Volumes {
-		held[volume.Name] = volume
-	}
-	for _, want := range r.agentSecretsVolumes(roles) {
-		have, ok := held[want.Name]
-		if !ok {
-			return true
-		}
-		if want.Projected == nil {
-			continue
-		}
-		token := want.Projected.Sources[0].ServiceAccountToken
-		if have.Projected == nil || !slices.ContainsFunc(have.Projected.Sources, func(source corev1.VolumeProjection) bool {
-			return sameTokenProjection(source.ServiceAccountToken, token)
-		}) {
-			return true
+		switch {
+		case volume.Name == agentSecretsTokenVolume && volume.Projected != nil:
+			for _, source := range volume.Projected.Sources {
+				if token := source.ServiceAccountToken; token != nil && (held == nil || sameTokenProjection(token, want)) {
+					held = token
+				}
+			}
+		case volume.Name == keyDir:
+			hasKeyDir = true
 		}
 	}
-	return false
+	if sameTokenProjection(held, want) && hasKeyDir {
+		return movedAddress{}, false
+	}
+	heldName := enrollmentName(held)
+	if held != nil && !hasKeyDir {
+		heldName += " without " + keyDir
+	}
+	return movedAddress{agentSecretsTokenVolume, heldName, enrollmentName(want)}, true
+}
+
+// enrollmentName names a broker token projection by the fields movedEnrollment compares, "(unset)"
+// for none; none of them is a credential.
+func enrollmentName(token *corev1.ServiceAccountTokenProjection) string {
+	if token == nil {
+		return "(unset)"
+	}
+	expiry := "(unset)"
+	if token.ExpirationSeconds != nil {
+		expiry = strconv.FormatInt(*token.ExpirationSeconds, 10) + "s"
+	}
+	return "audience=" + token.Audience + " expiry=" + expiry + " path=" + token.Path
 }
 
 // sameTokenProjection is whether held projects the token want does: the same audience, expiry and

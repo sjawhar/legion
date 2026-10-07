@@ -308,14 +308,14 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			row:     "9 a moved worker stream, before the launcher's state is read",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
 			want:    runtime.StaleAddress,
-			detail:  []string{connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL},
+			detail:  []string{movedAddress{connectFlag, movedStreamURL, testOptions().StreamURL}.String()},
 			absent:  []string{"disconnected", "LEGION_DAEMON_URL"},
 		},
 		{
 			row:     "9 a pending pod dialing a moved worker stream",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, pending, launchedUnder(moveStream)),
 			want:    runtime.StaleAddress,
-			detail:  []string{connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL},
+			detail:  []string{movedAddress{connectFlag, movedStreamURL, testOptions().StreamURL}.String()},
 		},
 		{
 			row:      "8 a generation recorded with every address a generation started now is handed",
@@ -328,7 +328,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 1)),
 			launcher: alive,
 			want:     runtime.StaleAddress,
-			detail:   []string{"role container tester runs generation 1", "LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL},
+			detail:   []string{"role container tester runs generation 1", movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String()},
 			absent:   []string{connectFlag, "ENVOY_URL"},
 		},
 		{
@@ -339,8 +339,8 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			launcher: alive,
 			want:     runtime.StaleAddress,
 			detail: []string{
-				"LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL,
-				"ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+				movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String(),
+				movedAddress{"ENVOY_URL", "http://192.0.2.9:9020", testOptions().EnvoyURL}.String(),
 			},
 			absent: []string{"ENVOY_NATS_URL"},
 		},

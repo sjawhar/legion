@@ -472,8 +472,14 @@ it. That catches a per-claim Sandbox of the layout before issue pods and the con
 `controller: daemon` daemon made before the controller ran in a launcher pod (`role=controller`, one
 `worker` container): remove either before enabling issue pods. Once the store opens and before it
 migrates, it refuses a claim that still records a Sandbox locator of the layout before issue pods
-(no pod uid, container or generation), that earlier controller's claim included. The daemon runs on
-a host its pods can reach and serves the worker stream they dial. The controller is `legion
+(no pod uid, container or generation), that earlier controller's claim included. Clear that claim
+with the release that made it, before upgrading: set `controller: operator` and boot that release
+once. It stops the controller its earlier boot launched, logging `controller: stopping the
+controller an earlier boot under controller: daemon launched; this daemon leaves the controller to
+its operator`: the stop deletes the claim's Sandbox and retires the claim, which then records no
+locator, so `legion claims list` shows `legion-<project>-controller` `retired`. Then start this
+release, with `controller: daemon` again if the daemon is to launch the controller. The daemon runs
+on a host its pods can reach and serves the worker stream they dial. The controller is `legion
 controller start` on the operator's machine, or, under `controller: daemon`, a pod of its own with
 one launcher that the daemon launches ([The controller](#the-controller)).
 
@@ -786,6 +792,12 @@ So the runtime compares a role's addresses with what it hands now on every evalu
 
 - **The stream** is read from the role container's launcher command in the pod spec, before the
   launcher's own state, since a launcher on a stale stream would only ever read as disconnected.
+- **The secrets broker's enrollment**, for a role that enrolls, is read from the pod spec at the
+  same point: the `agent-secrets-token` volume's projection of the broker's token (its audience,
+  expiry and path) and the role's own key directory, which a generation of the role started now
+  runs against. Like the stream, both are fixed for the pod's life, so turning
+  `runtime.kubernetes.agent_secrets` on, or changing its `audience` or `token_expiry_seconds`,
+  leaves every running workflow role holding a pod that lacks them.
 - **The other five** are read from a record on the issue Sandbox (`addresses.go`). Before it sends a
   generation's start command, the daemon merge-patches the role's own annotation,
   `legion.dev/addresses-<role>`, with the generation and, for each of the five, its variable, its
@@ -794,41 +806,39 @@ So the runtime compares a role's addresses with what it hands now on every evalu
   A later daemon reads the record from its informer cache, with no API read of its own, and compares
   the digests once the role's launcher reports it runs that generation. A role with no record, or a
   record of another generation, is never stale, so a generation started before records existed is
-  not relaunched for want of one; a record that cannot be read is named as moved, and the relaunch
+  not relaunched for want of one; a record that cannot be read is reported stale, and the relaunch
   writes a fresh one. The record holds no raw value: a URL's credentials travel only in the start
   command, never into a cluster object.
 
 A role holding any other value is reported `stale_address` rather than `alive` (`ObservationKind`,
 `internal/runtime/runtime.go`), and the observation's detail names each address that moved, with
 the name it holds and the one a generation started now is handed (`--connect
-tcp://192.0.2.5:13371, now tcp://192.0.2.7:13371`, or `ENVOY_URL https://envoy.internal.example, now
-https://ENVOY.INTERNAL.EXAMPLE`). The supervisor logs that detail, so every printed endpoint is
-constructed from its scheme, host and port alone, adding `xxxxx@` when userinfo is present. Path,
-query and fragment never appear, which also protects a value an earlier daemon accepted before the
-current endpoint grammar refused queries and fragments, and a value that yields no scheme and host
-is named only `xxxxx`. `ENVOY_NATS_URL` is named entry by entry from the URLs the loader accepted,
-never by splitting the joined value, since raw commas are valid in userinfo. A role this daemon
-started always compares equal, so only the roles a daemon under another configuration started are
-ever reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
-variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods created
-after it.
+tcp://192.0.2.5:13371, now tcp://192.0.2.7:13371`, `ENVOY_URL https://envoy.internal.example, now
+https://ENVOY.INTERNAL.EXAMPLE`, or `agent-secrets-token audience=agent-secrets expiry=3600s
+path=token, now audience=agent-secrets-next expiry=3600s path=token`). The supervisor logs that
+detail, so every printed endpoint is constructed from its scheme, host and port alone, adding
+`xxxxx@` when userinfo is present. Path, query and fragment never appear, which also protects a
+value an earlier daemon accepted before the current endpoint grammar refused queries and fragments,
+and a value that yields no scheme and host is named only `xxxxx`. `ENVOY_NATS_URL` is named entry by
+entry from the URLs the loader accepted, never by splitting the joined value, since raw commas are
+valid in userinfo. A role this daemon started always compares equal, so only the roles a daemon
+under another configuration started are ever reported, from the boot that re-adopts them; nobody
+runs a command for it. The operator's own variables (`runtime.kubernetes.pod.env`) are not
+compared: a change there reaches the pods created after it.
 
 The supervisor relaunches each reported claim at once, through the launch path a death uses: a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
-replaces follows from what moved. An issue pod whose launchers dial a stale stream is not healthy,
-so the first of its roles relaunched replaces the pod, under the pod's launch turn, and the issue's
-other roles resume into the new pod, whose six launchers dial the current stream; the controller's
-pod, whose one launcher dials a stale stream, is replaced the same way at its relaunch. A role whose
-environment alone moved starts its next generation in the same pod, handed the current addresses,
-and the pod and its other roles are left as they are, with one exception: enrolling with the
-secrets broker. A generation of a role that enrolls is started with the shim's agent-secrets flags,
-which name the broker's projected token and the role's key directory, and a pod carries those
-volumes only when it was created enrolled, for the audience and token expiry it was created with;
-the shim refuses to start without its token file. So when `AGENT_SECRETS_URL` moves because
-`runtime.kubernetes.agent_secrets` was turned on, or a relaunch finds the pod's projection made for
-another `audience` or `token_expiry_seconds`, the pod is replaced as one dialing a stale stream is,
-and the issue's other roles resume into the new pod. The stale observation is never charged, since
-the process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
+replaces follows from what moved. A pod whose launchers dial a stale stream, or which lacks the
+broker enrollment its roles are started against now, cannot run them as a pod created now would,
+and every role of it is reported at once, from the boot that re-adopts them: the first of them
+relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
+that turn, resume into the new pod, whose six launchers dial the current stream and mount the
+current enrollment. None of them is charged, and none is found gone when the pod is replaced under
+it. The controller's pod, whose one launcher dials a stale stream, is replaced the same way at its
+relaunch; it never enrolls, so the broker's settings never replace it. A role whose environment
+alone moved starts its next generation in the same pod, handed the current addresses, and the pod
+and its other roles are left as they are. The stale observation is never charged, since the
+process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
 A turn the stale process was in used the addresses it holds and ends with the relaunch, so the turn
 is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
 recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
@@ -1184,7 +1194,8 @@ issue's pod (every role container of it alike) and the image probe's.
   tree's close). Without the block, pods carry none of this. An older worker image is refused at
   the image probe: the block's pod variables are daemon API contract 8. A pod's agent-secrets
   volumes are fixed when it is created, so turning the block on, or changing its `audience` or
-  `token_expiry_seconds`, replaces each issue pod at the first relaunch of one of its roles
+  `token_expiry_seconds`, reports every running workflow role stale at the restart that brings the
+  change, and each issue pod is replaced with its roles moving into the new one together
   ([A pod whose address moved](#a-pod-whose-address-moved)).
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
@@ -1722,10 +1733,11 @@ back, or `legion claims stop`) deletes it, and its role Secret and volume with i
 keeps it while the daemon knows the claim, running or suspended, so a suspended controller's
 session survives, and deletes it once the claim is retired. Either delete runs under the pod's
 launch turn and only at the version of the Sandbox it was decided on: a controller relaunched into
-the Sandbox since has written it, so the delete is refused and the next sweep decides again on the
-claims known then. The controller Sandbox a daemon made before the controller ran in a launcher pod
-(`role=controller`, one `worker` container) is refused at boot like every Sandbox of the layout
-before issue pods, naming it: remove it before enabling issue pods.
+the Sandbox since has written it, so the delete is refused, the daemon logs `sandbox runtime: kept a
+sandbox written since its delete was decided; the orphan sweep decides it again` naming it, and the
+next sweep decides again on the claims known then. The controller Sandbox a daemon made before the
+controller ran in a launcher pod (`role=controller`, one `worker` container) is refused at boot like
+every Sandbox of the layout before issue pods, naming it: remove it before enabling issue pods.
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its

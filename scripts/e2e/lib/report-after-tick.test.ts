@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // report_after_tick, taken from stage4b-sandbox-tree.sh by name and run against controller sessions
 // written as Oh My Pi writes them: the daily-report checkpoint passes only when the controller's
@@ -9,12 +10,7 @@ import { join } from "node:path";
 // Pi gives the model three ways to make that call, and each must count: the dispatch_message tool
 // itself, a write to its xd://dispatch_message device, and eval code that calls
 // tool.dispatch_message(...).
-const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage4b-sandbox-tree.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "report-after-tick-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -121,6 +117,7 @@ function run(entries: Entry[]) {
     "bash",
     "-c",
     `set -Eeuo pipefail
+root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 profile_agent=${JSON.stringify(agent)} project=LEGSMOKE report=${report}
 ${fn("report_after_tick")}
 report_after_tick
