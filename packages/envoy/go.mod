@@ -5,6 +5,7 @@ go 1.26.8
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.63.1
 	github.com/aws/aws-sdk-go-v2/service/kms v1.61.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
@@ -35,7 +36,6 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.20 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.6 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.1 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.4 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.4 // indirect
@@ -107,12 +107,15 @@ require (
 )
 
 // The sjawhar/ygo fork carries ygo fixes Dispatch depends on while each waits in its own upstream
-// pull request (reearth/ygo #257, #260, #262, #263, #266, #267, #268, #269): an iterative delete
-// cascade and nested reads, so the stack a delete or read needs does not grow with a tree a peer
-// nested; the transactional GC range search; a merged update's skip parks the items after it
+// pull request (reearth/ygo #257, #260, #262, #263, #266, #267, #268, #269, #291): an iterative
+// delete cascade and nested reads, so the stack a delete or read needs does not grow with a tree a
+// peer nested; the transactional GC range search; a merged update's skip parks the items after it
 // rather than dropping the update that fills the gap; a whole document state resolves its own
 // dependencies before the pending cap; items merge only when their right origins match, so a
 // re-encoded document keeps its text order; BroadcastUpdate validates under the server's
-// MaxPendingItems; the bundled stores keep a large incremental update; and Apply stamps a room
-// with no peer idle when it returns, so the idle sweep evicts a room only the API touched.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-sami.2
+// MaxPendingItems; the bundled stores keep a large incremental update; Apply stamps a room with no
+// peer idle when it returns, so the idle sweep evicts a room only the API touched; and a
+// Hocuspocus-framed connection is answered one SyncStatus for each SyncStep2 or Update it sends, so
+// the browser's provider learns which of its edits the room took
+// (https://github.com/reearth/ygo/pull/291).
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-sami.3
