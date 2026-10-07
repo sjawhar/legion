@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -132,12 +133,13 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 }
 
 // movedAddresses are row 9's comparison: each address pod's main container holds that differs from
-// the one a pod launched now is handed (handedAddresses), as "<name> <held>, now <handed>". A pod
-// is compared only when its main container runs the shim with connectFlag, as every pod this
-// runtime builds does; one without (never one this runtime built) has nothing to compare, and row 9
-// must never read it as stale for want of it. A variable the container lacks holds "", as
-// mainEnvironment leaves unset an address the runtime hands none of. A handed value is compared as
-// the pod spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
+// the one a pod launched now is handed (handedAddresses), as "<name> <held>, now <handed>", both
+// named as named names them. A pod is compared only when its main container runs the shim with
+// connectFlag, as every pod this runtime builds does; one without (never one this runtime built)
+// has nothing to compare, and row 9 must never read it as stale for want of it. A variable the
+// container lacks holds "", as mainEnvironment leaves unset an address the runtime hands none of. A
+// handed value is compared as the pod spec carries it, escaped against the kubelet's expansion
+// (kubeletLiteral).
 func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == mainContainer })
 	if i < 0 {
@@ -155,18 +157,30 @@ func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 	var moved []string
 	for _, a := range r.handedAddresses() {
 		if handed := kubeletEscape(a.value); held[a.name] != handed {
-			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, orUnset(held[a.name]), orUnset(handed)))
+			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, named(held[a.name]), named(handed)))
 		}
 	}
 	return moved
 }
 
-// orUnset is an address as movedAddresses names it: "(unset)" for none.
-func orUnset(address string) string {
+// named is an address as movedAddresses names it: "(unset)" for none, and otherwise the address
+// with any user and password in its URLs (ENVOY_NATS_URL holds several, comma-separated) shown as
+// xxxxx. The supervisor logs the detail, and the daemon's log has readers the pod's spec does not.
+func named(address string) string {
 	if address == "" {
 		return "(unset)"
 	}
-	return address
+	if !strings.Contains(address, "@") {
+		return address
+	}
+	urls := strings.Split(address, ",")
+	for i, raw := range urls {
+		if u, err := url.Parse(raw); err == nil && u.User != nil {
+			u.User = url.User("xxxxx")
+			urls[i] = u.String()
+		}
+	}
+	return strings.Join(urls, ",")
 }
 
 // podAbsent is row 3's detail: the Sandbox's mode, its Suspended condition when current, and any

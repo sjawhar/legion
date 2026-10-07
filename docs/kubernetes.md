@@ -625,8 +625,10 @@ every evaluation of the pod (each watch event, the probe-interval sweep, each pr
 pod lacks counting as unset. A pod holding any other value is reported `stale_address` rather than
 `alive` (`ObservationKind`, `internal/runtime/runtime.go`), and the observation's detail names each
 address that moved, with the value the pod holds and the one a new pod is handed
-(`LEGION_DAEMON_URL http://192.0.2.5:13370, now http://192.0.2.7:13370`). A pod this runtime launched
-always compares equal, so only the pods a daemon under another configuration launched are ever
+(`LEGION_DAEMON_URL http://192.0.2.5:13370, now http://192.0.2.7:13370`). The supervisor logs that
+detail, so a URL's user and password are named `xxxxx` there (`nats://xxxxx@nats.example:4222`),
+since the daemon's log has readers a pod's spec does not. A pod this runtime launched always
+compares equal, so only the pods a daemon under another configuration launched are ever
 reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
 variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods launched
 after it. The supervisor relaunches each reported claim at once, through the launch path a death

@@ -65,6 +65,16 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		containers := podOf(t, r, workerSpec(t), false).Containers
 		return func(p *corev1.Pod) { p.Spec.Containers = containers }
 	}
+	// withoutConnect drops the worker shim's --connect and its address from the main container, as
+	// no pod this runtime builds is.
+	withoutConnect := func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if c := &p.Spec.Containers[i]; c.Name == mainContainer {
+				flag := slices.Index(c.Command, connectFlag)
+				c.Command = slices.Delete(slices.Clone(c.Command), flag, flag+2)
+			}
+		}
+	}
 	running := corev1.PodStatus{Phase: corev1.PodRunning}
 	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
 		status := corev1.PodStatus{Phase: corev1.PodFailed}
@@ -201,6 +211,11 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:    runtime.Alive,
 		},
 		{
+			row:     "8 a pod whose worker shim has no --connect is never read as stale for want of it",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(*Options) {}), withoutConnect),
+			want:    runtime.Alive,
+		},
+		{
 			row:     "9 a moved worker stream",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
 			want:    runtime.StaleAddress,
@@ -300,6 +315,16 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 		"the secrets broker moved": {
 			launched: func(o *Options) { o.AgentSecrets.URL = "https://secrets-old.internal.example" },
 			want:     "AGENT_SECRETS_URL https://secrets-old.internal.example, now " + broker,
+		},
+		"NATS moved, naming no user or password": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://legion:nats-password@192.0.2.9:4222", "nats://nats-token@192.0.2.10:4222"}
+			},
+			want: "ENVOY_NATS_URL nats://xxxxx@192.0.2.9:4222,nats://xxxxx@192.0.2.10:4222, now nats://192.0.2.250:4222",
+		},
+		"Dispatch moved to an address with a user and password, naming neither": {
+			now:  func(o *Options) { o.DispatchURL = "https://legion:dispatch-password@dispatch.internal.example" },
+			want: "DISPATCH_URL " + dispatch + ", now https://xxxxx@dispatch.internal.example",
 		},
 		"Dispatch configured only now": {
 			launched: func(o *Options) { o.DispatchURL, o.DispatchToken = "", "" },
