@@ -6,11 +6,16 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -34,7 +39,7 @@ func controllerSpec(t *testing.T) runtime.SpawnSpec {
 	return spec
 }
 
-// The controller's pod is an issue pod with a one-role list: the controller's launcher alone, on a
+// The controller's pod is the runtime's other kind of pod: the controller's launcher alone, on a
 // volume of its own the Sandbox owns, so a relaunch resumes its session. It provisions no
 // workspace and holds no repository credential: its one init container makes the sessions
 // directory and holds a resume to its session, and its labels name the controller and no tree or
@@ -53,10 +58,6 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare the controller's launch: %v", err)
 	}
-	if want := []claim.Role{claim.RoleController}; !slices.Equal(l.roles, want) {
-		t.Fatalf("the controller's pod runs the roles %v, want %v", l.roles, want)
-	}
-
 	s := r.sandboxManifest(l)
 	if s.Name != "legion-legion-controller" {
 		t.Errorf("the controller's Sandbox is %s, want legion-legion-controller", s.Name)
@@ -73,8 +74,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 				t.Errorf("labels carry %s (%v): a tree pod's anti-affinity would take the controller for another tree", key, labels)
 			}
 		}
-		if roles, err := podRoles(labels); err != nil || !slices.Equal(roles, l.roles) {
-			t.Errorf("labels %v name the roles %v (%v), want the pod's %v", labels, roles, err, l.roles)
+		if kind, err := podKindOf(labels); err != nil || kind != (controllerPod{}) {
+			t.Errorf("labels %v name the pod kind %T (%v), want the controller's", labels, kind, err)
 		}
 	}
 
@@ -146,10 +147,13 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 
 // The controller's agent runs the way every role's does — its launcher starts the shim on the pod
 // baseline, and the shim Oh My Pi in RPC mode with its prompt — and is told it is the controller,
-// and nothing of a tree, an issue, a workspace, GitHub or the secrets broker.
+// and nothing of a tree, an issue, a workspace, GitHub or the secrets broker: of the variables the
+// runtime owns (runtimeOwned), it is told exactly those every agent is told and its own marker, so
+// a variable the runtime comes to tell any agent fails here until it is decided for the controller.
 func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -169,14 +173,20 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 			t.Errorf("%s = %q, want %q", name, env[name], want)
 		}
 	}
-	for _, name := range []string{
-		"LEGION_TREE", "LEGION_ISSUE", "LEGION_WORKSPACE", "LEGION_GH_PATH", "LEGION_GIT_PATH", "LEGION_JJ_PATH",
-		"LEGION_CREDENTIAL_HELPER", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "UV_LINK_MODE", "AGENT_SECRETS_URL",
-		"AGENT_SECRETS_KEY_DIR",
-	} {
-		if value, ok := env[name]; ok {
-			t.Errorf("the controller is told %s=%q, which only a tree agent has", name, value)
+	var told []string
+	for name := range env {
+		if runtimeOwned[name] {
+			told = append(told, name)
 		}
+	}
+	slices.Sort(told)
+	if want := []string{
+		"DISPATCH_TOKEN_FILE", "DISPATCH_URL", "ENVOY_NATS_URL", "ENVOY_URL", "GIT_TERMINAL_PROMPT", "LEGION_BOOT_TOKEN_FILE",
+		"LEGION_CONTROLLER", "LEGION_DAEMON_URL", "LEGION_GENERATION", "LEGION_GRANT_FILE", "LEGION_PROJECT", "LEGION_ROLE",
+		"LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+		"XDG_STATE_HOME",
+	}; !slices.Equal(told, want) {
+		t.Errorf("the controller is told the runtime's variables %v, want exactly %v", told, want)
 	}
 	command := strings.Join(worker.Command, " ")
 	for _, want := range []string{" worker-shim --connect " + opts.StreamURL, " --pod-safety ", " --mode rpc --append-system-prompt "} {
@@ -330,10 +340,10 @@ func TestTheLauncherResolverAcceptsTheControllersLauncherOnItsOwnPodOnly(t *test
 }
 
 // The daemon tells the orphan sweep of every claim it has not retired (internal/daemon's
-// knownClaims), a suspended one with no locator. The controller's one-role Sandbox holds its saved
-// session, so a known controller claim keeps it, running or suspended; once the claim is retired,
-// and so unknown, the sweep deletes it. A known claim of another Sandbox or role keeps nothing of
-// the controller's.
+// knownClaims), a suspended one with no locator. The controller's Sandbox holds its saved session,
+// so a known controller claim keeps it, running or suspended; once the claim is retired, and so
+// unknown, the sweep deletes it. A known claim of another Sandbox or role keeps nothing of the
+// controller's.
 func TestTheOrphanSweepKeepsAKnownControllersSandboxAndDeletesAnUnknownOnes(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(controllerSpec(t))
@@ -362,6 +372,128 @@ func TestTheOrphanSweepKeepsAKnownControllersSandboxAndDeletesAnUnknownOnes(t *t
 	g.eventually("the retired controller's Sandbox to be deleted", func() bool { return g.sandbox(name) == nil })
 	if g.sandbox(worker.Sandbox.Name) == nil {
 		t.Fatal("the sweep deleted the live tree's issue Sandbox")
+	}
+}
+
+// Releasing the controller deletes its Sandbox under the pod's launch turn, as every relaunch, issue
+// suspension and orphan delete of a pod runs under it: while a relaunch holds the turn, the release
+// waits, and the Sandbox is deleted once the turn is given back.
+func TestReleasingTheControllerWaitsForItsPodsLaunchTurn(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(controllerSpec(t))
+	name := loc.Sandbox.Name
+	held, err := g.r.lockPod(g.ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() { released <- g.r.Release(g.ctx, runtime.Known{Claim: controllerToken, Locator: &loc}) }()
+	select {
+	case err := <-released:
+		t.Fatalf("Release returned (%v) while the pod's launch turn was held", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if g.sandbox(name) == nil {
+		t.Fatal("the controller's Sandbox was deleted while its pod's launch turn was held")
+	}
+	held()
+	if err := <-released; err != nil {
+		t.Fatalf("Release once the turn was given back: %v", err)
+	}
+	if s := g.sandbox(name); s != nil {
+		t.Fatalf("the released controller's Sandbox %s is still there", s.Name)
+	}
+}
+
+// The controller's Sandbox is deleted only as the decision to delete it read it: the orphan sweep
+// decides on the claims it was told before it began, and a release on the store's copy. A
+// controller relaunched into the Sandbox since writes it (every start records its addresses), so a
+// delete fenced to the read conflicts and the Sandbox, volume and session included, stays for the
+// next decision, which deletes it once nothing has written it since.
+func TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays(t *testing.T) {
+	for name, deleteIt := range map[string]func(g *rig) error{
+		"the orphan sweep": func(g *rig) error { return g.r.ReconcileOrphans(g.ctx, nil, 0) },
+		"its release":      func(g *rig) error { return g.r.Release(g.ctx, runtime.Known{Claim: controllerToken}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var written atomic.Bool
+			var g *rig
+			sandboxName := SandboxName(controllerToken)
+			hooks := &sandboxHooks{
+				beforeDelete: func(name string) {
+					if name == sandboxName && written.CompareAndSwap(true, false) {
+						setResourceVersion(g, name, "rv-relaunched")
+					}
+				},
+				afterGet: func(string) {},
+			}
+			g = newRig(t, nil, withSandboxHooks(hooks))
+			g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))
+			g.spawn(controllerSpec(t))
+			setResourceVersion(g, sandboxName, "rv-read")
+			g.eventually("the store to hold the Sandbox as read", func() bool { return storedVersion(g, sandboxName) == "rv-read" })
+
+			written.Store(true)
+			if err := deleteIt(g); err != nil {
+				t.Fatal(err)
+			}
+			if written.Load() {
+				t.Fatal("the controller's Sandbox was never asked to be deleted")
+			}
+			if g.sandbox(sandboxName) == nil {
+				t.Fatal("a controller Sandbox written since the delete was decided was deleted")
+			}
+
+			g.eventually("the store to hold the Sandbox as written", func() bool { return storedVersion(g, sandboxName) == "rv-relaunched" })
+			if err := deleteIt(g); err != nil {
+				t.Fatal(err)
+			}
+			if s := g.sandbox(sandboxName); s != nil {
+				t.Fatalf("the controller's Sandbox %s, unwritten since the second decision, is still there", s.Name)
+			}
+		})
+	}
+}
+
+// setResourceVersion stamps the Sandbox name in the tracker with version, as a write to it would:
+// the fake tracker keeps whatever version an object carries.
+func setResourceVersion(g *rig, name, version string) {
+	g.t.Helper()
+	object, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, name)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	stamped := object.(*unstructured.Unstructured).DeepCopy()
+	stamped.SetResourceVersion(version)
+	if err := g.dyn.Tracker().Update(sandboxGVR, stamped, testNamespace); err != nil {
+		g.t.Fatal(err)
+	}
+}
+
+// storedVersion is the resourceVersion of the Sandbox name in the runtime's store, "" when absent.
+func storedVersion(g *rig, name string) string {
+	s, err := g.r.storedSandbox(name)
+	if err != nil || s == nil {
+		return ""
+	}
+	return s.ResourceVersion
+}
+
+// fenceSandboxDeletes refuses a Sandbox delete whose preconditions the tracker's object does not
+// meet, as the API server does: the fake applies none.
+func fenceSandboxDeletes(g *rig) k8stesting.ReactionFunc {
+	return func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		deleting := action.(k8stesting.DeleteAction)
+		fence := deleting.GetDeleteOptions().Preconditions
+		object, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, deleting.GetName())
+		if fence == nil || err != nil {
+			return false, nil, nil
+		}
+		current := object.(*unstructured.Unstructured)
+		if (fence.UID != nil && *fence.UID != current.GetUID()) || (fence.ResourceVersion != nil && *fence.ResourceVersion != current.GetResourceVersion()) {
+			return true, nil, apierrors.NewConflict(sandboxGVR.GroupResource(), deleting.GetName(), errors.New("the object has been modified"))
+		}
+		return false, nil, nil
 	}
 }
 

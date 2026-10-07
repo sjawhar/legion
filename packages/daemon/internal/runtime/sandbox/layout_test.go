@@ -30,10 +30,10 @@ func TestTheBootCensusRefusesLegacyIssueSandboxesOnly(t *testing.T) {
 }
 
 // The census passes both pods this runtime builds, an issue pod's six launchers and the project
-// controller's one, and holds every other Sandbox to the launchers its labels name (podRoles): the
-// controller Sandbox a daemon before issue pods made (role=controller, one worker container), a pod
-// missing a launcher or running one more, and a Sandbox whose labels name no role list are each
-// refused, by name, before the daemon adopts, suspends or deletes any of them.
+// controller's one, and holds every other Sandbox to the launchers of the kind its labels name
+// (podKindOf): the controller Sandbox a daemon before issue pods made (role=controller, one worker
+// container), a pod missing a launcher or running one more, and a Sandbox whose labels name no kind
+// are each refused, by name, before the daemon adopts, suspends or deletes any of them.
 func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T) {
 	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))

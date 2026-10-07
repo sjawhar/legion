@@ -2,14 +2,15 @@
 // kubernetes-sigs/agent-sandbox v1.0.3). Six role containers share its workspace and network;
 // each has a private launcher that starts and stops only its own worker-shim child. The project
 // controller (`controller: daemon`) runs in a Sandbox of its own whose pod has the controller's
-// launcher alone: the same pod with a one-role list.
+// launcher alone. The two are the runtime's two kinds of pod (podKind): one supervision path runs
+// both, and each kind builds the facets of its pod the other does not.
 //
 // Process Suspend leaves the shared Sandbox running, and so does Release of a claim on an issue.
 // The durable issue close first stops every stored role, then sets its Sandbox Suspended and waits
 // for the pod to disappear, retaining the volume and sessions until linger cleanup. Re-admission
 // resumes the Sandbox, while an individual role's recovery in a healthy pod does not replace that
-// pod. A Sandbox whose role list is the released claim's role alone, the controller's, is that
-// claim's, and goes with its Release or, once the claim is retired, with the orphan sweep.
+// pod. The controller's Sandbox is the controller's claim's, and goes with its Release or, once
+// the claim is retired, with the orphan sweep.
 //
 // The Sandbox structs are Legion's own (types.go): importing sigs.k8s.io/agent-sandbox would move
 // grpc, otel, and controller-runtime for every module under go.work.
@@ -104,10 +105,10 @@ type Runtime struct {
 	watch map[claim.Token]runtime.Locator
 	// observer is the running Observe, nil when none runs.
 	observer *observer
-	// issues serializes first creation, replacement and orphan deletion of one issue pod. Tree
-	// initialization stays separately serialized because child issue pods share the root's clone
-	// and PVC.
-	issues map[string]chan struct{}
+	// podTurns serializes the relaunches, issue suspension, release and orphan deletion of one pod,
+	// keyed by its Sandbox's name (lockPod). Tree initialization stays separately serialized because
+	// child issue pods share the root's clone and PVC.
+	podTurns map[string]chan struct{}
 	// trees serializes the launches of one tree's pods (relaunch.go, awaitTreeInitialized).
 	trees map[string]chan struct{}
 }
@@ -148,11 +149,11 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 }
 
 // rejectLegacyIssueSandboxes refuses the project's first Sandbox whose pod is not one this runtime
-// builds: its containers must be exactly the launcher roles its labels name (podRoles), every
-// workflow role for an issue Sandbox and the controller alone for the project controller's. So a
-// per-claim Sandbox of the layout before issue pods (one worker container), the controller Sandbox
-// a daemon before issue pods made (role=controller, one worker container), a pod missing a
-// launcher, one with a container more, and a Sandbox whose labels name no role list are each
+// builds: its containers must be exactly the launcher roles of the kind its labels name
+// (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
+// controller's. So a per-claim Sandbox of the layout before issue pods (one worker container), the
+// controller Sandbox a daemon before issue pods made (role=controller, one worker container), a pod
+// missing a launcher, one with a container more, and a Sandbox whose labels name no kind are each
 // refused, and an operator removes it before enabling issue pods.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
 	reading, cancel := call(ctx)
@@ -165,10 +166,11 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 		if object.GetLabels()[labelProbe] != "" {
 			continue
 		}
-		roles, err := podRoles(object.GetLabels())
+		kind, err := podKindOf(object.GetLabels())
 		if err != nil {
 			return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s: %v; migrate or remove it before enabling issue pods", object.GetName(), err)
 		}
+		roles := kind.roles()
 		containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
 		if err != nil || !found {
 			return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s has no issue-pod container shape; migrate or remove it before enabling issue pods", object.GetName())
@@ -272,7 +274,7 @@ func configure(opts Options) (*Runtime, error) {
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
-		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, issues: map[string]chan struct{}{},
+		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
 		trees: map[string]chan struct{}{}, launchers: newLaunchers(),
 	}
 	if len(r.agent) == 0 {
@@ -604,8 +606,8 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 // claim from this runtime. It never suspends or deletes an issue Sandbox, even when this runtime
 // sees no sibling role: the issue's Sandbox, its Secrets and, for a root, the tree volume are the
 // tree cleanup's alone (CleanupTree), which runs once every stored claim of the tree has retired.
-// A Sandbox whose role list is the released claim's role alone, the project controller's, belongs
-// to that claim and nothing else, so Release deletes it (releaseOwnSandbox).
+// The project controller's Sandbox belongs to the controller's claim and nothing else, so releasing
+// that claim deletes it (releaseControllerSandbox).
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
@@ -616,18 +618,19 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 		}
 	}
 	r.forget(k.Claim)
-	return r.releaseOwnSandbox(ctx, k.Claim)
+	return r.releaseControllerSandbox(ctx, k.Claim)
 }
 
-// releaseOwnSandbox deletes token's Sandbox when the store holds it as this project's with a role
-// list (podRoles) of token's role alone; its Secrets and volume go with it through their owner
-// references. Any other Sandbox, an issue's above all, is left as it is, and the decision costs no
-// API read. One the store does not hold is the orphan sweep's once the claim has retired.
-func (r *Runtime) releaseOwnSandbox(ctx context.Context, token claim.Token) error {
-	role, ok := token.Role()
-	if !ok {
-		return nil
-	}
+// releaseControllerSandbox deletes token's Sandbox when the store holds it as this project's
+// controller pod (podKindOf), which only the controller's claim names; its Secrets and volume go
+// with it through their owner references. Any other Sandbox, an issue's above all, is left as it
+// is, and the decision costs no API read and takes no turn. One the store does not hold is the
+// orphan sweep's once the claim has retired. The delete runs under the pod's launch turn and is
+// fenced to the Sandbox the store showed (deleteFenced): a relaunch of the controller that holds the
+// turn meanwhile writes the Sandbox (recordAddresses), so the delete conflicts and leaves the
+// Sandbox to the orphan sweep, which judges it again on the claims known then, and a relaunch that
+// begins after waits for the delete and creates the Sandbox afresh.
+func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Token) error {
 	name := SandboxName(token)
 	s, err := r.storedSandbox(name)
 	if err != nil {
@@ -636,18 +639,19 @@ func (r *Runtime) releaseOwnSandbox(ctx context.Context, token claim.Token) erro
 	if s == nil || s.Labels[labelProject] != r.project {
 		return nil
 	}
-	if roles, err := podRoles(s.Labels); err != nil || !slices.Equal(roles, []claim.Role{role}) {
+	kind, err := podKindOf(s.Labels)
+	if _, controller := kind.(controllerPod); err != nil || !controller {
 		return nil
 	}
-	deleting, cancel := call(ctx)
-	defer cancel()
-	uid, background := s.UID, metav1.DeletePropagationBackground
-	err = r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{PropagationPolicy: &background, Preconditions: &metav1.Preconditions{UID: &uid}})
-	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-		return fmt.Errorf("release %s: delete sandbox %s: %w", token, name, err)
+	release, err := r.lockPod(ctx, name)
+	if err != nil {
+		return fmt.Errorf("release %s: %w", token, err)
 	}
-	r.forgetLauncherCredentials(name)
-	r.log.Info("sandbox runtime: deleted a released claim's sandbox", "claim", token, "sandbox", name, "uid", uid)
+	defer release()
+	fence := metav1.Preconditions{UID: &s.UID, ResourceVersion: &s.ResourceVersion}
+	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted a released claim's sandbox", "claim", token); err != nil {
+		return fmt.Errorf("release %s: %w", token, err)
+	}
 	return nil
 }
 
@@ -680,22 +684,28 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // when it has no lifecycle, which a launch whose create reached the API after its tree's cleanup
 // listed it can leave. A Sandbox of a tree whose lifecycle is open or releasing is its cleanup's
 // alone (CleanupTree), whatever claims are known: a launch passes its claim's lifecycle check
-// before it creates a Sandbox, so what this runtime launches is never swept. A Sandbox whose role
-// list is one role alone, the project controller's, is owned by the claim whose Sandbox and role it
-// is: it is an orphan once no claim of known is that claim. known is every claim the daemon has not
-// retired, a suspended one included (knownClaims), so a retired controller's Sandbox goes and a
-// suspended one's, which holds its session, stays. Each decision and delete runs under the pod's
-// launch lock, so a launch that begins meanwhile waits for the delete and then creates the Sandbox
-// afresh. The image probe's Sandbox (labelled legion.dev/probe) is no claim's and never an orphan:
-// the probe deletes it, and its shutdown time has the controller delete it otherwise (probe.go).
-// known's located claims join the watch, unless it already holds a newer incarnation of the claim,
-// and are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
+// before it creates a Sandbox, so what this runtime launches is never swept. The project
+// controller's Sandbox is owned by the controller's claim: it is an orphan once no claim of known
+// is that claim. known is every claim the daemon has not retired, a suspended one included
+// (knownClaims), so a retired controller's Sandbox goes and a suspended one's, which holds its
+// session, stays. Every delete runs under the pod's launch turn, so a launch that begins meanwhile
+// waits for the delete and then creates the Sandbox afresh, and is fenced to what its decision
+// read: an issue Sandbox's tree is read again under the turn, and the controller's Sandbox, whose
+// decision rests on known, read before the sweep, is deleted only as the store showed it
+// (deleteFenced). Every start writes the Sandbox its generation's address record
+// (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
+// next sweep judges it on the claims known then. The image probe's Sandbox (labelled
+// legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
+// has the controller delete it otherwise (probe.go). known's located claims join the watch, unless
+// it already holds a newer incarnation of the claim, and are evaluated at once. Nothing here lists
+// Secrets: each goes with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
-	claimed := map[claimedPod]bool{}
+	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.
+	controllers := map[string]bool{}
 	for _, k := range known {
-		if role, ok := k.Claim.Role(); ok {
-			claimed[claimedPod{name: SandboxName(k.Claim), role: role}] = true
+		if role, ok := k.Claim.Role(); ok && role == claim.RoleController {
+			controllers[SandboxName(k.Claim)] = true
 		}
 		if err := k.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile orphans: %w", err))
@@ -718,55 +728,56 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {
 			continue
 		}
-		if err := r.sweep(ctx, u, claimed); err != nil {
+		if err := r.sweep(ctx, u, controllers); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// claimedPod is a known claim's Sandbox and role, which the orphan sweep keeps a one-role Sandbox
-// for.
-type claimedPod struct {
-	name string
-	role claim.Role
-}
-
 // sweep deletes u, the Sandbox as the informer held it, unless something owns it
-// (ReconcileOrphans): for a one-role Sandbox, a claim of claimed; for an issue Sandbox, its tree's
-// lifecycle. A live tree is checked before any lock is taken, so a Sandbox a concurrent launch of
-// the same issue is still creating or waiting on is never serialized behind that launch: the
-// common case, where the tree stays live, costs no lock at all. Only once the tree looks closed
-// does the issue's launch lock apply, held from a second, authoritative TreeLive read through the
-// delete (lockPod), so a launch that begins meanwhile still waits for the delete and then creates
-// the Sandbox afresh. A Sandbox whose labels name no role list, or whose issue and tree labels are
-// no keys, is kept and reported: what cannot be told apart from a live tree's is never deleted.
-func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, claimed map[claimedPod]bool) error {
-	roles, err := podRoles(u.GetLabels())
+// (ReconcileOrphans), by its kind (podKindOf): the controller's pod is kept while it is one of
+// controllers, the Sandboxes of the known controller claims; an issue pod while its tree's lifecycle
+// is live. A live tree is checked before any turn is taken, so a Sandbox a concurrent launch of the
+// same issue is still creating or waiting on is never serialized behind that launch: the common
+// case, where the tree stays live, costs no turn at all. Only once the tree looks closed does the
+// pod's launch turn apply, held from a second, authoritative TreeLive read through the delete
+// (lockPod), so a launch that begins meanwhile still waits for the delete and then creates the
+// Sandbox afresh. A Sandbox whose labels name no kind, or whose issue and tree labels are no keys,
+// is kept and reported: what cannot be told apart from a live tree's is never deleted.
+func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, controllers map[string]bool) error {
+	kind, err := podKindOf(u.GetLabels())
 	if err != nil {
 		return fmt.Errorf("reconcile orphans: Sandbox %s: %v; kept", u.GetName(), err)
 	}
-	if len(roles) == 1 {
-		if claimed[claimedPod{name: u.GetName(), role: roles[0]}] {
+	name, uid := u.GetName(), u.GetUID()
+	switch kind.(type) {
+	case controllerPod:
+		if controllers[name] {
 			return nil
 		}
-		release, err := r.lockPod(ctx, u.GetName())
+		release, err := r.lockPod(ctx, name)
 		if err != nil {
 			return err
 		}
 		defer release()
-		return r.deleteOrphan(ctx, u, "role", string(roles[0]))
+		version := u.GetResourceVersion()
+		fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
+		if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "role", claim.RoleController); err != nil {
+			return fmt.Errorf("reconcile orphans: %w", err)
+		}
+		return nil
 	}
 	issue, tree := u.GetLabels()[labelIssue], u.GetLabels()[labelTree]
 	if !claim.IsIssueKey(issue) || !claim.IsIssueKey(tree) {
-		return fmt.Errorf("reconcile orphans: Sandbox %s names no issue and tree (labels %s=%q, %s=%q); kept", u.GetName(), labelIssue, issue, labelTree, tree)
+		return fmt.Errorf("reconcile orphans: Sandbox %s names no issue and tree (labels %s=%q, %s=%q); kept", name, labelIssue, issue, labelTree, tree)
 	}
 	if live, err := r.store.TreeLive(ctx, r.project, tree); err != nil {
 		return fmt.Errorf("reconcile orphans: %w", err)
 	} else if live {
 		return nil
 	}
-	release, err := r.lockPod(ctx, issue)
+	release, err := r.lockPod(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -778,23 +789,30 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, claim
 	if live {
 		return nil
 	}
-	return r.deleteOrphan(ctx, u, "tree", tree)
+	if err := r.deleteFenced(ctx, name, metav1.Preconditions{UID: &uid}, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
+		return fmt.Errorf("reconcile orphans: %w", err)
+	}
+	return nil
 }
 
-// deleteOrphan deletes the Sandbox u, fenced by its uid, and logs it with what made it an orphan
-// (key and value: its tree, or its one role). One already gone or replaced is no error.
-func (r *Runtime) deleteOrphan(ctx context.Context, u *unstructured.Unstructured, key, value string) error {
+// deleteFenced deletes the Sandbox name once, fenced by fence, and forgets its launchers'
+// credentials; msg and attrs log the delete. Its caller holds the pod's launch turn. One already
+// gone is gone, and one the fence refuses, replaced or written since, is kept: neither is an error.
+// Deletion propagates in the background, a custom resource's default, so its Secrets and volume go
+// after it through their owner references.
+func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
 	deleting, cancel := call(ctx)
 	defer cancel()
-	uid := u.GetUID()
-	err := r.sandboxClient().Delete(deleting, u.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{Preconditions: &fence})
 	switch {
 	case err == nil:
-		r.forgetLauncherCredentials(u.GetName())
-		r.log.Info("sandbox runtime: deleted an orphaned sandbox", "sandbox", u.GetName(), "uid", uid, key, value)
-	case apierrors.IsNotFound(err) || apierrors.IsConflict(err):
+		r.forgetLauncherCredentials(name)
+		r.log.Info(msg, append([]any{"sandbox", name, "uid", *fence.UID}, attrs...)...)
+	case apierrors.IsNotFound(err):
+		r.forgetLauncherCredentials(name)
+	case apierrors.IsConflict(err):
 	default:
-		return fmt.Errorf("reconcile orphans: delete sandbox %s: %w", u.GetName(), err)
+		return fmt.Errorf("delete sandbox %s: %w", name, err)
 	}
 	return nil
 }

@@ -415,8 +415,8 @@ A held turn, unfinished or uncertain launch, or Kubernetes error keeps the effec
 a superseded close finishes without acting. Once the roles have stopped, the daemon sets that
 issue's Sandbox to `Suspended` and waits for its pod to disappear. The Sandbox, tree volume and
 recorded sessions remain until linger cleanup. A daemon restart retries the stored effect.
-Re-admission during linger reuses those resources and resumes the recorded sessions; the issue's
-launch lock orders a concurrent resume after any suspension already in flight.
+Re-admission during linger reuses those resources and resumes the recorded sessions; the issue
+pod's launch turn orders a concurrent resume after any suspension already in flight.
 
 Linger expiry reserves its tree only while the root still lingers at the close's generation, so
 a re-admission that committed first fences it; an operator close reserves after it authenticated
@@ -807,11 +807,18 @@ after it.
 The supervisor relaunches each reported claim at once, through the launch path a death uses: a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
 replaces follows from what moved. An issue pod whose launchers dial a stale stream is not healthy,
-so the first of its roles relaunched replaces the pod, under the issue's lock, and the issue's other
-roles resume into the new pod, whose six launchers dial the current stream; the controller's pod,
-whose one launcher dials a stale stream, is replaced the same way at its relaunch. A role whose
+so the first of its roles relaunched replaces the pod, under the pod's launch turn, and the issue's
+other roles resume into the new pod, whose six launchers dial the current stream; the controller's
+pod, whose one launcher dials a stale stream, is replaced the same way at its relaunch. A role whose
 environment alone moved starts its next generation in the same pod, handed the current addresses,
-and the pod and its other roles are left as they are. The stale observation is never charged, since
+and the pod and its other roles are left as they are, with one exception: enrolling with the
+secrets broker. A generation of a role that enrolls is started with the shim's agent-secrets flags,
+which name the broker's projected token and the role's key directory, and a pod carries those
+volumes only when it was created enrolled, for the audience and token expiry it was created with;
+the shim refuses to start without its token file. So when `AGENT_SECRETS_URL` moves because
+`runtime.kubernetes.agent_secrets` was turned on, or a relaunch finds the pod's projection made for
+another `audience` or `token_expiry_seconds`, the pod is replaced as one dialing a stale stream is,
+and the issue's other roles resume into the new pod. The stale observation is never charged, since
 the process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
 A turn the stale process was in used the addresses it holds and ends with the relaunch, so the turn
 is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
@@ -1166,7 +1173,10 @@ issue's pod (every role container of it alike) and the image probe's.
   credential requests at request time) — hands the enrollment id back to the shim, and revokes it
   wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the
   tree's close). Without the block, pods carry none of this. An older worker image is refused at
-  the image probe: the block's pod variables are daemon API contract 8.
+  the image probe: the block's pod variables are daemon API contract 8. A pod's agent-secrets
+  volumes are fixed when it is created, so turning the block on, or changing its `audience` or
+  `token_expiry_seconds`, replaces each issue pod at the first relaunch of one of its roles
+  ([A pod whose address moved](#a-pod-whose-address-moved)).
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
   `provider_keys` names and no other key of the Secret, each at a file named for its variable, and
@@ -1700,10 +1710,12 @@ the controller a start-procedure turn, so size it.
 The Sandbox is the claim's alone, where an issue's is its tree's. A release of the claim (a switch
 back, or `legion claims stop`) deletes it, and its role Secret and volume with it. The orphan sweep
 keeps it while the daemon knows the claim, running or suspended, so a suspended controller's
-session survives, and deletes it once the claim is retired. The controller Sandbox a daemon made
-before the controller ran in a launcher pod (`role=controller`, one `worker` container) is refused
-at boot like every Sandbox of the layout before issue pods, naming it: remove it before enabling
-issue pods.
+session survives, and deletes it once the claim is retired. Either delete runs under the pod's
+launch turn and only at the version of the Sandbox it was decided on: a controller relaunched into
+the Sandbox since has written it, so the delete is refused and the next sweep decides again on the
+claims known then. The controller Sandbox a daemon made before the controller ran in a launcher pod
+(`role=controller`, one `worker` container) is refused at boot like every Sandbox of the layout
+before issue pods, naming it: remove it before enabling issue pods.
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its

@@ -23,7 +23,7 @@ import (
 )
 
 // migratedStore is a migrated store on a database of its own: the daemon's authorization of an
-// issue's close, which SuspendIssue runs under its issue launch lock.
+// issue's close, which SuspendIssue runs under its pod's launch turn.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")

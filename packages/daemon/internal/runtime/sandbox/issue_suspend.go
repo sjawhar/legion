@@ -12,16 +12,17 @@ import (
 
 var _ runtime.IssueSuspender = (*Runtime)(nil)
 
-// SuspendIssue is the durable close effect, not a per-role stop. The issue launch lock orders
-// authorize (the store's check of the close against the issue's starts, stops and stored roles)
-// and the mode change with physical starts: a later re-admission starts only after this patch and
-// resumes the Sandbox. No database transaction spans a Kubernetes call.
+// SuspendIssue is the durable close effect, not a per-role stop. Its pod's launch turn (lockPod, by
+// the issue's Sandbox name) orders authorize (the store's check of the close against the issue's
+// starts, stops and stored roles) and the mode change with physical starts: a later re-admission
+// starts only after this patch and resumes the Sandbox. No database transaction spans a Kubernetes
+// call.
 func (r *Runtime) SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error {
 	name, err := issueSandboxName(r.project, issue)
 	if err != nil {
 		return fmt.Errorf("suspend issue %s: %w", issue, err)
 	}
-	release, err := r.lockPod(ctx, issue)
+	release, err := r.lockPod(ctx, name)
 	if err != nil {
 		return err
 	}

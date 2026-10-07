@@ -27,9 +27,9 @@ type IssueClose struct {
 // child that left the workflow done), a later start of the issue was written, or the tree's
 // cleanup is reserved, which deletes what a suspension would keep; a wait while one of the close's
 // role stops is unfinished or a stored claim of the issue may still hold a process. The caller
-// holds the runtime's issue launch lock through this check and its Sandbox patch, never this
-// transaction. outOfWorkflow is the workflow's rule for a status that takes an issue out of it
-// (record.OutOfWorkflow), which the store does not restate.
+// holds the runtime's launch turn of the issue's pod through this check and its Sandbox patch,
+// never this transaction. outOfWorkflow is the workflow's rule for a status that takes an issue out
+// of it (record.OutOfWorkflow), which the store does not restate.
 func (s *Store) IssueSuspension(ctx context.Context, project string, close IssueClose, outOfWorkflow func(status string) bool) (bool, error) {
 	if close.Issue == "" || close.Tree == "" || close.IssueGeneration == 0 || close.TreeGeneration == 0 || close.Row <= 0 {
 		return false, errors.New("issue suspension requires issue, tree, both generations and its outbox row")

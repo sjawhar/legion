@@ -48,7 +48,7 @@ const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smok
 // manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
 // placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
 // whose workspace is recovered after its volume was lost; the root enrolled with the secrets
-// broker; and the project controller's one-role pod, launched fresh and resuming. colocate is
+// broker; and the project controller's pod, launched fresh and resuming. colocate is
 // whether another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
 // root-enrolled alone, is the runtime's enrollment for that one case (TestManifestGoldens,
 // TestManifestMatchesTheSandboxCRD apply it to the shared runtime before building that case's
@@ -482,7 +482,8 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			pod := r.podTemplate(l, tc.colocate).Spec
+			template := r.podTemplate(l, tc.colocate)
+			pod := template.Spec
 			claimSecret := secretName(l.name)
 			volumes := map[string]corev1.Volume{}
 			for _, volume := range pod.Volumes {
@@ -527,7 +528,11 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
 				}
 			}
-			if l.controller {
+			kind, err := podKindOf(template.Metadata.Labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == (controllerPod{}) {
 				if slices.ContainsFunc(containers, func(c corev1.Container) bool { return c.Name == fetchContainer }) {
 					t.Errorf("the controller's pod runs %s", fetchContainer)
 				}

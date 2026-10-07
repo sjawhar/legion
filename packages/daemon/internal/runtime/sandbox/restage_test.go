@@ -234,6 +234,131 @@ func TestARoleToldAStaleDaemonURLGetsANewGenerationInTheSamePod(t *testing.T) {
 	})
 }
 
+// Enrolling a running deployment with the secrets broker (runtime.kubernetes.agent_secrets) moves
+// each workflow role's environment, AGENT_SECRETS_URL from unset, and the role is reported
+// StaleAddress as for any address that moved. But a generation of a role that enrolls is started
+// with the shim's agent-secrets flags, which name a token projection and a key directory only a pod
+// created enrolled carries, and the shim refuses to start without its token file. So the relaunch
+// replaces the issue pod rather than start the role in one that cannot run it, the new pod mounts
+// both for every role, and a sibling resumes into that same new pod.
+func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
+	g := newRig(t, nil)
+	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
+	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
+
+	broker := &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	r2 := secondRuntime(t, g, func(o *Options) { o.AgentSecrets = broker })()
+	g.connectRunning(workerToken, testerLoc.Sandbox.Generation)
+	g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(workerToken, testerLoc.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	obs := readopt(t, g.ctx, r2, testerLoc)[0]
+	if obs.Kind != runtime.StaleAddress || obs.Locator != testerLoc {
+		t.Fatalf("%s at %+v, want StaleAddress at the recorded locator: %s", obs.Kind, obs.Locator, obs.Detail)
+	}
+	if want := "AGENT_SECRETS_URL (unset), now " + broker.URL; !strings.Contains(obs.Detail, want) {
+		t.Errorf("detail %q lacks %q", obs.Detail, want)
+	}
+
+	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+	newTester, err := r2.Resume(g.ctx, &testerLoc, tester)
+	if err != nil {
+		t.Fatalf("Resume the tester: %v", err)
+	}
+	if newTester.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
+		t.Fatalf("Resume kept the pod %s, which has no agent-secrets volume for the enrolled tester's shim", testerLoc.Sandbox.PodUID)
+	}
+	pod := g.pod(testerLoc.Sandbox.Name)
+	if r2.lacksEnrollment(pod, claim.Roles) {
+		t.Fatalf("the replaced pod's volumes %+v lack the enrollment the runtime has now", pod.Spec.Volumes)
+	}
+	for _, role := range claim.Roles {
+		mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, string(role)).VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.Name == agentSecretsTokenVolume && m.MountPath == AgentSecretsTokenDir
+		})
+		if !mounted {
+			t.Errorf("the replaced pod's %s launcher does not mount the broker's token at %s", role, AgentSecretsTokenDir)
+		}
+	}
+	if start := lastStart(t, g, workerToken); start.Generation != 2 || !slices.Contains(start.Argv, AgentSecretsTokenDir+"/"+AgentSecretsTokenFile) {
+		t.Errorf("the tester started generation %d with %q, want generation 2 pointed at the pod's token file", start.Generation, start.Argv)
+	}
+
+	reviewer.Generation, reviewer.BootToken, reviewer.ResumeSessionFile = 2, "boot-reviewer-g2", resumeSession
+	newReviewer, err := r2.Resume(g.ctx, &reviewerLoc, reviewer)
+	if err != nil {
+		t.Fatalf("Resume the reviewer: %v", err)
+	}
+	if newReviewer.Sandbox.PodUID != newTester.Sandbox.PodUID {
+		t.Fatalf("the reviewer resumed into pod %s, want the tester's new pod %s", newReviewer.Sandbox.PodUID, newTester.Sandbox.PodUID)
+	}
+}
+
+// A pod's agent-secrets volumes are fixed when it is created, so a relaunch of a role that enrolls
+// replaces a pod made under another audience or token expiry, as it does one made before the
+// runtime enrolled; a pod made under the enrollment the runtime has now is kept, whatever else its
+// stored volumes carry beside the token's audience, expiry and path and the key directories — a
+// mode, another projection source, a size the API server or an admission webhook set — since
+// replacing it for those would rebuild the pod and re-provision its workspace at every relaunch.
+func TestARelaunchReplacesAPodEnrolledOtherwiseThanTheRuntimeIsNow(t *testing.T) {
+	broker := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	carryingMore := func(pod *corev1.Pod) {
+		for i := range pod.Spec.Volumes {
+			volume := &pod.Spec.Volumes[i]
+			switch {
+			case volume.Projected != nil && volume.Name == agentSecretsTokenVolume:
+				volume.Projected.DefaultMode = new(int32(0o444))
+				volume.Projected.Sources = append(volume.Projected.Sources,
+					corev1.VolumeProjection{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"}}},
+					corev1.VolumeProjection{DownwardAPI: &corev1.DownwardAPIProjection{Items: []corev1.DownwardAPIVolumeFile{{
+						Path: "namespace", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"},
+					}}}})
+			case volume.EmptyDir != nil && strings.HasPrefix(volume.Name, agentSecretsKeyVolume):
+				volume.EmptyDir.SizeLimit = nil
+			}
+		}
+	}
+	for name, tc := range map[string]struct {
+		now      func(*AgentSecrets)
+		stored   func(*corev1.Pod)
+		replaced bool
+	}{
+		"the same enrollment":                       {func(*AgentSecrets) {}, nil, false},
+		"the same enrollment, stored carrying more": {func(*AgentSecrets) {}, carryingMore, false},
+		"another audience":                          {func(a *AgentSecrets) { a.Audience = "agent-secrets-next" }, nil, true},
+		"another token expiry":                      {func(a *AgentSecrets) { a.TokenExpiry = 30 * time.Minute }, nil, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before, now := broker, broker
+			tc.now(&now)
+			g := newRig(t, nil, withOptions(func(o *Options) { o.AgentSecrets = &before }))
+			spec := workerSpec(t)
+			loc := g.spawn(spec)
+			if tc.stored != nil {
+				g.update(g.pod(loc.Sandbox.Name), tc.stored)
+			}
+			r2 := secondRuntime(t, g, func(o *Options) { o.AgentSecrets = &now })()
+			g.connectRunning(workerToken, loc.Sandbox.Generation)
+			g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
+				state, connected := r2.launchers.state(workerToken, loc.Sandbox.PodUID)
+				return connected && state.Child != nil
+			})
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+			newLoc, err := r2.Resume(g.ctx, &loc, spec)
+			if err != nil {
+				t.Fatalf("Resume: %v", err)
+			}
+			if replaced := newLoc.Sandbox.PodUID != loc.Sandbox.PodUID; replaced != tc.replaced {
+				t.Fatalf("Resume replaced the pod: %t, want %t (pod %s, then %s)", replaced, tc.replaced, loc.Sandbox.PodUID, newLoc.Sandbox.PodUID)
+			}
+			if pod := g.pod(loc.Sandbox.Name); r2.lacksEnrollment(pod, claim.Roles) {
+				t.Fatalf("the pod the tester runs in lacks the enrollment the runtime has now: %+v", pod.Spec.Volumes)
+			}
+		})
+	}
+}
+
 // A role already running with every address the runtime hands now is left alone: Observe reports it
 // Alive, never StaleAddress, so nothing about it is ever replaced.
 func TestARoleAtTheCurrentAddressesIsNeverRepointed(t *testing.T) {

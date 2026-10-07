@@ -669,7 +669,7 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 // (controller_notice) would each redefine the check with the other's kind missing, and a database
 // past 0020 applies the lower 0016 late, where a check without controller_notice would refuse the
 // queued row and the upgrade: neither sets the list, 0021 does, after both. In the same way
-// `issue_branch` (0030) and `issue_suspend` (0033) each come with a migration that rewrites the
+// `issue_branch` (0030) and `issue_suspend` (0034) each come with a migration that rewrites the
 // check, and a database that ran 0031 onwards before 0029 and 0030 applies those two last, so a
 // queued close suspension must survive them and both kinds must stand at the end in either order.
 func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {

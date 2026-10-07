@@ -810,7 +810,7 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 	})
 }
 
-// Migration 0034 ends phase-end suspension. A transition's suspend queued before it named the phase
+// Migration 0035 ends phase-end suspension. A transition's suspend queued before it named the phase
 // it ended ("leaves"); the field is gone, and the outbox decodes rows strictly, so each such row is
 // deleted rather than left to fail on every attempt or, read without the field, stop a role its
 // issue still needs. Every other supervise row stays queued and decodes: a close's suspend, a start
@@ -821,7 +821,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 	all, err := migrations.All()
 	must(t, err)
 	for _, migration := range all {
-		if migration.Version >= 34 {
+		if migration.Version >= 35 {
 			break
 		}
 		inTx(t, st, func(tx pgx.Tx) {
@@ -856,7 +856,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 		for _, row := range rows {
 			payload, err := DecodeOutboxPayload(row)
 			if err != nil {
-				t.Fatalf("the %s row after 0034 does not decode: %v", row.LastError, err)
+				t.Fatalf("the %s row after 0035 does not decode: %v", row.LastError, err)
 			}
 			kept[row.LastError] = payload.(SuperviseRequest)
 		}
@@ -866,7 +866,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 			"tree close":    {Op: "tree_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 1, Linger: 1},
 		}
 		if !reflect.DeepEqual(kept, want) {
-			t.Fatalf("supervise rows after 0034 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
+			t.Fatalf("supervise rows after 0035 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
 		}
 	})
 }

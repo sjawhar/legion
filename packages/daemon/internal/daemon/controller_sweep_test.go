@@ -19,15 +19,15 @@ import (
 )
 
 // liveTrees is a Sandbox runtime's store in which every tree's lifecycle is open, so the sweep
-// keeps every issue Sandbox it consults one for: a one-role Sandbox the sweep deletes is deleted
-// on its claim's account alone, never for want of a live tree.
+// keeps every issue Sandbox it consults one for: the controller's Sandbox, when the sweep deletes
+// it, is deleted on its claim's account alone, never for want of a live tree.
 type liveTrees struct{}
 
 func (liveTrees) TreeHasSessions(context.Context, string, string) (bool, error) { return false, nil }
 func (liveTrees) TreeLive(context.Context, string, string) (bool, error)        { return true, nil }
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime
-// keeps the controller's one-role Sandbox exactly while a known claim is its claim. So the
+// keeps the controller's Sandbox exactly while a known claim is the controller's. So the
 // controller's Sandbox, which holds its saved session, survives a sweep while the controller's
 // claim is suspended (known, with no locator) and goes once the claim is retired (unknown). This
 // runs the daemon's own knownClaims over the controller's claim in each state, as the store holds

@@ -3,7 +3,6 @@ package sandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -103,33 +102,20 @@ const maxNameLength = 63
 // claims of an issue share it; their container and generation live in each process locator
 // instead. A role claim's token always ends in one fixed role word, so cutting it (claim.Token.Cut)
 // preserves the project and issue token even where an issue name has hyphens. The controller's
-// token (claim.ControllerToken) ends in no workflow role, so Cut leaves it whole and its Sandbox is
+// token (claim.ControllerToken) ends in no workflow role and names its Sandbox whole,
 // `legion-<project>-controller`, which no issue's can be: an issue's part always ends in
 // `-<digits>`, and one past dnsName's length in a dash and eight hex digits.
 func SandboxName(t claim.Token) string {
-	issue, _, _ := t.Cut()
-	return dnsName(issue, maxNameLength)
+	pod := string(t)
+	if issue, _, ok := t.Cut(); ok {
+		pod = issue
+	}
+	return dnsName(pod, maxNameLength)
 }
 
 // launcherRoles is every role a launcher container can run: the six workflow roles of an issue
 // pod, and the controller of the project controller's pod.
 var launcherRoles = append(slices.Clone(claim.Roles), claim.RoleController)
-
-// podRoles is the role list a Sandbox's labels name, which is exactly its pod's launcher
-// containers, one per role: an issue Sandbox (legion.dev/issue set) runs every workflow role
-// (claim.Roles), and the project controller's (legion.dev/role=controller with no tree and no
-// issue) runs the controller alone. Any other labelling names no list and is refused, so a pod is
-// never judged against a list its labels do not state.
-func podRoles(labels map[string]string) ([]claim.Role, error) {
-	switch {
-	case labels[labelIssue] != "":
-		return claim.Roles, nil
-	case labels[labelRole] == string(claim.RoleController) && labels[labelTree] == "":
-		return []claim.Role{claim.RoleController}, nil
-	}
-	return nil, fmt.Errorf("its labels name neither an issue nor the project controller (%s=%q, %s=%q, %s=%q)",
-		labelIssue, labels[labelIssue], labelTree, labels[labelTree], labelRole, labels[labelRole])
-}
 
 // issueSandboxName is SandboxName of issue's role claims, from the issue key. project need not
 // already be a claim.ProjectToken (the caller's own Options.Project, the legion.dev/project

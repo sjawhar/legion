@@ -31,8 +31,9 @@ type launcherCredentials struct {
 }
 
 // LauncherResolver rejects unknown pods from informer state before consulting credentials: a
-// launcher's role must be one its pod's labels name (podRoles), a workflow role of an issue pod or
-// the controller of the project controller's. Tokens minted here are cached as hashes; after
+// launcher's role must be one of the roles of the kind its pod's labels name (podKindOf), a
+// workflow role of an issue pod or the controller of the project controller's, and its claim is the
+// one that kind derives (podKind.claimToken). Tokens minted here are cached as hashes; after
 // restart a known role's first read is single-flight, so unauthenticated hellos cannot turn into
 // an unbounded stream of Kubernetes requests.
 func (r *Runtime) LauncherResolver() stream.LauncherResolver {
@@ -42,7 +43,8 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		if err != nil || view.sandbox == nil || view.pod == nil || string(view.pod.UID) != hello.PodUID {
 			return nil, "launcher pod is not the current controller-owned pod"
 		}
-		if roles, err := podRoles(view.sandbox.Labels); err != nil || !slices.Contains(roles, role) {
+		kind, err := podKindOf(view.sandbox.Labels)
+		if err != nil || !slices.Contains(kind.roles(), role) {
 			return nil, "launcher role is not one of its pod's roles"
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
@@ -66,10 +68,7 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		if err != nil {
 			return nil, "launcher credential does not name this pod's role"
 		}
-		token := claim.ControllerToken(project)
-		if role != claim.RoleController {
-			token, err = claim.NewToken(project, credential.issue, role)
-		}
+		token, err := kind.claimToken(project, credential.issue, role)
 		if err != nil || SandboxName(token) != hello.Sandbox {
 			return nil, "launcher credential does not name this pod's role"
 		}
