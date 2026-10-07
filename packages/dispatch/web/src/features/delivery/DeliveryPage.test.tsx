@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -100,6 +100,56 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     getDeliveryTimeline.mockRestore();
     getDeliverySettings.mockRestore();
     putDeliverySettings.mockRestore();
+  }
+});
+
+test("a refetch of the unconfigured timeline, as tab focus starts, keeps the setup form and its unsaved draft", async () => {
+  const notConfigured = () =>
+    new ApiError(404, {
+      code: "DELIVERY_NOT_CONFIGURED",
+      error:
+        "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
+    });
+  const refetch = Promise.withResolvers<DeliveryTimelineResponse>();
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
+    .mockRejectedValueOnce(notConfigured())
+    .mockReturnValueOnce(refetch.promise);
+  const settle = () =>
+    act(async () => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 50);
+      await promise;
+    });
+
+  try {
+    renderPage();
+    await screen.findByRole("heading", { name: "Set up the delivery timeline" });
+    fireEvent.change(screen.getByLabelText("Deploy repository"), {
+      target: { value: "acme/widgets" },
+    });
+
+    // Coming back to the tab (TanStack's focus listener is on `window`) refetches the timeline,
+    // and while that refetch runs the query holds no error at all. Any render of the timeline's
+    // body in between would unmount the form, so the draft surviving says none happened.
+    window.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(2));
+    await settle();
+    expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
+      "acme/widgets"
+    );
+    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
+
+    refetch.reject(notConfigured());
+    await settle();
+    expect(screen.getByRole("heading", { name: "Set up the delivery timeline" })).toBeDefined();
+    expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
+      "acme/widgets"
+    );
+    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
   }
 });
 

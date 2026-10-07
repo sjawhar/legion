@@ -164,7 +164,21 @@ export function DeliveryPage(): ReactNode {
     return prs.some((pr) => pr.id === selection.id) ? selection : null;
   }, [selection, prs]);
 
-  const notConfigured = isDeliveryNotConfigured(query.error);
+  // Whether the page shows the setup form, latched: set once a timeline read settles on
+  // `DELIVERY_NOT_CONFIGURED`, and cleared only once a read answers with a timeline, as the read
+  // a save starts does. A refetch with nothing cached clears `query.error` the moment it starts
+  // (the window regaining focus, the event stream's reconnect refresh), and one can fail on
+  // something else, so a body read live from the query would unmount the form, and the draft
+  // typed into it, on every tab switch. Set during render (React's pattern for state derived from
+  // props), so the render that settles already shows the new body.
+  const [notConfigured, setNotConfigured] = useState(false);
+  if (
+    notConfigured
+      ? query.isSuccess
+      : query.fetchStatus === "idle" && isDeliveryNotConfigured(query.error)
+  ) {
+    setNotConfigured(!notConfigured);
+  }
   return (
     <section className="flex h-full flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-2">

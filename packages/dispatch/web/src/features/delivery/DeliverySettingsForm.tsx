@@ -18,6 +18,9 @@ import {
  *  neither a GitHub login nor an `owner/repo` can hold one. */
 const LIST_SEPARATOR = /[\s,]+/;
 
+/** Any one character of a list entry: anything `LIST_SEPARATOR` does not match. */
+const LIST_ENTRY_CHARACTER = /[^\s,]/;
+
 /** The entries a list field's text holds. */
 function listEntries(text: string): string[] {
   return text.split(LIST_SEPARATOR).filter(Boolean);
@@ -27,6 +30,12 @@ function listEntries(text: string): string[] {
  *  so the browser's `required` check refuses it before the server's 400 would. */
 function textOrEmpty(text: string): string {
   return text.trim() === "" ? "" : text;
+}
+
+/** A required list field's text as the draft keeps it: text holding no entry, only separators, is
+ *  empty, as `textOrEmpty` keeps a field of only whitespace. */
+function listOrEmpty(text: string): string {
+  return LIST_ENTRY_CHARACTER.test(text) ? text : "";
 }
 
 /** The fields as typed: the two lists are the textareas' text, split only when saved. */
@@ -60,28 +69,27 @@ interface DeliverySettingsFormProps {
  */
 export function DeliverySettingsForm({ initial }: DeliverySettingsFormProps): ReactNode {
   const settings = useQuery({ ...deliverySettingsQuery(), enabled: initial === undefined });
-  if (initial !== undefined) {
-    return <DeliverySettingsFields record={initial} />;
-  }
-  if (settings.isPending) {
-    return <p className={`mt-6 ${textMutedOnCanvas}`}>Loading delivery settings…</p>;
-  }
-  if (settings.isError) {
-    return (
-      <div className="mt-6">
-        <QueryError
-          message="Couldn't load the delivery settings."
-          onRetry={() => void settings.refetch()}
-          retrying={settings.isFetching}
-        />
-      </div>
-    );
+  let record = initial;
+  if (record === undefined) {
+    if (settings.isPending) {
+      return <p className={`mt-6 ${textMutedOnCanvas}`}>Loading delivery settings…</p>;
+    }
+    if (settings.isError) {
+      return (
+        <div className="mt-6">
+          <QueryError
+            message="Couldn't load the delivery settings."
+            onRetry={() => void settings.refetch()}
+            retrying={settings.isFetching}
+          />
+        </div>
+      );
+    }
+    record = settings.data;
   }
   // Keyed by the record's write time, so a save (anyone's) starts the fields over from the record
-  // as the server stored it.
-  return (
-    <DeliverySettingsFields key={settings.data?.updated_at ?? "unset"} record={settings.data} />
-  );
+  // as the server stored it, and so does a caller handing over another record.
+  return <DeliverySettingsFields key={record?.updated_at ?? "unset"} record={record} />;
 }
 
 function DeliverySettingsFields({ record }: { record: DeliverySettings | null }): ReactNode {
@@ -188,12 +196,7 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
                 className={settingsMonoInput}
                 id={`${id}-population-authors`}
                 onChange={(event) =>
-                  // Text holding no entry, only separators, is empty, as `textOrEmpty` keeps it.
-                  setDraft({
-                    ...draft,
-                    population_authors:
-                      listEntries(event.target.value).length === 0 ? "" : event.target.value,
-                  })
+                  setDraft({ ...draft, population_authors: listOrEmpty(event.target.value) })
                 }
                 placeholder="One GitHub login per line"
                 required
