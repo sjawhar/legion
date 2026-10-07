@@ -320,10 +320,46 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			launched: func(o *Options) {
 				o.NATSURLs = []string{"nats://legion:nats-password@192.0.2.9:4222", "nats://nats-token@192.0.2.10:4222"}
 			},
-			want: "ENVOY_NATS_URL nats://xxxxx@192.0.2.9:4222,nats://xxxxx@192.0.2.10:4222, now nats://192.0.2.250:4222",
+			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
 		},
-		"Dispatch moved to an address with a user and password, naming neither": {
+		"NATS moved, naming no userinfo with a raw comma in it": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{
+					"nats://user,more:password@192.0.2.9:4222",
+					"nats://user:password,more@192.0.2.10:4222",
+					"nats://user,more:password,more@192.0.2.11:4222",
+				}
+			},
+			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+		},
+		"NATS configured now names no raw-comma userinfo": {
+			now: func(o *Options) {
+				o.NATSURLs = []string{
+					"nats://user,more:password@192.0.2.9:4222",
+					"nats://user:password,more@192.0.2.10:4222",
+					"nats://user,more:password,more@192.0.2.11:4222",
+				}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://xxxxx@192.0.2.9:4222,nats://xxxxx@192.0.2.10:4222,nats://xxxxx@192.0.2.11:4222",
+		},
+		"Envoy moved to a URL with raw commas in its userinfo": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://user,more:password,more@192.0.2.9:9020"
+			},
+			want: "ENVOY_URL http://xxxxx@192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"the daemon's API moved to a URL with raw commas in its userinfo": {
+			now: func(o *Options) {
+				o.DaemonURL = "http://user,more:password,more@192.0.2.9:13370"
+			},
+			want: "LEGION_DAEMON_URL " + testOptions().DaemonURL + ", now http://xxxxx@192.0.2.9:13370",
+		},
+		"Dispatch moved to a URL with a user and password, naming neither": {
 			now:  func(o *Options) { o.DispatchURL = "https://legion:dispatch-password@dispatch.internal.example" },
+			want: "DISPATCH_URL " + dispatch + ", now https://xxxxx@dispatch.internal.example",
+		},
+		"Dispatch moved to a URL with raw commas in its userinfo": {
+			now:  func(o *Options) { o.DispatchURL = "https://user,more:password,more@dispatch.internal.example" },
 			want: "DISPATCH_URL " + dispatch + ", now https://xxxxx@dispatch.internal.example",
 		},
 		"Dispatch configured only now": {

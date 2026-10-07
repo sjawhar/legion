@@ -134,12 +134,12 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 
 // movedAddresses are row 9's comparison: each address pod's main container holds that differs from
 // the one a pod launched now is handed (handedAddresses), as "<name> <held>, now <handed>", both
-// named as named names them. A pod is compared only when its main container runs the shim with
-// connectFlag, as every pod this runtime builds does; one without (never one this runtime built)
-// has nothing to compare, and row 9 must never read it as stale for want of it. A variable the
-// container lacks holds "", as mainEnvironment leaves unset an address the runtime hands none of. A
-// handed value is compared as the pod spec carries it, escaped against the kubelet's expansion
-// (kubeletLiteral).
+// named without putting URL userinfo in the detail. A pod is compared only when its main container
+// runs the shim with connectFlag, as every pod this runtime builds does; one without (never one this
+// runtime built) has nothing to compare, and row 9 must never read it as stale for want of it. A
+// variable the container lacks holds "", as mainEnvironment leaves unset an address the runtime
+// hands none of. A handed value is compared as the pod spec carries it, escaped against the
+// kubelet's expansion (kubeletLiteral).
 func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == mainContainer })
 	if i < 0 {
@@ -157,30 +157,61 @@ func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
 	var moved []string
 	for _, a := range r.handedAddresses() {
 		if handed := kubeletEscape(a.value); held[a.name] != handed {
-			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, named(held[a.name]), named(handed)))
+			heldName, handedName := namedURL(held[a.name]), namedURL(handed)
+			if a.name == "ENVOY_NATS_URL" {
+				heldName, handedName = namedNATSPodValue(held[a.name]), namedNATSURLs(r.natsURLs)
+			}
+			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, heldName, handedName))
 		}
 	}
 	return moved
 }
 
-// named is an address as movedAddresses names it: "(unset)" for none, and otherwise the address
-// with any user and password in its URLs (ENVOY_NATS_URL holds several, comma-separated) shown as
-// xxxxx. The supervisor logs the detail, and the daemon's log has readers the pod's spec does not.
-func named(address string) string {
+// namedURL is one endpoint value as movedAddresses names it: "(unset)" for none, and otherwise the
+// URL with any userinfo shown as xxxxx. A single endpoint is parsed whole: raw commas are valid in
+// its userinfo. An invalid value with an @ is redacted whole too, so an unexpected input does not
+// turn the log into a credential reader.
+func namedURL(address string) string {
 	if address == "" {
 		return "(unset)"
 	}
-	if !strings.Contains(address, "@") {
-		return address
+	u, err := url.Parse(address)
+	if err == nil && u.User != nil {
+		u.User = url.User("xxxxx")
+		return u.String()
 	}
-	urls := strings.Split(address, ",")
+	if strings.Contains(address, "@") {
+		return "xxxxx"
+	}
+	return address
+}
+
+// namedNATSURLs names the current ENVOY_NATS_URL from the distinct values r.natsURLs holds: the
+// entries readNatsURLs accepted, before mainEnvironment comma-joined them. Each is an endpoint, so
+// namedURL may parse its kubelet-escaped value whole.
+func namedNATSURLs(urls []string) string {
+	if len(urls) == 0 {
+		return "(unset)"
+	}
+	named := make([]string, len(urls))
 	for i, raw := range urls {
-		if u, err := url.Parse(raw); err == nil && u.User != nil {
-			u.User = url.User("xxxxx")
-			urls[i] = u.String()
-		}
+		named[i] = namedURL(kubeletEscape(raw))
 	}
-	return strings.Join(urls, ",")
+	return strings.Join(named, ",")
+}
+
+// namedNATSPodValue names the ENVOY_NATS_URL an existing pod holds. mainEnvironment comma-joined
+// the old daemon's list, but raw commas are valid in userinfo, so that string cannot safely be
+// split back into its URLs. When it has an @, redact the whole field; otherwise no userinfo is
+// present and it is safe to show.
+func namedNATSPodValue(address string) string {
+	if address == "" {
+		return "(unset)"
+	}
+	if strings.Contains(address, "@") {
+		return "xxxxx"
+	}
+	return address
 }
 
 // podAbsent is row 3's detail: the Sandbox's mode, its Suspended condition when current, and any
