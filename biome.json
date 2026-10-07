@@ -13,7 +13,8 @@
       "!!packages/contracts/fixtures/daemon-api",
       "!!packages/daemon/internal/runtime/sandbox/testdata/golden",
       "!!packages/envoy/internal/dispatch/pmdoc/testdata",
-      "!!packages/envoy/internal/dispatch/text/testdata"
+      "!!packages/envoy/internal/dispatch/text/testdata",
+      "!!.legion"
     ]
   },
   "formatter": {

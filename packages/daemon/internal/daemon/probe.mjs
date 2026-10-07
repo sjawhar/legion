@@ -28,7 +28,12 @@ export default async function probeLegionPluginLoaded(pi) {
   // `disabledExtensions` (session-tools.ts #applyDiscoveredSkills at the pin).
   const explicit = process.env.LEGION_PROMPT_ROOTS;
   const roots = explicit
-    ? { explicit: explicit.split(":"), mode: "explicit-only", configured: [], configuredLevel: "user" }
+    ? {
+        explicit: explicit.split(":"),
+        mode: "explicit-only",
+        configured: [],
+        configuredLevel: "user",
+      }
     : undefined;
   const cwd = process.cwd();
   const agents = await resolve("LEGION_PROMPT_AGENTS", async () => {
