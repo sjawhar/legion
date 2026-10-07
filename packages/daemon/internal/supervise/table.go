@@ -904,7 +904,16 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 	return m.sendPending(ctx)
 }
 
-func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
+// reready persists the in-memory ready state before answering an agent retry: a prior ready's
+// claim write may have failed after the machine made the transition, and a restart must not restore
+// the older registered row and treat a ready agent as one that never became ready.
+func reready(m *Machine, ctx context.Context, _ Event) error {
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	m.terminal(StateReady)
+	return m.sendPending(ctx)
+}
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 

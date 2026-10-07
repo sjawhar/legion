@@ -420,11 +420,10 @@ func (c *heldClock) fire(after time.Duration) int {
 	return len(due)
 }
 
-// An agent registered over the API whose ready never comes — no stream ever connected, as for the
-// two workers LEGION-599 records — is relaunched at the deadline as the same session one
-// generation later, with one launch failure charged, through the daemon's own API, store, stream
-// and machines. The relaunched agent's shim says hello, the agent registers and says it is ready,
-// and it is sent the task the claim held.
+// An agent registered over the API that never says it is ready is relaunched at the deadline as
+// the same session one generation later, with one launch failure charged, through the daemon's own
+// API, store, stream and machines. The relaunched agent's shim says hello, the agent registers and
+// says it is ready, and it is sent the task the claim held.
 func TestRunRelaunchesAClaimWhoseAgentRegisteredAndNeverSaidReady(t *testing.T) {
 	cfg := testConfig(t)
 	rt := fake.NewRuntime()

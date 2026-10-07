@@ -122,8 +122,7 @@ func TestHelloResolverReleasesAKnownTokenWhenTheBootGivesUpRatherThanBecomingRea
 	}
 }
 
-// flakyClaimStore fails its first read the way Postgres did under the boot-token reads LEGION-599
-// records ("read claim: context deadline exceeded"), and answers every later read with its claim.
+// flakyClaimStore fails its first read and answers every later read with its claim.
 type flakyClaimStore struct {
 	mu    sync.Mutex
 	reads int

@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -205,12 +206,10 @@ func TestARestartOfAClaimStillLaunchingKeepsTheFullProvisioningBound(t *testing.
 	h.wantState(StateLaunching)
 }
 
-// An agent that registers and never says it is ready never became a working agent, whatever kept
-// its ready from coming: an answer to its registration it never read (LEGION-599), a ready lost to a
-// daemon restart. The deadline runs again from the registration, and at it the live process is
-// retired, one launch failure is charged, and the same session is resumed one generation later.
-// Whether its shim said hello first changes nothing. The relaunched agent that says it is ready is
-// sent the task the claim held through it all.
+// An agent that registers and never says it is ready never became a working agent. The deadline
+// runs again from the registration, and at it the live process is retired, one launch failure is
+// charged, and the same session is resumed one generation later. Whether its shim said hello first
+// changes nothing. The relaunched agent that says it is ready is sent the task the claim held.
 func TestARegisteredAgentThatNeverSaysReadyIsRelaunchedAtTheDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -339,4 +338,30 @@ func TestReadyEndsTheBootWatch(t *testing.T) {
 	h.wantCalls("Probe", 0)
 	h.wantCalls("Suspend", 0)
 	h.wantState(StateReady)
+}
+
+// A ready whose first claim write fails stays ready in memory. Its retry must persist that ready
+// state before it returns, so a restart restores ready rather than registered and never charges a
+// launch failure for an agent that was ready.
+func TestARetriedReadyAfterAClaimWriteFailureStaysReadyAcrossARestart(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered)
+	h.store.fail("PutClaim", errBoom)
+
+	err := h.handle(RequestReady{Claim: h.token, Generation: h.generation(), Session: session})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("ready over a failed claim write returned %v, want %v", err, errBoom)
+	}
+	h.wantState(StateReady)
+	if live := h.clock.Live(); live != 0 {
+		t.Fatalf("%d timers armed after failed ready, want none", live)
+	}
+
+	h.store.fail("PutClaim", nil)
+	h.ready()
+	h.restart()
+	h.wantState(StateReady)
+	h.advance(2 * deadline)
+	h.wantCalls("Suspend", 0)
+	h.wantBudgets(Budgets{})
 }
