@@ -1,0 +1,100 @@
+{
+  "codeHead": "aee59ebb4c8523e669b4452454bb53a618ce78b3",
+  "completed": "2026-10-07T09:53:17.380560806Z",
+  "critical": 0,
+  "forgeFacts": "Required checks at 536e915c: lint, typecheck, test (Tests run 37599842096) and pr-title (runs 37599842141, 37599968110) success; Worker Image 37599842170 and Docs 37599842037 success; Legion Envoy and Contracts 37599842045 still running when the round was decided (not required). Review threads: none; reviews: none. E2E (implementer) at aee59ebb and E2E (tester) at 7c21dd99 both present with surface, command, observation, head and negative control; the tester's two commits above the code head touch only packages/pi-legion/extensions/legion-phase-stall-omp.test.ts and .legion/LEGION-247/test.json.",
+  "important": 3,
+  "issue": "LEGION-247",
+  "keyFindings": [
+    {
+      "description": "The Envoy partition ships dispatch-first, whose text the Envoy entry injects into every Dispatch-enabled session's requests (envoy.ts:366, 1636-1639) and which tells every spec writer to run task(agent=\"plan-gap-analyst\") (skills/dispatch-first/SKILL.md:53); that agent now ships only in @sjawhar/pi-legion (packages/pi-legion/agents/, files [dist, agents]) while @sjawhar/pi-envoy ships files [dist]. Pre-split the one package shipped agents/ to every installer, so a person with @sjawhar/pi-envoy alone, the audience the Outcome line names, is now told on every turn to dispatch an agent their Oh My Pi cannot resolve. Same class, inert for a person because each is conditioned on a Legion role: skill://legion-architect and skill://legion-worker in the three Envoy skills. The guard cannot see it: packages/pi-envoy/src/skills-guard.test.ts:57 resolves the Envoy partition's skill:// links against the repository's skills/, not its staged partition. Remedy is a partition or wording decision for the architect: either pi-envoy also ships the agent its own skill dispatches, or dispatch-first's sentence conditions the plan-gap-analyst step on a session that has it.",
+      "file": "scripts/pi-plugin-prepack.sh:38",
+      "severity": "important"
+    },
+    {
+      "description": "The four skill://dispatch/SKILL.md#… anchors this PR adds (skills/legion-architect/SKILL.md:80,87,115; skills/legion-worker/SKILL.md:170) are checked only by packages/pi-legion/src/skills-guard.test.ts in the pi-legion job, whose pi_legion filter lists the eight Legion skill directories and not skills/dispatch/**; pr-and-main.yaml's test job runs no plugin bun test. Before this PR the one job's skills/** filter ran the guard on any skill edit. A heading rename in skills/dispatch/SKILL.md now merges green and fails the next unrelated pi-legion change. Add skills/dispatch/** to the pi_legion filter.",
+      "file": ".github/workflows/envoy-and-contracts.yaml:251",
+      "severity": "important"
+    },
+    {
+      "description": "No `## Contract change census`. The PR adds refusals (the Legion entry's three at session_start and /legion-claim-controller; the gate's legacy/absent/mismatch in each lane), makes --envoy-plugin-root required on legion probe-image, renames the package and the probe wire (legion.pi-envoy.legion-loaded → legion.pi-legion.loaded object; LEGION_PROMPT_ROOT → LEGION_PROMPT_ROOTS; the boot-gate pass line), and adds required arguments to scripts/e2e/lib/pack-plugin.sh and install-plugin-profile.sh. The reviewer's own searches find every in-repository caller migrated (worker.Dockerfile:462, sandbox/probe.go:533, docs/kubernetes.md:86,222; every pack-plugin.sh caller names a package; every install-plugin-profile.sh caller passes --package; check-plugin-names.sh clean over 3608 files; no LEGION_PROMPT_ROOT singular; the old pass line only in allowlisted history), but the census with its search commands, dispositions and a rollout line per change (each here an immediate refusal naming what it closes) must be in the body for the merger and the human.",
+      "file": "PR body",
+      "severity": "important"
+    },
+    {
+      "description": "Pane-lane envoyAbsent says install the release when the probe's `none` also covers a disabled or unregistered pi-envoy; the sibling notLoaded and the controller lane name `omp plugin list`. Fast-follow.",
+      "file": "packages/daemon/internal/daemon/bootgate.go:320",
+      "severity": "minor"
+    },
+    {
+      "description": "1052 lines; the manifest-path port (pluginManifestPath, normalizeProfile, ompHome, profileWords) and the lane/refusal layer could be their own files, and the nine per-lane refusal closures lane data built once in judgeLoaded. Fast-follow.",
+      "file": "packages/daemon/internal/daemon/bootgate.go",
+      "severity": "minor"
+    },
+    {
+      "description": "The skills partition is copied into eight YAML lists with no check that they equal pi-plugin-prepack.sh --stage-skills; a skill added later to the script alone would release and be guarded only on the PR that adds it. Fast-follow: a check beside check-image-trigger-paths.sh.",
+      "file": ".github/workflows/release.yaml:153",
+      "severity": "minor"
+    },
+    {
+      "description": "Only relative specifiers are reported; a bare @sjawhar/pi-envoy/… import would pass (closed today only because neither manifest depends on the other). Fast-follow.",
+      "file": "packages/pi-shared/test/cross-imports.ts:10",
+      "severity": "minor"
+    },
+    {
+      "description": "The cross-import exception list (also packages/pi-legion/AGENTS.md:281) names legion-role-claim.test.ts and legion-phase-stall-omp.test.ts; the files that import the sibling entry are legion.test.ts:104 and legion-role-claim.test.ts:46. Fast-follow.",
+      "file": "packages/pi-shared/AGENTS.md:10",
+      "severity": "minor"
+    },
+    {
+      "description": "The skill-scenarios rig section documents a script that moved to packages/pi-legion/scripts; pi-legion/AGENTS.md:286 points back across the boundary. Fast-follow.",
+      "file": "packages/pi-envoy/scripts/README.md:100",
+      "severity": "minor"
+    },
+    {
+      "description": "References are collected from the Legion partition only, so dispatch-brainstorming (named only by dispatch-first) left the gate's required set. Fast-follow.",
+      "file": "packages/daemon/internal/daemon/promptreferences.go:49",
+      "severity": "minor"
+    },
+    {
+      "description": "LEGION_PROMPT_ROOTS joins two roots with ':' and probe.mjs splits on it; the shipped roots never carry one. Fast-follow hardening.",
+      "file": "packages/daemon/internal/daemon/bootgate.go:276",
+      "severity": "minor"
+    },
+    {
+      "description": "filepath.Abs(\"\") would resolve an empty Envoy root to the cwd; only ProbeImage's guard makes it unreachable. Fast-follow hardening.",
+      "file": "packages/daemon/internal/daemon/bootgate.go:263",
+      "severity": "minor"
+    },
+    {
+      "description": "Explicit exports map while both plugin tsconfigs map @legion/pi-shared/* by wildcard: an unexported module typechecks and fails at bun build. Fast-follow.",
+      "file": "packages/pi-shared/package.json:7",
+      "severity": "minor"
+    },
+    {
+      "description": "The four Envoy-refusal cases were appended to a 3895-line file. Fast-follow.",
+      "file": "packages/pi-legion/extensions/legion.test.ts:776",
+      "severity": "minor"
+    },
+    {
+      "description": "Whole-file and whole-directory allowlist entries exempt every future line of those files. Fast-follow hardening.",
+      "file": ".github/scripts/check-plugin-names.sh:33",
+      "severity": "minor"
+    }
+  ],
+  "minor": 12,
+  "notProven": [
+    "Stage 2 and Stage 3 (devbox only) were not run; the spec's open decision block dispatch://LEGION-247/ask/c736bf45-5564-47d3-88f8-1a0c3acb45c3 decides what replaces them.",
+    "The first npm publish of @sjawhar/pi-envoy and @sjawhar/pi-legion depends on trusted publishing being configured for each new name (the ask the architect opens before READY); not verifiable from CI.",
+    "A session with @sjawhar/pi-envoy alone is told by the injected dispatch-first text to run task(agent=\"plan-gap-analyst\") and may read skill://legion-architect / skill://legion-worker, none of which that install ships (finding 1).",
+    "Consumers of the reworded boot-gate pass line outside this repository (a deployment's alert or smoke check, if any) cannot be verified from here.",
+    "The pane lane was proven on the real binary through an installed profile and the controller lane, not under a live daemon."
+  ],
+  "phase": "review",
+  "reviewedHead": "536e915caa5af1363d79b05caece94a5bf1da009",
+  "round": 1,
+  "schemaVersion": 1,
+  "securityLine": "Security: authz — no new route or caller class; the new refusals are fail-closed gates in the daemon's boot path (bootgate.go judgeLoaded 711-733) and in the Legion entry's session_start, which logs and exits 1 only after classifySession says Legion (legion.ts:545-554); /legion-claim-controller keeps its caller set and throws the refusal instead of claiming (legion.ts:750-753). secret — nothing widened (credentials.go:19, grants.go:20 comment-only). untrusted-input — the probe's stderr is read once by exact line prefixes (readLoadAnswer bootgate.go:642-659), versions through strconv.Atoi with an unreadable value refused (711-733); no later pass re-parses; interpolated values are the launch's own import.meta.url and marker. supply-chain — pi_legion pins actions/checkout@fbc6f399 (v5.1.0) and actions/setup-node@49933ea5 (v4.4.0) (release.yaml:670-676), declares contents: write and id-token: write under the workflow's permissions: {} (release.yaml:47, 666-668), publishes by OIDC trusted publishing with --provenance and no NPM_TOKEN; the worker image adds no external input (worker.Dockerfile:111-138, 392-394). sandbox — the pod argv gains one --extension behind --no-extensions (manifest.go:266); the probe Sandbox keeps --pod-safety and its wiring (probe.go:533). agent-def — the six agent files are byte-identical moves; the skill edits are three citations turned into anchored skill://dispatch/SKILL.md links and doc tables; the pair ran from this pane's installed plugin, not the branch, so the diff could not steer it. prompt — the injected dispatch-first text is unchanged, repository-authored, no untrusted region; its dangling agent and skill names are finding 1, correctness not injection. transport — not touched.",
+  "thermonuclear": "Pair run once at 536e915c. Deep review: no blocking, no security finding with an exploit path; should-fix: the pane-lane envoyAbsent remedy omits disabled/unregistered (bootgate.go:320-323), the Envoy partition's skills reference Legion-only skills (dispatch-first/SKILL.md:53, dispatch/SKILL.md:218,385, dispatch-brainstorming/SKILL.md:3,9,32), and the four skill://dispatch/SKILL.md#… anchors are checked by a CI job skills/dispatch edits do not trigger. Code quality: structural only (bootgate.go growth, nine per-lane refusal closures, the skills partition copied into eight unchecked YAML lists, cross-imports.ts ignoring bare specifiers, two doc pointers, legion.test.ts growth, LEGION_PROMPT_ROOTS colon join, pi-shared exports vs tsconfig wildcard).",
+  "verdict": "changes_requested"
+}
