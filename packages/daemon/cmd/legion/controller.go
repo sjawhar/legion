@@ -71,8 +71,9 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
-// pi-legion-envoy it does not load, or loads speaking another daemon API contract than this
-// binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
+// pi-legion it does not load, loads without pi-envoy or beside the pre-split package, or loads
+// speaking another daemon API contract than this binary's, each of which would refuse the
+// controller at session start (daemon.ProbeController). The probe
 // runs `omp models`, which starts no session, so it neither registers, takes the controller role,
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
@@ -195,7 +196,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// The daemon's design gate policy is the controller's addressing, the line its take comment
 	// reads before it promises anyone a design approval (skill://legion-controller). The start
 	// message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather than a CLI
-	// word: the pi-legion-envoy extension sends it as the session's first turn once its claim
+	// word: the pi-legion extension sends it as the session's first turn once its claim
 	// succeeds, before it opens the live wake subscription, so a started or restarted controller
 	// runs its start procedure at once and deterministically, never racing a wake for the one
 	// first-turn slot.
@@ -231,8 +232,8 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
 // directory's gh shim and legion launcher first in the agent's bash tool as on every pane, and
-// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion-envoy extension sends as the session's
-// first turn once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
+// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
+// once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
 // pointers only. Later pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
 	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)

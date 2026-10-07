@@ -90,7 +90,7 @@ func testSpec() runtime.SpawnSpec {
 
 // The pane's -e pairs, in the one order: the pairs every Legion pane carries, PI_CONFIG_FILES
 // naming the turn-scoping overlay writeTurnScopeOverlay writes under the state directory, the
-// grant file the pi-envoy extension writes before each command that redeems a grant, the XDG base
+// grant file the pi-legion extension writes before each command that redeems a grant, the XDG base
 // directories under `<state_dir>/home` explicitly, the caller's own variables sorted, then one
 // `<NAME>_FILE` pointer per secret — the boot token's first. PATH is never a pair: tmux would
 // discard it (LEGION-91); the shell command exports it. No secret value is in any pair.

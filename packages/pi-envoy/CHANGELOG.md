@@ -48,22 +48,12 @@
 
 ### Changed
 
-- `legion.daemonApiVersion` is 15. Contract 15 changes a Sandbox locator on the daemon's
-  `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
-  `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
-  generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The client's strict
-  state parse needs this release beside a daemon at 15; the daemon's boot gate refuses any earlier
-  contract.
-- Every phase worker stays live from its role's first assignment until its issue closes
-  (LEGION-462): no move between phases suspends it, so a role that finished its phase still
-  answers questions through Envoy, and its next assignment arrives in the same session. The worker
-  and architect skills and the headless worker prompt say so, in place of the phase-end suspension
-  LEGION-223's entry below describes.
 - `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
-  pod, whose agent's environment carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
+  pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
   release registers it with the launch's boot token, where an earlier one reads it as the
   operator's controller and never registers. Install this release with a Go `legion` built from
   the same commit; the daemon's image probe refuses a worker image whose plugin declares 13.
+
 - `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
   claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
   it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
@@ -75,6 +65,7 @@
   Contract 13 also covers the worker image's `LEGION_REMOVABLE_WORKSPACES` payload, which the
   image's own `legion` decodes strictly, so the daemon's image probe refuses an image that would
   read a later shape of it the old way.
+
 - Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
   steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
   clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
@@ -88,7 +79,26 @@
   agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
   rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
   skill reaches every installed user of this package, not only its author.
-
+- **Breaking:** the package is renamed `@sjawhar/pi-envoy` and carries the Envoy entry alone
+  (LEGION-247). `@sjawhar/pi-legion-envoy` gets no further release. What stays here is
+  `extensions/envoy.ts` (published as `dist/envoy.js`): Envoy messaging, subscriptions, delivery,
+  the native Dispatch tools and the `dispatch-first` context, with the four skills every session
+  with Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) at
+  `dist/skills`. The Legion entry (`extensions/legion.ts`), its modules (the former `src/legion/`),
+  the task agents in `agents/`, the eight Legion skills and the `legion.daemonApiVersion` manifest
+  field moved to `@sjawhar/pi-legion` (`packages/pi-legion`), which a Legion pane loads beside this
+  package; this manifest has no `legion` key. The two entries meet through a versioned in-process
+  interface in the private workspace package `@legion/pi-shared` (`packages/pi-shared`, version 1,
+  one object on `globalThis` under `Symbol.for("legion.pi-shared.envoy-plugin-interface")`): this
+  entry publishes it at factory time, and the Legion entry claims roles, matches injected user turns
+  and reads the bootstrapped session through it, refusing to run in a Legion session when no
+  `@sjawhar/pi-envoy` is loaded, when the loaded one speaks another interface version, or when
+  `@sjawhar/pi-legion-envoy` is still installed beside it. Both plugins release from one commit and
+  the daemon's boot gate refuses a pair whose interface versions differ. A person who installed the
+  one package reinstalls once:
+  `omp plugin uninstall @sjawhar/pi-legion-envoy && omp plugin install @sjawhar/pi-envoy`; a Legion
+  deployment also runs `omp plugin install @sjawhar/pi-legion` in the daemon's profile, and the
+  worker image carries both at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.

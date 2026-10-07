@@ -17,7 +17,7 @@
 # is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
 # killed mid-turn and an implementer killed until it is held, and is taken out the same way. Each
 # checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
-# plugin version recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
+# two plugins' versions recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
 # `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
@@ -1808,9 +1808,11 @@ stale_consumers=$(nats_stream consumers "$nats_url" "$stream" "legion-go-$projec
 locked=1
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
 revision=$(sed -n 's/^source: //p' <<<"$built")
-jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
-  --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugin: $plugin, started: $started}' >"$evidence/run.json"
-note "source $revision; image $image; plugin $(jq -r .plugin "$evidence/run.json")"
+jq -n --arg revision "$revision" --arg image "$image" \
+  --arg envoy "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
+  --arg legion "$(jq -r '.name + "@" + .version' "$root/packages/pi-legion/package.json")" \
+  --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugins: {envoy: $envoy, legion: $legion}, started: $started}' >"$evidence/run.json"
+note "source $revision; image $image; plugins $(jq -r '.plugins.envoy + " and " + .plugins.legion' "$evidence/run.json")"
 note "daemon bind $bind, advertise_host $host: API http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
 if [ -n "$until" ]; then
   # A name no checkpoint has would run the whole proof as a development run.
@@ -2943,7 +2945,8 @@ skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
 else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 make_omp_home "$omp_home"
-bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" >/dev/null
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" >/dev/null
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
 pin=$(<"$root/.omp-pin")
@@ -2968,7 +2971,7 @@ note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` carries as
 # LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go) and
-# the pi-legion-envoy extension sends right after its role claim, before it opens the live wake
+# the pi-legion extension sends right after its role claim, before it opens the live wake
 # subscription a tick could race it on (controller-session.ts `claim`); the model answers it.
 controller_started_itself() {
   local file

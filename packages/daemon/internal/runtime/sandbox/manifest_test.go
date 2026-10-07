@@ -1249,12 +1249,12 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 }
 
 // imageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
-// mount there would hide: Oh My Pi, the Legion plugin the agent loads, the Go legion every
-// container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
+// mount there would hide: Oh My Pi, the Envoy and Legion plugins the agent loads, the Go legion
+// every container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
 // profile's agent directory.
 func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	for _, used := range []string{
-		defaultAgent, legionPlugin, testOptions().Tools.Legion,
+		defaultAgent, envoyPlugin, legionPlugin, testOptions().Tools.Legion,
 		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
 	} {
 		if !slices.ContainsFunc(imageOwnedPaths(), func(owned string) bool {

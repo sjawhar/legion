@@ -28,7 +28,7 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 // beside a tree's architect, completed as the state route completes it (internal/daemon's
 // source.State), and it is packages/contracts' state-controller-claim fixture: the contract's own
 // schema parses it (packages/contracts/src/legion-api.test.ts), and the plugin's daemon-launched
-// controller reads it as its daemon's state (packages/pi-envoy/extensions/legion.test.ts).
+// controller reads it as its daemon's state (packages/pi-legion/extensions/legion.test.ts).
 func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	const issue = "LEGION-208"
 	architect, err := claim.NewToken("legion", issue, claim.RoleArchitect)

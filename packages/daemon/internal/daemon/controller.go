@@ -16,7 +16,7 @@ import (
 
 // ControllerStartMessage is the controller's first prompt at every start: `legion controller start`
 // carries it to the operator's Oh My Pi as LEGION_CONTROLLER_START_MESSAGE, which the
-// pi-legion-envoy extension sends as the session's first user turn once its claim succeeds, before
+// pi-legion extension sends as the session's first user turn once its claim succeeds, before
 // it opens the live Envoy subscription a wake could arrive on (LEGION-392 found that Oh My Pi's own
 // positional-argument first message can lose that race); and the daemon delivers it to its own
 // controller (`controller: daemon`) each time that controller reports ready. So every start and

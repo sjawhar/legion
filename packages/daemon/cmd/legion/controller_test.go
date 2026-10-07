@@ -204,10 +204,12 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	c.write("controller.yaml", strings.Join(lines, "\n")+"\n", 0o600)
 
 	// The Oh My Pi LEGION_OMP_PATH names. As the load probe (`models --extension <probe>`) it
-	// records its environment and working directory and reports the plugin loaded from the file
-	// `loaded-from` names, or not loaded when there is none, as the probe extension does; as the
-	// controller it records its argv, environment, and working directory, and exits with the code
-	// the test asked for.
+	// records its environment and working directory and reports, as the probe extension does,
+	// pi-legion loaded from the file `loaded-from` names, or not loaded when there is none;
+	// pi-envoy publishing the interface `envoy-interface` holds (1 when absent; `none` for no
+	// pi-envoy) from the file `envoy-loaded-from` names; and the pre-split package loaded from the
+	// file `legacy-loaded-from` names, when there is one. As the controller it records its argv,
+	// environment, and working directory, and exits with the code the test asked for.
 	omp := filepath.Join(record, "omp")
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = models ]; then
@@ -215,10 +217,17 @@ if [ "$1" = models ]; then
   pwd -P >%[1]s/probe-cwd
   readlink /proc/self/fd/0 >%[1]s/probe-stdin
   if [ -f %[1]s/loaded-from ]; then
-    printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=%%s\n' "$(cat %[1]s/loaded-from)" >&2
+    printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=%%s\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n' "$(cat %[1]s/loaded-from)" >&2
   else
     echo LEGION_PLUGIN_LOADED=no >&2
   fi
+  interface=$(cat %[1]s/envoy-interface 2>/dev/null || echo 1)
+  if [ "$interface" = none ]; then
+    echo LEGION_ENVOY_INTERFACE=none >&2
+  else
+    printf 'LEGION_ENVOY_INTERFACE=%%s\nLEGION_ENVOY_LOADED_FROM=%%s\n' "$interface" "$(cat %[1]s/envoy-loaded-from)" >&2
+  fi
+  [ ! -f %[1]s/legacy-loaded-from ] || printf 'LEGION_LEGACY_PLUGIN_LOADED_FROM=%%s\n' "$(cat %[1]s/legacy-loaded-from)" >&2
   exit 0
 fi
 for a in "$@"; do printf '%%s\0' "$a"; done >%[1]s/argv
@@ -242,26 +251,47 @@ exit %[2]d
 	return c
 }
 
-// installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
-// declaring contract, and has the recording Oh My Pi load it.
+// installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion manifest
+// declaring contract and a pi-envoy manifest beside it, and has the recording Oh My Pi load both.
 func (c *operatorMachine) installPlugin(contract int) {
 	c.t.Helper()
 	c.loads(c.installPluginAt(filepath.Join(c.home, ".omp"), contract))
 }
 
-// loads has the recording Oh My Pi report the plugin loaded from the package directory dir, as
-// the probe extension renders it: a file URL of its dist/legion.js with a cache-busting query.
+// loads has the recording Oh My Pi report pi-legion loaded from the package directory dir, and
+// pi-envoy from the pi-envoy package beside it, as the probe extension renders each: a file URL of
+// its dist/legion.js or dist/envoy.js with a cache-busting query.
 func (c *operatorMachine) loads(dir string) {
 	c.t.Helper()
-	if err := os.WriteFile(filepath.Join(c.record, "loaded-from"), []byte("file://"+filepath.Join(dir, "dist", "legion.js")+"?mtime=1"), 0o600); err != nil {
+	c.tells("loaded-from", "file://"+filepath.Join(dir, "dist", "legion.js")+"?mtime=1")
+	c.tells("envoy-loaded-from", "file://"+filepath.Join(filepath.Dir(dir), "pi-envoy", "dist", "envoy.js")+"?mtime=1")
+}
+
+// loadsNothing has the recording Oh My Pi report pi-legion not loaded.
+func (c *operatorMachine) loadsNothing() {
+	c.t.Helper()
+	if err := os.Remove(filepath.Join(c.record, "loaded-from")); err != nil && !os.IsNotExist(err) {
 		c.t.Fatal(err)
 	}
 }
 
-// loadsNothing has the recording Oh My Pi report the plugin not loaded.
-func (c *operatorMachine) loadsNothing() {
+// loadsEnvoyAt has the recording Oh My Pi report pi-envoy publishing plugin interface version;
+// "none" is no pi-envoy loaded.
+func (c *operatorMachine) loadsEnvoyAt(version string) {
 	c.t.Helper()
-	if err := os.Remove(filepath.Join(c.record, "loaded-from")); err != nil && !os.IsNotExist(err) {
+	c.tells("envoy-interface", version)
+}
+
+// loadsLegacyFrom has the recording Oh My Pi report the pre-split package loaded from from.
+func (c *operatorMachine) loadsLegacyFrom(from string) {
+	c.t.Helper()
+	c.tells("legacy-loaded-from", from)
+}
+
+// tells writes what the recording Oh My Pi reads under name.
+func (c *operatorMachine) tells(name, value string) {
+	c.t.Helper()
+	if err := os.WriteFile(filepath.Join(c.record, name), []byte(value), 0o600); err != nil {
 		c.t.Fatal(err)
 	}
 }
@@ -272,19 +302,23 @@ func (c *operatorMachine) probeEnv() map[string]string {
 	return readEnv(c.t, filepath.Join(c.record, "probe-env"))
 }
 
-// installPluginAt installs a pi-legion-envoy manifest declaring contract under the Oh My Pi data
-// root root, and answers its package directory.
+// installPluginAt installs a pi-legion manifest declaring contract, and a pi-envoy manifest, under
+// the Oh My Pi data root root, and answers pi-legion's package directory.
 func (c *operatorMachine) installPluginAt(root string, contract int) string {
 	c.t.Helper()
-	dir := filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		c.t.Fatal(err)
+	plugins := filepath.Join(root, "plugins", "node_modules", "@sjawhar")
+	for name, manifest := range map[string]string{
+		"pi-legion": fmt.Sprintf(`{"name":"@sjawhar/pi-legion","version":"9.9.9","legion":{"daemonApiVersion":%d}}`, contract),
+		"pi-envoy":  `{"name":"@sjawhar/pi-envoy","version":"9.9.9"}`,
+	} {
+		if err := os.MkdirAll(filepath.Join(plugins, name), 0o700); err != nil {
+			c.t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(plugins, name, "package.json"), []byte(manifest), 0o600); err != nil {
+			c.t.Fatal(err)
+		}
 	}
-	manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"daemonApiVersion":%d}}`, contract)
-	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
-		c.t.Fatal(err)
-	}
-	return dir
+	return filepath.Join(plugins, "pi-legion")
 }
 
 func (c *operatorMachine) write(name, contents string, mode os.FileMode) {
@@ -794,25 +828,47 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
 		c.installPlugin(api.DaemonAPIVersion - 1)
-		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json")
-		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
+		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion", "package.json")
+		c.refused(fmt.Sprintf("pi-legion at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
 			manifest, api.DaemonAPIVersion-1, api.DaemonAPIVersion))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
-	t.Run("an Oh My Pi that does not load the plugin", func(t *testing.T) {
-		d := newControllerDaemon(t)
-		c := newControllerStart(t, d, controllerOptions{})
-		c.loadsNothing()
-		code, _, errb := c.run()
-		for _, want := range []string{"did not load pi-legion-envoy (not installed, disabled, or unregistered)", "plugin list` under the controller's environment"} {
-			if code != 1 || !strings.Contains(errb, want) {
-				t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q", code, errb, want)
+	// Each refusal of the load probe says what Oh My Pi did, launched as the controller launches
+	// it, and the remedy under the controller's environment; none names a profile, which only Oh
+	// My Pi resolves.
+	for _, testCase := range []struct {
+		name  string
+		loads func(c *operatorMachine)
+		want  []string
+	}{
+		{"an Oh My Pi that does not load the plugin", (*operatorMachine).loadsNothing,
+			[]string{"did not load pi-legion (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion release built from this daemon's commit into the Oh My Pi the controller runs", "plugin list` under the controller's environment"}},
+		{"an Oh My Pi that loads the plugin but no pi-envoy", func(c *operatorMachine) { c.loadsEnvoyAt("none") },
+			[]string{"loaded pi-legion but no pi-envoy. Install the @sjawhar/pi-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd ", "plugin list`"}},
+		{"an Oh My Pi whose pi-envoy publishes another interface", func(c *operatorMachine) { c.loadsEnvoyAt("2") },
+			[]string{"loaded pi-envoy from file://" + "@HOME/.omp/plugins/node_modules/@sjawhar/pi-envoy/dist/envoy.js?mtime=1, which publishes plugin interface 2, and a pi-legion that speaks 1. Install both releases built from this daemon's commit into the Oh My Pi the controller runs, and check them with `cd ", "plugin list`"}},
+		{"an Oh My Pi that still loads the pre-split package", func(c *operatorMachine) { c.loadsLegacyFrom("file:///plugins/legacy/dist/legion.js") },
+			[]string{"loaded @sjawhar/pi-legion-envoy from file:///plugins/legacy/dist/legion.js beside pi-legion. Run `cd ", "plugin uninstall @sjawhar/pi-legion-envoy` under the controller's environment"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			d := newControllerDaemon(t)
+			c := newControllerStart(t, d, controllerOptions{})
+			testCase.loads(c)
+			code, _, errb := c.run()
+			for _, want := range testCase.want {
+				want = strings.ReplaceAll(want, "@HOME", c.home)
+				if code != 1 || !strings.Contains(errb, want) {
+					t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q", code, errb, want)
+				}
 			}
-		}
-		c.wantNoSecretRequest()
-		c.wantNothingLaunchedOrWritten(c.defaultDir)
-	})
+			if strings.Contains(errb, "OMP profile") {
+				t.Errorf("legion controller start's refusal names a profile, which only Oh My Pi resolves: %q", errb)
+			}
+			c.wantNoSecretRequest()
+			c.wantNothingLaunchedOrWritten(c.defaultDir)
+		})
+	}
 	t.Run("an unknown key, naming it and the example", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -843,7 +899,7 @@ func TestControllerStartHoldsTheCopyOhMyPiLoadsToTheContract(t *testing.T) {
 		c := newControllerStart(t, d, controllerOptions{})
 		loaded := c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.DaemonAPIVersion-1)
 		c.loads(loaded)
-		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
+		c.refused(fmt.Sprintf("pi-legion at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
 			filepath.Join(loaded, "package.json"), api.DaemonAPIVersion-1, api.DaemonAPIVersion))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)

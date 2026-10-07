@@ -15,7 +15,10 @@ docs
 # The documentation site is a root workspace, so every frozen Bun install needs its manifest
 # (.github/scripts/check-bun-workspace-manifests.sh).
 !docs/site/package.json
-# skills/ ships inside the worker image's plugin tarball (packages/pi-envoy/scripts/prepack.sh).
+# skills/ ships inside the worker image's two plugin tarballs: scripts/pi-plugin-prepack.sh stages
+# each plugin's own skill directories, and nothing else of skills/, so its AGENTS.md is a checkout
+# document the build never reads and no image trigger owes.
+skills/AGENTS.md
 
 # Envoy: test files and deploy tooling not needed in the image.
 packages/envoy/**/*_test.go

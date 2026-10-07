@@ -26,35 +26,37 @@ var promptKinds = [len(promptrefs.Kinds)]promptKind{
 		noun:          "task agent",
 		namedBy:       "dispatched by",
 		consequence:   "a worker that calls one gets a tool result listing the agents it has, and carries on without it",
-		remedy:        "pi-legion-envoy ships every agent its prompts dispatch; install the release built from this daemon's commit",
+		remedy:        "the " + pluginPackage + " and " + envoyPackage + " releases built from this daemon's commit ship every agent Legion's prompts dispatch; install both",
 		discoveryName: "agent discovery",
 	},
 	promptrefs.Skills: {
 		noun:        "skill",
 		namedBy:     "loaded by",
 		consequence: "a worker told to load one reads `Unknown skill` and carries on without it",
-		remedy: "pi-legion-envoy ships every skill its prompts load; install the release built from this daemon's commit, " +
+		remedy: "the " + pluginPackage + " and " + envoyPackage + " releases built from this daemon's commit ship every skill Legion's prompts load; install both, " +
 			"and check that the settings this Oh My Pi reads (`disabledExtensions`, `skills`) neither disable nor filter it",
 		discoveryName: "skill discovery",
 	},
 }
 
-// promptReferences are the task agents and skills the plugin's own files name: every reference in
-// a Markdown file under the plugin's skills directories (the manifest's `omp.skills`, read with its
-// contract, readPluginManifest) and its `agents/` directory, the agent definitions Oh My Pi
-// discovers there, each named relative to the plugin. The role prompts' references are added to
-// them (prompts.RoleReferences, Merge).
+// promptReferences are the task agents and skills the Legion plugin's own files name: every
+// reference in a Markdown file under its skills directories (the manifest's `omp.skills`, read with
+// its contract, readPluginManifest) and its `agents/` directory, the agent definitions Oh My Pi
+// discovers there, each named relative to the plugin. The Envoy plugin's skills are every
+// session's, not the prompts a Legion pane is handed, so only pi-legion's files are read, and the
+// probe resolves what they name over both plugins, as a pane's use does.
+// The role prompts' references are added to them (prompts.RoleReferences, Merge).
 func promptReferences(manifest string, skills []string) (promptrefs.Names, error) {
 	names := promptrefs.New()
 	root := filepath.Dir(manifest)
 	for _, dir := range skills {
 		if err := names.Collect(root, filepath.Join(root, dir)); err != nil {
-			return names, fmt.Errorf("pi-legion-envoy at %s ships skills in %s, which the gate cannot read: %w", manifest, dir, err)
+			return names, fmt.Errorf("pi-legion at %s ships skills in %s, which the gate cannot read: %w", manifest, dir, err)
 		}
 	}
 	// A plugin without agents/ ships no agent definition, so none names anything.
 	if err := names.Collect(root, filepath.Join(root, "agents")); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return names, fmt.Errorf("pi-legion-envoy at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
+		return names, fmt.Errorf("pi-legion at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
 	}
 	return names, nil
 }
