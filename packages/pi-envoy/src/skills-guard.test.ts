@@ -9,12 +9,15 @@ import {
   anchors,
   brokenRelativeLinks,
   brokenSkillLinks,
+  bundledAgents,
   longSkillBodies,
   misnamedSkills,
   oversizedFiles,
   REPO_ROOT,
+  shippedAgents,
   skillLinks,
   stageSkills,
+  unresolvedAgentDispatches,
 } from "@legion/pi-shared/test/skills-guard";
 
 // The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
@@ -22,6 +25,12 @@ import {
 // its prepack stages it. A `skill://` link resolves by name through Oh My Pi's discovery, so it is
 // held to the repository's skills/, where both plugins' skills live.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
+const packageRoot = path.resolve(import.meta.dir, "..");
+// LEGION_TEST_OMP names the pinned Oh My Pi binary, as in extensions/dispatch-first-omp.test.ts: the
+// fork pin CI's pi-envoy job installs. A run without one skips the rule that reads it, except on
+// GitHub Actions.
+const omp = process.env.LEGION_TEST_OMP;
+const onActions = process.env.GITHUB_ACTIONS === "true";
 let staged: string;
 
 beforeAll(() => {
@@ -62,6 +71,25 @@ test("every skill://<name>/<path> link names a file that exists, and its #anchor
 test("every relative link resolves to a file inside the staged partition", () => {
   expect(brokenRelativeLinks(staged)).toEqual([]);
 });
+
+// This plugin's skills reach every session with Dispatch, including one with no other plugin
+// installed (the Envoy entry injects dispatch-first into each request), so a task agent they
+// dispatch must come with this plugin (`agents/`, which ships none today) or with Oh My Pi itself
+// (what `omp agents unpack` writes, read off the pinned binary rather than listed here). A
+// `skill://legion-*` mention in these skills is held to no such partition, on purpose: each is a
+// sentence conditioned on a Legion role (skills/dispatch/SKILL.md:218 and :385,
+// skills/dispatch-brainstorming/SKILL.md:3, :9 and :32, skills/dispatch-first/SKILL.md:53), inert
+// for a person and right for a pane with both plugins, and `brokenSkillLinks` above resolves a
+// `skill://<name>/<path>` link against the repository's skills/ for the same reason.
+test.skipIf(omp === undefined && !onActions)(
+  "every task agent the staged skills dispatch is one this plugin ships or Oh My Pi bundles",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const available = new Set([...shippedAgents(packageRoot), ...(await bundledAgents(omp))]);
+    expect(unresolvedAgentDispatches([staged], available)).toEqual([]);
+  },
+  60_000
+);
 
 test("a heading inside a code fence is no anchor, since a Markdown reader renders none", () => {
   const markdown = [

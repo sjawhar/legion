@@ -256,6 +256,11 @@ jobs:
               - 'skills/ce-simplify-code/**'
               - 'skills/thermonuclear-code-quality/**'
               - 'skills/thermonuclear-deep-review/**'
+              # The Legion skills link into skills/dispatch/SKILL.md by heading
+              # (`skill://dispatch/SKILL.md#…`), and src/skills-guard.test.ts is the one check that
+              # those anchors resolve: a heading rename there must run it on its own pull request,
+              # not merge green and fail the next unrelated pi-legion change.
+              - 'skills/dispatch/**'
               - '.omp-pin'
               - '.github/actions/install-omp/**'
               - 'packages/daemon/**'

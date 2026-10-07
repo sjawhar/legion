@@ -9,6 +9,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { linkOmpNatives } from "./omp-natives";
 
 export const SPILL_THRESHOLD_BYTES = 50 * 1024;
 /** The repository root, where `skills/` and the prepack script live. */
@@ -19,6 +20,9 @@ const PREPACK_SCRIPT = path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh");
 const SKILL_LINK = /skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)\/([^\s)`'"\]>*]+)/g;
 // A relative Markdown link, `](../…)` or `](./…)`, up to its closing parenthesis.
 const RELATIVE_LINK = /\]\((\.\.?\/[^\s)]+)\)/g;
+// A task dispatch as the daemon's boot gate reads it (packages/daemon/internal/promptrefs/
+// promptrefs.go): the name inside `agent="…"`, as `task(agent="<name>")` writes it.
+const AGENT_DISPATCH = /agent="([a-z0-9][a-z0-9._-]*)"/g;
 
 /**
  * Stages `packageName`'s skill partition into a fresh temporary directory through the prepack
@@ -190,5 +194,80 @@ export function brokenRelativeLinks(partitionRoot: string): string[] {
           return [];
         }
       )
+    );
+}
+
+export interface AgentDispatch {
+  /** The Markdown file holding the dispatch. */
+  readonly source: string;
+  readonly name: string;
+}
+
+/**
+ * Every `task(agent="<name>")` dispatch in the Markdown files under `roots`. Code fences are not
+ * excluded: the daemon's gate reads a prompt whole, and a dispatch shown in a fence is still what a
+ * model copies.
+ */
+export function agentDispatches(roots: readonly string[]): AgentDispatch[] {
+  return roots
+    .flatMap(files)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) =>
+      [...readFileSync(file, "utf8").matchAll(AGENT_DISPATCH)].map(([, name = ""]) => ({
+        source: file,
+        name,
+      }))
+    );
+}
+
+/**
+ * The task agents the Oh My Pi binary `omp` resolves with no plugin installed: the names of the
+ * files `omp agents unpack` writes under a fresh HOME. That HOME is a temporary directory holding
+ * only the binary's natives (hardlinks to the shared copy, omp-natives.ts), and the binary's
+ * environment names no profile or config directory, so it writes where a person's does. The
+ * directory is removed before returning.
+ */
+export async function bundledAgents(omp: string): Promise<string[]> {
+  const home = mkdtempSync(path.join(os.tmpdir(), "omp-bundled-agents-"));
+  try {
+    await linkOmpNatives(omp, home);
+    const unpacked = Bun.spawnSync([omp, "agents", "unpack"], {
+      env: { HOME: home, PATH: "/usr/local/bin:/usr/bin:/bin" },
+    });
+    if (unpacked.exitCode !== 0) {
+      throw new Error(
+        `${omp} agents unpack exited ${unpacked.exitCode}:\n${unpacked.stderr.toString()}`
+      );
+    }
+    return files(path.join(home, ".omp"))
+      .filter((file) => file.endsWith(".md"))
+      .map((file) => path.basename(file, ".md"));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** The task agents the plugin at `packageRoot` ships: the `*.md` under its `agents/`, if any. */
+export function shippedAgents(packageRoot: string): string[] {
+  const agents = path.join(packageRoot, "agents");
+  if (!existsSync(agents)) return [];
+  return readdirSync(agents)
+    .filter((file) => file.endsWith(".md"))
+    .map((file) => path.basename(file, ".md"));
+}
+
+/**
+ * The dispatches in the Markdown files under `roots` naming an agent not in `available`, each as
+ * one sentence naming the source.
+ */
+export function unresolvedAgentDispatches(
+  roots: readonly string[],
+  available: ReadonlySet<string>
+): string[] {
+  return agentDispatches(roots)
+    .filter(({ name }) => !available.has(name))
+    .map(
+      ({ source, name }) =>
+        `${source} dispatches ${name}, which neither this plugin nor Oh My Pi ships`
     );
 }
