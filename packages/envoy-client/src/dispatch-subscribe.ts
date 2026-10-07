@@ -2,11 +2,11 @@ import { DispatchEventSchema, SubscriptionRemovedEventPayloadSchema } from "@leg
 import { documentTopicOf, issueTopic, type OwnerTopic } from "./dispatch-owner";
 
 /**
- * The follow notice a host shows once per ask after a native tool result whose
+ * The follow notice the `dispatch` command prints once per ask after a result whose
  * `details.follows.ask` says the calling session now follows that ask (it opened it,
- * replied to it, or asked to follow it). No tool result subscribes the session to the
+ * replied to it, or asked to follow it). No result subscribes the session to the
  * owner; the notice names the `envoy_subscribe` line for whoever wants every event.
- * Returns null for any other result: reads, unfollows, errors, and Envoy tools.
+ * Returns null for any other result: reads, unfollows and errors.
  */
 export function dispatchFollowNotice(
   details: unknown
@@ -33,24 +33,6 @@ export function dispatchFollowNotice(
   return {
     ask,
     text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch follow --ask ${ask} --action unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
-  };
-}
-
-/**
- * The once-per-ask policy over `dispatchFollowNotice`: the returned function emits the
- * notice for a tool result the first time it names an ask this session follows and returns
- * what `emit` returned; following the same ask again is not news, so a repeat (or a result
- * with no notice) emits nothing and returns undefined.
- */
-export function createFollowAnnouncer<Emitted>(
-  emit: (text: string) => Emitted
-): (details: unknown) => Emitted | undefined {
-  const announced = new Set<string>();
-  return (details) => {
-    const notice = dispatchFollowNotice(details);
-    if (notice === null || announced.has(notice.ask)) return undefined;
-    announced.add(notice.ask);
-    return emit(notice.text);
   };
 }
 

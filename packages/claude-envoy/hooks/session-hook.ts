@@ -2,22 +2,27 @@
 // mode is a hook command of its own because Claude Code caps each hook's output at 10,000
 // characters, so a long open-asks summary sharing a command with the skill could push it out.
 //
-// open-asks (every SessionStart: startup, resume, clear, compact, fork). Two jobs:
-// 1. Record the CURRENT session id for this Claude process so the channel
+// open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
+// 1. Name Claude Code as the `dispatch` command's host: append `export DISPATCH_HOST=claude` to
+//    `CLAUDE_ENV_FILE`, which Claude Code sources into every later Bash command of the session.
+//    The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which Claude Code sets fresh
+//    in each Bash command, so a `/clear` needs nothing more here.
+// 2. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
-// 2. Put the session's open Dispatch asks into the model's context.
+// 3. Put the session's open Dispatch asks into the model's context.
 // Plain stdout becomes context; it always exits 0 so a Dispatch outage never
 // blocks a session from starting.
 //
 // dispatch-first (every SessionStart, and SubagentStart): puts the dispatch-first skill into the
 // model's context when Dispatch is configured for the project, as
-// `hookSpecificOutput.additionalContext` under the event that ran it. A subagent holds the main
-// conversation's Dispatch tools and starts with no SessionStart of its own. On resume and fork
+// `hookSpecificOutput.additionalContext` under the event that ran it. A subagent runs the main
+// conversation's `dispatch` command and starts with no SessionStart of its own. On resume and fork
 // Claude Code adds the context only when the transcript does not already hold the same text, so a
 // session that started with the skill keeps one copy, and one that started without it (opened
 // before this plugin version, or before Dispatch was configured) gets it. A plugin installed
 // without the skill file exits non-zero naming it, which Claude Code shows the user.
 
+import { appendFileSync } from "node:fs"
 import { join } from "node:path"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
@@ -40,6 +45,8 @@ const DispatchFirstInput = z.object({
 
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
+  const envFile = process.env["CLAUDE_ENV_FILE"]
+  if (envFile) appendFileSync(envFile, "export DISPATCH_HOST=claude\n")
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
   if (pluginData !== undefined && pluginData.trim().length > 0) {
     try {

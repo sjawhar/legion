@@ -158,13 +158,12 @@ function fieldKinds(spec: DispatchToolSpec): ReadonlyMap<string, FieldInfo> {
     const inner = nonNull.length === 1 ? nonNull[0] : undefined;
     const kind = inner === undefined ? "json" : kindOf(field, inner);
     const values = inner?.enum?.map(String);
+    const description = node.description ?? inner?.description;
     fields.set(field, {
       kind,
       nullable,
       required: required.has(field),
-      ...(node.description === undefined && inner?.description === undefined
-        ? {}
-        : { description: node.description ?? inner?.description }),
+      ...(description === undefined ? {} : { description }),
       ...(values === undefined ? {} : { values }),
     });
   }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -133,6 +133,45 @@ test("adds nothing to context when Dispatch is not configured", async () => {
         "utf8",
       ),
     ).toBe("s-1\n")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// The `dispatch` command the plugin's bin/ puts on the Bash tool's PATH reads its host from
+// DISPATCH_HOST; Claude Code sources CLAUDE_ENV_FILE into every later Bash command of the session.
+test("names Claude Code as the dispatch host in CLAUDE_ENV_FILE, after whatever other hooks wrote", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-env-"))
+  const envFile = join(scratch, "session-env.sh")
+  await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(await readFile(envFile, "utf8")).toBe(
+      "export FROM_ANOTHER_HOOK=1\nexport DISPATCH_HOST=claude\n",
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("leaves an env file alone when Claude Code names none", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-no-env-"))
+  const envFile = join(scratch, "session-env.sh")
+  await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(await readFile(envFile, "utf8")).toBe("export FROM_ANOTHER_HOOK=1\n")
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }

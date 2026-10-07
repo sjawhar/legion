@@ -1,12 +1,6 @@
 import { unwatchFile, watchFile } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
-import {
-  agentSubject,
-  dispatchToolSchema,
-  dispatchToolSpecs,
-  ROLE_TOPIC_PREFIX,
-  zodSchemaApi,
-} from "@legion/contracts"
+import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
 import {
   type DispatchDelivery,
@@ -16,13 +10,7 @@ import {
   renderInbound,
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
-import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
-import { forgetShownPictures } from "@legion/envoy-client/dispatch-picture-tools"
-import { imageBlocks, isPictureType, type ToolImage } from "@legion/envoy-client/dispatch-pictures"
-import {
-  createFollowAnnouncer,
-  subscriptionRemovedTopics,
-} from "@legion/envoy-client/dispatch-subscribe"
+import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
@@ -126,11 +114,6 @@ export interface ChannelDelivery {
    * Code: `false` for a frame skipped, dropped, or answered on Dispatch with an error instead.
    */
   enqueue(input: { readonly subject: string; readonly raw: string }): Promise<boolean>
-  /**
-   * Tell the model, once per ask, that a Dispatch write made this session follow an ask
-   * (`details.follows.ask`); no write subscribes the session to the whole issue.
-   */
-  announceFollow(details: unknown): Promise<void>
   /** Latest inbound metadata, most recent first; no envelope body is retained. */
   inbox(): readonly ChannelInboxEntry[]
 }
@@ -189,38 +172,10 @@ function parseArguments<Operation extends EnvoyToolOperation>(
   return argumentsSchema(spec).parse(input) as ToolArgumentsByOperation[Operation]
 }
 
-type McpContent =
-  | { readonly type: "text"; readonly text: string }
-  | { readonly type: "image"; readonly data: string; readonly mimeType: string }
-
-/** Whether a value a tool answered is a picture: base64 `data` and a picture type a model is
- *  shown. `mcpResult` reads a result as `unknown`, so each element is checked, never cast. */
-function isToolImage(value: unknown): value is ToolImage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "data" in value &&
-    typeof value.data === "string" &&
-    "mimeType" in value &&
-    typeof value.mimeType === "string" &&
-    isPictureType(value.mimeType)
-  )
-}
-
-/** A tool's answer as MCP content: the value as JSON text, then the pictures a Dispatch result
- *  carries (`images`) as image blocks, which the JSON leaves out. */
-export function mcpResult(value: unknown): { readonly content: readonly McpContent[] } {
-  if (typeof value === "object" && value !== null && "images" in value) {
-    const { images, ...rest } = value
-    if (Array.isArray(images)) {
-      return {
-        content: [
-          { type: "text", text: JSON.stringify(rest) },
-          ...imageBlocks(images.filter(isToolImage)),
-        ],
-      }
-    }
-  }
+/** A tool's answer as MCP content: the value as one JSON text block. */
+export function mcpResult(value: unknown): {
+  readonly content: readonly { readonly type: "text"; readonly text: string }[]
+} {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
 
@@ -235,21 +190,12 @@ function currentDispatchConfig(directory = projectDirectory()) {
   return resolveDispatchConfig(process.env, { cwd: directory })
 }
 
-export function channelToolDefinitions(dispatchEnabled: boolean) {
-  return [
-    ...envoyToolSpecs.map((spec) => ({
-      name: spec.name,
-      description: spec.description,
-      inputSchema: z.toJSONSchema(argumentsSchema(spec)),
-    })),
-    ...(dispatchEnabled
-      ? dispatchToolSpecs.map((spec) => ({
-          name: spec.name,
-          description: spec.description,
-          inputSchema: z.toJSONSchema(dispatchToolSchema(spec, zodSchemaApi(z))),
-        }))
-      : []),
-  ]
+export function channelToolDefinitions() {
+  return envoyToolSpecs.map((spec) => ({
+    name: spec.name,
+    description: spec.description,
+    inputSchema: z.toJSONSchema(argumentsSchema(spec)),
+  }))
 }
 
 class UnsupportedEnvoyToolError extends Error {
@@ -306,12 +252,6 @@ export function createChannelDelivery(input: {
     })
     return queued
   }
-  const announce = createFollowAnnouncer((text) =>
-    queue({
-      method: CHANNEL_NOTIFICATION_METHOD,
-      params: { content: text, meta: { producer: "dispatch" } },
-    }),
-  )
 
   return {
     enqueue({ subject, raw }) {
@@ -372,9 +312,6 @@ export function createChannelDelivery(input: {
         },
       })
       return queued.then(() => true)
-    },
-    announceFollow(details) {
-      return announce(details) ?? tail
     },
     inbox() {
       return [...inbox]
@@ -603,9 +540,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
     identity.set(next)
     directSubject = nextSubject
-    // `/clear` empties the conversation, so the new id starts with no pictures shown, and what
-    // the old id was shown goes with it.
-    forgetShownPictures(previous)
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
     // handoff does not wait for it: a stuck notification would otherwise hold
@@ -826,23 +760,6 @@ export async function executeEnvoyTool(
   input: unknown,
 ): Promise<unknown> {
   const { identity } = runtime
-  const dispatchSpec = dispatchToolSpecs.find((candidate) => candidate.name === name)
-  if (dispatchSpec !== undefined) {
-    const config = currentDispatchConfig(identity.directory)
-    if (!config.enabled) throw new UnsupportedEnvoyToolError(name)
-    const result = await executeDispatchTool({
-      tool: dispatchSpec.name,
-      args: input as Record<string, unknown>,
-      cwd: identity.directory,
-      host: "claude",
-      sessionId: identity.id,
-      config,
-      env: process.env,
-    })
-    await runtime.session.delivery.announceFollow(result.details)
-    return result
-  }
-
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name)
   if (spec === undefined) throw new UnsupportedEnvoyToolError(name)
   switch (spec.operation) {
@@ -937,7 +854,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const dispatchConfig = currentDispatchConfig(directory)
   if (!dispatchConfig.enabled) {
     process.stderr.write(
-      `envoy-channel: Dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}\n`,
+      `envoy-channel: Dispatch disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}\n`,
     )
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
@@ -957,11 +874,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
     instructions:
-      "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
+      "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
   })
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch })
   let runtime: ChannelToolRuntime | undefined
-  const toolDefinitions = channelToolDefinitions(dispatchConfig.enabled)
+  const toolDefinitions = channelToolDefinitions()
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")

@@ -45,14 +45,8 @@ var __export = (target, all) => {
 };
 var __require = import.meta.require;
 
-// hooks/session-hook.ts
-import { appendFileSync } from "fs";
-import { join as join4 } from "path";
-
-// ../envoy-client/src/dispatch-config.ts
-import { readFileSync as readFileSync2 } from "fs";
-import { homedir } from "os";
-import * as path from "path";
+// ../envoy-client/bin/dispatch.ts
+import { readFileSync as readFileSync4 } from "fs";
 
 // ../../node_modules/.bun/zod@4.3.6/node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -13586,153 +13580,6 @@ function date4(params) {
 
 // ../../node_modules/.bun/zod@4.3.6/node_modules/zod/v4/classic/external.js
 config(en_default());
-// ../envoy-client/src/errors.ts
-function messageFor(error48) {
-  return error48 instanceof Error ? error48.message : String(error48);
-}
-
-// ../envoy-client/src/secret-file.ts
-import { readFileSync } from "fs";
-function readSecretFile(variable, filePath) {
-  let contents;
-  try {
-    contents = readFileSync(filePath, "utf8");
-  } catch (error48) {
-    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
-  }
-  const value = contents.trim();
-  if (value.length === 0)
-    throw new Error(`${variable} names ${filePath}, which is empty`);
-  return value;
-}
-
-// ../envoy-client/src/dispatch-config.ts
-var DEFAULT_SERVER_URL = "http://localhost:8766";
-function normalizeDispatchUrl(url2) {
-  return url2.replace(/\/+$/, "");
-}
-function parsedDispatchUrl(value, source) {
-  const url2 = normalizeDispatchUrl(value);
-  try {
-    new URL(url2);
-    return { url: url2, error: null };
-  } catch {
-    return { url: null, error: `${source} must be a valid URL` };
-  }
-}
-var EnvoyFileSchema = exports_external.looseObject({
-  $schema: exports_external.string().optional(),
-  natsUrls: exports_external.array(exports_external.string()).optional(),
-  dispatch: exports_external.strictObject({
-    enabled: exports_external.boolean().optional(),
-    serverUrl: exports_external.url().optional(),
-    token: exports_external.string().optional()
-  }).optional()
-});
-function describeSchemaIssue(filePath, error48) {
-  const issue2 = error48.issues[0];
-  if (!issue2)
-    return `${filePath}: invalid dispatch config`;
-  if (issue2.code === "unrecognized_keys") {
-    const keys = issue2.keys.map((key) => `dispatch.${key}`).join(", ");
-    return `${filePath}: unrecognized dispatch key(s): ${keys}`;
-  }
-  return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
-}
-function readEnvoyFile(filePath) {
-  let raw;
-  try {
-    raw = readFileSync2(filePath, "utf-8");
-  } catch {
-    return { kind: "absent" };
-  }
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch (err) {
-    return { kind: "invalid", reason: `${filePath}: invalid JSON (${messageFor(err)})` };
-  }
-  const parsed = EnvoyFileSchema.safeParse(parsedJson);
-  if (!parsed.success) {
-    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
-  }
-  return { kind: "valid", settings: parsed.data.dispatch ?? null };
-}
-function resolveDispatchConfig(env, options = {}) {
-  const explicitUrl = env.DISPATCH_URL;
-  const home = options.home ?? env.HOME ?? homedir();
-  const cwd = options.cwd ?? process.cwd();
-  const userFile = readEnvoyFile(path.join(home, ".config", "opencode", "envoy.json"));
-  const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));
-  for (const file2 of [userFile, repoFile]) {
-    if (file2.kind === "invalid") {
-      return { enabled: false, url: null, token: null, error: file2.reason };
-    }
-  }
-  const userSettings = userFile.kind === "valid" ? userFile.settings : null;
-  const repoSettings = repoFile.kind === "valid" ? repoFile.settings : null;
-  const merged = { ...userSettings, ...repoSettings };
-  const repoURL = repoSettings?.serverUrl;
-  if (explicitUrl === undefined && merged.enabled === true && repoURL !== undefined) {
-    const token2 = repoSettings?.token ?? null;
-    if (!token2) {
-      return {
-        enabled: false,
-        url: null,
-        token: null,
-        error: "repository dispatch.serverUrl requires dispatch.token from the same .opencode/envoy.json or DISPATCH_URL with DISPATCH_TOKEN"
-      };
-    }
-    const url3 = parsedDispatchUrl(repoURL, "repository dispatch.serverUrl");
-    if (url3.error !== null)
-      return { enabled: false, url: null, token: null, error: url3.error };
-    return { enabled: true, url: url3.url, token: token2, error: null };
-  }
-  const rawUrl = explicitUrl !== undefined ? { value: explicitUrl, source: "DISPATCH_URL" } : merged.enabled === true ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" } : null;
-  const url2 = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
-  let token;
-  let tokenSource;
-  if (env.DISPATCH_TOKEN_FILE !== undefined) {
-    tokenSource = "DISPATCH_TOKEN_FILE";
-    try {
-      token = readSecretFile(tokenSource, env.DISPATCH_TOKEN_FILE);
-    } catch (error48) {
-      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
-    }
-  } else if (env.DISPATCH_TOKEN !== undefined) {
-    tokenSource = "DISPATCH_TOKEN";
-    token = env.DISPATCH_TOKEN;
-  } else {
-    tokenSource = "dispatch.token";
-    token = merged.token ?? null;
-  }
-  if (url2.error !== null)
-    return { enabled: false, url: null, token, error: url2.error };
-  if (url2.url === null)
-    return { enabled: false, url: null, token, error: null };
-  if (!token) {
-    return {
-      enabled: false,
-      url: url2.url,
-      token,
-      error: `${tokenSource} must be a non-empty bearer token`
-    };
-  }
-  return { enabled: true, url: url2.url, token, error: null };
-}
-function activeDispatchConfig(env, options = {}) {
-  const config2 = resolveDispatchConfig(env, options);
-  if (config2.error !== null)
-    throw new Error(`dispatch config: ${config2.error}`);
-  const { url: url2, token } = config2;
-  if (!config2.enabled || url2 === null || token === null)
-    return null;
-  return { ...config2, url: url2, token };
-}
-
-// ../envoy-client/src/dispatch-execute.ts
-import { resolve as resolvePath2 } from "path";
-
 // ../contracts/src/dispatch-api.ts
 function serviceSubjectLabel(subject) {
   const parts = subject.split(":");
@@ -14692,22 +14539,9 @@ function zodSchemaApi(zod) {
     }
   };
 }
-// ../envoy-client/src/ask-answer.ts
-var HEAD_LENGTH = 120;
-function textHead(text) {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > HEAD_LENGTH ? `${flat.slice(0, HEAD_LENGTH)}\u2026` : flat;
-}
-function askAnswerText(answer) {
-  if (answer === null || answer === undefined)
-    return "";
-  const selected = (answer.selected ?? []).join(", ");
-  const text = answer.text ?? "";
-  if (text === "")
-    return selected;
-  if (selected === "")
-    return text;
-  return `${selected} - ${text}`;
+// ../envoy-client/src/errors.ts
+function messageFor(error48) {
+  return error48 instanceof Error ? error48.message : String(error48);
 }
 
 // ../envoy-client/src/dispatch-command.ts
@@ -14900,8 +14734,8 @@ function parseCommand(argv, io) {
   let help = false;
   let dryRun = false;
   let stdinFlag;
-  const read = (flag, path2) => {
-    if (path2 === STDIN) {
+  const read = (flag, path) => {
+    if (path === STDIN) {
       if (stdinFlag !== undefined) {
         problems.push(`${stdinFlag} and ${flag} both read stdin (-); only one flag can`);
         return;
@@ -14909,9 +14743,9 @@ function parseCommand(argv, io) {
       stdinFlag = flag;
     }
     try {
-      return io.readText(path2);
+      return io.readText(path);
     } catch (error48) {
-      problems.push(`${flag} could not read ${path2 === STDIN ? "stdin" : path2}: ${messageFor(error48)}`);
+      problems.push(`${flag} could not read ${path === STDIN ? "stdin" : path}: ${messageFor(error48)}`);
       return;
     }
   };
@@ -15129,6 +14963,171 @@ function commandsHelp() {
     ""
   ].join(`
 `);
+}
+
+// ../envoy-client/src/dispatch-config.ts
+import { readFileSync as readFileSync2 } from "fs";
+import { homedir } from "os";
+import * as path from "path";
+
+// ../envoy-client/src/secret-file.ts
+import { readFileSync } from "fs";
+function readSecretFile(variable, filePath) {
+  let contents;
+  try {
+    contents = readFileSync(filePath, "utf8");
+  } catch (error48) {
+    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
+  }
+  const value = contents.trim();
+  if (value.length === 0)
+    throw new Error(`${variable} names ${filePath}, which is empty`);
+  return value;
+}
+
+// ../envoy-client/src/dispatch-config.ts
+var DEFAULT_SERVER_URL = "http://localhost:8766";
+function normalizeDispatchUrl(url2) {
+  return url2.replace(/\/+$/, "");
+}
+function parsedDispatchUrl(value, source) {
+  const url2 = normalizeDispatchUrl(value);
+  try {
+    new URL(url2);
+    return { url: url2, error: null };
+  } catch {
+    return { url: null, error: `${source} must be a valid URL` };
+  }
+}
+var EnvoyFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  natsUrls: exports_external.array(exports_external.string()).optional(),
+  dispatch: exports_external.strictObject({
+    enabled: exports_external.boolean().optional(),
+    serverUrl: exports_external.url().optional(),
+    token: exports_external.string().optional()
+  }).optional()
+});
+function describeSchemaIssue(filePath, error48) {
+  const issue2 = error48.issues[0];
+  if (!issue2)
+    return `${filePath}: invalid dispatch config`;
+  if (issue2.code === "unrecognized_keys") {
+    const keys = issue2.keys.map((key) => `dispatch.${key}`).join(", ");
+    return `${filePath}: unrecognized dispatch key(s): ${keys}`;
+  }
+  return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
+}
+function readEnvoyFile(filePath) {
+  let raw;
+  try {
+    raw = readFileSync2(filePath, "utf-8");
+  } catch {
+    return { kind: "absent" };
+  }
+  let parsedJson;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch (err) {
+    return { kind: "invalid", reason: `${filePath}: invalid JSON (${messageFor(err)})` };
+  }
+  const parsed = EnvoyFileSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
+  }
+  return { kind: "valid", settings: parsed.data.dispatch ?? null };
+}
+function resolveDispatchConfig(env, options = {}) {
+  const explicitUrl = env.DISPATCH_URL;
+  const home = options.home ?? env.HOME ?? homedir();
+  const cwd = options.cwd ?? process.cwd();
+  const userFile = readEnvoyFile(path.join(home, ".config", "opencode", "envoy.json"));
+  const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));
+  for (const file2 of [userFile, repoFile]) {
+    if (file2.kind === "invalid") {
+      return { enabled: false, url: null, token: null, error: file2.reason };
+    }
+  }
+  const userSettings = userFile.kind === "valid" ? userFile.settings : null;
+  const repoSettings = repoFile.kind === "valid" ? repoFile.settings : null;
+  const merged = { ...userSettings, ...repoSettings };
+  const repoURL = repoSettings?.serverUrl;
+  if (explicitUrl === undefined && merged.enabled === true && repoURL !== undefined) {
+    const token2 = repoSettings?.token ?? null;
+    if (!token2) {
+      return {
+        enabled: false,
+        url: null,
+        token: null,
+        error: "repository dispatch.serverUrl requires dispatch.token from the same .opencode/envoy.json or DISPATCH_URL with DISPATCH_TOKEN"
+      };
+    }
+    const url3 = parsedDispatchUrl(repoURL, "repository dispatch.serverUrl");
+    if (url3.error !== null)
+      return { enabled: false, url: null, token: null, error: url3.error };
+    return { enabled: true, url: url3.url, token: token2, error: null };
+  }
+  const rawUrl = explicitUrl !== undefined ? { value: explicitUrl, source: "DISPATCH_URL" } : merged.enabled === true ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" } : null;
+  const url2 = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
+  let token;
+  let tokenSource;
+  if (env.DISPATCH_TOKEN_FILE !== undefined) {
+    tokenSource = "DISPATCH_TOKEN_FILE";
+    try {
+      token = readSecretFile(tokenSource, env.DISPATCH_TOKEN_FILE);
+    } catch (error48) {
+      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
+    }
+  } else if (env.DISPATCH_TOKEN !== undefined) {
+    tokenSource = "DISPATCH_TOKEN";
+    token = env.DISPATCH_TOKEN;
+  } else {
+    tokenSource = "dispatch.token";
+    token = merged.token ?? null;
+  }
+  if (url2.error !== null)
+    return { enabled: false, url: null, token, error: url2.error };
+  if (url2.url === null)
+    return { enabled: false, url: null, token, error: null };
+  if (!token) {
+    return {
+      enabled: false,
+      url: url2.url,
+      token,
+      error: `${tokenSource} must be a non-empty bearer token`
+    };
+  }
+  return { enabled: true, url: url2.url, token, error: null };
+}
+function activeDispatchConfig(env, options = {}) {
+  const config2 = resolveDispatchConfig(env, options);
+  if (config2.error !== null)
+    throw new Error(`dispatch config: ${config2.error}`);
+  const { url: url2, token } = config2;
+  if (!config2.enabled || url2 === null || token === null)
+    return null;
+  return { ...config2, url: url2, token };
+}
+
+// ../envoy-client/src/dispatch-execute.ts
+import { resolve as resolvePath2 } from "path";
+
+// ../envoy-client/src/ask-answer.ts
+var HEAD_LENGTH = 120;
+function textHead(text) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > HEAD_LENGTH ? `${flat.slice(0, HEAD_LENGTH)}\u2026` : flat;
+}
+function askAnswerText(answer) {
+  if (answer === null || answer === undefined)
+    return "";
+  const selected = (answer.selected ?? []).join(", ");
+  const text = answer.text ?? "";
+  if (text === "")
+    return selected;
+  if (selected === "")
+    return text;
+  return `${selected} - ${text}`;
 }
 
 // ../envoy-client/src/dispatch-cwd.ts
@@ -18304,178 +18303,301 @@ function asObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 }
 
-// ../envoy-client/src/dispatch-first.ts
-import { readFileSync as readFileSync3 } from "fs";
+// ../envoy-client/src/dispatch-session-state.ts
+import { createHash } from "crypto";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync as readFileSync3,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "fs";
+import { homedir as homedir2 } from "os";
 import { join as join2 } from "path";
-var DISPATCH_FIRST_MARKER = "<dispatch-first-skill>";
-function dispatchFirstSkillFile(skillsDirectory) {
-  return join2(skillsDirectory, "dispatch-first", "SKILL.md");
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_DIR = 448;
+var PRIVATE_FILE = 384;
+var IDLE_SESSION_MS = 14 * 86400000;
+var PRUNE_INTERVAL_MS = 86400000;
+var PRUNED_STAMP = ".pruned";
+var PICTURE_EXTENSIONS = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp"
+};
+function sessionStateRoot(env) {
+  if (env.DISPATCH_STATE_DIR)
+    return env.DISPATCH_STATE_DIR;
+  return join2(env.XDG_STATE_HOME || join2(homedir2(), ".local", "state"), "dispatch");
 }
-function readDispatchFirstContext(skillFile) {
-  let skill;
-  try {
-    skill = readFileSync3(skillFile, "utf8");
-  } catch (error48) {
-    throw new Error(`the dispatch-first skill ${skillFile} could not be read: ${messageFor(error48)}`);
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  const body = skill.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-  return [
-    DISPATCH_FIRST_MARKER,
-    "This session has Dispatch, so the dispatch-first skill is loaded for it. Follow it.",
-    "",
-    body,
-    "</dispatch-first-skill>"
-  ].join(`
+  return join2(sessionStateRoot(env), "sessions", sessionId);
+}
+function ensureDirectory(dir) {
+  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
+}
+function writeAtomically(path2, text) {
+  const temporary = `${path2}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporary, text, { mode: PRIVATE_FILE });
+  renameSync(temporary, path2);
+}
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function loadSessionMemory(dir, sessionId) {
+  const path2 = join2(dir, "state.json");
+  if (!existsSync(path2))
+    return new Set;
+  const state = JSON.parse(readFileSync3(path2, "utf-8"));
+  const advice = adviceMemory();
+  for (const key of stringList(state.advice))
+    advice.add(key);
+  const pictures = shownPictures(sessionId);
+  for (const address of stringList(state.pictures))
+    pictures.add(address);
+  return new Set(stringList(state.follows));
+}
+function saveSessionMemory(dir, sessionId, follows) {
+  ensureDirectory(dir);
+  const state = {
+    advice: [...adviceMemory()],
+    pictures: [...shownPictures(sessionId)],
+    follows: [...follows]
+  };
+  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
-
-// src/claude-session.ts
-function configuredValue(value) {
-  return value !== undefined && value.trim().length > 0 ? value : undefined;
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  const line = { at: new Date().toISOString(), ...entry };
+  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
+`, { mode: PRIVATE_FILE });
 }
-function claudeSessionId(environment) {
-  const id = configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
-  if (id !== undefined)
-    return id;
-  throw new Error("Envoy channel requires ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID; Claude Code did not provide a session identity");
-}
-function claudeProjectDirectory(environment, fallback) {
-  return configuredValue(environment.CLAUDE_PROJECT_DIR) ?? fallback;
-}
-
-// src/session-identity.ts
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, join as join3 } from "path";
-
-class SessionIdentity {
-  directory;
-  #id;
-  constructor(id, directory) {
-    this.directory = directory;
-    this.#id = id;
+function writePicture(dir, image) {
+  const bytes = Buffer.from(image.data, "base64");
+  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+  const pictures = join2(dir, "pictures");
+  const path2 = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  if (!existsSync(path2)) {
+    ensureDirectory(pictures);
+    writeFileSync(path2, bytes, { mode: PRIVATE_FILE });
   }
-  get id() {
-    return this.#id;
-  }
-  set(next) {
-    this.#id = next;
-  }
+  return { path: path2, bytes: bytes.length };
 }
-function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join3(stateDirectory, "sessions", String(claudePid));
+function writeLongOutput(dir, text) {
+  const out = join2(dir, "out");
+  ensureDirectory(out);
+  const path2 = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync(path2, text, { mode: PRIVATE_FILE });
+  return path2;
 }
-function sessionHandoffFile(stateDirectory, claudePid) {
-  return join3(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
-}
-function roleStateFile(stateDirectory, sessionId) {
-  return join3(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
-}
-function hasErrnoCode(error48, code) {
-  return error48 instanceof Error && "code" in error48 && error48.code === code;
-}
-async function writeAtomicStateFile(file2, contents) {
-  await mkdir(dirname(file2), { recursive: true, mode: 448 });
-  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temporary, contents, { mode: 384 });
-  await rename(temporary, file2);
-}
-async function writeSessionHandoff(file2, sessionId) {
-  await writeAtomicStateFile(file2, `${sessionId.trim()}
-`);
-}
-async function readSessionHandoff(file2) {
-  try {
-    const id = (await readFile(file2, "utf8")).trim();
-    return id.length === 0 ? undefined : id;
-  } catch (error48) {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return;
-    throw error48;
-  }
-}
-function processExists(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error48) {
-    return hasErrnoCode(error48, "EPERM");
-  }
-}
-async function pruneStaleSessionHandoffs(stateDirectory) {
-  const sessions = join3(stateDirectory, "sessions");
-  const entries = await readdir(sessions).catch((error48) => {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return [];
-    throw error48;
-  });
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || processExists(Number(entry)))
-      continue;
-    await rm(join3(sessions, entry), { recursive: true, force: true });
-  }
-}
-
-// hooks/session-hook.ts
-var OPEN_ASKS_TIMEOUT_MS = 3000;
-var OpenAsksInput = exports_external.object({ session_id: exports_external.string().min(1), cwd: exports_external.string().optional() });
-var DispatchFirstInput = exports_external.object({
-  hook_event_name: exports_external.enum(["SessionStart", "SubagentStart"]),
-  cwd: exports_external.string().optional()
-});
-async function openAsks(raw) {
-  const input = OpenAsksInput.parse(raw);
-  const envFile = process.env["CLAUDE_ENV_FILE"];
-  if (envFile)
-    appendFileSync(envFile, `export DISPATCH_HOST=claude
-`);
-  const pluginData = process.env["CLAUDE_PLUGIN_DATA"];
-  if (pluginData !== undefined && pluginData.trim().length > 0) {
-    try {
-      await writeSessionHandoff(sessionHandoffFile(pluginData, process.ppid), input.session_id);
-    } catch (error48) {
-      process.stderr.write(`envoy: could not record the session id \u2014 ${messageFor(error48)}
-`);
-    }
-  }
-  const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
-  const config2 = resolveDispatchConfig(process.env, { cwd: directory });
-  if (config2.enabled && config2.url !== null && config2.token !== null) {
-    try {
-      const snapshot = await new DispatchClient(config2.url, config2.token, fetch, AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)).openAsks(input.session_id);
-      process.stdout.write(`Dispatch authored-ask summary:
-${formatOpenAsksSummary(snapshot, config2.url)}
-`);
-    } catch (error48) {
-      process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error48)}
-`);
-    }
-  } else if (config2.error !== null) {
-    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config2.error}
-`);
-  }
-}
-function dispatchFirst(raw) {
-  const input = DispatchFirstInput.parse(raw);
-  const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
-  if (!resolveDispatchConfig(process.env, { cwd: directory }).enabled)
+function readSessionTitle(dir) {
+  const path2 = join2(dir, "title");
+  if (!existsSync(path2))
     return;
-  const pluginRoot = configuredValue(process.env["CLAUDE_PLUGIN_ROOT"]);
-  if (pluginRoot === undefined) {
-    throw new Error("CLAUDE_PLUGIN_ROOT is unset; Claude Code sets it for every plugin hook");
-  }
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: input.hook_event_name,
-      additionalContext: readDispatchFirstContext(dispatchFirstSkillFile(join4(pluginRoot, "skills")))
+  return readFileSync3(path2, "utf-8") || undefined;
+}
+function pruneSessions(root, now) {
+  const stamp = join2(root, PRUNED_STAMP);
+  if (existsSync(stamp) && now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    return;
+  const sessions = join2(root, "sessions");
+  if (existsSync(sessions)) {
+    for (const entry of readdirSync(sessions, { withFileTypes: true })) {
+      if (!entry.isDirectory())
+        continue;
+      const dir = join2(sessions, entry.name);
+      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS)
+        rmSync(dir, { recursive: true, force: true });
     }
-  }));
+  }
+  ensureDirectory(root);
+  writeFileSync(stamp, "", { mode: PRIVATE_FILE });
 }
-var mode = process.argv[2];
-if (mode !== "open-asks" && mode !== "dispatch-first") {
-  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`);
+
+// ../envoy-client/src/dispatch-subscribe.ts
+function dispatchFollowNotice(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue: issue2, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  let owner;
+  if (typeof issue2 === "string" && issue2 !== "") {
+    owner = issueTopic(issue2);
+  } else if (typeof document === "string") {
+    const [project, slug] = document.split("/", 2);
+    if (!project || !slug)
+      return null;
+    owner = { label: document, topic: documentTopicOf(project, slug).topic };
+  } else {
+    return null;
+  }
+  return {
+    ask,
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch follow --ask ${ask} --action unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
+  };
 }
-var input = JSON.parse(await Bun.stdin.text());
-if (mode === "open-asks")
-  await openAsks(input);
-else
-  dispatchFirst(input);
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope2;
+  try {
+    envelope2 = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope2 !== "object" || envelope2 === null)
+    return;
+  const { source, payload } = envelope2;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
+// ../envoy-client/src/dispatch-cli.ts
+var OK = 0;
+var REFUSED = 1;
+var USAGE = 2;
+var HOSTS = { omp: "omp", claude: "claude", opencode: "opencode" };
+var CLAUDE_OUTPUT_MAX = 25000;
+async function runDispatchCli(argv, rawEnv, io) {
+  const print = (text) => io.stdout(text.endsWith(`
+`) ? text : `${text}
+`);
+  const env = {};
+  for (const [name, value] of Object.entries(rawEnv)) {
+    if (value !== undefined && value !== "")
+      env[name] = value;
+  }
+  let parsed;
+  try {
+    parsed = parseCommand(argv, io);
+  } catch (error48) {
+    print(`dispatch: ${messageFor(error48)}`);
+    return USAGE;
+  }
+  if (parsed.kind === "help") {
+    print(parsed.tool === undefined ? commandsHelp() : commandHelp(parsed.tool));
+    return OK;
+  }
+  if (parsed.kind === "refused") {
+    if (parsed.tool === undefined) {
+      print([`dispatch: ${parsed.problems.join(`
+`)}`, "Run dispatch --help."].join(`
+`));
+      return USAGE;
+    }
+    print(new ToolInputError(parsed.tool, parsed.problems, { syntax: "cli" }).message);
+    return REFUSED;
+  }
+  const hostName = env.DISPATCH_HOST;
+  const host = hostName === undefined ? undefined : HOSTS[hostName];
+  if (host === undefined) {
+    print(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`);
+    return USAGE;
+  }
+  const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
+  const sessionId = env[sessionVariable];
+  if (sessionId === undefined) {
+    print(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`);
+    return USAGE;
+  }
+  let dir;
+  try {
+    dir = sessionDirectory(env, sessionId);
+  } catch (error48) {
+    print(messageFor(error48));
+    return USAGE;
+  }
+  if (parsed.dryRun) {
+    print(JSON.stringify(parsed.args, null, 2));
+    return OK;
+  }
+  let config2;
+  try {
+    config2 = activeDispatchConfig(env, { cwd: io.cwd });
+  } catch (error48) {
+    print(`dispatch: ${messageFor(error48)}`);
+    return USAGE;
+  }
+  if (config2 === null) {
+    print("dispatch: Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)");
+    return USAGE;
+  }
+  pruneSessions(sessionStateRoot(env), Date.now());
+  const follows = loadSessionMemory(dir, sessionId);
+  const { tool, args } = parsed;
+  try {
+    const result = await executeDispatchTool({
+      tool,
+      args,
+      cwd: io.cwd,
+      host,
+      sessionId,
+      sessionTitle: env.DISPATCH_SESSION_TITLE ?? readSessionTitle(dir),
+      config: config2,
+      env,
+      ...io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }
+    });
+    let text = result.text;
+    if (host === "claude" && text.length > CLAUDE_OUTPUT_MAX) {
+      const path2 = writeLongOutput(dir, text);
+      text = `${text.slice(0, CLAUDE_OUTPUT_MAX)}
+(the full result, ${text.length} characters: ${path2})`;
+    }
+    const lines = [text];
+    for (const image of result.images ?? []) {
+      const picture = writePicture(dir, image);
+      lines.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
+    }
+    const notice = dispatchFollowNotice(result.details);
+    if (notice !== null && !follows.has(notice.ask)) {
+      follows.add(notice.ask);
+      lines.push(notice.text);
+    }
+    print(lines.join(`
+`));
+    appendResult(dir, { tool, details: result.details });
+    saveSessionMemory(dir, sessionId, follows);
+    return OK;
+  } catch (error48) {
+    const message = messageFor(error48);
+    print(message);
+    appendResult(dir, { tool, error: message });
+    saveSessionMemory(dir, sessionId, follows);
+    return REFUSED;
+  }
+}
+
+// ../envoy-client/bin/dispatch.ts
+var readText = (path2) => readFileSync4(path2 === "-" ? 0 : path2, "utf-8");
+process.exit(await runDispatchCli(Bun.argv.slice(2), process.env, {
+  stdout: (text) => process.stdout.write(text),
+  readText,
+  cwd: process.cwd()
+}));
