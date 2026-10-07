@@ -2557,6 +2557,14 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
 
+func (s *blockingFirstAppendStore) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit []byte, creditSeq uint64) (persistence.Version, error) {
+	if s.blocked.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.VersionedStore.(creditedUpdateStore).AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit, creditSeq)
+}
+
 // room is the state the service holds for room now, created when it holds none, for a test to read
 // or arrange under its lock.
 func (s *Service) room(name string) *roomState {

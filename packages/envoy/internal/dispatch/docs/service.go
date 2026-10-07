@@ -129,6 +129,10 @@ type Service struct {
 	// calling transaction's fork up to date with the room, and before it renders the fork. Nil
 	// outside tests; tests use it to edit the room in that window.
 	afterCaptureFork func(room string)
+	// afterForkRead runs once a write's fork has been brought up to date with the room
+	// (forkLive), before the write's operation runs on it. Nil outside tests; tests use it to edit
+	// the room after the fork read it.
+	afterForkRead func(room string)
 	// afterSettleAuthorsTake runs after a settlement has taken its authors and before it copies
 	// the tree it will version. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleAuthorsTake func(room string)

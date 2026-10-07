@@ -229,6 +229,9 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		return nil, err
 	}
 	write.fork, write.forkedFrom, write.forkSeq, write.forkGeneration = fork, weak.Make(room), seq, generation
+	if s.afterForkRead != nil {
+		s.afterForkRead(write.artifactID)
+	}
 	return fork, nil
 }
 
