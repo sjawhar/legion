@@ -1582,15 +1582,12 @@ this release, never the previous image. A revert that cannot be avoided goes in 
 1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the earlier
    release refuses both as unknown keys, and without them this release runs `controller: operator`.
    Restart this release with that file and let it boot once. Do not skip this boot: only this
-   release ends the stopped controller's registration, and it stops the pod gracefully, with a
-   shutdown frame and the termination grace, before it releases the Sandbox and volume. The earlier
-   release's orphan sweep would instead delete that Sandbox at its first boot, with no shutdown:
-   it counts no retired claim as known, so it takes a retired claim's Sandbox as readily as one whose
-   row is gone. The boot is done when `legion claims list` shows
-   `legion-<project>-controller` `retired`, and, if that controller had registered, the daemon has
-   logged `controller: ending the registration of the controller an earlier boot under controller:
-   daemon launched`. If the boot is refused, stop here and follow the refusal's entry in
-   troubleshooting.
+   release ends the stopped controller's registration. It also releases the controller's Sandbox and
+   volume itself, which the earlier release's orphan sweep would otherwise do at its first boot: that
+   sweep counts no retired claim as known, so it takes a retired claim's Sandbox as readily as one
+   whose row is gone. The boot is done when `legion claims list` shows
+   `legion-<project>-controller` `retired`. If the boot is refused, stop here and follow the
+   refusal's entry in troubleshooting.
 2. Stop that daemon: the earlier release must not run beside it for the same project, and while it
    runs it still holds the claim in memory, so any write of that claim would put the row back.
 3. Read the row, then delete it. `<project>` is the project's token: `project` in `legion.yaml`

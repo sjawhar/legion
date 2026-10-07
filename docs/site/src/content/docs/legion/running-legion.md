@@ -270,8 +270,8 @@ rolling back the image. If you must roll back, do it in this order:
 1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the
    earlier release refuses both as unknown keys, and without them this release runs
    `controller: operator`. Restart this release once with that file. Do not skip this boot: only
-   this release ends the stopped controller's registration and stops its pod gracefully. It is done
-   when `legion claims list` shows `legion-<project>-controller` `retired`. If the boot is refused,
+   this release ends the stopped controller's registration. It is done when `legion claims list`
+   shows `legion-<project>-controller` `retired`. If the boot is refused,
    stop and follow the refusal's entry in [Troubleshooting](/legion/legion/troubleshooting/).
 2. Stop that daemon: the earlier release must not run beside it for the same project, and while it
    runs it still holds the claim in memory, so any write of that claim would put the row back.
