@@ -337,6 +337,19 @@ every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` th
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
 loop before Stage 7, so the reviewer, as its Go prompt says and with no approval sent by the proof, approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+The smoke `main` requires the `gate` check, which has not started when the fixture pull request is
+created, and GitHub refuses a merge before it passes, so the cleanup first waits up to 600 s, named
+in the transcript, for the pull request's merge state to read `CLEAN`, `UNSTABLE` or `HAS_HOOKS`
+(`smoke_pr_mergeable` in `lib/workflow.sh`). A failed read is a poll that has not seen it yet, and
+a timeout names the last state read. That checkpoint, `smoke-main-clean`, is the fixture's
+teardown, not the workflow under test. It begins only once every checkpoint before it has passed,
+the first issue's workflow through its human merge and sign-off included. A failure there stops
+the run like any other: the checkpoints after `smoke-main-clean`, from `held-after-launch-budget`
+through `cleanup-is-complete`, do not run, so its result is no report on them. The `EXIT` trap's
+teardown follows its `FAIL smoke-main-clean` line as for any failure, and the run's last line is
+`stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed,
+…`. The run still exits non-zero, and the smoke `main` may still carry the leftovers the cleanup
+was to remove.
 From the proof's merge until that cleanup passes, the run holds the smoke `main`: an exclusive
 `flock` on `/tmp/legion-e2e-smoke-main.<owner>-<repo>.lock`, shared by every Stage 3 and Stage 4b
 run on the box (`hold_smoke_main` in `lib/workflow.sh`). Another run's merge inside that window

@@ -139,6 +139,12 @@ cleanup() {
   # (129, 130, 143, as trapped below) stopped the run and gets none.
   [ -n "${ok:-}" ] || [[ $status =~ ^(129|130|143)$ ]] ||
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
+  # smoke-main-clean begins only once every checkpoint before it has passed, and it touches nothing
+  # but the smoke repository and its main's lock: its failure is the fixture's teardown, not the
+  # workflow under test, and the run's last line says so. The status stays the failure's, since the
+  # checkpoints after it never ran.
+  [ -n "${ok:-}" ] || [ "$check" != smoke-main-clean ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its human merge and sign-off included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
   return 0
 }
 trap cleanup EXIT
