@@ -1220,14 +1220,15 @@ one way a file on the tree volume becomes jj configuration, jj migrating a legac
 `.jj/workspace-config.toml` or `.jj/repo/config.toml` that has no id file beside it, is closed by
 removing that file before each jj command provisioning and removal run (`disarmLegacyConfig`,
 `internal/workspace/config.go`), the repository's only in the shared clone's own `.jj/repo`: a jj
-command in a workspace whose `.jj/repo` names any other directory is refused. The worker image's
-jj is 0.45; on the tmux runtime, which runs the host's jj through the same code, the daemon refuses
-to start with a jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38
-`.jj/repo/config.toml` is the repository's live configuration. It snapshots the candidate's own
-working copy with `--config` overrides that hold the snapshot's working-copy filter and signing
-programs off even so (`snapshotOverrides`, `internal/workspace/removal.go`), keeps the workspace
-whenever that snapshot leaves anything unaccounted for — an untracked path, anything on stderr, or
-a nested repository the snapshot cannot see at all — and otherwise removes it only once every
+command in a workspace whose `.jj/repo` names any other directory, followed through symlinks and
+`..` as jj itself follows it, or is neither a directory nor a regular file, is refused. The
+worker image's jj is 0.45; on the tmux runtime, which runs the host's jj through the same code,
+the daemon refuses to start with a jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`),
+since before 0.38 `.jj/repo/config.toml` is the repository's live configuration. It snapshots the
+candidate's own working copy with `--config` overrides that hold the snapshot's working-copy filter
+and signing programs off even so (`snapshotOverrides`, `internal/workspace/removal.go`), keeps the
+workspace whenever that snapshot leaves anything unaccounted for — an untracked path, anything on
+stderr, or a nested repository the snapshot cannot see at all — and otherwise removes it only once every
 commit it holds is reachable from a remote bookmark or the recorded merged pull-request head,
 renaming its directory aside before the slower recursive delete so a kill mid-delete is finished, not
 re-judged, on the next pass. A removed workspace's gitignored content is deleted with it: nothing

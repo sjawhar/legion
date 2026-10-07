@@ -239,16 +239,19 @@ func disarmLegacyConfig(root, clone string) error {
 // held to the shared clone's own `.jj/repo`: clone's when the command names one (a workspace of
 // it), else the root's own (the command opens the clone itself). That directory must be a real
 // directory, not a symlink or a file. A workspace names its repository in its `.jj/repo` file,
-// which a tree agent can rewrite: resolved as jj's DefaultWorkspaceLoader resolves it (relative to
-// `.jj`, symlinks followed), it must be the clone's own, or the command is refused, naming both,
-// before jj opens a repository Legion did not provision and before anything there is removed.
+// which a tree agent can rewrite. The path that file names is built as jj builds it
+// (workspaceRepository, never cleaned) and stat'ed by the kernel, which resolves it physically as
+// jj's canonicalize does; it must be the same directory as the clone's own (os.SameFile), or the
+// command is refused, naming both, before jj opens a repository Legion did not provision and
+// before anything there is removed.
 func sharedRepository(jjDir, clone string) (string, error) {
 	own := filepath.Join(jjDir, "repo")
 	if clone != "" {
 		own = filepath.Join(clone, ".jj", "repo")
 	}
-	if info, err := os.Lstat(own); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("refusing to run jj in %s: %s is not the shared clone's own repository directory (%v)", filepath.Dir(jjDir), own, describeEntry(info, err))
+	ownInfo, err := os.Lstat(own)
+	if err != nil || !ownInfo.IsDir() {
+		return "", fmt.Errorf("refusing to run jj in %s: %s is not the shared clone's own repository directory (%v)", filepath.Dir(jjDir), own, describeEntry(ownInfo, err))
 	}
 	if clone == "" {
 		return own, nil
@@ -257,40 +260,48 @@ func sharedRepository(jjDir, clone string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("refusing to run jj in %s: resolve the shared clone's %s: %w", filepath.Dir(jjDir), own, err)
 	}
-	opened, err := workspaceRepository(jjDir)
-	if err != nil || opened != expected {
-		if err != nil {
-			opened = err.Error()
+	target, err := workspaceRepository(jjDir)
+	if err != nil {
+		return "", fmt.Errorf("refusing to run jj in %s: read its .jj/repo: %w", filepath.Dir(jjDir), err)
+	}
+	if opened, err := os.Stat(target); err != nil || !os.SameFile(opened, ownInfo) {
+		named := target
+		if resolved, err := filepath.EvalSymlinks(target); err == nil {
+			named = resolved
 		}
-		return "", fmt.Errorf("refusing to run jj in %s: its .jj/repo names %s, not the shared clone's %s", filepath.Dir(jjDir), opened, expected)
+		return "", fmt.Errorf("refusing to run jj in %s: its .jj/repo names %s, not the shared clone's %s", filepath.Dir(jjDir), named, expected)
 	}
 	return expected, nil
 }
 
-// workspaceRepository is the directory jj opens as the repository of the workspace whose `.jj` is
-// jjDir (jj's DefaultWorkspaceLoader): `.jj/repo` itself when it is a directory, else the path the
-// `.jj/repo` file holds, relative to `.jj` unless absolute; symlinks resolved either way.
+// workspaceRepository is the path jj opens as the repository of the workspace whose `.jj` is
+// jjDir, built as jj 0.45's DefaultWorkspaceLoader builds it (lib/src/workspace.rs): `.jj/repo`
+// itself unless it is a regular file, else the path that file holds, appended to `.jj` unless it
+// is absolute. It is never cleaned: jj canonicalizes it physically, each symlink resolved before a
+// `..` after it, and filepath.Join would cancel `link/..` before anything resolved `link`, naming
+// a different directory than the one jj opens. A `.jj/repo` that is neither a directory nor a
+// regular file (a FIFO, a socket, a device) is refused before anything reads it: reading a FIFO
+// blocks, and nothing here runs under the command's deadline.
 func workspaceRepository(jjDir string) (string, error) {
-	real, err := filepath.EvalSymlinks(jjDir)
-	if err != nil {
-		return "", err
-	}
-	repo := filepath.Join(real, "repo")
+	repo := filepath.Join(jjDir, "repo")
 	info, err := os.Stat(repo)
 	if err != nil {
 		return "", err
 	}
-	if !info.IsDir() {
-		pointer, err := os.ReadFile(repo)
-		if err != nil {
-			return "", err
-		}
-		repo = string(pointer)
-		if !filepath.IsAbs(repo) {
-			repo = filepath.Join(real, repo)
-		}
+	if info.IsDir() {
+		return repo, nil
 	}
-	return filepath.EvalSymlinks(repo)
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is neither a directory nor a regular file (mode %s)", repo, info.Mode().Type())
+	}
+	pointer, err := os.ReadFile(repo)
+	if err != nil {
+		return "", err
+	}
+	if target := string(pointer); filepath.IsAbs(target) {
+		return target, nil
+	}
+	return jjDir + string(filepath.Separator) + string(pointer), nil
 }
 
 // describeEntry says what a path that should be a directory is instead.

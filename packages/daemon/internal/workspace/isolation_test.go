@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Every agent of a tree writes the shared clone, so everything below is what a tree agent can plant
@@ -370,9 +372,177 @@ func TestNoJJCommandReadsALegacyConfigurationTheTreePlanted(t *testing.T) {
 
 // A workspace's .jj/repo is a file a tree agent can rewrite. One that names a directory other
 // than the shared clone's .jj/repo refuses the command, naming both, before jj opens that
-// directory and before anything in it is removed: here a config.toml with no config-id beside it,
-// which the runner removes only in the shared clone's own repository directory.
+// directory and before anything in it is removed (a config.toml with no config-id beside it is
+// removed only in the shared clone's own repository directory). That holds for a pointer to
+// another directory outright, and for one a lexical join reads as the clone's own while jj, which
+// canonicalizes it physically, opens another repository (pointThroughALink): there, RemoveFinished
+// keeps a pushed workspace holding an edit no jj command ever snapshotted, where a snapshot run
+// against the other repository would have hidden the edit and let the workspace be removed.
 func TestTheRunnerRefusesAWorkspaceWhoseRepoPointerNamesAnotherDirectory(t *testing.T) {
+	t.Run("an absolute pointer to another directory", func(t *testing.T) {
+		run := newLocalRunner(t)
+		ws, err := Provision(context.Background(), run, provisionRequest(t))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.Mkdir(elsewhere, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		untouched := filepath.Join(elsewhere, "config.toml")
+		if err := os.WriteFile(untouched, []byte("[user]\nname = \"not the clone's\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ws.Dir, ".jj", "repo"), []byte(elsewhere), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		clone, err := filepath.EvalSymlinks(filepath.Join(ws.Clone, ".jj", "repo"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		named, err := filepath.EvalSymlinks(elsewhere)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = RunCheckedIn(context.Background(), run, ws, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"})
+		if err == nil || !strings.Contains(err.Error(), named) || !strings.Contains(err.Error(), clone) {
+			t.Errorf("jj in a workspace whose .jj/repo names %s = %v, want a refusal naming it and the shared clone's %s", named, err, clone)
+		}
+		if _, err := os.Stat(untouched); err != nil {
+			t.Errorf("%s, outside the shared clone, was touched: %v", untouched, err)
+		}
+	})
+
+	t.Run("a symlink then .. that a lexical join cancels", func(t *testing.T) {
+		run := newLocalRunner(t)
+		ws, err := Provision(context.Background(), run, provisionRequest(t))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		decoy := pointThroughALink(t, ws)
+		if err := os.Remove(filepath.Join(decoy, "config-id")); err != nil {
+			t.Fatal(err)
+		}
+		untouched := filepath.Join(decoy, "config.toml")
+		if err := os.WriteFile(untouched, []byte("[revset-aliases]\n\"empty()\" = \"all()\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		clone, err := filepath.EvalSymlinks(filepath.Join(ws.Clone, ".jj", "repo"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		named, err := filepath.EvalSymlinks(decoy)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		listed, err := RunCheckedIn(context.Background(), run, ws, []string{"jj", "config", "list", "--include-defaults", "revset-aliases", "--ignore-working-copy", "--color=never"})
+		if err == nil || !strings.Contains(err.Error(), "refusing to run jj") || !strings.Contains(err.Error(), named) || !strings.Contains(err.Error(), clone) {
+			t.Errorf("jj in a workspace whose .jj/repo resolves to %s = %v, want a refusal naming it and the shared clone's %s", named, err, clone)
+		}
+		if strings.Contains(listed.Stdout, "all()") {
+			t.Errorf("jj read the alias planted in the other repository:\n%s", listed.Stdout)
+		}
+		if _, err := os.Stat(untouched); err != nil {
+			t.Errorf("%s, outside the shared clone, was touched: %v", untouched, err)
+		}
+	})
+
+	t.Run("a pushed workspace holding an unsnapshotted edit under that pointer is never removed", func(t *testing.T) {
+		run := newLocalRunner(t)
+		ws, err := Provision(context.Background(), run, provisionRequest(t))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runSetup(t, ws.Dir, "jj", "status")
+		runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+		pointThroughALink(t, ws)
+		pending := filepath.Join(ws.Dir, "pending.txt")
+		if err := os.WriteFile(pending, []byte("never snapshotted\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var logged []string
+		err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
+		if _, statErr := os.Stat(pending); statErr != nil {
+			t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
+		}
+		for _, line := range logged {
+			if strings.Contains(line, "removed WIDGETS-42's workspace") {
+				t.Errorf("logged %q, want the workspace kept", line)
+			}
+		}
+	})
+}
+
+// pointThroughALink rewrites ws's .jj/repo into a pointer a lexical join reads as the shared
+// clone's own repository while jj, which canonicalizes it physically, opens a copy of the clone
+// elsewhere: `ln/../` and then jj's own pointer, where `.jj/ln` links to a directory one level
+// deeper than that pointer's `..`s climb, under a root that holds the copy. It returns the copy's
+// .jj/repo, and fails the test unless a lexical join of the new pointer is the clone's own.
+func pointThroughALink(t *testing.T, ws Workspace) string {
+	t.Helper()
+	jjDir := filepath.Join(ws.Dir, ".jj")
+	written, err := os.ReadFile(filepath.Join(jjDir, "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointer := string(written)
+	if filepath.IsAbs(pointer) || !strings.HasSuffix(pointer, "/.jj/repo") {
+		t.Fatalf("test setup: jj wrote .jj/repo as %q, want a relative path to a .jj/repo", pointer)
+	}
+	climbs := 0
+	for _, segment := range strings.Split(pointer, "/") {
+		if segment != ".." {
+			break
+		}
+		climbs++
+	}
+	link := t.TempDir()
+	for i := 0; i <= climbs; i++ {
+		link = filepath.Join(link, fmt.Sprintf("d%d", i))
+	}
+	if err := os.MkdirAll(link, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(filepath.Dir(link), pointer)
+	copied := filepath.Dir(filepath.Dir(decoy))
+	if err := os.MkdirAll(filepath.Dir(copied), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, "", "cp", "-a", ws.Clone, copied)
+	// jj warns once, on stderr, that a repository was copied; the next command in it is silent, as
+	// in a copy a tree agent made and used before it rewrote the pointer.
+	runSetup(t, copied, "jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id")
+	if err := os.Symlink(link, filepath.Join(jjDir, "ln")); err != nil {
+		t.Fatal(err)
+	}
+	crafted := "ln/../" + pointer
+	if err := os.WriteFile(filepath.Join(jjDir, "repo"), []byte(crafted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lexical, err := filepath.EvalSymlinks(filepath.Join(jjDir, crafted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone, err := filepath.EvalSymlinks(filepath.Join(ws.Clone, ".jj", "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lexical != clone {
+		t.Fatalf("test setup: %q joined lexically is %s, want the shared clone's %s", crafted, lexical, clone)
+	}
+	return decoy
+}
+
+// The shared clone's own .jj/repo must be a real directory. A symlink there, to a directory
+// holding a config.toml and no config-id, refuses both a command on the clone and one in a
+// workspace of it, naming the symlink, and nothing in the directory it points to is removed.
+func TestTheRunnerRefusesASharedCloneWhoseRepositoryIsASymlink(t *testing.T) {
 	run := newLocalRunner(t)
 	ws, err := Provision(context.Background(), run, provisionRequest(t))
 	if err != nil {
@@ -386,23 +556,66 @@ func TestTheRunnerRefusesAWorkspaceWhoseRepoPointerNamesAnotherDirectory(t *test
 	if err := os.WriteFile(untouched, []byte("[user]\nname = \"not the clone's\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ws.Dir, ".jj", "repo"), []byte(elsewhere), 0o644); err != nil {
+	repo := filepath.Join(ws.Clone, ".jj", "repo")
+	if err := os.Rename(repo, repo+"-moved"); err != nil {
 		t.Fatal(err)
 	}
-	clone, err := filepath.EvalSymlinks(filepath.Join(ws.Clone, ".jj", "repo"))
-	if err != nil {
+	if err := os.Symlink(elsewhere, repo); err != nil {
 		t.Fatal(err)
 	}
-	named, err := filepath.EvalSymlinks(elsewhere)
-	if err != nil {
-		t.Fatal(err)
-	}
+	log := []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"}
 
-	_, err = RunCheckedIn(context.Background(), run, ws, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"})
-	if err == nil || !strings.Contains(err.Error(), named) || !strings.Contains(err.Error(), clone) {
-		t.Errorf("jj in a workspace whose .jj/repo names %s = %v, want a refusal naming it and the shared clone's %s", named, err, clone)
+	for name, command := range map[string]func() error{
+		"a command on the clone": func() error {
+			_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, "")
+			return err
+		},
+		"a command in a workspace of it": func() error {
+			_, err := RunCheckedIn(context.Background(), run, ws, log)
+			return err
+		},
+	} {
+		if err := command(); err == nil || !strings.Contains(err.Error(), "is not the shared clone's own repository directory (a symlink)") {
+			t.Errorf("%s with the clone's .jj/repo a symlink = %v, want a refusal naming the symlink", name, err)
+		}
 	}
 	if _, err := os.Stat(untouched); err != nil {
 		t.Errorf("%s, outside the shared clone, was touched: %v", untouched, err)
+	}
+}
+
+// A workspace's .jj/repo that is neither a directory nor a regular file is refused before anything
+// reads it: a FIFO there would otherwise block the runner, which reads .jj/repo before the
+// command's deadline starts.
+func TestTheRunnerRefusesAWorkspaceWhoseRepoIsNotARegularFile(t *testing.T) {
+	run := newLocalRunner(t)
+	ws, err := Provision(context.Background(), run, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	fifo := filepath.Join(ws.Dir, ".jj", "repo")
+	if err := os.Remove(fifo); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunCheckedIn(context.Background(), run, ws, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "neither a directory nor a regular file") {
+			t.Errorf("jj in a workspace whose .jj/repo is a FIFO = %v, want a refusal naming what it is", err)
+		}
+	case <-time.After(20 * time.Second):
+		// Release the blocked reader so the test process can finish, then fail.
+		if writer, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+			writer.Close()
+		}
+		t.Fatal("the runner blocked reading a FIFO at .jj/repo for 20 s")
 	}
 }

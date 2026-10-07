@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
@@ -91,6 +92,7 @@ func checkJJVersion(jj string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), jjVersionTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, jj, "--version")
+	command.Env = runtime.WithoutNATSSeeds(os.Environ())
 	command.WaitDelay = time.Second
 	output, err := command.Output()
 	if err != nil {

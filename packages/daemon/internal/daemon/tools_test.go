@@ -128,3 +128,26 @@ func TestResolveToolsRefusesAJJOlderThanTheLayoutProvisioningReliesOn(t *testing
 		})
 	}
 }
+
+// The jj --version boot runs starts without either raw NATS seed the daemon holds, as every
+// command the daemon starts does (runtime.WithoutNATSSeeds).
+func TestTheJJVersionCheckGetsNoNATSSeed(t *testing.T) {
+	t.Setenv("NATS_NKEY_SEED", "pane-seed-value")
+	t.Setenv("NATS_DAEMON_NKEY_SEED", "daemon-seed-value")
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "env")
+	jj := filepath.Join(dir, "jj")
+	if err := os.WriteFile(jj, []byte("#!/bin/sh\nenv >"+dump+"\necho '"+currentJJ+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkJJVersion(jj); err != nil {
+		t.Fatalf("checkJJVersion(%s) = %v, want it accepted", jj, err)
+	}
+	seen, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("jj --version never ran: %v", err)
+	}
+	if strings.Contains(string(seen), "seed-value") || !strings.Contains(string(seen), "PATH=") {
+		t.Errorf("jj --version's environment carries a NATS seed (or is not the daemon's):\n%s", seen)
+	}
+}
