@@ -164,10 +164,41 @@ export function DeliveryPage(): ReactNode {
     return prs.some((pr) => pr.id === selection.id) ? selection : null;
   }, [selection, prs]);
 
-  if (isDeliveryNotConfigured(query.error)) {
-    return (
-      <section className="flex h-full flex-col gap-4">
+  const notConfigured = isDeliveryNotConfigured(query.error);
+  return (
+    <section className="flex h-full flex-col gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-2">
         <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
+        {notConfigured ? null : (
+          <div className="flex items-center gap-2 text-sm">
+            <label className={textMutedOnCanvas}>
+              Color by
+              <select
+                className={`ml-2 rounded border px-2 py-1 ${bgTransparent}`}
+                onChange={(event) => setColorBy(event.target.value as ColorFacet)}
+                value={colorBy}
+              >
+                {COLOR_BY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="rounded border px-3 py-1"
+              onClick={() =>
+                setState({ ...state, mode: state.mode === "list" ? "timeline" : "list" })
+              }
+              type="button"
+            >
+              {state.mode === "list" ? "Show timeline" : "Show list"}
+            </button>
+          </div>
+        )}
+      </header>
+
+      {notConfigured ? (
         <section aria-labelledby="delivery-setup-heading" className="max-w-4xl">
           <h2
             className={`text-base font-semibold ${textPrimaryOnCanvas}`}
@@ -179,89 +210,59 @@ export function DeliveryPage(): ReactNode {
             Once set, this page shows the merged pull requests of the authors you name, the
             production deploys that shipped them, and the pipeline failures in between.
           </p>
-          <DeliverySettingsForm />
+          <DeliverySettingsForm initial={null} />
         </section>
-      </section>
-    );
-  }
-  return (
-    <section className="flex h-full flex-col gap-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
-        <div className="flex items-center gap-2 text-sm">
-          <label className={textMutedOnCanvas}>
-            Color by
-            <select
-              className={`ml-2 rounded border px-2 py-1 ${bgTransparent}`}
-              onChange={(event) => setColorBy(event.target.value as ColorFacet)}
-              value={colorBy}
-            >
-              {COLOR_BY_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="rounded border px-3 py-1"
-            onClick={() =>
-              setState({ ...state, mode: state.mode === "list" ? "timeline" : "list" })
-            }
-            type="button"
-          >
-            {state.mode === "list" ? "Show timeline" : "Show list"}
-          </button>
-        </div>
-      </header>
+      ) : (
+        <>
+          {query.data === undefined ? null : <SourceFreshness freshness={query.data.freshness} />}
 
-      {query.data === undefined ? null : <SourceFreshness freshness={query.data.freshness} />}
+          <FacetPanel
+            component={state.component}
+            filters={state.filters}
+            onChange={(filters) => setState({ ...state, filters })}
+            onComponentChange={(component) => setState({ ...state, component })}
+            onPriorityChange={(priority) => setState({ ...state, priority })}
+            prs={prs}
+            priority={state.priority}
+          />
 
-      <FacetPanel
-        component={state.component}
-        filters={state.filters}
-        onChange={(filters) => setState({ ...state, filters })}
-        onComponentChange={(component) => setState({ ...state, component })}
-        onPriorityChange={(priority) => setState({ ...state, priority })}
-        prs={prs}
-        priority={state.priority}
-      />
+          {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
+          {query.isError ? (
+            <QueryError
+              message="Couldn't load the delivery timeline."
+              onRetry={() => void query.refetch()}
+            />
+          ) : null}
 
-      {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
-      {query.isError ? (
-        <QueryError
-          message="Couldn't load the delivery timeline."
-          onRetry={() => void query.refetch()}
-        />
-      ) : null}
-
-      {query.data === undefined ? null : (
-        <div className="flex min-h-0 flex-1 gap-4">
-          <div className="min-w-0 flex-1">
-            {state.mode === "timeline" ? (
-              <Timeline
-                colorBy={colorBy}
-                onBrush={(window) => setState({ ...state, from: window.from, to: window.to })}
-                onSelect={setSelection}
+          {query.data === undefined ? null : (
+            <div className="flex min-h-0 flex-1 gap-4">
+              <div className="min-w-0 flex-1">
+                {state.mode === "timeline" ? (
+                  <Timeline
+                    colorBy={colorBy}
+                    onBrush={(window) => setState({ ...state, from: window.from, to: window.to })}
+                    onSelect={setSelection}
+                    prs={prs}
+                    runs={query.data.runs}
+                  />
+                ) : (
+                  <PRList
+                    colorBy={colorBy}
+                    onSelect={(id) => setSelection({ kind: "pr", id })}
+                    prs={prs}
+                    selectedId={selection?.kind === "pr" ? selection.id : undefined}
+                  />
+                )}
+              </div>
+              <DrillDown
+                onClose={() => setSelection(null)}
                 prs={prs}
                 runs={query.data.runs}
+                selection={drillDownSelection}
               />
-            ) : (
-              <PRList
-                colorBy={colorBy}
-                onSelect={(id) => setSelection({ kind: "pr", id })}
-                prs={prs}
-                selectedId={selection?.kind === "pr" ? selection.id : undefined}
-              />
-            )}
-          </div>
-          <DrillDown
-            onClose={() => setSelection(null)}
-            prs={prs}
-            runs={query.data.runs}
-            selection={drillDownSelection}
-          />
-        </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

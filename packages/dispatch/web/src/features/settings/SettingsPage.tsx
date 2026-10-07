@@ -24,6 +24,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
 import {
+  ownerRepoPattern,
   settingsFieldLabel,
   settingsMonoInput,
   settingsSectionGap,
@@ -224,7 +225,7 @@ export function SettingsPage(): ReactNode {
                     className={settingsMonoInput}
                     id="repository"
                     onChange={(event) => setRepository(event.target.value)}
-                    pattern="[^/\s]+/[^/\s]+"
+                    pattern={ownerRepoPattern}
                     placeholder="owner/repo"
                     required
                     value={repository}

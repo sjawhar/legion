@@ -34,7 +34,7 @@ function renderPage() {
   );
 }
 
-test("an unconfigured timeline shows the setup form in its place, and a save brings the timeline", async () => {
+test("an unconfigured timeline shows the setup form in its place, reading no settings, and a save brings the timeline", async () => {
   const saved: DeliverySettings = {
     deploy_repo: "acme/widgets",
     deploy_workflow_path: ".github/workflows/deploy.yml",
@@ -68,8 +68,12 @@ test("an unconfigured timeline shows the setup form in its place, and a save bri
     ).toBeDefined();
     expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+    // The timeline's DELIVERY_NOT_CONFIGURED already says no record is stored: the form's fields
+    // are there at once, empty, with no read of the record and no loading line.
+    expect(screen.queryByText("Loading delivery settings…")).toBeNull();
+    expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe("");
 
-    fireEvent.change(await screen.findByLabelText("Deploy repository"), {
+    fireEvent.change(screen.getByLabelText("Deploy repository"), {
       target: { value: "acme/widgets" },
     });
     fireEvent.change(screen.getByLabelText("Deploy workflow"), {
@@ -90,6 +94,7 @@ test("an unconfigured timeline shows the setup form in its place, and a save bri
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
     expect(putDeliverySettings).toHaveBeenCalledTimes(1);
     expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
+    expect(getDeliverySettings).not.toHaveBeenCalled();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();
