@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { seedFakeGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -182,4 +183,81 @@ test("an unfetchable pull request shows on the freshness row by count", async ({
   ).toBeVisible();
 
   await context.close();
+});
+
+test("an unconfigured Delivery page sets itself up from its form and then shows the timeline", async ({
+  browser,
+}, testInfo) => {
+  // The save proves the GitHub App can read the deploy repository (the installation with
+  // Contents: read, a minted token, then the repository read under it); the fake answers all
+  // three for a seeded repository and 404s an unseeded one.
+  await seedFakeGithub({ "acme/widgets": { contents: "read", installation_id: 301 } });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.goto(`/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z`);
+    await expect(page.getByRole("heading", { name: "Set up the delivery timeline" })).toBeVisible();
+    await expect(page.getByLabel("Deploy repository")).toHaveValue("");
+    await expect(page.getByLabel("Deploy repository")).toHaveAttribute("placeholder", "owner/repo");
+
+    // A repository the App cannot read is refused with the server's own reason, and nothing is
+    // stored: the page still offers the setup form.
+    await page.getByLabel("Deploy repository").fill("acme/unseen");
+    await page.getByLabel("Deploy workflow").fill(".github/workflows/deploy.yml");
+    await page.getByLabel("Production job").fill("widgets-release");
+    await page.getByLabel("PR checks workflow").fill(".github/workflows/pr-checks.yml");
+    await page.getByLabel("Population authors").fill("octocat\noctocat-agent[bot]");
+    await page.getByLabel("Excluded repositories").fill("acme/dojo");
+    await page.getByRole("button", { name: "Save delivery settings" }).click();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "the GitHub App is not installed on acme/unseen" })
+    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Set up the delivery timeline" })).toBeVisible();
+    expect(await sql("SELECT count(*) FROM delivery_settings")).toBe("0");
+    await page.screenshot({
+      path: testInfo.outputPath("delivery-setup-refused.png"),
+      fullPage: true,
+    });
+
+    await page.getByLabel("Deploy repository").fill("acme/widgets");
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        response.url().endsWith("/api/v1/settings/delivery") &&
+        response.ok()
+    );
+    await page.getByRole("button", { name: "Save delivery settings" }).click();
+    await saved;
+
+    // The timeline replaces the form: nothing has been reconciled yet, so the freshness row
+    // reads never-happened and the list view is empty.
+    await expect(page.getByRole("heading", { name: "Set up the delivery timeline" })).toHaveCount(
+      0
+    );
+    await expect(page.getByText(/reconcile never ran/i)).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("delivery-after-save.png"),
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Show list" }).click();
+    await expect(page.getByText("No PRs match the current filters.")).toBeVisible();
+    expect(
+      await sql(
+        `SELECT deploy_repo || ' ' || array_to_string(population_authors, ',') || ' ' || array_to_string(excluded_repos, ',') FROM delivery_settings`
+      )
+    ).toBe("acme/widgets octocat,octocat-agent[bot] acme/dojo");
+
+    // Settings shows the same record, to change it later.
+    await page.goto("/settings");
+    await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
+    await expect(page.getByLabel("Deploy repository")).toHaveValue("acme/widgets");
+    await expect(page.getByLabel("Population authors")).toHaveValue("octocat\noctocat-agent[bot]");
+    await page.screenshot({
+      path: testInfo.outputPath("delivery-settings.png"),
+      fullPage: true,
+    });
+  } finally {
+    await context.close();
+  }
 });

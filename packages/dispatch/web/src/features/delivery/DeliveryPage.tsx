@@ -2,12 +2,18 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import type { DeliveryTimelineOptions } from "../../api/client";
+import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
 import { deliveryTimelineQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
-import { bgTransparent, textMutedOnCanvas, textPrimaryOnCanvas } from "../../theme/classes";
+import {
+  bgTransparent,
+  textMutedOnCanvas,
+  textPrimaryOnCanvas,
+  textSecondaryOnCanvas,
+} from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { DeliverySettingsForm } from "./DeliverySettingsForm";
 import { DrillDown } from "./DrillDown";
 import { FacetPanel } from "./FacetPanel";
 import type { ColorFacet } from "./lib/colorScale";
@@ -120,8 +126,9 @@ const COLOR_BY_OPTIONS: { value: ColorFacet; label: string }[] = [
 ];
 
 /** `/delivery`: successful production deploys, pipeline failures, and merged PRs labelled by
- *  agent session, Dispatch issue, priority, and architectural component — LEGION-567 slice 1,
- *  ported from the local prototype at `~/proto/delivery-timeline`. */
+ *  agent session, Dispatch issue, priority, and architectural component. Until the timeline's
+ *  configuration is set, the server answers `DELIVERY_NOT_CONFIGURED` and the page shows the
+ *  settings form in the timeline's place; a save refetches the timeline, which then renders. */
 export function DeliveryPage(): ReactNode {
   useDocumentTitle("Delivery · Dispatch");
   const [state, setState] = useDeliveryUrlState();
@@ -157,6 +164,26 @@ export function DeliveryPage(): ReactNode {
     return prs.some((pr) => pr.id === selection.id) ? selection : null;
   }, [selection, prs]);
 
+  if (isDeliveryNotConfigured(query.error)) {
+    return (
+      <section className="flex h-full flex-col gap-4">
+        <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
+        <section aria-labelledby="delivery-setup-heading" className="max-w-4xl">
+          <h2
+            className={`text-base font-semibold ${textPrimaryOnCanvas}`}
+            id="delivery-setup-heading"
+          >
+            Set up the delivery timeline
+          </h2>
+          <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+            Once set, this page shows the merged pull requests of the authors you name, the
+            production deploys that shipped them, and the pipeline failures in between.
+          </p>
+          <DeliverySettingsForm />
+        </section>
+      </section>
+    );
+  }
   return (
     <section className="flex h-full flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-2">
