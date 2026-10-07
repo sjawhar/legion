@@ -1,0 +1,61 @@
+{
+  "codeHead": "013b1415a4b94984536335eb6ebae86dac427c1d",
+  "completed": "2026-10-07T16:19:26.768793114Z",
+  "critical": 0,
+  "fingerprint": "conflict-forced forward merges after the round-3 approval (bf6fc214 → 61a99564 → 013b1415): branch diff at the approved head d13d2cb9 b219493e6793a185263b5279d8b09691b230c62c4191c87b82a97ea6f6aa00ea → at c10f6132 1932febd55b2d2bbd28cbfd0e81f99613336793072b3e61b040d537e01e3fa76, changed, so a new round with the pair and one review rather than a confirmation; the change is main's LEGION-592 content inside the branch's diff (contract 14, the controller pod goldens, the supervised controller claim ported onto the moved files, 7.12.0), not a change to what this pull request adds.",
+  "forgeFacts": "CI at the merged code head 013b1415: lint, typecheck, test (Tests run 37642167306), pr-title (37642167514), every Legion Envoy and Contracts job (37642167376), Worker Image (37642167778, probe-image OK daemon-api-version=14), Docs (37642167241) success. GitHub started no run at 84d0a35c (the implement handoff; its push was not synchronised to the pull request until the tester's push, which carried skip-checks) nor at d3495d09/c10f6132 (skip-checks); the three commits above 013b1415 change only .legion/, and the daemon carries the code head's verdict (checksVerdict green at c10f6132). Threads: all three resolved, each on the reviewer's Accepted: as newest. Both E2E lines present; the tester's round-3 proof re-drove the pod, pane and controller lanes at 84d0a35c on the pinned binary (probe-image OK at contract 14, contract-15 refused, Envoy absent/mismatch/legacy refused, Envoy-only session gets no legion tool, Legion session claims and gets it). Spec v8 approved by Sami: he runs Stage 2 and Stage 3 himself on the devbox before 2026-10-09 at the head the branch has then; that result is the proof and stands for the code it covered.",
+  "important": 0,
+  "issue": "LEGION-247",
+  "keyFindings": [
+    {
+      "description": "The forward merge left main's two LEGION-592 bullets ([Unreleased] Added :7-12 and Changed :51-55, `legion.daemonApiVersion is 14`) in the Envoy plugin's changelog beside their ported copies in packages/pi-legion/CHANGELOG.md:8-14 and :22-26; they describe the Legion entry and a manifest key the Envoy manifest no longer has, which the same section says at :88-90. Hand-maintained, not read by the release (--generate-notes). Fast-follow: delete the two bullets from pi-envoy's changelog, as LEGION-583's treatment shows.",
+      "file": "packages/pi-envoy/CHANGELOG.md:7",
+      "severity": "minor"
+    },
+    {
+      "description": "run.json is said to record `source revision, image and plugin`; stage4b-sandbox-tree.sh:1519 now writes plugins {envoy, legion}; its only programmatic reader is the script's own .revision check. Fast-follow.",
+      "file": "scripts/e2e/README.md:636",
+      "severity": "minor"
+    },
+    {
+      "description": "Wrap artifacts from the path rewrites (legion.ts:293, pi-legion/CHANGELOG.md:33). Fast-follow.",
+      "file": "packages/pi-legion/extensions/legion.ts:293",
+      "severity": "minor"
+    }
+  ],
+  "minor": 20,
+  "notProven": [
+    "Stage 2 and Stage 3 (devbox only): per spec v8 Sami runs them himself before 2026-10-09 from a checkout at the head the branch has then, and that result is the proof for the code it covered; not run by any Legion role.",
+    "The first npm publish of @sjawhar/pi-envoy and @sjawhar/pi-legion depends on the trusted publisher configured 2026-10-07T14:23Z staying unused for at most two days (merge before 2026-10-09 ~14:23Z); not verifiable from CI.",
+    "Consumers of the reworded boot-gate pass line outside this repository (a deployment's alert or smoke check, if any) cannot be verified from here.",
+    "The pane lane was proven on the real binary through an installed profile and the controller lane, not under a live daemon; the daemon-launched controller's supervised claim (main's LEGION-592, ported) is proven by its ported unit tests and main's own CI, not driven live here."
+  ],
+  "phase": "review",
+  "previousRounds": [
+    {
+      "review": "https://github.com/sjawhar/legion/pull/1831#pullrequestreview-5440623101",
+      "reviewedHead": "536e915caa5af1363d79b05caece94a5bf1da009",
+      "round": 1,
+      "verdict": "changes_requested"
+    },
+    {
+      "review": "https://github.com/sjawhar/legion/pull/1831#pullrequestreview-5441237261",
+      "reviewedHead": "42a9100a7c8f7946cadec7288db1ab6ff3d5fe59",
+      "round": 2,
+      "verdict": "changes_requested"
+    },
+    {
+      "approvedCommit": "d13d2cb9cb022d6332efafa4b4876f90b9c5834e",
+      "review": "https://github.com/sjawhar/legion/pull/1831#pullrequestreview-5441641606",
+      "reviewedHead": "d30f4083909d8f79ae9aac7377f7a5d633b1f56f",
+      "round": 3,
+      "verdict": "approved"
+    }
+  ],
+  "reviewedHead": "c10f61325631bc0da04a88bcbe14b6055767adb5",
+  "round": 4,
+  "schemaVersion": 1,
+  "securityLine": "Security: sandbox — the controller pod's isolation is unchanged: --no-extensions still precedes the two image-owned roots (testdata/golden/controller.json:38-42, manifest.go agentArgv), so a repository's .omp/extensions cannot load, and the second root adds only the Legion entry that lived in the one package before. secret — the controller's boot token becomes its registration capability only in a LEGION_CONTROLLER=1 session (packages/pi-legion/src/controller-session.ts:83-86,103-108), byte-identical to main's; lifetime, reader and file mode are the pod Secret's, and /legion-claim-controller from a worker's pane still demands the operator capability (the ported takeover test). supply-chain — no dependency, action or base image changed; workspace versions 7.11.2 → 7.12.0 in both manifests and bun.lock. authz, untrusted-input, agent-def, prompt, transport — untouched by the delta; rounds 1–3's answers for the whole diff stand (bootgate.go:711-733, legion.ts:545-554, readLoadAnswer bootgate.go:642-659, release.yaml:666-676, probe.go:533, skills-guard.ts:234-236, dispatch-execute.ts:191).",
+  "thermonuclear": "Pair run once at c10f6132 over the forward-merge delta. Deep review: no blocking, no should-fix; the port of main's LEGION-592 edits onto packages/pi-legion is byte-identical to main's files except import and comment paths (controller-session.ts supervised claim: LEGION_BOOT_TOKEN as capability, client.ready after the role claim, exit on failure; legion.ts exitProcess dep; legion.test.ts's four additions); nothing of LEGION-592 left on the old layout; controller pod goldens pass both roots in agentArgv's order; contract 14 coherent across version.go, the contracts fixture and the Legion manifest, the Envoy manifest without a legion key, both at 7.12.0 with bun.lock matching; the split guards and the e2e callers intact. Code quality: one should-fix, wording only — packages/pi-envoy/CHANGELOG.md:7-12 and :51-55 keep main's two LEGION-592 bullets (also ported into pi-legion's), so the Envoy changelog claims a legion.daemonApiVersion bump for a manifest its own :88-90 says has no legion key; two wrap artifacts.",
+  "verdict": "approved"
+}

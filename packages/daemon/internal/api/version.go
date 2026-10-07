@@ -1,8 +1,8 @@
 package api
 
-// DaemonAPIVersion is the contract this daemon speaks with the Oh My Pi plugin: the claim,
-// credential, workflow, controller and state shapes the plugin's client parses strictly
-// (`packages/pi-envoy/src/legion/daemon-client.ts`, through
+// DaemonAPIVersion is the contract this daemon speaks with the Legion plugin (@sjawhar/pi-legion):
+// the claim, credential, workflow, controller and state shapes the plugin's client parses strictly
+// (`packages/pi-legion/src/daemon-client.ts`, through
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s

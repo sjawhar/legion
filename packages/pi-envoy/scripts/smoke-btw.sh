@@ -11,7 +11,7 @@ readonly omp_bin="${OMP_BIN:-omp}"
 readonly session_timeout=60
 readonly answer_timeout=90
 readonly teardown_timeout=15
-readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json"
+readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-envoy/package.json"
 readonly envoy_config="${HOME}/.config/opencode/envoy.json"
 
 fail() {

@@ -519,9 +519,10 @@ type probeSpec struct {
 // pool, gVisor, the configured scheduling — with the workers' pod security and what the operator
 // adds to every pod (its ServiceAccount, volumes, mounts, and variables, and the providers
 // Secret's configured keys), and a single container running the image's Go `legion probe-image`
-// against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugin
-// from the root a pod loads it from (--plugin-root), with the providers Secret's keys exported as
-// the worker's shim exports them (--provider-env-dir) when any are configured, each providers
+// against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugins
+// from the roots a pod loads them from (--plugin-root, --envoy-plugin-root), with the providers
+// Secret's keys exported as the worker's shim exports them (--provider-env-dir) when any are
+// configured, each providers
 // secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
 // and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
 // requires. Its command and env are escaped against the kubelet's expansion as every worker
@@ -529,7 +530,7 @@ type probeSpec struct {
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
-	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--pod-safety"}
+	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}

@@ -250,7 +250,8 @@ describe("Dispatch write advice", () => {
       advice({ decision_blocks: 0 })
     );
 
-    expect(result.text.split("\n")[1]).toContain("`plan-gap-analyst`");
+    expect(result.text.split("\n")[1]).toContain('`task(agent="scout")`');
+    expect(result.text.split("\n")[1]).toContain("Legion plugin's `plan-gap-analyst`");
     expect(result.text).toEndWith(zeroBlocks);
   });
 

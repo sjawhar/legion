@@ -1,4 +1,4 @@
-import type { SessionContext, SideTurn } from "./pi-types";
+import type { SessionContext, SideTurn } from "@legion/pi-shared/pi-types";
 
 /**
  * Oh My Pi's /btw prompt (`packages/coding-agent/src/prompts/system/btw-user.md`, the same file
