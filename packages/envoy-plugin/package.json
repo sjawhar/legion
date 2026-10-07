@@ -23,10 +23,11 @@
     "dist",
     "src",
     "!src/**/__tests__",
-    "skills"
+    "skills",
+    "bin"
   ],
   "scripts": {
-    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*'",
+    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*' && bun build ../envoy-client/bin/dispatch.ts --outfile dist/dispatch.js --target bun --format esm",
     "prepack": "./scripts/prepack.sh",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
