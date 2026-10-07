@@ -469,6 +469,7 @@ interface ClaimPane {
   readonly errors: string[];
   readonly intervals: (() => void)[];
   readonly tools: RegisteredTool[];
+  readonly commands: RegisteredCommand[];
   readonly activeTools: string[];
   readonly entries: AppendedEntry[];
   readonly title: HostTitle;
@@ -625,6 +626,7 @@ async function claimPane(options: {
     errors,
     intervals,
     tools: fixture.tools,
+    commands: fixture.commands,
     activeTools: fixture.activeTools,
     entries: fixture.entries,
     title: fixture.title,
@@ -740,6 +742,44 @@ describe("Legion OMP extension", () => {
       })
     ).rejects.toThrow(
       "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller. Launch OMP with one of them in its environment before running /legion-claim-controller."
+    );
+  });
+  // A root architect's or phase worker's pane carries its claim's boot token, which is not the
+  // controller's. `/legion-claim-controller` run there is a takeover by hand, which needs the
+  // operator's capability: it stops before any daemon call, so it never registers the worker's own
+  // token (whose re-registration would replace its claim's capability) and never exits the worker.
+  test("/legion-claim-controller in a phase worker's pane calls no daemon route and does not exit", async () => {
+    const goldenState = JSON.parse(
+      await readFile(
+        path.join(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
+        "utf8"
+      )
+    );
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_worker",
+      // The daemon serves its state for the pane's project, so a claim that went on would reach
+      // claims/register.
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/state"
+          ? Response.json({ ...goldenState, daemon: { ...goldenState.daemon, project: "OMP" } })
+          : undefined,
+    });
+    expect(pane.exits).toEqual([]);
+    const booted = pane.requests.length;
+    const claimCommand = pane.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+
+    const refusal = await claimCommand.handler("", pane.context).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    expect(daemonRequests(pane.requests.slice(booted))).toEqual([]);
+    expect(pane.exits).toEqual([]);
+    expect(String(refusal)).toContain(
+      "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller."
     );
   });
   test("a claim registers, claims its Envoy role, and reports ready through the claim routes alone", async () => {

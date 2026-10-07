@@ -70,16 +70,20 @@ export function createControllerSession(deps: {
    * transcript is reported on every claim, a takeover's included, because the route requires one;
    * the daemon records only the session.
    *
-   * A controller the daemon launched itself (`controller: daemon`) carries its launch's boot token
-   * (`LEGION_BOOT_TOKEN_FILE`) in place of a capability: it registers with that token, as every
-   * pane does, and once it holds the role and the topic it reports ready on `claims/ready`, which is
-   * when the daemon hands it the start message. Any step of its claim that fails exits Oh My Pi,
-   * so the daemon relaunches it, as a pane's failed boot does: nobody reads its session.
+   * A controller the daemon launched itself (`controller: daemon`) is the controller's own session
+   * (`LEGION_CONTROLLER=1`) carrying its launch's boot token (`LEGION_BOOT_TOKEN_FILE`) in place of
+   * a capability: it registers with that token, as every pane does, and once it holds the role and
+   * the topic it reports ready on `claims/ready`, which is when the daemon hands it the start
+   * message. Any step of its claim that fails exits Oh My Pi, so the daemon relaunches it, as a
+   * pane's failed boot does: nobody reads its session. A root architect's or phase worker's pane
+   * carries a boot token too, its own claim's: `/legion-claim-controller` run there is a takeover
+   * by hand like any other, which needs the capability and stops before any daemon call without it.
    */
   const claim = async (context: CommandContext | SessionContext): Promise<void> => {
     const supervised =
-      process.env.LEGION_BOOT_TOKEN_FILE !== undefined ||
-      process.env.LEGION_BOOT_TOKEN !== undefined;
+      classifySession(process.env).kind === "controller" &&
+      (process.env.LEGION_BOOT_TOKEN_FILE !== undefined ||
+        process.env.LEGION_BOOT_TOKEN !== undefined);
     if (!supervised) return claimWith(context, false);
     try {
       await claimWith(context, true);
