@@ -1584,14 +1584,15 @@ this release, never the previous image. A revert that cannot be avoided goes in 
    Restart this release with that file and let it boot once. Do not skip this boot: only this
    release ends the stopped controller's registration, and it stops the pod gracefully, with a
    shutdown frame and the termination grace, before it releases the Sandbox and volume. The earlier
-   release's orphan sweep would instead delete that Sandbox at its first boot, with no shutdown,
-   since no claim names it once the row is gone. The boot is done when `legion claims list` shows
+   release's orphan sweep would instead delete that Sandbox at its first boot, with no shutdown:
+   it counts no retired claim as known, so it takes a retired claim's Sandbox as readily as one whose
+   row is gone. The boot is done when `legion claims list` shows
    `legion-<project>-controller` `retired`, and, if that controller had registered, the daemon has
    logged `controller: ending the registration of the controller an earlier boot under controller:
    daemon launched`. If the boot is refused, stop here and follow the refusal's entry in
    troubleshooting.
-2. Stop that daemon. A running daemon holds the claim and writes its row back, so a delete made
-   while it runs does nothing.
+2. Stop that daemon: the earlier release must not run beside it for the same project, and while it
+   runs it still holds the claim in memory, so any write of that claim would put the row back.
 3. Read the row, then delete it. `<project>` is the project's token: `project` in `legion.yaml`
    lowercased, with every character outside `a-z0-9` dropped, so `project: LEGION` gives
    `legion-legion-controller`; `legion claims list` shows it. Run

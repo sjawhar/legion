@@ -273,8 +273,8 @@ rolling back the image. If you must roll back, do it in this order:
    this release ends the stopped controller's registration and stops its pod gracefully. It is done
    when `legion claims list` shows `legion-<project>-controller` `retired`. If the boot is refused,
    stop and follow the refusal's entry in [Troubleshooting](/legion/legion/troubleshooting/).
-2. Stop that daemon. A running daemon writes the claim's row back, so a delete made while it runs
-   does nothing.
+2. Stop that daemon: the earlier release must not run beside it for the same project, and while it
+   runs it still holds the claim in memory, so any write of that claim would put the row back.
 3. `<project>` is your `project` lowercased with every character outside `a-z0-9` dropped
    (`project: LEGION` gives `legion-legion-controller`). Run
    `select token, state from claims where token = 'legion-<project>-controller';`, which must
