@@ -347,7 +347,7 @@ smoke_main_leftovers() {
 # fixture whose base carries no other issue's handoff. See approve_as_reviewer for why a merge
 # leaves them.
 clean_smoke_main() {
-  local paths base branch path sha url
+  local paths base branch path sha url pr deadline state
   paths=$(smoke_main_leftovers)
   [ -n "$paths" ] || return 0
   base=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
@@ -359,7 +359,20 @@ clean_smoke_main() {
   done <<<"$paths"
   url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
     --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
-  gh -R "$repo" pr merge "${url##*/}" --squash --delete-branch
+  pr=${url##*/}
+  # LEGION-619: the smoke repository's required `gate` check has not started when this pull
+  # request is created, and a merge inside that window is refused -- "Required status check
+  # \"gate\" is queued" (run 3) or "is in progress" (run 1), both of which failed this step.
+  # Wait for the merge state to read CLEAN, as a hand-run of this procedure did before it
+  # merged first time.
+  deadline=$((SECONDS + 600))
+  while :; do
+    state=$(gh -R "$repo" pr view "$pr" --json mergeStateStatus -q .mergeStateStatus)
+    [ "$state" = CLEAN ] && break
+    [ "$SECONDS" -lt "$deadline" ] || fail "$repo#$pr never reached CLEAN in 600s; last state $state"
+    sleep 15
+  done
+  gh -R "$repo" pr merge "$pr" --squash --delete-branch
   note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
 }
 
