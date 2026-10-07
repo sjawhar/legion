@@ -163,8 +163,9 @@ type Timeouts struct {
 	// Boot is the boot observation interval (worker_boot_timeout_seconds): each interval an
 	// unregistered process is probed, and a live one is left alone.
 	Boot time.Duration
-	// RegistrationIntervals is how many boot intervals a live process gets to register before it
-	// is retired (worker_boot_registration_deadline_intervals).
+	// RegistrationIntervals is how many boot intervals a live process gets to register, and again
+	// from its registration to say it is ready, before it is retired
+	// (worker_boot_registration_deadline_intervals).
 	RegistrationIntervals int
 	// RPC bounds a prompt's acknowledgement and, after it, the wait for the turn it should start
 	// (worker_rpc_timeout_seconds).
@@ -334,9 +335,9 @@ type armed struct {
 }
 
 // NewMachine builds the machine for one claim: a new one the spawn route just stored, or one the
-// daemon read back at boot. A restored claim that was booting is watched again from now, and a
-// restored delivery that may already have been sent is sent again only after asking the agent.
-// ctx bounds the machine's own work — its timers and its sends.
+// daemon read back at boot. A restored claim that was booting, or registered and not yet ready, is
+// watched again from now, and a restored delivery that may already have been sent is sent again
+// only after asking the agent. ctx bounds the machine's own work — its timers and its sends.
 func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	if err := deps.check(); err != nil {
 		return nil, err
@@ -356,6 +357,8 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	switch c.State {
 	case StateLaunching, StateShimConnected:
 		m.armBoot()
+	case StateRegistered:
+		m.armRegistration()
 	case StateReady, StateIdle:
 		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero()
 	case StateWorking:
@@ -829,7 +832,21 @@ func nothing(context.Context) error { return nil }
 
 func (m *Machine) armBoot() {
 	m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
-	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals), "")
+	m.armRegistration()
+}
+
+// armRegistration arms the registration deadline at its base Boot×RegistrationIntervals bound,
+// plus the runtime's own ProvisionBound while the claim is still StateLaunching: a pod that has
+// not said hello yet may still be provisioning. A claim already StateShimConnected — reached by
+// a fresh hello (helloed) or restored there (NewMachine) — gets the base bound alone, the same
+// one a tmux launch (ProvisionBound always zero) gets throughout, and so does a claim registered
+// (register, or restored there), whose agent has that long to say it is ready.
+func (m *Machine) armRegistration() {
+	grace := time.Duration(0)
+	if m.claim.State == StateLaunching {
+		grace = m.deps.Runtime.ProvisionBound()
+	}
+	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries

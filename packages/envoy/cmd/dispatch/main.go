@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
@@ -26,8 +27,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -80,6 +85,9 @@ type bootConfig struct {
 	// (required when AgentSecretsURL is set).
 	AgentSecretsURL   string
 	AgentSecretsToken string
+	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
+	// Empty keeps them in Postgres.
+	FileStoreBucket string
 	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
 	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
 	ListenAddr string
@@ -189,7 +197,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := database.Migrate(ctx); err != nil {
-		slog.Error("dispatch: migrate database", "error", err)
+		slog.Error("dispatch: migrate database", "error", explainMigrateError(err))
 		os.Exit(1)
 	}
 
@@ -208,6 +216,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The store's construction reads no network: credentials come with the first request.
+	fileStore, err := openFileStore(ctx, boot)
+	if err != nil {
+		slog.Error("dispatch: configure the file store", "error", err)
+		os.Exit(1)
+	}
+	if fileStore != nil {
+		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
+	}
 	var assetStore routes.AssetStore
 	if boot.AssetStoreBucket != "" {
 		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
@@ -257,6 +274,16 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
+	// embedder is nil (meaning search off, search answers keyword-only and says so) when no AWS
+	// region/credentials reach this process at boot - a CI job or a devbox with no AWS_REGION set
+	// - which embed.New reports as an error rather than a reason to refuse to boot.
+	var embedder embed.Embedder
+	if client, err := embed.New(ctx); err != nil {
+		slog.Warn("dispatch: meaning search unavailable", "error", err)
+	} else {
+		embedder = client
+	}
+
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
@@ -268,10 +295,12 @@ func main() {
 		Store:       database,
 		ServerURL:   serverURL,
 		Docs:        documentService,
+		Embedder:    embedder,
 		Events:      broker,
 		App:         appCfg,
 		OIDC:        serviceTokens,
 		AgentStream: agentStream,
+		Files:       fileStore,
 		Lifetime:    ctx,
 	}))
 
@@ -288,9 +317,27 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
+	// deploy that grants Bedrock credentials needs no other wiring change to pick up meaning
+	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	// It gets a rate-limited wrapper around the same client api.Deps holds unwrapped above
+	// (embedder, line 296's Embedder field): the write-time queue's poller and a backfill run are
+	// the only two embedqueue callers, and pacing only their calls - never a live search
+	// request's own query embedding, which always goes straight through the unwrapped client -
+	// is what keeps a saturating backfill from taking live search down with it (LEGION-549 round
+	// 5; embed.RateLimitedEmbedder's own doc comment has the AIMD mechanism and the headroom
+	// this leaves). A nil embedder (meaning search off) stays nil rather than becoming a non-nil
+	// wrapper around nothing, which embedqueue.Run's own nil check depends on.
+	var backgroundEmbedder embed.Embedder
+	if embedder != nil {
+		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
+	}
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -311,7 +358,17 @@ func main() {
 
 	go architecture.Run(ctx, appCtx.Architecture())
 
-	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
+	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
+	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
+	// a connected client, exactly like the outbox above.
+	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
+	if natsClient != nil {
+		go delivery.NewIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
+	} else {
+		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
+	}
+
+	handler := dispatchHandler(routes.New(appCtx), database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -438,6 +495,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
+		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
 		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
 		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
@@ -628,6 +686,36 @@ func loopbackDatabase(databaseURL string) error {
 	return nil
 }
 
+// explainMigrateError wraps a migration failure Postgres attributes to a missing CREATE
+// permission on the vector extension (0072_embeddings_core.up.sql's `create extension if not
+// exists vector`) with what that actually means operationally: the deployment's own bootstrap
+// (the cluster's master role, which this application's migration role is not) must create the
+// extension before this Dispatch ever boots against this database - a one-time ops dependency,
+// not a bug in the migration retried. Every other migration failure passes through unchanged.
+// Classified the same way the rest of this codebase classifies a specific Postgres failure
+// (api/issue_create.go's isUniqueViolation, internal/pgmigrate/lock.go and census.go's own
+// errors.As(..., &pgErr) checks): by the stable SQLSTATE code (42501, insufficient_privilege),
+// not by matching the fully wrapped error's text, which a locale or Postgres version could
+// change; pgErr.Message is Postgres's own unwrapped message, so the extension-name check still
+// narrows to this specific failure rather than every insufficient-privilege error any migration
+// could ever raise.
+func explainMigrateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	const insufficientPrivilege = "42501"
+	if !errors.As(err, &pgErr) || pgErr.Code != insufficientPrivilege || !strings.Contains(pgErr.Message, `extension "vector"`) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w (this database's own migration role cannot CREATE EXTENSION; the deployment's bootstrap, "+
+			"run as the cluster's master role, must install the vector extension before Dispatch boots "+
+			"against this database for the first time - not something retrying the migration fixes)",
+		err,
+	)
+}
+
 // sessionSigningKey is the key session cookies are signed with: one generated for this process
 // under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
 // secrets manager), otherwise the data dir's signing-key file, created on first start (a local
@@ -728,32 +816,70 @@ func parsePositiveInt(raw string) (int, error) {
 	return n, nil
 }
 
+// openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
+// unset, which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's
+// nil check reads the setting: NewS3's (*S3)(nil) on failure is not passed through as a Store.
+func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
+	if boot.FileStoreBucket == "" {
+		return nil, nil
+	}
+	bucketStore, err := files.NewS3(ctx, boot.FileStoreBucket)
+	if err != nil {
+		return nil, err
+	}
+	return bucketStore, nil
+}
+
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, commit string) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, commit))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
 	mux.Handle("/", handler)
 	return mux
 }
 
 // healthzHandler answers the probe: the process is serving, Postgres is reachable on the
 // health pool's own connection, and NATS is connected where it is configured. Nothing here
-// waits on the shared pool, and Healthy bounds its own wait at store.healthProbeTimeout, which
-// records why a probe that answers late is as bad as one that never answers.
+// waits on the shared pool, and each probe bounds its own wait (store.healthProbeTimeout,
+// files.healthTimeout), which records why a probe that answers late is as bad as one that never
+// answers. The database and file-store probes run side by side: each takes up to two seconds,
+// and one after the other they would take four, past the three-second prober (the compose
+// healthcheck and the deploy script).
+//
+// Where a file store is configured, `files` reports whether its bucket answered, and that is
+// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
+// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
+// take documents, asks and comments down with the files. A deploy check that wants the bucket
+// asserts `files: true` itself.
 //
 // Beside those it reports what is deployed: `commit`, the legion commit the binary was built
 // from (null when the build did not stamp one), and `schema_version`, the highest migration
 // the database has applied, read by the same probe (null when the database did not answer).
 // A deploy check compares the two with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess.
-func healthzHandler(database *store.Store, natsClient *bus.Client, commit string) http.HandlerFunc {
+func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
 	}
 	return func(w http.ResponseWriter, req *http.Request) {
+		var filesOK *bool
+		filesProbed := make(chan struct{})
+		if fileStore != nil {
+			go func() {
+				defer close(filesProbed)
+				reachable := true
+				if err := fileStore.Healthy(req.Context()); err != nil {
+					slog.Warn("dispatch: file store probe failed", "error", err)
+					reachable = false
+				}
+				filesOK = &reachable
+			}()
+		} else {
+			close(filesProbed)
+		}
 		databaseOK := database != nil && database.Pool != nil
 		var schemaVersion *int
 		if databaseOK {
@@ -774,6 +900,7 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 			connected := natsClient.Connected()
 			natsOK = &connected
 		}
+		<-filesProbed
 		ok := databaseOK && (natsOK == nil || *natsOK)
 		status := http.StatusOK
 		if !ok {
@@ -785,9 +912,10 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 			OK            bool    `json:"ok"`
 			DB            bool    `json:"db"`
 			NATS          *bool   `json:"nats"`
+			Files         *bool   `json:"files"`
 			Commit        *string `json:"commit"`
 			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
 }
 

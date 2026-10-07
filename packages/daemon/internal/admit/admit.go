@@ -583,7 +583,9 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // waiting line empties, and reports how many candidates it admitted. A candidate a.pending still
 // names is held back: the Dispatch consumer has not yet reached the stream position Reconcile
 // captured when it deferred that key. release, not promote, is what clears pending — it empties
-// the whole set at once, so this need only check membership.
+// the whole set at once, so this need only check membership. An admitted candidate's architect
+// start is queued behind a row creating its issue branch (record.IssueBranch), which the start
+// waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
@@ -631,6 +633,9 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			return admitted, fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
 		}
 		if err := a.enqueue(ctx, tx, candidate.Key, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now); err != nil {
+			return admitted, err
+		}
+		if err := a.enqueue(ctx, tx, candidate.Key, record.IssueBranch{Generation: candidate.Generation}, now); err != nil {
 			return admitted, err
 		}
 		if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
@@ -775,7 +780,8 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // the root waited for its slot, and that start is queued or has run) is not started a second time.
 // A child whose claim a stop from the tree's close will still suspend is started, so this start
 // ends last or supersedes the stop (workflow.StartFor, over the role's queued rows and this
-// daemon's own claim).
+// daemon's own claim). Each start is queued behind a row creating its child's branch, as the root's
+// architect start is.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
@@ -799,6 +805,9 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		}
 		if !workflow.StartFor(run, root, child.Generation, child.Phase) {
 			continue
+		}
+		if err := a.enqueue(ctx, tx, child.Key, record.IssueBranch{Generation: child.Generation}, now); err != nil {
+			return err
 		}
 		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation, Phase: child.Phase,
 			Task: workflow.ResumePhaseTask(child), ResumeTask: true}

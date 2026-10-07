@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -1307,9 +1308,9 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	if err := database.Pool.QueryRow(context.Background(), `select attempt_count, next_attempt_at from events where id = 1`).Scan(&attempts, &nextAttempt); err != nil {
 		t.Fatalf("read poison retry state: %v", err)
 	}
-	// Every failure schedules the next attempt at least retryBaseDelay after it, and the first
+	// Every failure schedules the next attempt at least retry.BaseDelay after it, and the first
 	// failure happened after scanStart.
-	earliest := scanStart.Add(retryBaseDelay).Truncate(time.Microsecond)
+	earliest := scanStart.Add(retry.BaseDelay).Truncate(time.Microsecond)
 	if attempts < 1 || nextAttempt == nil || nextAttempt.Before(earliest) {
 		t.Fatalf("poison retry state = attempts %d next=%v, want at least one attempt with a retry no earlier than %v", attempts, nextAttempt, earliest)
 	}

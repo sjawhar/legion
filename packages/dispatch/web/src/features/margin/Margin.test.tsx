@@ -476,6 +476,73 @@ test("Margin moves an answered anchored ask out of Needs you in place, without a
   }
 });
 
+test("a reply typed into an answered ask's thread survives leaving the Comments tab and back", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  const answeredAsk: Ask = {
+    ...anchoredAsk,
+    answer: { at: "2026-09-10T00:01:00Z", selected: ["Ship"], text: null, user: "alice" },
+    state: "answered",
+  };
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["asks", issue.key], [anchoredAsk]);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: anchoredAsk,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk]);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByRole("heading", { name: "Needs you" });
+    fireEvent.click(screen.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    const field = await screen.findByRole("textbox", { name: "Reply" });
+    field.focus();
+    fireEvent.change(field, { target: { value: "Draft survives" } });
+
+    // The Comments tab unmounts every ask card while another tab shows; a draft typed into one
+    // belongs to the ask, not to that mounted field, and picks back up when the tab returns.
+    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true")
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Comments" }));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+        "true"
+      )
+    );
+    const moved = screen.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement;
+    // A fresh field - the tab switch really remounted the card - still carries the draft.
+    expect(moved).not.toBe(field);
+    expect(moved.value).toBe("Draft survives");
+  } finally {
+    view.unmount();
+    answerAsk.mockRestore();
+    getAsk.mockRestore();
+    listIssueAsks.mockRestore();
+  }
+});
+
 test("Margin leaves an unanchored root out of document review", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {

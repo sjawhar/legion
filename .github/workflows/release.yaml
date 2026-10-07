@@ -49,6 +49,9 @@ on:
 permissions: {}
 
 concurrency:
+  # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
+  # loses nothing: `changes`' base step below diffs since the last *successful* run, not this
+  # run's commit alone, so the next run picks up every commit a dropped run skipped.
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
@@ -351,12 +354,15 @@ jobs:
     uses: ./.github/workflows/worker-image.yaml
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
-    # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's own
-    # `permissions:` block declares. The release note, the one step needing contents: write, is
-    # worker_image_release_note below.
+    # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's
+    # `permissions:` blocks declare: its workflow-level block (the build) and its `attest` job's
+    # (id-token and attestations: write, for the image's GitHub attestation). The release note, the
+    # one step needing contents: write, is worker_image_release_note below.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     with:
       legion_version: ${{ needs.legion.outputs.version }}
 

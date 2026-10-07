@@ -21,11 +21,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
@@ -768,17 +768,20 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 // verifySessionStorage is the session-storage probe (verifySessionStorageSetting, boot-probes.ts),
 // which only the image runs: it proves the Oh My Pi build carries the `session.storage`
 // setting, so a deployment that sets OMP_SESSION_STORAGE=sql gets its sessions in its database
-// rather than a build that ignores the variable and silently keeps them on files. PI_TIMING=x
-// makes an interactive start print its timings and exit just before the TUI would open, with
-// stdin on /dev/null there is no piped prompt, and every `--no-*` flag keeps the profile's
-// plugins, sessions, and tools out of a run that only needs the setting's resolver, which runs
-// before that exit: a carrying build dies on the nonsense value first, naming the variable (a
-// pass); a clean exit is a build that accepted it, so predates the setting (refused); any other
-// failure is the launch dying before the resolver ran (transient).
+// rather than a build that ignores the variable and silently keeps them on files.
+//
+// It starts Oh My Pi in RPC mode with stdin on /dev/null, where the setting resolves before the
+// first command is read and the closed stdin then ends the run with exit 0, calling no model; an
+// interactive start without a terminal is refused (exit 2) before the resolver runs. Every
+// `--no-*` flag keeps the profile's plugins, sessions and tools out of the run.
+//
+// A carrying build dies on the nonsense value, naming the variable (a pass). A clean exit is a
+// build that accepted the value, so predates the setting (refused). Any other failure is the
+// launch dying before the resolver ran (transient).
 func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
-	script := "export " + sessionStorageVariable + "=" + sessionStorageProbeValue + " PI_TIMING=x; exec " + launch +
-		" --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
+	script := "export " + sessionStorageVariable + "=" + sessionStorageProbeValue + "; exec " + launch +
+		" --mode rpc --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
 	return bootprobe.Run(ctx, "OMP session storage setting", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
 		r, err := g.run(ctx, script)
 		if err != nil {
@@ -861,10 +864,8 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	cmd.Stdin = g.stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.Configure(cmd)
 	job.attach(cmd)
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = time.Second
 	started := time.Now()
 	err := cmd.Run()
 	job.release()
@@ -874,9 +875,8 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	if job.interrupted(cmd.ProcessState) {
 		return ran{}, errors.New("the probe was interrupted at the terminal")
 	}
-	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, exec.ErrWaitDelay) {
-		return ran{}, err
+	if runErr := procgroup.Err(err); runErr != nil {
+		return ran{}, runErr
 	}
 	tail := strings.TrimSpace(stderr.String())
 	if len(tail) > maxProbeStderr {

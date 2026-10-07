@@ -33,7 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
-| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
+| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*`, the AWS SDK's `AWS_*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
@@ -57,14 +57,29 @@ update. A repair reports whether its transaction wrote anything; one that wrote 
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
-repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too, and credits
-that edit's author, whose own settlement then writes no version. It takes the authors with that
-tree, so an edit made while the version renders is credited on the version its own settlement
-writes, not on this one. A settlement that wrote into the room commits what it wrote even when the
-document moved after its read, since the room and its browsers hold it; one that wrote nothing
-leaves a moved document to the settlement the move scheduled. A repair is written only into the
-document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is
-refused and retried. Every close of a room the service makes - a failed room's eviction, `Evict`
+repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version
+too. The settlement takes its authors under the room's state lock before it copies that tree, so
+an edit credited after the take stays pending for the next version that holds it. Each pending
+author carries the sequence number of the credit that made it pending (`roomState.creditSeq`).
+Every version takes the sequence no later than it reads the tree it records - a settlement and a
+version read straight from the room before their copy; a transaction's version before its fork
+reads the room; an upload as of its write's last read of the room (`liveWrite.forkSeq`) - and its
+commit releases every pending entry credited through that sequence, not the keys it captured
+(`versionPending`, `Service.commitVersion`). An author who edits again after a version took its
+authors stays pending for the second edit, as does one whose edit the version's tree holds while
+its update observer, which ygo runs only once the edit's transaction has released the document,
+had not yet credited it. That edit's own settlement writes no version and releases nothing, and
+the next version credits them (LEGION-503). A transaction whose version holds every change of its
+own write does not credit that write again at commit (`liveWrite.versioned`). An upload, whose
+route writes its version itself, records it (`Ledger.WroteVersion`): when its write changed the
+document, it clears every credit pending at the write's room read, whether its replacement removed
+that edit or kept it, and its version credits the uploader alone; an edit credited after that read
+stays pending for the next version. An upload that changed nothing clears nothing.
+A settlement that wrote into the room commits what it wrote even when the document moved after its
+read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
+the settlement the move scheduled. A repair is written only into the document the settlement read
+(`applySuppressed`): one whose room was evicted and reloaded since is refused and retried. Every
+close of a room the service makes - a failed room's eviction, `Evict`
 and `Quiesce`, an issue's close, `Shutdown`'s close of a room with an editor - goes through its
 server's `CloseRoom` (`roomServer`, which shadows ygo's, so a call written against ygo's API is
 gated too). That close waits for a repair committing into the room and refuses new repairs while
@@ -78,7 +93,35 @@ is already durable and intentionally does not take the gate, so its room can sti
 its Apply. Its exit compaction is housekeeping and leaves a busy document lock to the next pass; a
 failed room's eviction is the exception and compacts under the lock before recovery.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
-document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
+document. Every write path that changes a document queues that closer once its transaction commits:
+a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version
+(`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded
+at issue creation, so ask blocks written by any of them become asks without waiting for a later live
+change. The closer attributes a new ask and its `ask.opened` event to whoever introduced its
+block: a service write's or a committed transaction's own before/after trees name the ids it
+adds, staged on the write's own liveWrite and registered into the room's bookkeeping only once
+the write commits (`Ledger.credit`, `registerAskAuthors`), never before - discarding the
+transaction, or refusing the write for any other reason, leaves no trace, so a later, separately
+committed write of the same author-chosen literal id is never outranked by one that never reached
+the room. Registration happens before the update can reach any observer, rather than leaving
+attribution to whichever update's observer ends up rendering a merged catch-up first
+(LEGION-503); an id no write registered this way can only be a browser's, and gets the one
+browser connected when its update arrived, or `SettlementActor` while several are
+(`observeAskBlocks`). A settlement's own id repair and an edit's repair of an existing, unrelated
+block (`ApplyOps`'s `EnsureBlockIDs`) each carry forward the author recorded for the id a rename
+replaces, unless it is a copy of the block that keeps that id (`recordStampedAskBlocks`, staged on
+the write by `registerStampedAskBlocks`'s `carriedAskAuthors` and registered at the same commit,
+`registerCarriedAskAuthors`) - on a transaction's write too, where the generic before/after diff
+above would otherwise count the renamed id as newly added and claim it for the write's own actor
+instead. A copy's previous id stays live in the room's own bookkeeping, since another block still
+carries it; any other rename's does not. A rename whose own update's observer had not yet recorded
+an author carries none forward, and is named after the settlement's own actor rather than its
+editor. A seeded spec's blocks are its creator's. A block in the tree whose update the observer
+has not rendered yet waits for the settlement that observer arms. A block the room held when it
+loaded, which no write registered and no update the observer saw introduced, is attributed as the
+settlement's other events are. Those name the room's latest editor when the version credits them,
+including an approval request's move; ambiguous browser edits name `SettlementActor`. A free-text
+ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
 durable document update writes the document's `doc_settlements_pending` row in its own transaction
@@ -136,11 +179,16 @@ back what they held open; with nothing in flight over HTTP that is about 21 s af
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
 `issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary
-document as its latest version renders (`pmdoc.CountTasks`, which skips an item emptied of its
-text, since the renderer writes one as a plain `- `), and the number of the version they were
-counted from. Every version write records them in its own transaction (`docs.RecordTaskProgress`
-from `writeVersionTx`; issue creation and an upload call `docs.RecordTaskProgressMarkdown` after
-they insert their version row, so the count names it). The row the API reads
+document's latest version, and the number of that version. A writer holding the parsed tree counts
+it (`pmdoc.CountTasks`); one holding the stored markdown counts that alone
+(`pmdoc.CountTasksMarkdown`: goldmark's tree before the Proof schema's refusals, so a spec holding a
+table row wider than its header, an html block or an unknown typed block is still counted, where
+reading it as a document reports nothing).
+Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read
+front matter as Parse does, so they agree on every document both can read. Every version write
+records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`; issue
+creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row,
+so the count names it). The row the API reads
 (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag
 its document - every row the migration found, any the task a deploy replaces versions while both
 run (its code records no count), a row another writer held - so `cmd/dispatch` runs
@@ -337,7 +385,7 @@ are two unsynchronised reads, in both directions; `token` is the concurrency pri
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
 `GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
-the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
+the tree `readTree` serves): its path of `{type, id, index}` from the top-level block
 down, and for a table block, row or cell a `table` naming the table's id, the row's child index
 (0 is the header row), the cell's child index in its row (the indexes `delete_row` and
 `delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
@@ -372,23 +420,112 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
 
-A read of a resident room reads a copy taken under its document lock (`snapshotDocument`,
-`crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
-admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`), a read
-outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`'s first
-read and its version's, and the block-id backfill's read, through `lockedTreeOf`), so a torn read is
-never versioned as the document; a repair reads the tree inside the transaction that writes it
-(`rewriteLive`), and the unrecorded-mark sweep (`sweepUnrecordedMarks`) inside the transaction that
-unmarks it. A walk of the live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every
-peer update and service write holds that lock as it applies, so the walk can read a write halfway
-through as a tree outside the schema and answer a healthy document 409 with the repair. A version's
-capture holds the room's state lock across the copy and the authors it captures, so an author the
-update observer credits is captured only with that update's text; the order - state lock, then
-document lock - is never reversed, since only a Yjs transaction's own function holds a document's
-lock and none takes a room's state lock. A read that may load its room (a version's capture,
-`docView`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads
-and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
-evicted in between.
+A read of a resident room outside a write never walks the live tree. It reads the room as of one
+moment under its document lock (`readLive`): the replica the room's update observer keeps
+(`renderedReplica`, below), brought up to date under that lock with what the room gained since, or a
+copy taken under the lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no
+replica - no update has reached it since it loaded - or another holds the replica or the observer
+waits for it.
+`GET /text`, `GET /blocks`, the block route and the document websocket's admission check
+(`loadTree`), a read outside any transaction (`docTree`), a published write's loss check
+(`recordPublishedLoss`), a version's capture (`captureLiveTextAndAuthors`) and settlement's reads of
+the room (`settleRoomWithin`'s first read and its version's, and the block-id backfill's read,
+through `liveTree`) read it so, so a torn read is never versioned as the document; a repair reads
+the tree inside the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
+(`sweepUnrecordedMarks`) inside the transaction that unmarks it. A room's load reads the live tree
+before ygo hands the room to anyone (`onLoadDocument`). A write reads its transaction's fork, with
+no exception: every operation that changes the document - `ReplaceText`, `MarkQuote`,
+`SetBlockAttributes` and the rest of `applyLive`'s callers - takes it from a transaction its caller
+joined first (`Docs.Join`), and refuses one that didn't (`errUnjoined`). Main's own
+`applyLive`/`applyJoined` fold (#1693) removed the unjoined branch this used to carve out as a
+tests-only exception, which walked the room's own live document directly inside `Server.Apply`,
+holding no lock across its callback, and so could read a peer's write halfway through as a tree
+outside the schema; every write now reads through its own transaction's fork instead, which is
+always a consistent copy no peer's concurrent write can tear. A tree a read returns shares no map
+or slice with the
+document it was read from
+(`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a
+reader that edits its tree changes nothing a later read of the replica meets
+(`TestEditingALiveReadsTreeChangesNoLaterRead`).
+
+A read takes up to three locks, in one order: the room's state lock; then the replica's, which a
+read only tries; then the live document's, for the catch-up's or the copy's encode. A version's
+capture takes its authors under the state lock and releases it before it takes the room through
+`holdLive`, which keeps the replica's lock, when it reads the replica, until the capture has walked
+it: an author the update observer credits after that take is numbered past it and stays pending
+for the next version, whether or not the copy holds the edit (`captureLiveTextAndAuthors`,
+LEGION-503). The update observer's own turn with the replica (`renderedReplica.observe`) is the
+one exception to that order: it holds the replica's lock for its whole call (`lockForUpdate`, a
+blocking acquisition, unlike every other caller's), and its `onChanged` callback
+(`observeAskBlocksForUpdate`) takes the state lock from inside it, nested the other way around
+(LEGION-503). This stays deadlock-free because every other acquisition of the replica's lock only
+tries it (`hold`, under `holdLive`/`readLive`) rather than blocking on it, and always after
+releasing the state lock first, never while holding it - so nothing can be waiting on the state
+lock while the observer waits for anyone else to release the replica's; only a Yjs transaction's
+own function holds a document's lock, and it takes neither of the others. So the
+caller of `readLive` or `holdLive` may hold the room's state lock, and must not hold the live
+document's lock - run inside a Yjs transaction on it - since the catch-up and the copy encode under
+that lock. A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s
+subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
+looked up again with `GetDoc` once that Apply returned can have been evicted in between.
+
+The replica's lock is the one a room's browsers wait on. The update observer takes it for every peer
+update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only
+once the observer has returned (sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go`), so a read
+holding the replica for its walk holds every other browser's copy of the keystroke. A read
+therefore only tries the lock, and
+reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
+never queue behind each other or ahead of a waiting observer. `BenchmarkKeystrokeBesideReads`
+measures the wait: a keystroke's transaction and the observer's whole turn with the replica -
+the catch-up and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since
+the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run of
+each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races
+beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
+p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor
+(`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
+
+| Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
+| --- | --- | --- | --- | --- |
+| none | 551.8 / 849.1 / 1120 | | 635.5 / 810.9 / 881.5 | |
+| copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
+| the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
+
+The render dominates every row now, on both designs: at half a processor the three keystroke
+counts are within one run's noise of each other, matching round 2's real-browser, end-to-end
+measurement of the same three modes (PR comment, not reproduced here). On 32 cores the replica
+still costs more at the tail than a copy does - about 50 ms at its median and 200 ms at p99
+reading every 250 ms, growing to about 1 s at p99 reading back to back - the same direction this
+design's trade-off has shown since round 1, now measured on top of the render's own cost rather
+than in isolation from it. A replica of the reads' own would remove that tail (measured early in
+this PR's history, before this benchmark counted the render, at `93a77af2`) and was rejected for
+its memory: a room read while resident would hold a second whole copy of its document until
+eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB,
+with nothing bounding how many rooms hold one. Copying the observer's rendered tree under the lock
+instead of walking the replica would hold it about 45 ms rather than about 105 ms at 524 KiB, but
+would keep that tree resident (about 22 MiB) and still need the replica for the loss check, which
+walks the document itself. A read's own cost (`BenchmarkLiveDocumentRead`, the development machine
+at load about 40): a 524 KiB document's tree read took about 68 ms walking the live tree, 283 ms
+through a copy and 86 ms through the replica (77 ms with a keystroke to catch up), and its render
+about 181, 391 and 194 ms. The replica is listed for its document's reads (`Service.replicas`),
+the document and the replica each held weakly there; the update observer, which the document
+holds, is the replica's one strong holder, so the replica is collected with an evicted document,
+in the same collection, and the listing goes once the document is collected (`keepReplica`,
+`TestAnEvictedRoomsReplicaGoesWithIt`). A reader holding an evicted instance of a room reaches that
+instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunBesideItsPeers` runs
+each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
+peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
+reports a walk of the live tree beside a write; the unit tests' own step runs without it.
+
+Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
+applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
+`crdt.ApplyUpdateV1`), so two browsers' updates take turns. `Server.Apply` holds no lock across
+its callback, so the service never walks the room's tree there: a write reads and writes its
+transaction's fork, and builds the fork from an encode taken under the lock (`forkLive`); the room
+has one writer slot (`openLiveWrite`); and a committed write reaches the room in a transaction and
+is read back through `readLive`. A helper that walks the room inside `Server.Apply` outside a
+transaction, as an unjoined write once did, races every peer's update; no production path does.
+`TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the
+document, until 50 of its edits have overlapped their typing.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
@@ -408,10 +545,11 @@ of a block the server wrote, is copied, read, opened and kept from a rebuild who
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's
 edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
-the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
-v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
-evicted room and reaches the store only through its retiring persistence worker, while the next
-access has already loaded the store without it and serves, and takes, the next write on a document
+the moment its last peer leaves even while a `Server.Apply` is inside its callback on it
+(sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go` checks only the peers): the callback's
+write then lands on the evicted room and reaches the store only through its retiring persistence
+worker, while the next access has already loaded the store without it and serves, and takes, the
+next write on a document
 missing the first. Two such writes, each a diff of the same document, merge into a document neither
 wrote, and into one holding no block at all once each kept a block the other replaced: the
 healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts a room only
@@ -432,15 +570,18 @@ publish it runs inside, and the publish, its request and the document's writer s
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
 
-The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
-tree, since ygo fires it after the transaction has released the document's lock and another write
-can be integrating meanwhile (`renderedReplica`). The replica is copied from the room on its first
-update and then brought up to date under the room's lock with what the room gained since its state
-vector, as `forkLive` brings a fork up to date. The update the observer is handed cannot stand in:
-two transactions' observers run concurrently in either order, and each update carries the room's
-whole delete set. On a 1 MiB document a catch-up after one typed character took about 8 ms where the
-render took about 160 ms and a whole copy about 420 ms, and the replica holds about 80 MiB of heap
-while its room is resident.
+The room's update observer (`updateChangesMarkdown`) renders a replica of the room, the one its
+reads walk, not the live tree, since ygo fires it after the transaction has
+released the document's lock and another write can be integrating meanwhile (`renderedReplica`). It
+keeps the rendering it compares the next one with in that replica (`renderedReplica.markdown`), so
+each instance of a room compares with its own, and it takes the room's state lock only once it has
+released the replica. The replica is copied from the room on its first update and then brought up
+to date under the room's lock with what the room gained since its state vector, as `forkLive`
+brings a fork up to date. The update the observer is handed cannot stand in: two transactions'
+observers run concurrently in either order, and each update carries the room's whole delete set.
+On a 1 MiB document a catch-up after one typed character took about 8 ms where the render took
+about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above) while
+its room is resident.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
@@ -1400,7 +1541,7 @@ canonical markdown.
 - Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree, once per tree: a version written in the transaction whose own live mutation produced that tree inherits that mutation's refresh rather than repeating it, and a version with no live mutation of its own - settlement, a standalone named version - refreshes for itself. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone. The refresh writes only the two fields it owns, the quote and the orphan flag, never the whole `anchor` column: it reads every open row up front and writes each one back after the lookups and event appends the rows before it cost, so a whole-column write would erase what another writer put in that anchor in between - the block id `BackfillAnchorBlocks` pins (LEGION-149).
 - The quote a refresh reads is the first contiguous run of the row's mark (`pmdoc.FindMark`), so text written inside an anchor must carry its mark. Two marks of one type may cover one character (two readers' comments, suggestions or asks: the record marks declare `excludes: ''`), so `pmdoc.MarkSpans` and `FindMark` match a run by the mark's type and id, never by the first mark of the type on it, and the server stores a record mark under y-prosemirror's overlapping-mark key shape `<type>--<8 characters>` (`pmdoc.markAttributeKey`, with its own digest), which both readers strip. A `replace` through the edit route, and the text an accepted suggestion writes inline or into code, takes every comment, suggestion and ask mark that covers all of the text it replaces (`pmdoc.AnchorMarksCovering`, the accepted suggestion's own mark excepted): replacing a word, the first or last word, or the whole quote leaves the anchor over the new text, and the refreshed quote is its whole current extent. A replace that runs past an anchor's edge rewrote text outside it too, so that anchor keeps only the text the replace left alone, and one covering the whole anchor and more orphans it. A block replacement from an accepted suggestion takes no mark, since it can land a code block an ask's mark cannot cover.
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions: the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it). `kind` may be absent or `question`; `kind: "action"` (removed; migration 0035 folded every stored action ask into a question keeping its options and its answer) and `kind: "approval"` (server-created by the document-approval route only) answer `400 ASK_KIND_INPUT`.
-- Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` `{summary?}` (any actor) opens an ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Its question is `Approve <name> (version <N>)?`, followed by the request's `summary`: what the human is approving and nothing else, since an approval request carries nothing new. A summary is trimmed and must hold text (`400 SUMMARY_INPUT`), and one that would take the question past the ask cap is `400 CAP_EXCEEDED` naming `summary` and the characters left for it, counted against the longest version the request can reach (ten digits, the most `asks_approval_kind_check` admits), so no later version move takes the question past the cap; both are checked on every request, including one that opens nothing, and a request without one gets the bare question. An open approval ask follows every document version in the same transaction, preserving its thread and summary: the move rewords its question to the new version, stamps `edited_at` and appends `ask.edited`, while `requested_version` remains the version the agent last handed to the human, so a moved request is Waiting on agents. Only the first move since the request was opened or handed back wakes anyone, even when a thread reply had already left the request waiting on the agent: a later move, while `requested_version` is already below the version it named, carries `quiet: true` (`model.AskEditEventPayload.Quiet`), so `events.Broker.Notify` records it with `notify` false and the outbox routes it to no follower, as a human's unnamed `artifact.version` is recorded; the log and SSE still carry it, so a person typing in the document wakes the asker once rather than at every settled version. Calling the request route again reads the open row's `waiting_on` once, before it writes anything (`renewApprovalAsk`, `api/reviews.go`). While it is `agent` - the request moved, or a thread reply newer than its last hand-back holds the turn - the call hands it back to the human: a new summary first rewords it the same way (`edited_at`, `ask.edited`; a request that names none keeps the summary it has), and the hand-back then sets `requested_version` to the current version, records the thread's newest reply as the one it answered (`asks.handed_back_reply_id`, migration 0064, a foreign key to `comments` from 0066) and appends `ask.handed_back`, which leaves `edited_at` and the question as they were, so an answer the human started before it is not refused `ASK_EDITED` and the card's edit history gains nothing. While it is `human` the call hands nothing back: the same summary, or none, writes nothing, and a different one is `409 APPROVAL_WAITS_ON_HUMAN`, naming the question the human is reading, since rewording it would rewrite that card with no turn of theirs and refuse an answer they had started. The route answers 201 when it wrote anything and 200 when it wrote nothing, with the document's `approval` as the call left it. `docs.OpenApprovalAsk` locks that one row, `docs.RewriteApprovalAsk` is the one rewording a version move and a new summary share, and `handBackApprovalAsk` (`api/reviews.go`) the one hand-back. The move is in the version's sole author when one exists and otherwise in settlement's actor, `{kind: "system", id: "document-settlement"}`. What resolving an ask stores is written in one place, `docs.WriteAskResolution`, which settlement's retraction of a removed ask block and the resolve route both call. A request while the latest version is approved returns the approval and opens nothing. Answering an approval ask (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread. Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it); `stale` is derived from versions. Every approval ask names its document and no other ask names one: `asks_approval_kind_check` (migration 0053) refuses a row that pairs `kind` and `approval` otherwise. Legion's design gate consumes the approval events; it is the exception path, not an every-issue step.
+- Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` `{summary?}` (any actor) opens an ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Its question is `Approve <name> (version <N>)?`, followed by the request's `summary`: what the human is approving and nothing else, since an approval request carries nothing new. A summary is trimmed and must hold text (`400 SUMMARY_INPUT`), and one that would take the question past the ask cap is `400 CAP_EXCEEDED` naming `summary` and the characters left for it, counted against the longest version the request can reach (ten digits, the most `asks_approval_kind_check` admits), so no later version move takes the question past the cap; both are checked on every request, including one that opens nothing, and a request without one gets the bare question. An open approval ask follows every document version in the same transaction, preserving its thread and summary: the move rewords its question to the new version, stamps `edited_at` and appends `ask.edited`, while `requested_version` remains the version the agent last handed to the human, so a moved request is Waiting on agents. Only the first move since the request was opened or handed back wakes anyone, even when a thread reply had already left the request waiting on the agent: a later move, while `requested_version` is already below the version it named, carries `quiet: true` (`model.AskEditEventPayload.Quiet`), so `events.Broker.Notify` records it with `notify` false and the outbox routes it to no follower, as a human's unnamed `artifact.version` is recorded; the log and SSE still carry it, so a person typing in the document wakes the asker once rather than at every settled version. Calling the request route again reads the open row's `waiting_on` once, before it writes anything (`renewApprovalAsk`, `api/reviews.go`). While it is `agent` - the request moved, or a thread reply newer than its last hand-back holds the turn - the call hands it back to the human: a new summary first rewords it the same way (`edited_at`, `ask.edited`; a request that names none keeps the summary it has), and the hand-back then sets `requested_version` to the current version, records the thread's newest reply as the one it answered (`asks.handed_back_reply_id`, migration 0064, a foreign key to `comments` from 0066) and appends `ask.handed_back`, which leaves `edited_at` and the question as they were, so an answer the human started before it is not refused `ASK_EDITED` and the card's edit history gains nothing. While it is `human` the call hands nothing back: the same summary, or none, writes nothing, and a different one is `409 APPROVAL_WAITS_ON_HUMAN`, naming the question the human is reading, since rewording it would rewrite that card with no turn of theirs and refuse an answer they had started. The route answers 201 when it wrote anything and 200 when it wrote nothing, with the document's `approval` as the call left it. `docs.OpenApprovalAsk` locks that one row, `docs.RewriteApprovalAsk` is the one rewording a version move and a new summary share, and `handBackApprovalAsk` (`api/reviews.go`) the one hand-back. Every writer passes `MoveApprovalAsk` the actor whose edit moved the request: a route passes its own actor, settlement its latest known browser editor, and ambiguous browser content `SettlementActor`, `{kind: "system", id: "document-settlement"}`; how many authors the version credits does not choose the mover. What resolving an ask stores is written in one place, `docs.WriteAskResolution`, which settlement's retraction of a removed ask block and the resolve route both call. A request while the latest version is approved returns the approval and opens nothing. Answering an approval ask (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread. Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it); `stale` is derived from versions. Every approval ask names its document and no other ask names one: `asks_approval_kind_check` (migration 0053) refuses a row that pairs `kind` and `approval` otherwise. Legion's design gate consumes the approval events; it is the exception path, not an every-issue step.
 - `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
@@ -1802,7 +1943,32 @@ the alarm, and a failed reload keeps the last set. `Set.Version`, the SHA-256 of
 secret's name, owner, tier and ARN, is recorded on every request, and a live grant is re-checked
 only once it has moved (`stillAllowed`); the record line, the column and the API field that carry
 it keep the name `rules_version`, since records are content-addressed and stored bodies must still
-parse.
+parse. `policy.NewSet` is the one place a `Version` is computed, ascending by slug (not by request
+name, which orders `A0` and `A_B` the other way), for a full load and a single-name merge alike, so
+an unchanged namespace keeps its version (`TestGoldenDigest` pins the bytes). `Loader.LoadOne`
+reads one name with `DescribeSecret` under the same rules and the same refusal line, and
+`Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one writer lock
+from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
+so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's
+deadline, and each ticker reload is given the refresh interval before it fails. Each full reload
+that begins (its clock read before its listing is fetched) within five minutes of an anchor
+(`listLag`, how far AWS documents `ListSecrets` may lag) reads that name again alone, so a lagging
+listing neither drops a secret the reread served nor brings back one it found gone; a name is
+anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
+the answer differed from what the live set held, so a change no reread caught (a console delete, a
+tag that now refuses the secret) is kept for `listLag` from the reload that caught it rather than
+flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
+a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
+invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no
+secret under the prefix can carry - not `namePattern`'s form, or one whose name under the prefix
+would pass Secrets Manager's 512-character limit - is `policy.ErrNameInvalid` before any AWS call,
+before the writer lock and before a miss-path reread token (`Loader.secretName`, which
+`Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
+`POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
+`RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
+name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
+request ended first; the public `GET /v1/settings`
+answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1907,12 +2073,13 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
-(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential rate limiter's
-per-address bucket trusts for the caller's real address — its last comma-separated entry, the hop
-your own reverse proxy appended, never an earlier client-supplied one. Unset, the default, keys on
+(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
+limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
+comma-separated entry, the hop your own reverse proxy appended, never an earlier client-supplied
+one. Unset, the default, keys on
 `r.RemoteAddr` directly, correct only when the broker is reached without a proxy in front of it;
 behind one — this broker's documented production shape, the shared internal ALB — `r.RemoteAddr`
-is the proxy's own address for every caller, collapsing the per-address bucket into one shared by
+is the proxy's own address for every caller, collapsing each per-address bucket into one shared by
 everyone unless this variable is set). `BROKER_UI_TOKEN` and `BROKER_ENVOY_TOKEN` follow the
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
@@ -1954,7 +2121,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 21 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 23 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -1968,7 +2135,14 @@ credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a st
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
-against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), and the
+against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
+unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
+every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, since each reread holds
+the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
+reload; a reread spends a token from either bucket only when both allow it
+(`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
+shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
+with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
 request body's own `operator` field, so an attacker naming a specific victim operator repeatedly
@@ -2069,7 +2243,10 @@ all refuse, so an approved grant outlives an owner change only while its approve
 approve the secret, or once the new tags give its session the secret without asking; a name
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
-let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
+scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
+`GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
+(`secrets.AWS.Read` reads both as `ErrNotFound`, and `secrets.Local` answers each as it does).
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant

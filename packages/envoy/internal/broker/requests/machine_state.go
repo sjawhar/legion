@@ -18,14 +18,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -43,14 +48,39 @@ var (
 	// signature, one approval by the record's approver) failed — a row written by anyone but the
 	// broker releases nothing.
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
-	// ErrSecretNotInStore: the secret a grant reads its value from is no longer in Secrets Manager.
-	ErrSecretNotInStore = errors.New("secret is not in the secrets store")
-	ErrMixedApprovers   = errors.New("the requested secrets need different approvers; request them separately")
+	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
+	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
+	// ErrSessionIDInvalid: the request's own session_id override (requests.session_id — an
+	// unsigned claim any enrolled process may send, never verified against a signature) is too
+	// long or carries a whitespace or control character, refused before it is ever stored or
+	// forwarded to Envoy's wake (LEGION-587).
+	ErrSessionIDInvalid = errors.New("session id must be at most 128 characters with no whitespace or control character")
 )
+
+// maxSessionIDLength bounds the request body's session_id override; see ErrSessionIDInvalid.
+const maxSessionIDLength = 128
+
+// validSessionID reports whether sessionID is acceptable to store: empty (unset) or at most
+// maxSessionIDLength runes with no whitespace or control character.
+func validSessionID(sessionID string) bool {
+	if utf8.RuneCountInString(sessionID) > maxSessionIDLength {
+		return false
+	}
+	for _, r := range sessionID {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
 // proof.Verifier's own retention margin.
 const jtiRetentionMargin = time.Minute
+
+// DefaultMissRereads bounds the policy rereads one enrollment's unknown-name requests trigger:
+// a session inventing names costs at most Burst DescribeSecret calls, refilled one per Every.
+var DefaultMissRereads = ratelimit.Limit{Every: 10 * time.Second, Burst: 10}
 
 // SecretDecision is how the policy decided one name of a request.
 type SecretDecision struct {
@@ -97,6 +127,24 @@ type Machine struct {
 	// record.ChainVerifier machinery enroll.Service.AuthenticateLauncher uses for launcher
 	// credentials, built by NewChainVerifier against agent_secret records instead.
 	Chain *record.ChainVerifier
+	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
+	// live policy does not serve (rereadMissing); nil means DefaultMissRereads.
+	MissRereads *ratelimit.Limit
+	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
+	missRereads     *ratelimit.Keyed
+	missRereadsOnce sync.Once
+}
+
+// missRereadLimiter is the per-enrollment buckets MissRereads names, built on the first miss.
+func (m *Machine) missRereadLimiter() *ratelimit.Keyed {
+	m.missRereadsOnce.Do(func() {
+		limit := DefaultMissRereads
+		if m.MissRereads != nil {
+			limit = *m.MissRereads
+		}
+		m.missRereads = ratelimit.NewKeyed(limit)
+	})
+	return m.missRereads
 }
 
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
@@ -129,8 +177,9 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
-// name their own approver — that's the policy's job), and hands back a live grant for exactly these
-// names when one may be reused (reuseLiveGrant). Otherwise it decides and writes the request in one
+// name their own approver — that's the policy's job), rereads each name the live policy does not
+// serve (rereadMissing), and hands back a live grant for exactly these names when one may be
+// reused (reuseLiveGrant). Otherwise it decides and writes the request in one
 // transaction: it takes the advisory lock that serializes identical requests from one enrollment
 // (lockIdenticalPending), then locks the enrollment live (lockLiveEnrollment), so no request or
 // grant lands on an enrollment that ended after Create first read it (such an enrollment is
@@ -140,6 +189,9 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 // or denied request, with a granted one's grant, or a pending request and its credential-request
 // record, which a pending identical request already waiting coalesces onto instead.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
+	if !validSessionID(sessionID) {
+		return Request{}, ErrSessionIDInvalid
+	}
 	enr, err := m.enrollment(ctx, enrollmentID)
 	if err != nil {
 		return Request{}, err
@@ -169,7 +221,10 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	set := m.Policy.Get()
+	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
+	if err != nil {
+		return Request{}, err
+	}
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, set); err != nil {
 		return Request{}, err
 	} else if ok {
@@ -232,6 +287,39 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		return Request{}, err
 	}
 	return req, tx.Commit(ctx)
+}
+
+// rereadMissing rereads each requested name the live set does not serve (the spec's miss path: a
+// secret created seconds ago is not in the listing yet), bounded per enrollment by MissRereads,
+// and answers the set to evaluate against. A name no secret can carry (policy.Current.CheckName:
+// a free-text identifier, or one past Secrets Manager's name limit) stays unknown before it costs
+// a token or a line. A failed reread logs LoadFailedMessage and the name stays unknown — the
+// caller sees UNKNOWN_SECRET exactly as before the miss path existed. A reread that fails once ctx
+// has ended (the caller went away, or its deadline passed) is the request's failure, not Secrets
+// Manager's: it logs nothing and answers ctx's error, so the alarm on LoadFailedMessage never
+// counts a client that left. It runs before Create's transaction, so no Secrets Manager call
+// holds a row lock.
+func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names []string, set *policy.Set) (*policy.Set, error) {
+	for _, name := range names {
+		if _, ok := set.Secrets[name]; ok {
+			continue
+		}
+		if m.Policy.CheckName(name) != nil {
+			continue
+		}
+		if !m.missRereadLimiter().Allow(enrollmentID) {
+			return set, nil
+		}
+		if _, err := m.Policy.RefreshOne(ctx, name); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			slog.Error(policy.LoadFailedMessage, "name", name, "error", err)
+			continue
+		}
+		set = m.Policy.Get()
+	}
+	return set, nil
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs

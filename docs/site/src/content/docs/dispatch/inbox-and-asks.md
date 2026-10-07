@@ -37,7 +37,8 @@ A credential request is an agent asking you to let it use a secret, or a machine
 agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
 and each links to the page where you approve or deny it. They count toward **Needs you** and the
 banner like an ask that waits on you. The Inbox says `Nothing needs you` only when it lists no ask
-and no credential request.
+and no credential request. An open Inbox picks up a new request, or one that is no longer pending,
+within moments on its own - no reload needed.
 
 ### Mine and Everyone
 
@@ -105,6 +106,15 @@ replies.
 If you type a question and choose **Answer** with no option picked, Dispatch checks first. It
 offers **Ask back instead** and **Answer with it anyway**.
 
+### Reply thread
+
+Replies appear newest first. The two newest replies stay visible. When there are older replies,
+choose **Show N more replies** to reveal them below the newest pair; choose **Show fewer replies**
+to collapse the thread again. After an ask is answered, write a follow-up in **Reply**; in the
+Conversation tab and in document decisions, choose **Write a reply** first. A new reply appears at
+the top of the thread, and a reply you are still typing survives if its card remounts elsewhere,
+such as switching margin tabs away and back.
+
 ### Approvals
 
 An agent can ask you to approve a document at a specific version. The card reads
@@ -113,6 +123,13 @@ agent's summary of what that version proposes. It has two fixed choices and no O
 
 - **Approve** approves that version.
 - **Request changes** needs a reason, which goes back to the agent.
+
+The card also names the document and the version it asks about as a link (everywhere except the
+document's own margin, where you're already on it): opening the ask from the Inbox, the drawer, or
+its `dispatch://.../ask/<id>` reference takes you to that document with the approve controls in
+view, instead of the issue's Conversation turn. If the document has moved past the version the
+request named, the link still opens the current document, and the card keeps saying which version
+the request was for.
 
 Answering this card is the same review as the **Approve** and **Request changes** buttons on the
 document itself. [Documents](/legion/dispatch/documents/#approvals) covers approval states and what
@@ -131,6 +148,25 @@ ask's answer and replies. Open it to see two groups:
   subscribed through a wider topic shows that topic and has no control.
 
 Each row shows whether the session is live. The list updates as sessions follow and leave.
+
+## Opening the Inbox as a drawer
+
+You don't have to leave a page to answer an ask. The `i` key opens the Inbox as a drawer over
+whatever page you're on, and so does a header button, which differs by screen width:
+
+- **On a phone or a narrow window**, the sidebar collapses into a top header whose **Inbox**
+  badge (or **Needs you N**, once something needs you) opens the drawer instead of navigating.
+- **On a wide screen**, the sidebar's **Inbox** link still navigates to the Inbox page and keeps
+  its own **Needs you N** badge; a separate **Peek** button beside it, with no count of its own,
+  opens the drawer instead.
+
+Either way it's the same list, cards, and actions as the Inbox page: answer, ask back, snooze, or
+open an ask without losing your place. The page underneath keeps its state, a half-typed message
+included, so a reply you were drafting is still there when you close the drawer.
+
+`Escape` closes the drawer before it closes anything else behind it, and returns focus to the
+button that opened it. Clicking outside the drawer closes it too. The button isn't offered on the
+Inbox page itself, since the page already shows everything the drawer would.
 
 ## On a phone
 

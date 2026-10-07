@@ -35,8 +35,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -90,8 +93,10 @@ type AppContextOptions struct {
 	EnvoyURL       string
 	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
 	// sends none.
-	EnvoyToken    string
-	Docs          docs.API
+	EnvoyToken string
+	Docs       docs.API
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
+	Embedder      embed.Embedder
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
@@ -102,7 +107,10 @@ type AppContextOptions struct {
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL   string
 	AgentSecretsToken string
-	TestHooksEnabled  bool
+	// Files is the uploaded-file store main built from DISPATCH_FILE_STORE_BUCKET; nil keeps
+	// files in Postgres. See api.DepsInput.
+	Files            files.Store
+	TestHooksEnabled bool
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
 	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
@@ -144,6 +152,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		EnvoyURL:          opts.EnvoyURL,
 		EnvoyToken:        opts.EnvoyToken,
 		Docs:              opts.Docs,
+		Embedder:          opts.Embedder,
 		Events:            opts.Events,
 		App:               opts.App,
 		GitHubAPIBase:     opts.GitHubAPIBase,
@@ -152,6 +161,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Lifetime:          opts.Lifetime,
 		AgentSecretsURL:   opts.AgentSecretsURL,
 		AgentSecretsToken: opts.AgentSecretsToken,
+		Files:             opts.Files,
 		TestHooksEnabled:  opts.TestHooksEnabled,
 	})
 	if err != nil {
@@ -180,6 +190,13 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 // route and the sync tool do.
 func (ctx *AppContext) Architecture() *architecture.Importer {
 	return ctx.apiDeps.Architecture
+}
+
+// GitHub is the shared GitHub App client the HTTP routes use (the architecture importer, the
+// REST proxy and the Settings access checks), so LEGION-567's delivery intake and reconcile sign
+// their own calls as the same App rather than loading credentials a second time.
+func (ctx *AppContext) GitHub() *githubapp.Client {
+	return ctx.apiDeps.GitHub
 }
 
 const (

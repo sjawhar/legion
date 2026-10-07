@@ -42,13 +42,19 @@ type Runtime struct {
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
 // resolved into the values the daemon runs on.
 type Config struct {
-	Project      string
-	Port         int
-	Bind         string
-	PostgresDSN  string
-	StateDir     string
-	Runtime      Runtime
-	AdmissionCap int
+	Project string
+	Port    int
+	Bind    string
+	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at in
+	// Bind's place, so Bind can be the unspecified address a daemon running as a pod listens on; ""
+	// (the default) has pods dial Bind. Only runtime: kubernetes accepts it, and readAdvertiseHost
+	// holds it to an IP address or a DNS name. `daemon_url` names the pod-facing API address on its
+	// own.
+	AdvertiseHost string
+	PostgresDSN   string
+	StateDir      string
+	Runtime       Runtime
+	AdmissionCap  int
 
 	// DaemonURL is the API address every pane is told (`LEGION_DAEMON_URL`), with no trailing
 	// slash; the loopback address on Port unless the file names another.
@@ -78,8 +84,8 @@ type Config struct {
 
 	WorkerBootTimeout time.Duration
 	// WorkerBootRegistrationDeadlineIntervals × WorkerBootTimeout is the registration deadline: a
-	// pane whose process is alive but whose agent has not registered by then is retired and
-	// counted as a launch failure.
+	// pane whose process is alive but whose agent has not registered by then, or has not said it is
+	// ready that long after its registration, is retired and counted as a launch failure.
 	WorkerBootRegistrationDeadlineIntervals int
 	WorkerRPCTimeout                        time.Duration
 	WorkerStopTimeout                       time.Duration
@@ -205,6 +211,7 @@ type fileConfig struct {
 	Project           *string
 	Port              *int
 	Bind              *string
+	AdvertiseHost     *string
 	PostgresDSN       *string
 	StateDir          *string
 	AdmissionCap      *int
@@ -307,6 +314,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Project, err = readString(value, key)
 		case "bind":
 			file.Bind, err = readString(value, key)
+		case "advertise_host":
+			file.AdvertiseHost, err = readAdvertiseHost(value, key)
 		case "postgres_dsn":
 			file.PostgresDSN, err = readString(value, key)
 		case "state_dir":
@@ -545,9 +554,19 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 
 // dispatchBase is `dispatch_url`: a base URL, never its clients' `/mcp` endpoint, which the clients
 // append themselves (the shipped `requireNoMcpSuffix`, config.ts). A trailing slash is gone
-// by then, so `/mcp/` is caught too.
+// by then, so `/mcp/` is caught too. Its scheme must be http or https: anything else — a typo such
+// as `htp` — is a misconfiguration `--check-config` should catch now, rather than reaching the
+// daemon's HTTP client as "unsupported protocol scheme", which the boot's readiness gate would
+// otherwise wait out forever as if Dispatch were merely unreachable (LEGION-580).
 func dispatchBase(value, key string) (string, error) {
-	base, err := baseURL(value, key)
+	parsed, err := validURL(value, key)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%s must be http or https, not %q", key, parsed.Scheme)
+	}
+	base, err := trimmedBase(parsed, key)
 	if err != nil {
 		return "", err
 	}
@@ -703,6 +722,13 @@ func baseURL(value, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return trimmedBase(parsed, key)
+}
+
+// trimmedBase is baseURL's own normalization, on an already-validated URL: a query or fragment is
+// refused and trailing slashes are dropped. dispatchBase shares it after its own scheme check,
+// which must read the parsed URL's Scheme directly rather than re-parsing a normalized string.
+func trimmedBase(parsed *url.URL, key string) (string, error) {
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", fmt.Errorf("%s must not include a query string or fragment", key)
 	}
@@ -763,6 +789,12 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if strings.TrimSpace(cfg.Bind) == "" {
 		return Config{}, errors.New("bind must not be empty")
+	}
+	if file.AdvertiseHost != nil {
+		if file.Kubernetes == nil {
+			return Config{}, errors.New("advertise_host is not used when runtime is tmux: every pane dials the daemon's own unix socket; remove advertise_host")
+		}
+		cfg.AdvertiseHost = *file.AdvertiseHost
 	}
 
 	if file.Kubernetes != nil {

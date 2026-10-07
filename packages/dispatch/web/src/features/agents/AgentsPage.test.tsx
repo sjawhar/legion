@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type {
@@ -18,6 +18,7 @@ import type {
 } from "../../api/types";
 import { AuthGate } from "../../app";
 import { orderAgents, partitionAgents } from "./AgentsPage";
+import { matchesFilters, searchWords } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
@@ -87,15 +88,24 @@ function message(body: string, overrides: Partial<Message> = {}): Message {
   };
 }
 
+/** Exposes the router's current query string, for the one test that needs to see a typed search
+ *  land on the page's own address rather than only in its rendered rows. */
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-search">{location.search}</div>;
+}
+
 function renderAgents({
   agentState = {},
   inboxRows = inbox,
+  initialEntry = "/agents",
   listedAgents = agents,
   issues = [],
   messages = [],
 }: {
   agentState?: UserAgentStates;
   inboxRows?: InboxRow[];
+  initialEntry?: string;
   listedAgents?: Agent[];
   issues?: IssueSummary[];
   messages?: MessageRead[];
@@ -145,9 +155,10 @@ function renderAgents({
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
-    <MemoryRouter initialEntries={["/agents"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
         <AuthGate />
+        <LocationProbe />
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -440,6 +451,59 @@ test("partitionAgents splits live sessions with a Dispatch signal, silent live s
   expect(ids(parts.active)).toEqual(["pinned-silent", "awaited", "asked", "spoke"]);
   expect(ids(parts.quiet)).toEqual(["silent"]);
   expect(ids(parts.inactive)).toEqual(["unseen-spoke", "unseen-silent"]);
+});
+
+test("matchesFilters keeps a session whose title, directory, machine, session id or issue key together hold every searched word, in any case", () => {
+  const alpha = session({
+    dir: "/workspaces/alpha",
+    machine_id: "alpha-host",
+    session_id: "alpha-session",
+    title: "Scrum planning",
+  });
+  const beta = session({
+    dir: "/workspaces/beta",
+    machine_id: "beta-host",
+    session_id: "beta-session",
+    title: "Beta",
+  });
+  const matches = (agent: Agent, search: string, issueKeys: readonly string[] = []) =>
+    matchesFilters(agent, { machine: "", role: "" }, searchWords(search), issueKeys);
+
+  // One word, found in the title alone.
+  expect(matches(alpha, "scrum")).toBe(true);
+  expect(matches(beta, "scrum")).toBe(false);
+
+  // Two words found in two different fields of the one session - its directory and an issue key
+  // one of its asks names - still match: "wherever they appear" is not "in the same field".
+  expect(matches(alpha, "alpha core-9", ["CORE-9"])).toBe(true);
+  expect(matches(beta, "alpha core-9", ["CORE-9"])).toBe(false);
+
+  // Case-insensitive, by machine id; a word absent from every field excludes the session even
+  // when the others match.
+  expect(matches(alpha, "ALPHA-HOST")).toBe(true);
+  expect(matches(alpha, "alpha gamma")).toBe(false);
+
+  // The session id itself is searchable too.
+  expect(matches(alpha, "alpha-session")).toBe(true);
+  expect(matches(beta, "alpha-session")).toBe(false);
+});
+
+test("matchesFilters narrows by machine and role exactly, free text besides", () => {
+  const planner = session({
+    machine_id: "build-host",
+    roles: ["planner"],
+    session_id: "planner-session",
+    title: "Planner",
+  });
+  expect(
+    matchesFilters(planner, { machine: "build-host", role: "planner" }, searchWords("planner"), [])
+  ).toBe(true);
+  expect(
+    matchesFilters(planner, { machine: "other-host", role: "planner" }, searchWords("planner"), [])
+  ).toBe(false);
+  expect(
+    matchesFilters(planner, { machine: "build-host", role: "reviewer" }, searchWords(""), [])
+  ).toBe(false);
 });
 
 test("Agents orders who needs you before Dispatch recency before liveness, folds silent sessions, and keeps a re-poll stable", async () => {
@@ -1105,11 +1169,13 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
 
     fireEvent.click(older);
     expect(older.getAttribute("aria-expanded")).toBe("true");
-    // Newest first, the fold's rows beneath the newest exchange in the same list.
+    // Newest first, the fold's rows beneath the newest exchange in the same list. A body is a
+    // full Markdown block (its text in a `<p>` under the root); the reply's quote of its
+    // parent is a one-line preview with no paragraph, so only paragraphs are counted.
     await waitFor(() =>
       expect(
         within(conversation)
-          .getAllByText(/question$/, { selector: ".dispatch-markdown" })
+          .getAllByText(/question$/, { selector: ".dispatch-markdown > p" })
           .map((node) => node.textContent)
       ).toEqual(["Third question", "Second question", "First question"])
     );
@@ -2235,13 +2301,13 @@ test("the header checkbox follows the filters and its count never hides a select
     const header = within(region).getByRole("checkbox", {
       name: "Select all matching agents",
     }) as HTMLInputElement;
-    const directory = within(region).getByRole("searchbox", { name: "Directory contains" });
+    const search = within(region).getByRole("searchbox", { name: "Search agents" });
     expect(within(region).getByText("2 matching")).toBeTruthy();
 
     // Everything, then narrow: the header counts the matching row and names the other one.
     fireEvent.click(header);
     expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
-    fireEvent.change(directory, { target: { value: "PLANNER" } });
+    fireEvent.change(search, { target: { value: "PLANNER" } });
     await waitFor(() =>
       expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()
     );
@@ -2268,7 +2334,7 @@ test("the header checkbox follows the filters and its count never hides a select
     ).toEqual(["Reviewer · does not advertise BTW ✕"]);
 
     // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
-    fireEvent.change(directory, { target: { value: "" } });
+    fireEvent.change(search, { target: { value: "" } });
     await waitFor(() => expect(within(region).getByText("1 of 2 matching selected")).toBeTruthy());
     expect(header.checked).toBe(false);
     expect(header.indeterminate).toBe(true);
@@ -2316,6 +2382,44 @@ test("the header checkbox selects a folded row and the fold says how many of its
         .getAllByRole("button")
         .map((chip) => chip.textContent)
     ).toEqual(["Planner ✕", "Silent ✕"]);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// LEGION-540. A send's row in the Sends strip names the message it carries, which is Markdown
+// its author wrote: formatted on the row's one line, with all of its words on hover - the row is
+// the only copy of a refused message, so the hover keeps every word, and never shows its syntax.
+test("a refused send's row shows its message formatted on one line, with its whole text on hover", async () => {
+  const page = renderAgents();
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+  const body = "**Stop** the deploy\n\n1. check `main`\n2. report back";
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.change(
+      within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
+        name: "Broadcast message",
+      }),
+      { target: { value: body } }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    await waitFor(() => expect(sends.querySelector("strong")?.textContent).toBe("Stop"));
+    const preview = sends.querySelector<HTMLElement>("[data-markdown-preview]");
+    if (preview === null) throw new Error("the send's row shows no preview of its message");
+    expect(preview.querySelector("code")?.textContent).toBe("main");
+    expect(preview.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Stop the deploy check main report back"
+    );
+    expect(preview.querySelector("ol, li, p")).toBeNull();
+    await waitFor(() =>
+      expect(preview.getAttribute("title")).toBe("Stop the deploy check main report back")
+    );
   } finally {
     page.view.unmount();
     page.restore();
@@ -2370,6 +2474,46 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
         read_through: "2026-09-14T01:05:00Z",
       })
     );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// LEGION-540. A session's answer on the Agents page is Markdown it wrote, shown whole: a list in
+// it reads as a list (the `inline` rendering this row used before ran it onto one line and
+// dropped every item's formatting after the first block).
+test("an agent's answer on its row renders as a Markdown block, lists included", async () => {
+  const page = renderAgents({
+    messages: [
+      exchange("m1", "Status?", "2026-09-14T01:00:00Z", {
+        body: "Two things:\n\n1. **Stopped** the deploy\n2. `main` is green",
+        createdAt: "2026-09-14T01:05:00Z",
+      }),
+    ],
+  });
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await waitFor(() =>
+      expect(
+        Array.from(
+          conversation.querySelectorAll(".dispatch-markdown ol > li"),
+          (item) => item.textContent
+        )
+      ).toEqual(["Stopped the deploy", "main is green"])
+    );
+    // Scoped to the rendered body: the conversation is itself a list of turns.
+    expect(conversation.querySelector(".dispatch-markdown ol > li > strong")?.textContent).toBe(
+      "Stopped"
+    );
+    expect(conversation.querySelector(".dispatch-markdown ol > li > code")?.textContent).toBe(
+      "main"
+    );
+    expect(conversation.textContent).not.toContain("**");
   } finally {
     page.view.unmount();
     page.restore();
@@ -2497,17 +2641,80 @@ test("a row a filter hides keeps its draft and comes back as the reader left it"
     expand(planner, "Planner");
     const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
     fireEvent.change(field, { target: { value: "Half a thought" } });
-    const directory = within(region).getByRole("searchbox", { name: "Directory contains" });
+    const search = within(region).getByRole("searchbox", { name: "Search agents" });
 
-    fireEvent.change(directory, { target: { value: "REVIEWER" } });
+    fireEvent.change(search, { target: { value: "REVIEWER" } });
     expectFolded(region, "Planner");
-    fireEvent.change(directory, { target: { value: "" } });
+    fireEvent.change(search, { target: { value: "" } });
 
     expect(card(region, "Planner")).toBe(planner);
     expect(
       within(planner).getByRole("button", { name: "Planner" }).getAttribute("aria-expanded")
     ).toBe("true");
     expect(field.value).toBe("Half a thought");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("the search box reads its query from the page's address and writes back to it as the reader types", async () => {
+  const page = renderAgents({ initialEntry: "/agents?q=planner" });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const search = within(region).getByRole("searchbox", {
+      name: "Search agents",
+    }) as HTMLInputElement;
+    // A reload lands on this address, so the box opens already narrowed to what it last held.
+    expect(search.value).toBe("planner");
+    expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull();
+
+    fireEvent.change(search, { target: { value: "reviewer" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("location-search").textContent).toBe("?q=reviewer")
+    );
+    await waitFor(() =>
+      expect(within(region).queryByRole("heading", { level: 2, name: "Planner" })).toBeNull()
+    );
+
+    fireEvent.change(search, { target: { value: "" } });
+    await waitFor(() => expect(screen.getByTestId("location-search").textContent).toBe(""));
+    await screen.findByRole("heading", { level: 2, name: "Planner" });
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("/ focuses the Agents search box instead of opening the Dispatch-wide search dialog", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const search = within(region).getByRole("searchbox", { name: "Search agents" });
+    expect(search).not.toBe(document.activeElement);
+
+    fireEvent.keyDown(document.body, { key: "/" });
+
+    expect(document.activeElement).toBe(search);
+    expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("/ falls through to the Dispatch-wide search dialog when no agents are connected, since no box is there to focus", async () => {
+  const page = renderAgents({ listedAgents: [] });
+
+  try {
+    await screen.findByText("No agents are connected.");
+    expect(screen.queryByRole("searchbox", { name: "Search agents" })).toBeNull();
+
+    fireEvent.keyDown(document.body, { key: "/" });
+
+    expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();

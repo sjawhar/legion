@@ -51,9 +51,8 @@ interface Pane {
 /**
  * Whether a Messages request is a side turn rather than a turn. The host sends one as an
  * ordinary Messages request over a snapshot of the conversation whose last message is the `<btw>`
- * block around the question — the host adds it for `pi.askEphemeral` on the pin (measured there,
- * which is the only thing that can say), and pi-envoy adds it for `ctx.runEphemeralTurn` on 18.3 —
- * so the stand-in answers it distinctly and nothing about it reaches the transcript.
+ * block around the question, which pi-envoy adds for `ctx.runEphemeralTurn` — so the stand-in
+ * answers it distinctly and nothing about it reaches the transcript.
  */
 function isSelfCheck(request: Request): boolean {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];

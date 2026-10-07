@@ -12,8 +12,17 @@
 project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
 state_dir: ./state                     # the daemon's local state
 # postgres_dsn: postgres://…           # or LEGION_POSTGRES_DSN in the daemon's environment
-bind: 192.0.2.10                       # pods dial the worker stream here: never loopback
-daemon_url: http://192.0.2.10:13370
+# The daemon's own pod restarts onto a new IP, so bind, where the daemon listens, and advertise_host,
+# the stable address every pod dials instead, split apart once the daemon itself runs in the
+# cluster: bind 0.0.0.0 (every interface) and set advertise_host to the ClusterIP Service's DNS
+# name that fronts it (a Service named legion-daemon-widgets in the legion namespace is the
+# convention this example follows). Pods dial advertise_host at the port the worker stream listens
+# on, so that Service exposes worker_stream_port (13371 here, port + 1) as the same port number.
+# Running the daemon on a fixed host instead — a devbox or a VM — needs neither: bind that host's
+# own address, which pods then dial, and leave advertise_host unset.
+bind: 0.0.0.0
+advertise_host: legion-daemon-widgets.legion.svc
+daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
 
 operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read

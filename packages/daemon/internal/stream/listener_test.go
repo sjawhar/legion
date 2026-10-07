@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,8 +79,8 @@ func TestListenRefusesANonPositiveRPCTimeout(t *testing.T) {
 // is logged, the token is resolved at most once, and nothing changes — no registration, no
 // event (worker-stream-listener.ts:112-161).
 func TestHelloRejectionsCloseLogAndChangeNothing(t *testing.T) {
-	stale := &resolver{fn: func(string) (claim.Token, uint64, bool, bool) {
-		return testClaim, testGeneration - 1, true, true
+	stale := &resolver{fn: func(string) (claim.Token, uint64, bool, bool, error) {
+		return testClaim, testGeneration - 1, true, true, nil
 	}}
 	for _, test := range []struct {
 		name          string
@@ -118,6 +119,43 @@ func TestHelloRejectionsCloseLogAndChangeNothing(t *testing.T) {
 				t.Fatalf("a rejected hello emitted %#v", events)
 			}
 		})
+	}
+}
+
+// A token the daemon could not resolve — its store did not answer — is not refused: the hello says
+// nothing about the token, so the connection closes unacked with nothing written, the failed read
+// is logged once with its error, and nothing registers. The shim redials as it does after any hello
+// it gets no ack for, and a redial the store answers is acked.
+func TestAHelloTheDaemonCouldNotResolveClosesUnrefused(t *testing.T) {
+	var failed atomic.Bool
+	flaky := &resolver{fn: func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		if failed.CompareAndSwap(false, true) {
+			return "", 0, false, false, errors.New("read claim: context deadline exceeded")
+		}
+		return testClaim, testGeneration, false, true, nil
+	}}
+	h := startListener(t, harnessOptions{resolver: flaky})
+	p := dial(t, h.listener.Addr())
+	p.writeRaw(`{"type":"hello2","bootToken":"boot-token-1"}` + "\n")
+	p.awaitClosed()
+
+	lines := h.logs.Lines()
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "worker-stream: could not resolve a hello's boot token; the shim redials") ||
+		!strings.Contains(lines[0], "read claim: context deadline exceeded") {
+		t.Fatalf("logs = %q, want one line naming the failed read and no refusal", lines)
+	}
+	if _, ok := h.listener.Conn(testClaim); ok {
+		t.Fatal("a hello the daemon could not resolve registered a connection")
+	}
+
+	redial := dial(t, h.listener.Addr())
+	redial.writeRaw(`{"type":"hello2","bootToken":"boot-token-1"}` + "\n")
+	redial.expect(shimwire.TypeHelloAck)
+	if events := h.stop(); !slices.Equal(events, []Event{Hello{Claim: testClaim, Generation: testGeneration}, Closed{Claim: testClaim}}) {
+		t.Fatalf("events = %#v, want only the redial's hello and its close", events)
+	}
+	if lines := h.logs.Lines(); len(lines) != 1 {
+		t.Fatalf("logs = %q, want only the failed read", lines)
 	}
 }
 

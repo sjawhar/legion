@@ -3,7 +3,7 @@ import { type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
 import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
 
-import { api } from "./client";
+import { api, type DeliveryTimelineOptions } from "./client";
 import type { InboxRow } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it. */
@@ -117,3 +117,12 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
   signal.addEventListener("abort", abort);
   return settled.promise;
 }
+
+/** The delivery timeline's one read, keyed by every facet so a filter change refetches its own
+ *  cache entry: `GET /api/v1/delivery/timeline` applies the window and every facet server-side
+ *  (LEGION-567's plan, "API"). */
+export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
+  queryOptions({
+    queryKey: ["delivery", "timeline", filters],
+    queryFn: () => api.getDeliveryTimeline(filters),
+  });

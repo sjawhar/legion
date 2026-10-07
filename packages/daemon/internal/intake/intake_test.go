@@ -1045,3 +1045,126 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		}
 	}
 }
+
+// The workflow decides a review round inside a transaction and performs no I/O, so whether the
+// review's author may write to the repository is read before the fact is applied, and only for a
+// review that decides a round and names its author: a comment costs no GitHub call, and neither
+// does a review the producer gave no author. A request for changes in GitHub's upper case is
+// looked up as the workflow counts it (PullRequestReview.Decides). A read that fails is returned,
+// so the delivery is retried rather than applied with a permission nobody read, and a daemon with
+// no reader leaves every review's write access false.
+func TestADecidingReviewCarriesItsAuthorsWriteAccessBeforeItIsApplied(t *testing.T) {
+	review := PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer", CommitID: "head"}
+	var asked []string
+	answering := func(canWrite bool, err error) ConsumerSpec {
+		return ConsumerSpec{AckWait: time.Second, ReviewPermission: func(_ context.Context, review PullRequestReview) (bool, error) {
+			asked = append(asked, fmt.Sprintf("%s#%d %s", review.Repo, review.Number, review.Author))
+			return canWrite, err
+		}}
+	}
+	withAuthor := func(review PullRequestReview, author string) PullRequestReview {
+		review.Author = author
+		return review
+	}
+	for _, tc := range []struct {
+		name     string
+		fact     Fact
+		spec     ConsumerSpec
+		want     bool
+		wantAsks []string
+	}{
+		{name: "an approval by an account with write access", fact: review, spec: answering(true, nil), want: true,
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
+		{name: "an approval by an account without it", fact: review, spec: answering(false, nil),
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
+		{name: "a request for changes", fact: withState(review, "changes_requested"), spec: answering(true, nil), want: true,
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
+		{name: "a request for changes in upper case", fact: withState(review, "CHANGES_REQUESTED"), spec: answering(true, nil), want: true,
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
+		{name: "a comment, which decides nothing whoever writes it", fact: withState(review, "commented"), spec: answering(true, nil),
+			wantAsks: nil},
+		{name: "an approval with no author", fact: withAuthor(review, ""), spec: answering(true, nil), wantAsks: nil},
+		{name: "a daemon with no reader", fact: review, spec: ConsumerSpec{}, wantAsks: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asked = nil
+			got, err := resolveReviewPermission(context.Background(), tc.spec, tc.fact)
+			if err != nil {
+				t.Fatalf("resolve the review's permission: %v", err)
+			}
+			if resolved, ok := got.(PullRequestReview); !ok || resolved.AuthorCanWrite != tc.want {
+				t.Fatalf("the review = %#v, want AuthorCanWrite %v", got, tc.want)
+			}
+			if !slices.Equal(asked, tc.wantAsks) {
+				t.Fatalf("GitHub was asked %v, want %v", asked, tc.wantAsks)
+			}
+		})
+	}
+
+	if _, err := resolveReviewPermission(context.Background(), answering(false, errors.New("GitHub answered 502")), review); err == nil {
+		t.Fatal("a failed permission read resolved; want the error, so the delivery is retried")
+	}
+	other := PullRequestChecks{Repo: "acme/widgets", Number: 42}
+	if got, err := resolveReviewPermission(context.Background(), answering(true, nil), other); err != nil || !reflect.DeepEqual(got, Fact(other)) {
+		t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
+	}
+}
+
+// A permission read GitHub answers with its rate limit names how long GitHub asks to be left alone
+// (RetryLater), and the review's delivery waits that long before it is read again, not the
+// consumer's nak delay: every review retried each NakDelay would keep calling an API that already
+// said no until its reset. A failure that names no wait is retried after NakDelay. Either way the
+// review is applied once its read passes.
+func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
+	// rateLimitWait is far longer than the 25 ms nak delay the other row is retried after, so a
+	// loaded runner's scheduling cannot make one row's wait read as the other's.
+	const rateLimitWait = 2 * time.Second
+	for _, tc := range []struct {
+		name    string
+		failure error
+		limited bool
+	}{
+		{name: "a rate limit", failure: &RetryLater{After: rateLimitWait, Err: errors.New("GitHub answered 403: API rate limit exceeded")}, limited: true},
+		{name: "a 502", failure: errors.New("GitHub answered 502")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			createWrites(t, pool)
+			js, _ := testJetStream(t)
+			spec := consumerSpec(&lockedBuffer{})
+			var mu sync.Mutex
+			var asks []time.Time
+			spec.ReviewPermission = func(context.Context, PullRequestReview) (bool, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				asks = append(asks, time.Now())
+				if len(asks) == 1 {
+					return false, tc.failure
+				}
+				return true, nil
+			}
+			stop := startConsume(t, js, spec, pool, writeHandler("applied", nil))
+			defer stop()
+
+			publish(t, js, "notifications.github.sjawhar.legion.pr.42.review", capturedGitHubEnvelope(t, "review.json"))
+			testwait.Eventually(t, "the review applied once its read passed", func() bool { return writeCount(t, pool) == 1 })
+			mu.Lock()
+			defer mu.Unlock()
+			if len(asks) != 2 {
+				t.Fatalf("the permission was read %d times, want twice", len(asks))
+			}
+			gap := asks[1].Sub(asks[0])
+			if tc.limited && gap < rateLimitWait {
+				t.Fatalf("the rate-limited read was made again after %s, want at least the %s GitHub named", gap, rateLimitWait)
+			}
+			if !tc.limited && (gap < spec.NakDelay || gap >= rateLimitWait) {
+				t.Fatalf("the failed read was made again after %s, want the %s nak delay", gap, spec.NakDelay)
+			}
+		})
+	}
+}
+
+func withState(review PullRequestReview, state string) PullRequestReview {
+	review.State = state
+	return review
+}

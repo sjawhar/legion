@@ -10,17 +10,20 @@ import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
+import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
+  AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
   buildProjectPath,
   parseIssuePath,
   parseProjectPath,
   routeFillsViewport,
   routeHasMargin,
+  routeIsInbox,
   routeProjectOf,
 } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
@@ -92,6 +95,12 @@ const AgentConversationPage = lazy(() =>
   }))
 );
 
+const AgentArtifactPage = lazy(() =>
+  import("./features/artifacts/AgentArtifactPage").then((module) => ({
+    default: module.AgentArtifactPage,
+  }))
+);
+
 const BroadcastsPage = lazy(() =>
   import("./features/agents/BroadcastsPage").then((module) => ({ default: module.BroadcastsPage }))
 );
@@ -104,6 +113,10 @@ const CredentialRecordPage = lazy(() =>
   import("./features/credentials/CredentialRecordPage").then((module) => ({
     default: module.CredentialRecordPage,
   }))
+);
+
+const DeliveryPage = lazy(() =>
+  import("./features/delivery/DeliveryPage").then((module) => ({ default: module.DeliveryPage }))
 );
 const MachineLoginPage = lazy(() =>
   import("./features/credentials/MachineLoginPage").then((module) => ({
@@ -246,6 +259,7 @@ function NavigationContents({
   compact,
   onClose,
   onHideSidebar,
+  onOpenInboxDrawer,
   onSearch,
   onSignOut,
   signOutError,
@@ -256,6 +270,7 @@ function NavigationContents({
   compact: boolean;
   onClose: () => void;
   onHideSidebar: () => void;
+  onOpenInboxDrawer: () => void;
   onSearch: () => void;
   onSignOut: () => void;
   signOutError: boolean;
@@ -286,7 +301,12 @@ function NavigationContents({
           onSearch();
         }}
       />
-      <Sidebar onHide={compact ? undefined : onHideSidebar} onNavigate={onClose} user={user} />
+      <Sidebar
+        onHide={compact ? undefined : onHideSidebar}
+        onNavigate={onClose}
+        onOpenInboxDrawer={compact ? undefined : onOpenInboxDrawer}
+        user={user}
+      />
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
           above is read on every visit, so the footer sits under it rather than over it. */}
       <div className={`mt-auto border-t pt-4 ${railBorder}`}>
@@ -315,6 +335,7 @@ function NavigationContents({
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [inboxDrawerOpen, setInboxDrawerOpen] = useState(false);
   // Which palette is open, and `null` for none: `$mod+k` and the rail's Search control list this
   // page's actions and the hits, `/` searches only, and `g p` lists projects.
   const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
@@ -429,6 +450,15 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       run: () => setPaletteMode("projects"),
     },
     {
+      id: "inbox-drawer",
+      keys: "i",
+      label: "Open the inbox",
+      run: () => setInboxDrawerOpen((open) => !open),
+      // The Inbox page already shows everything the drawer would, so a peek over itself is
+      // never offered; `g i` still gets the reader there from anywhere else.
+      when: () => !routeIsInbox(location.pathname),
+    },
+    {
       id: "toggle-sidebar",
       keys: "Shift+S",
       label: "Toggle sidebar",
@@ -478,6 +508,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
       onHideSidebar={() => setSidebarHidden(true)}
+      onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
       onSearch={() => setPaletteMode("all")}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
@@ -485,6 +516,17 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       user={user}
     />
   );
+
+  // On the Inbox page the compact header's badge stays plain text: the page is the Inbox
+  // already, so there's nothing for it to open.
+  const needsYouBadge =
+    needsYouCount === 0 ? null : (
+      <span
+        className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+      >
+        Needs you {needsYouCount}
+      </span>
+    );
 
   return (
     <MarginProvider>
@@ -529,12 +571,24 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Link className="text-lg font-semibold" to="/">
                 Dispatch
               </Link>
-              {needsYouCount === 0 ? null : (
-                <span
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+              {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
+              {routeIsInbox(location.pathname) ? (
+                needsYouBadge
+              ) : (
+                <button
+                  aria-label={
+                    needsYouCount === 0 ? "Open inbox" : `Open inbox, needs you ${needsYouCount}`
+                  }
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                    needsYouCount === 0
+                      ? railHoverBg
+                      : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
+                  }`}
+                  onClick={() => setInboxDrawerOpen(true)}
+                  type="button"
                 >
-                  Needs you {needsYouCount}
-                </span>
+                  {needsYouCount === 0 ? "Inbox" : `Needs you ${needsYouCount}`}
+                </button>
               )}
               {unreadReplies === 0 ? null : (
                 <Link
@@ -622,6 +676,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
                 <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
+                <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />
@@ -631,6 +686,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
                 <Route element={<MachineLoginPage />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
+                <Route element={<DeliveryPage />} path="/delivery" />
                 <Route element={<NotFoundPage />} path="*" />
               </Routes>
             </Suspense>
@@ -645,6 +701,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           />
         </ErrorBoundary>
         <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+        <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
         <RefPreviewHost />

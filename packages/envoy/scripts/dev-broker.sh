@@ -162,7 +162,10 @@ echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
 # --- Start the broker: BROKER_LISTEN_ADDR/BROKER_PUBLIC_URL of port 0 (above); its own log names
 # the real address once Listen succeeds. Output is teed to BROKER_LOG (read below) and to this
 # script's own stderr, so a human watching this script still sees the broker's own request logs
-# live. ---
+# live. tee ignores SIGTERM and SIGINT: a signal to this script's process group (Ctrl-C, or a kill
+# of the group) reaches the broker and tee together, and a tee that died first would leave the
+# broker writing its shutdown into a closed pipe and dying of SIGPIPE before it drained. tee ends
+# once the broker exits and closes the pipe. ---
 echo "dev-broker: starting broker..." >&2
 : >"$BROKER_LOG"
 BROKER_DATABASE_URL="$POSTGRES_URL" \
@@ -173,7 +176,7 @@ BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
 BROKER_MAX_GRANT_SECONDS=3600 \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
-"$BROKER_BIN" > >(tee -a "$BROKER_LOG" >&2) 2>&1 &
+"$BROKER_BIN" > >(trap '' TERM INT; exec tee -a "$BROKER_LOG" >&2) 2>&1 &
 BROKER_PID=$!
 
 # --- Both readiness loops below poll this instance's own process; fail loudly the moment it

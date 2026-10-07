@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -17,13 +18,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
 
-// Local stands in, in memory, for the AWS calls the broker makes: Secrets Manager's ListSecrets
-// and GetSecretValue, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for local
-// development (LocalFromFile), and tests build one with NewLocal.
+// Local stands in, in memory, for the AWS calls the broker makes: Secrets Manager's ListSecrets,
+// DescribeSecret and GetSecretValue, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for
+// local development (LocalFromFile), and tests build one with NewLocal.
 type Local struct {
 	mu      sync.Mutex
 	secrets map[string]LocalSecret
 	aliases map[string][]string
+	// path is the file a LocalFromFile Local follows, and file the bytes its secrets were last
+	// read from; empty for a NewLocal one.
+	path string
+	file []byte
 }
 
 // LocalSecret is one secret a Local holds.
@@ -39,6 +44,9 @@ type LocalSecret struct {
 	// Manager, it is listed with no version and reading it answers ResourceNotFoundException; one
 	// holding a value is listed with a version labelled AWSCURRENT.
 	Value string `json:"value"`
+	// DeletedAt, when set, is when the secret is scheduled to be deleted: as in Secrets Manager,
+	// ListSecrets leaves it out and DescribeSecret answers it with that DeletedDate.
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 // localFile is BROKER_FAKE_SECRETS_FILE's shape.
@@ -61,14 +69,27 @@ func NewLocal(secrets ...LocalSecret) *Local {
 }
 
 // LocalFromFile reads path, a local-development-only JSON file {"secrets": [LocalSecret, ...]},
-// into a Local. An error names path and, for a file that does not parse, only the byte offset and
-// field it failed at, never the file's content: no secret value reaches an error message, local
-// development included.
+// into a Local that follows it: each ListSecrets, DescribeSecret and GetSecretValue reads the file
+// again and, when its bytes have changed, answers from it, so an edit to the file is a write as
+// Secrets Manager sees one. A value Put directly stands until the file next changes. An error names
+// path and, for a file that does not parse, only the byte offset and field it failed at, never the
+// file's content: no secret value reaches an error message, local development included.
 func LocalFromFile(path string) (*Local, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	secrets, err := parseLocalFile(path, data)
+	if err != nil {
+		return nil, err
+	}
+	l := NewLocal(secrets...)
+	l.path, l.file = path, data
+	return l, nil
+}
+
+// parseLocalFile reads data, the content of path, as BROKER_FAKE_SECRETS_FILE's shape.
+func parseLocalFile(path string, data []byte) ([]LocalSecret, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var f localFile
@@ -91,7 +112,33 @@ func LocalFromFile(path string) (*Local, error) {
 			return nil, fmt.Errorf("%s: secrets[%d] has no name", path, i)
 		}
 	}
-	return NewLocal(f.Secrets...), nil
+	return f.Secrets, nil
+}
+
+// follow reads a LocalFromFile Local's file again and, when its bytes have changed since they were
+// last read, takes its secrets from it. A file it cannot read or parse fails the call. The caller
+// holds l.mu.
+func (l *Local) follow() error {
+	if l.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", l.path, err)
+	}
+	if bytes.Equal(data, l.file) {
+		return nil
+	}
+	secrets, err := parseLocalFile(l.path, data)
+	if err != nil {
+		return err
+	}
+	l.secrets = make(map[string]LocalSecret, len(secrets))
+	for _, s := range secrets {
+		l.secrets[s.Name] = s
+	}
+	l.file = data
+	return nil
 }
 
 // Put adds secret, or replaces the one of its name.
@@ -117,28 +164,68 @@ func (l *Local) Alias(keyARN, alias string) {
 
 // ListSecrets answers every secret in one page, filtered as Secrets Manager filters by name: each
 // name filter value matches a name it prefixes, case-sensitively. A secret holding a value is
-// listed with one version labelled AWSCURRENT, and one with no value with none.
+// listed with one version labelled AWSCURRENT, and one with no value with none. A secret scheduled
+// for deletion is left out, as Secrets Manager leaves it out by default.
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
 	out := &secretsmanager.ListSecretsOutput{}
 	for _, s := range l.secrets {
-		if !matchesNameFilters(s.Name, in.Filters) {
+		if s.DeletedAt != nil || !matchesNameFilters(s.Name, in.Filters) {
 			continue
 		}
-		entry := types.SecretListEntry{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name))}
-		if s.KmsKeyID != "" {
-			entry.KmsKeyId = aws.String(s.KmsKeyID)
-		}
-		for k, v := range s.Tags {
-			entry.Tags = append(entry.Tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-		}
-		if s.Value != "" {
-			entry.SecretVersionsToStages = map[string][]string{"local-current": {"AWSCURRENT"}}
-		}
-		out.SecretList = append(out.SecretList, entry)
+		out.SecretList = append(out.SecretList, types.SecretListEntry{
+			Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), KmsKeyId: s.kmsKeyID(),
+			Tags: s.awsTags(), SecretVersionsToStages: s.versionsToStages(),
+		})
 	}
 	return out, nil
+}
+
+// DescribeSecret answers the secret SecretId names, by name or by LocalARN, with the tags, key and
+// version stages ListSecrets lists it with, and DeletedDate while it is scheduled for deletion;
+// ResourceNotFoundException for one it does not hold.
+func (l *Local) DescribeSecret(_ context.Context, in *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
+	s, ok := l.secrets[strings.TrimPrefix(aws.ToString(in.SecretId), LocalARN(""))]
+	if !ok {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
+	}
+	return &secretsmanager.DescribeSecretOutput{
+		Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), KmsKeyId: s.kmsKeyID(),
+		Tags: s.awsTags(), VersionIdsToStages: s.versionsToStages(), DeletedDate: s.DeletedAt,
+	}, nil
+}
+
+// kmsKeyID is s's KmsKeyId as Secrets Manager reports it: absent for the AWS-managed key.
+func (s LocalSecret) kmsKeyID() *string {
+	if s.KmsKeyID == "" {
+		return nil
+	}
+	return aws.String(s.KmsKeyID)
+}
+
+func (s LocalSecret) awsTags() []types.Tag {
+	tags := make([]types.Tag, 0, len(s.Tags))
+	for k, v := range s.Tags {
+		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return tags
+}
+
+// versionsToStages is one version labelled AWSCURRENT for a secret holding a value, none otherwise.
+func (s LocalSecret) versionsToStages() map[string][]string {
+	if s.Value == "" {
+		return nil
+	}
+	return map[string][]string{"local-current": {"AWSCURRENT"}}
 }
 
 func matchesNameFilters(name string, filters []types.Filter) bool {
@@ -158,14 +245,21 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 }
 
 // GetSecretValue answers the AWSCURRENT value of the secret SecretId names, by name or by
-// LocalARN, and ResourceNotFoundException for one it does not hold or that has no value.
+// LocalARN; ResourceNotFoundException for one it does not hold or that has no value, and
+// InvalidRequestException for one scheduled for deletion, as Secrets Manager refuses that one.
 func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
 	id := aws.ToString(in.SecretId)
 	s, ok := l.secrets[strings.TrimPrefix(id, LocalARN(""))]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
+	}
+	if s.DeletedAt != nil {
+		return nil, &types.InvalidRequestException{Message: aws.String("You can't perform this operation on the secret because it was marked for deletion.")}
 	}
 	if s.Value == "" {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret value for staging label: AWSCURRENT")}

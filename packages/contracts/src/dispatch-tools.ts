@@ -174,24 +174,50 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
 const SPEC_WRITING_POINTER =
   'Write a spec as the "Writing a spec" section of skill://dispatch says.';
 
+/**
+ * The `images` argument of the three tools that write text a person reads: local picture files,
+ * each uploaded to `owner` and shown inline in the text as one appended
+ * `![<file name>](dispatch://<owner>/artifact/<slug>@v<N>)` line. The lines count toward the
+ * text's `cap`, so a call they would carry over it is refused before anything is uploaded.
+ */
+function imagesArgument<E extends SchemaNode<E>>(z: SchemaApi<E>, owner: string, cap: string): E {
+  return z
+    .array(z.string({ min: 1 }), { min: 1 })
+    .describe(
+      `Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://…@vN) line, in this order; those lines count toward ${cap}.`
+    )
+    .optional();
+}
+
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
 /** Longest ask question the Dispatch server accepts, in characters. */
 export const ASK_QUESTION_MAX = 800;
 
+/** Longest message or comment body the Dispatch tools send, in characters. */
+export const DISPATCH_BODY_MAX = 2000;
+
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
- * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
- * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
- * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
- * server enforces.
+ * query rides in the URL beside `project`, `limit` and `offset`, so this refusal and `project`'s
+ * key rule are what keep the tool's URL under the load balancer's limit;
+ * `packages/contracts/AGENTS.md` "Search limits" owns that budget. Generated into Go as
+ * `contracts.SearchQueryMax`, which the server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
 
 /** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/**
+ * How many of its best matches each kind of content (issues, documents, asks, comments and
+ * messages) lists before `GET /api/v1/search` merges the kinds into one order. A kind's later
+ * matches count in the answer's `total` and no offset returns them. Generated into Go as
+ * `contracts.SearchKindDepth`, where the server cuts each kind's list.
+ */
+export const SEARCH_KIND_DEPTH = 100;
 
 /** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
  *  `projects.key` check constraint). */
@@ -429,8 +455,8 @@ export const dispatchToolSpecs = [
       "never a message. " +
       "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
-      `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` +
-      `and has at most 8 options. ${OWNER_REFERENCE}`,
+      `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` +
+      `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -467,6 +493,11 @@ export const dispatchToolSpecs = [
         })
         .describe("Optional document location for the question.")
         .optional(),
+      images: imagesArgument(
+        z,
+        "the issue (or the project document's project)",
+        `the ${ASK_QUESTION_MAX}-character question limit`
+      ),
     }),
     validation: documentOwnerValidation(true),
   },
@@ -614,7 +645,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters. ${OWNER_REFERENCE}`,
+      `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -628,7 +659,9 @@ export const dispatchToolSpecs = [
         .number({ int: true, min: 0 })
         .describe("Optional zero-based occurrence of quote.")
         .optional(),
-      body: z.string({ max: 2000 }).describe("Review comment, at most 2,000 characters."),
+      body: z
+        .string({ max: DISPATCH_BODY_MAX })
+        .describe("Review comment, at most 2,000 characters."),
       reply_to: z
         .string()
         .describe(
@@ -652,6 +685,11 @@ export const dispatchToolSpecs = [
             "you need the human to act - the ask returns to 'Waiting on you'."
         )
         .optional(),
+      images: imagesArgument(
+        z,
+        "the issue (or the project document's project)",
+        "the 2,000-character body limit"
+      ),
     }),
     validation: commentValidation,
   },
@@ -704,7 +742,7 @@ export const dispatchToolSpecs = [
       "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
       "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " +
       "that conversation back. Every other message names its issue. " +
-      `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+      `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z
         .string()
@@ -712,7 +750,7 @@ export const dispatchToolSpecs = [
           `${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`
         )
         .optional(),
-      body: z.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
+      body: z.string({ max: DISPATCH_BODY_MAX }).describe("Update text, at most 2,000 characters."),
       in_reply_to: z
         .string()
         .describe(
@@ -723,6 +761,11 @@ export const dispatchToolSpecs = [
             "reply on that issue."
         )
         .optional(),
+      images: imagesArgument(
+        z,
+        "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)",
+        "the 2,000-character body limit"
+      ),
     }),
     validation: messageValidation,
   },
@@ -859,7 +902,8 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " +
-      "A file that is not UTF-8 text is described, with the route that serves its bytes. " +
+      "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
+      "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -871,7 +915,12 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       version: z.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
-      ref: z.string().describe("Optional dispatch:// document reference.").optional(),
+      ref: z
+        .string()
+        .describe(
+          "Optional dispatch:// document reference; a picture in a conversation on the Agents page is dispatch://agent/<session id>/artifact/<slug>@vN."
+        )
+        .optional(),
     }),
     validation: documentOwnerValidation(true),
   },
@@ -976,6 +1025,10 @@ export const dispatchToolSpecs = [
       "when it has any (`Progress: none` otherwise). " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
+      "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
+      "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " +
+      "one shown, in order, and the rest by reference, for dispatch_doc_read. A picture this session was already shown is named, not sent again " +
+      "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch_doc_read shows it again. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -998,7 +1051,13 @@ export const dispatchToolSpecs = [
     description:
       "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " +
       "Use it before creating an issue or a design document, and to find where a word was written. " +
-      'Websearch syntax: "quoted phrase", -excluded, OR.',
+      'Websearch syntax: "quoted phrase", -excluded, OR. ' +
+      "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
+      "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
+      "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
+      "corpus holds still: content added, changed, or removed between two offsets can shift rows " +
+      "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z) => ({
       query: z
         .string({
@@ -1011,6 +1070,10 @@ export const dispatchToolSpecs = [
       limit: z
         .number({ int: true, min: 1, max: 50 })
         .describe("Maximum results, 1-50; default 20.")
+        .optional(),
+      offset: z
+        .number({ int: true, min: 0 })
+        .describe("Results to skip before the page; nonnegative integer; default 0.")
         .optional(),
     }),
     // An empty project searches every project, as the server reads it.

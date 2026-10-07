@@ -26,7 +26,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -75,6 +77,12 @@ type testServerOptions struct {
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
+	// embedder wires meaning search (LEGION-549); nil (every test but search_meaning_test.go's
+	// own) is the deployment with no Cohere key, where search answers keyword-only.
+	embedder embed.Embedder
+	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
+	// deployment with no bucket does.
+	files files.Store
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -154,6 +162,8 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
 		AgentStream:      options.agentStream,
+		Embedder:         options.embedder,
+		Files:            options.files,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

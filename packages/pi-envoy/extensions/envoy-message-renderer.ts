@@ -33,7 +33,13 @@ function renderEnvoyMessage(
   box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(message.customType)), 0, 0));
   box.addChild(new Spacer(1));
 
-  let text = message.content;
+  // A delivery that carries pictures is its text block, then one image block per picture.
+  let text =
+    typeof message.content === "string"
+      ? message.content
+      : message.content
+          .map((block) => (block.type === "text" ? block.text : `[picture: ${block.mimeType}]`))
+          .join("\n");
   if (!options.expanded) {
     const lines = text.split("\n");
     if (lines.length > ENVOY_MESSAGE_COLLAPSED_LINES) {

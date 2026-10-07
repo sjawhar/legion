@@ -6,15 +6,15 @@ They are Markdown instructions loaded by Oh My Pi sessions; the daemon and the t
 
 | Skill | Who reads it | What it owns |
 | --- | --- | --- |
-| `ce-simplify-code/` | the implementer, once per pull request | the behaviour-preserving simplify pass before the reviewer's final pass (Legion's copy of the MIT-licensed Compound Engineering skill; `LICENSE` beside it) |
+| `ce-simplify-code/` | the implementer, once per pull request | the behaviour-preserving simplify pass, in the implementer's first implementing round (Legion's copy of the MIT-licensed Compound Engineering skill; `LICENSE` beside it) |
 | `dispatch/` | every role, and any session writing to Dispatch | specs, asks, comments, artifacts, and messages on native Dispatch |
 | `dispatch-brainstorming/` | any session with Dispatch that starts a design conversation or writes a plan, as `dispatch-first` directs | the design conversation in the issue's spec, turn by turn to one approval, and the plan as the issue's `plan.md`; in a session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans` |
-| `dispatch-first/` | every session with Dispatch configured, injected by each host plugin on every request (Oh My Pi), on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart` (Claude Code), or as an instruction file (OpenCode) | searching Dispatch before acting, extending the existing issue, citing decisions, closing duplicates; kept under 60 lines and 6,000 characters |
+| `dispatch-first/` | every session with Dispatch configured, injected by each host plugin on every request (Oh My Pi), on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart` (Claude Code), or as an instruction file (OpenCode) | searching Dispatch before acting, extending the existing issue, citing decisions, closing duplicates, the fresh-reader check before a spec reaches a human; kept under 60 lines and 6,000 characters |
 | `envoy/` | every role | subscriptions, agent-to-agent messages, and topic formats |
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, sign-off |
 | `legion-controller/` | the controller root process | wake routing, keeping the admission slots full from `todo`, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
-| `legion-retro/` | the implementer, at retro | the pre-merge retrospective and its Dispatch message |
+| `legion-retro/` | the implementer, at retro | the pre-merge retrospective, its Dispatch message, and the PR body content the pull request's changed paths require at its commit |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |
 | `thermonuclear-code-quality/` | the `thermonuclear-code-quality` agent | the maintainability rubric of the reviewer's pair (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |
 | `thermonuclear-deep-review/` | the `thermonuclear-deep-review` agent, and the reviewer (the Security Guidelines) | the correctness rubric of the reviewer's pair, with its tagged, diff-triggered Security Guidelines and the attack on the PR body's claims (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |

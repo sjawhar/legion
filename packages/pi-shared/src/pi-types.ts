@@ -231,8 +231,25 @@ export interface CommandContext {
   };
 }
 
+/** The host's text block (`TextContent` in `@oh-my-pi/pi-ai`), as far as this package writes it. */
+export interface TextContent {
+  readonly type: "text";
+  readonly text: string;
+}
+
+/** The host's image block (`ImageContent` in `@oh-my-pi/pi-ai`): base64 bytes and their type. */
+export interface ImageContent {
+  readonly type: "image";
+  readonly data: string;
+  readonly mimeType: string;
+}
+
+/** What a tool result, a custom message and a user prompt may carry (`AgentToolResult.content`,
+ *  `CustomMessageContent`, `sendUserMessage`'s array form). */
+export type ContentBlock = TextContent | ImageContent;
+
 export interface ToolResult {
-  readonly content: readonly { readonly type: "text"; readonly text: string }[];
+  readonly content: readonly ContentBlock[];
   readonly details: Readonly<Record<string, unknown>>;
   readonly isError?: boolean;
 }
@@ -306,14 +323,11 @@ export interface MessageRendererTheme {
 
 /**
  * Extension-injected message entry handed to a registered {@link
- * MessageRenderer}. Envoy only ever sends string content (see
- * `PiApi["sendMessage"]` below), so this narrows the host's wider
- * `string | (TextContent | ImageContent)[]` union to what this package
- * actually produces.
+ * MessageRenderer}: the host's `string | (TextContent | ImageContent)[]`.
  */
 export interface RenderableMessage {
   readonly customType: string;
-  readonly content: string;
+  readonly content: string | readonly ContentBlock[];
 }
 
 export type MessageRenderer = (
@@ -331,7 +345,7 @@ export interface PiApi {
     message:
       | {
           readonly customType: string;
-          readonly content: string;
+          readonly content: string | readonly ContentBlock[];
           readonly display: boolean;
           readonly details?: Readonly<Record<string, unknown>>;
         }
@@ -343,12 +357,10 @@ export interface PiApi {
    * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
    * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
    */
-  readonly sendUserMessage: (content: string, options?: { readonly deliverAs: "aside" }) => void;
-  /**
-   * The fork's side turn before Oh My Pi 18.3: the same call as `SessionContext.runEphemeralTurn`,
-   * with the question wrapped in the /btw prompt by the host.
-   */
-  readonly askEphemeral?: SideTurn;
+  readonly sendUserMessage: (
+    content: string | readonly ContentBlock[],
+    options?: { readonly deliverAs: "aside" }
+  ) => void;
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   /**

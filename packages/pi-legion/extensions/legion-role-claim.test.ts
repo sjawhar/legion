@@ -137,7 +137,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });
   }) as typeof fetch;
-  const activeTools = ["read", "task", "hub"];
+  const activeTools = ["read", "task", "wait"];
   const property = (): ZodNumberProperty => ({
     optional: property,
     nullable: property,

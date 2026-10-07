@@ -22,7 +22,9 @@ legion start --config legion.yaml --check-config
 | It says | What to do |
 | --- | --- |
 | `runtime.kubernetes.image must be pinned by digest (@sha256:…)` | Pin the image by digest, never a tag ([The worker image](/legion/legion/running-legion/#the-worker-image)). |
-| `bind 127.0.0.1 is not an address a pod can reach, …` (or the same for `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry) | Every address handed to a pod must be one a pod reaches: the daemon host's own address, never loopback or `0.0.0.0`. |
+| `bind 127.0.0.1 is not an address a pod can reach, …` (or the same for `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry, or `advertise_host`) | Every address handed to a pod must be one a pod reaches: the daemon host's own address, never loopback or `0.0.0.0` — except `bind`, which may be `0.0.0.0` once `advertise_host` names the stable address pods dial instead. |
+| `bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; …` | With `advertise_host` set, `bind` is where the daemon listens: `0.0.0.0`, or the daemon host's own address. |
+| `advertise_host must be an IP address or a DNS name, …` or `advertise_host is not used when runtime is tmux: …` | `advertise_host` is the host alone (no scheme, port, path or brackets), and only `runtime: kubernetes` reads it. |
 | `<key> is required when runtime is kubernetes: …` | Add the key; the message says why a pod needs it. |
 | `projects must configure <PROJECT>, the daemon's own project` | `project` must also be a key of `projects`. |
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
@@ -96,7 +98,22 @@ Check, in order:
    ```
 
    `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
-5. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
+5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
+   branch, `legion/<KEY>`, on GitHub at `main` as the implement App, and again before each tree
+   member's planner starts, so no agent's push is the one that creates it (GitHub can refuse that
+   push on a large repository). A branch GitHub already has is kept as it is. While GitHub refuses
+   the create, the architect or planner waiting for it does not start. The daemon retries the
+   create, backing off to about a minute, and logs each refusal as an error whose `msg` is
+   `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the ref,
+   GitHub's status and its body:
+
+   ```text
+   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
+   ```
+
+   Fix what GitHub names, such as the implement App's permissions or a ruleset on `legion/*`
+   branches. The next attempt then creates the branch, and the tree starts.
+6. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
 
@@ -169,11 +186,21 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
   (`kubectl -n legion exec -it <pod> -c worker -- sh`).
 - **The tree volume was lost.** The daemon logs
   `supervise: the tree volume was lost with the session; relaunching a fresh session`. The agent
-  comes back as a new session in a new workspace, which holds `.legion/workspace-recovered.json`
+  comes back as a new session in a new workspace, which holds `.legion/<issue>/workspace-recovered.json`
   naming the issue's branch to reconcile from.
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.
   Nothing to do.
+- **`worker-stream: could not resolve a hello's boot token; the shim redials`** means the daemon's
+  Postgres did not answer while a pod's shim said hello. The hello is not refused: the shim
+  redials, and the hello is accepted once the store answers. If the line keeps coming, look at the
+  database, not the pod.
+- **`supervise: the agent registered and never said it was ready; retired its process`** means an
+  agent registered and its ready never came within the registration deadline
+  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, 6 minutes at the
+  defaults), often because the registration's answer never reached it. The daemon resumes the same
+  session one generation later and counts a launch failure; after `launch_failure_limit` of them
+  the claim fails.
 
 ## The work loops or stops
 
@@ -185,17 +212,30 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   stayed red through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
-  for the decision.
+  for the decision. Only the review App or an account with write access to the repository decides a
+  round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
+  reads the author's permission from GitHub before it applies the review: an account GitHub answers
+  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
+  minutes; write access is read again for every review. Any other failed read is retried, a rate
+  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
+  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
+  its author is neither the review App nor an account with write access to the repository`, with
+  the author's login, and logs a permission it read as no write access with GitHub's own answer. A
+  `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's
+  installation a review author's repository permission`, naming the installation's owner: the
+  review App's installation cannot read the repository's collaborators, so until it can, no review
+  but the review App's decides a round.
 - **`READY` refused.** The merger's `READY` is refused until every check the base branch requires
   has succeeded on the pull request's head, and every workflow its rulesets require has a run on
   the head that succeeded, and while the design gate is closed. The refusal names the head and the
   check or workflow, or the spec version that needs approval.
 
-An issue back in `in_progress` after its `READY` had a required check or workflow turn red on the
-head itself while it awaited its merge: the daemon sent it back to the implementer, told the
-architect which checks, and posted on the issue, and told the project's `merge_queue_role` when one
-is set, that the `READY` is withdrawn; the work comes back through testing, review and a new
-`READY`.
+An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
+or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no
+merge ref for a conflicting head and runs no checks on it at all): the daemon sent it back to the
+implementer, told the architect which checks or that the head conflicts, and posted on the issue,
+and told the project's `merge_queue_role` when one is set, that the `READY` is withdrawn; the work
+comes back through testing, review and a new `READY`.
 
 An issue that stays in `needs_review` while a review workflow the project declares
 (`projects.<KEY>.review_workflows`) is red: only declared review workflows are red, so the reviewer

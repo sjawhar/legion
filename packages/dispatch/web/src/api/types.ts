@@ -71,6 +71,10 @@ export type {
   CreateProjectInput,
   CreateVersionInput,
   DeliveryCapability,
+  DeliveryPR,
+  DeliveryRun,
+  DeliveryRunJob,
+  DeliveryTimelineResponse,
   DispatchEvent,
   DispatchUser,
   DocEditOp,
@@ -114,6 +118,7 @@ export type {
   SearchResponse,
   SearchResult,
   SearchResultKind,
+  SearchResultsPage,
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,
@@ -139,11 +144,24 @@ export type CredentialRequestState =
   | "cancelled"
   | "revoked";
 
+/** A credential request's two possibly-differing session ids, read independently by the broker:
+ *  `request` is the id the request itself stated (an unsigned override in its body at create
+ *  time), `enrollment` is the id its requesting enrollment stated when it enrolled. Either is
+ *  null when that id was never set; a machine login (`launcher_credential`, which has no request
+ *  row and no requesting enrollment) always answers both null. Optional so an older broker's
+ *  response, with no `session` field at all, resolves the same as a request that names neither
+ *  id. */
+export interface CredentialSession {
+  request: string | null;
+  enrollment: string | null;
+}
+
 export interface CredentialPendingRow {
   record_id: string;
   kind: CredentialRequestKind;
   identifiers: string[]; // secret rule keys, or [hostname] for a launcher_credential
   requested_at: string; // RFC3339
+  session?: CredentialSession;
 }
 export interface CredentialPendingResponse {
   pending: CredentialPendingRow[];
@@ -176,6 +194,7 @@ export interface CredentialRecord {
   expires_at: string;
   requested_at: string;
   decided: CredentialDecisionEvent | null;
+  session?: CredentialSession;
 }
 
 export interface CredentialApproval {

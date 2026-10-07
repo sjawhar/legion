@@ -3,7 +3,8 @@
 # runtime, in the production cluster's namespace `legion`, against production Dispatch, the
 # production Envoy listener and production NATS, in the disposable Dispatch project LEGSMOKE and the
 # smoke repository sjawhar/legion-smoke. The daemon runs on the devbox under the Legion daemon's
-# restricted identity; its pods run the worker image under test and dial its worker stream on the
+# restricted identity, bound to every interface (`bind: 0.0.0.0`) as a daemon that runs as a pod
+# binds; its pods run the worker image under test and dial its worker stream at `advertise_host`, the
 # devbox's private address. Operator steps (exec into a pod, a Secret's hash, the namespace list,
 # the controls' pods) use the admin context. It is the production-EKS driver LEGION-206
 # Requirement 12 asks for.
@@ -40,9 +41,13 @@
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
 #   repository carries none of them, and the run never prints them.
-# - LEGION_E2E_DISPATCH_TOKEN_SECRET_ID and LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) are the
-#   Secrets Manager ids of the production Dispatch agents' bearer and the production Envoy listener's
-#   API token. The repository carries neither.
+# - LEGION_E2E_DISPATCH_TOKEN_FILE (required) names a file only its owner can read (no group or
+#   other permission bits) holding a bearer of the Dispatch agents' client, the one an agent
+#   session's Dispatch configuration resolves (DISPATCH_TOKEN_FILE, DISPATCH_TOKEN, or envoy.json's
+#   dispatch.token). Dispatch answers it as an agent session actor, which its HTTP routes and the
+#   document websocket require.
+# - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
+#   listener's API token. The repository carries neither credential.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -54,12 +59,12 @@
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
-# The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
-# into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
-# reads them from header files), and never in the evidence. One run at a time: the project, the NATS
-# durable consumer names, ports 13372/13373 and the namespace label are shared, so the run takes a
-# lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
-# it did not create.
+# The production bearers are copied, the Dispatch one from its file and the Envoy one read from
+# Secrets Manager with the devbox admin role, into 0600 files under the run's scratch directory.
+# They are never printed, never in an argv (curl reads them from header files), and never in the
+# evidence. One run at a time: the project, the NATS durable consumer names, ports 13372/13373 and
+# the namespace label are shared, so the run takes a lock and refuses to start while another holds
+# it, or while LEGSMOKE has pods, Sandboxes or claims it did not create.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -86,7 +91,7 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
-dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
+dispatch_token_file=${LEGION_E2E_DISPATCH_TOKEN_FILE:-}
 envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
@@ -118,7 +123,10 @@ providers_secret=legion-$run_label-providers
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
 # The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
-# the Legion nodes, so a run never waits for the production daemon to stop.
+# the Legion nodes, so a run never waits for the production daemon to stop. The daemon binds both on
+# every interface, and every pod dials the worker stream at advertise_host, the devbox's private
+# address ($host, read in prerequisites).
+bind=0.0.0.0
 port_daemon=13372
 port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
@@ -275,14 +283,17 @@ pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
 # every task call naming it, the tool result of each call (text, isError, details), the ids its
 # results name for AGENT (details.progress), and every task-result block naming AGENT the session
-# received, however it arrived: an async-result delivery, or a hub wait or jobs snapshot that
-# recovered it first. A delivery is that block alone, never the rest of a snapshot, which carries
-# other jobs' output. Nothing else is summarised, so the evidence keeps each failure's text.
+# received, however it arrived: an async-result delivery, or a `wait` result or a `read` of a
+# `proc://` job that recovered it first. A delivery is that block alone, never the rest of a
+# snapshot, which carries other jobs' output. Nothing else is summarised, so the evidence keeps each
+# failure's text.
 pair_dispatch() {
   jq -R -s -c --arg agent "$1" '[split("\n")[] | fromjson?] as $e
     | [$e[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-        | select(.type == "toolCall" and .name == "task" and (.arguments | tostring | contains($agent)))] as $calls
+        | select(.type == "toolCall")] as $toolCalls
+    | [$toolCalls[] | select(.name == "task" and (.arguments | tostring | contains($agent)))] as $calls
     | ($calls | map(.id)) as $ids
+    | [$toolCalls[] | select(.name == "read" and ((.arguments.path? // "") | tostring | test("^proc://"; "i"))) | .id] as $procReads
     | [$e[] | select(.type == "message" and .message.role == "toolResult" and (.message.toolCallId as $i | $ids | index($i)))
         | .message | {toolCallId, isError, text: ([.content[]? | select(.type == "text") | .text] | join("\n")), details}] as $results
     | {agent: $agent,
@@ -291,8 +302,9 @@ pair_dispatch() {
        ids: ([$results[].details.progress[]? | select(.agent == $agent) | .id] | unique),
        deliveries: [$e[]
          | (if .type == "custom_message" and .customType == "async-result" then {timestamp, via: "async-result", text: (.content | tostring)}
-            elif .type == "message" and .message.role == "toolResult" and .message.toolName == "hub"
-              then {timestamp, via: "hub", text: ([.message.content[]? | select(.type == "text") | .text] | join("\n"))}
+            elif .type == "message" and .message.role == "toolResult"
+              and (.message.toolName == "wait" or (.message.toolName == "read" and (.message.toolCallId as $i | $procReads | index($i))))
+              then {timestamp, via: .message.toolName, text: ([.message.content[]? | select(.type == "text") | .text] | join("\n"))}
             else empty end)
          | . as $d
          | ($d.text | [scan("<task-result [^>]*agent=\"" + $agent + "\"[^>]*>[\\s\\S]*?</task-result>")])[]
@@ -421,14 +433,15 @@ pod_endpoint_mismatch() {
 
 read_bearers() {
   (umask 077 &&
-    aws secretsmanager get-secret-value --secret-id "$dispatch_token_secret_id" --query SecretString --output text >"$work/dispatch-token" &&
+    tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
     aws secretsmanager get-secret-value --secret-id "$envoy_token_secret_id" --query SecretString --output text >"$work/envoy-token" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
     cp "$work/dispatch-auth-header" "$work/dispatch-human-header" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
-  [ -s "$work/dispatch-token" ] && [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer"
+  [ -s "$work/dispatch-token" ] || fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
+  [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer for LEGION_E2E_ENVOY_TOKEN_SECRET_ID"
 }
 # scrub replaces each production service's host with the variable that names it: the run prints
 # none of them, and a tool's error (a refused connection, an unresolved name) may carry one.
@@ -447,7 +460,8 @@ nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@" 2> >(scrub >&2);
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
-bind: $host
+bind: $bind
+advertise_host: $host
 port: $port_daemon
 worker_stream_port: $port_worker_stream
 daemon_url: http://$host:$port_daemon
@@ -846,15 +860,17 @@ hog_oomkilled() {
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
 # check_pod_shape SPEC prints each way the pod object SPEC departs from the shape every Sandbox pod
-# has, or nothing, with its Secret's values as they are now: gVisor, the operator's ServiceAccount and its one projected token, the run's own copy of
-# the operator's route ConfigMap mounted where the profile reads models.yml, the pool, the restricted
-# security context, no token value in a container's environment, command or args, and 4b.6b's split
-# provisioning (the provisioning token only in workspace-fetch, the feed read-only in workspace-init,
-# no provision directory in the worker).
+# has, or nothing, with its Secret's values as they are now: gVisor, the operator's ServiceAccount
+# and its one projected token, the run's own copy of the operator's route ConfigMap mounted where
+# the profile reads models.yml, the pool, the restricted security context, the shim dialing the
+# worker stream at advertise_host, no token value in a container's environment, command or args,
+# and 4b.6b's split provisioning (the provisioning token only in workspace-fetch, the feed read-only
+# in workspace-init, no provision directory in the worker).
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
 # judges the object alone, so a pod the watch recorded is judged after it is gone.
 shape_problems() {
-  jq -r --arg route "$route_configmap" --arg audience "$gateway_audience" '
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --arg stream "tcp://$host:$port_worker_stream" '
+    include "stage4b-pods";
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
       (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
@@ -876,6 +892,10 @@ shape_problems() {
              or ($c.securityContext.seccompProfile.type // $s.securityContext.seccompProfile.type) != "RuntimeDefault"
              or ($c.securityContext.capabilities.drop // []) != ["ALL"]
             then "container \($c.name) is not restricted: \({container: $c.securityContext, pod: $s.securityContext} | tostring)" else empty end)),
+      # The worker shim dials advertise_host at the worker stream port, never the unspecified
+      # address the daemon binds.
+      (shim_connect as $connect
+        | if $connect != $stream then "the worker shim dials \($connect // "nothing (no --connect)"), not advertise_host at \($stream)" else empty end),
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the worker mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end)
@@ -947,9 +967,7 @@ pod_shape_verdict() {
   while IFS=$'\t' read -r uid spec; do
     problems=$(shape_problems <<<"$spec")
     [ -z "$problems" ] || printf '%s: %s\n' "$uid" "$(tr '\n' ';' <<<"$problems")"
-  done < <(jq -c 'select(.object.kind == "Pod") | .object
-      | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-      | select(any(.status.containerStatuses[]?; .name == "worker" and .ready))' "$watch" |
+  done < <(jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods' "$watch" |
     jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
 }
 # stream_missing WATCH prints each Sandbox pod uid the run knows from another source that the watch
@@ -1417,8 +1435,20 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
-[[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
-  fail "LEGION_E2E_DISPATCH_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
+# The Dispatch bearer's file is named, never read into the transcript: a refusal names the variable
+# and the path, never what the file holds.
+[ -n "$dispatch_token_file" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE is unset: it names the file holding the Dispatch agents' bearer"
+[ -f "$dispatch_token_file" ] && [ -r "$dispatch_token_file" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which is not a readable file"
+# The mode is the file tr reads below, so a symlink is followed: a link's own mode is always 777.
+dispatch_token_mode=$(stat -L -c %a -- "$dispatch_token_file")
+case $dispatch_token_mode in
+  *00) ;;
+  *) fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, whose group or others have access (mode $dispatch_token_mode): make it 0600" ;;
+esac
+[ -n "$(tr -d '[:space:]' <"$dispatch_token_file")" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
 [[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
   fail "LEGION_E2E_ENVOY_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
 # The gateway's health endpoint is at its origin.
@@ -1449,7 +1479,7 @@ jq -n --arg revision "$revision" --arg image "$image" \
   --arg legion "$(jq -r '.name + "@" + .version' "$root/packages/pi-legion/package.json")" \
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugins: {envoy: $envoy, legion: $legion}, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugins $(jq -r '.plugins.envoy + " and " + .plugins.legion' "$evidence/run.json")"
-note "daemon http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
+note "daemon bind $bind, advertise_host $host: API http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
 if [ -n "$until" ]; then
   # A name no checkpoint has would run the whole proof as a development run.
   grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
@@ -1486,6 +1516,16 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
   jq -c '[.spec.template.spec.requirements[] | select(.key == "karpenter.k8s.aws/instance-cpu")]')
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
+# The run's Dispatch bearer authenticates as an agent session, the actor Dispatch's routes and its
+# document websocket require, and the read is what says so: the same read with an invalid bearer
+# is refused 401.
+whoami=$(dispatch_get whoami 2>&1) || fail "production Dispatch refused the LEGION_E2E_DISPATCH_TOKEN_FILE bearer: $(scrub <<<"$whoami" | head -c 300)"
+jq -e '.kind == "agent"' <<<"$whoami" >/dev/null ||
+  fail "the LEGION_E2E_DISPATCH_TOKEN_FILE bearer authenticates as $(jq -c '{kind}' <<<"$whoami" 2>/dev/null), not an agent session"
+refused=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer stage4b-invalid-$RANDOM$RANDOM" "$(dispatch_url)/api/v1/whoami" 2>&1) ||
+  fail "production Dispatch did not answer the invalid-bearer control: $(scrub <<<"$refused")"
+[ "$refused" = 401 ] || fail "production Dispatch answered $refused to an invalid bearer, not 401, so the bearer's read proves nothing"
+note "[dispatch] the run's bearer reads whoami as an agent session; an invalid bearer is refused 401"
 # LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
 stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
 for key in $stale; do
@@ -1733,9 +1773,73 @@ for issue in "${specs[@]}"; do
 done
 pass
 
+begin advertise-host
+# The daemon's file names bind 0.0.0.0 and advertise_host, the devbox's private address
+# (write_legion_config). Both its listeners hold every interface; every Sandbox pod the watch has
+# seen ready dials the worker stream at advertise_host, a rule of the pod shape, so the shape
+# watcher and pod-shape hold every later pod of the run to it too; each admitted root's architect
+# registered from such a pod; and the daemon's own loader refuses the proof's file with
+# advertise_host dropped, and with a loopback bind beside it, each naming bind.
+for port in "$port_daemon" "$port_worker_stream"; do
+  sockets=$(ss -Hltn "sport = :$port")
+  while read -r _ _ _ listen _; do
+    case ${listen%:"$port"} in
+      '*' | 0.0.0.0 | '[::]') ;;
+      *) fail "port $port listens on ${listen:-nothing}, not on every interface (bind $bind)" ;;
+    esac
+  done <<<"$sockets"
+  note "port $port: $(tr -s ' ' <<<"$sockets" | paste -sd ';' -)"
+done
+stream_url="tcp://$host:$port_worker_stream"
+bad=$(pod_shape_verdict "$evidence/pod-watch.json")
+[ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
+judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u)
+note "$(grep -c . <<<"$judged") pods seen ready so far, each one's worker shim dialing advertise_host at $stream_url: $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | "\(.metadata.labels["legion.dev/tree"]) \(.metadata.labels["legion.dev/role"])"' "$evidence/pod-watch.json" | sort -u | paste -sd ',' -)"
+for issue in "${specs[@]}"; do
+  architect=$(claim_view "$issue" architect)
+  uid=$(jq -r '.locator.incarnation // empty' <<<"$architect")
+  state=$(jq -r '.state // "none"' <<<"$architect")
+  case $state in
+    ready | working | idle) ;;
+    *) fail "$issue's architect is $state, not registered from its pod $uid" ;;
+  esac
+  grep -qxF -- "$uid" <<<"$judged" || fail "$issue's architect runs on pod $uid, which the pod watch never saw ready"
+  note "$issue's architect registered ($state) from pod $uid, whose worker shim the verdict above holds to --connect $stream_url"
+done
+# Negative control: the last ready pod the watch recorded, its --connect edited in place to the
+# address the daemon binds, departs from the pod shape for that --connect.
+jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$evidence/pod-watch.json" | tail -1 |
+  jq -c --arg bound "tcp://$bind:$port_worker_stream" '.object.spec.containers |= map(if .name == "worker"
+    then .command |= (index("--connect") as $i | .[$i + 1] = $bound) else . end)' >"$work/wildcard-connect.json"
+cat "$evidence/pod-watch.json" "$work/wildcard-connect.json" >"$evidence/controls/pod-watch-wildcard-connect.json"
+control=$(pod_shape_verdict "$evidence/controls/pod-watch-wildcard-connect.json")
+grep -qF "the worker shim dials tcp://$bind:$port_worker_stream, not advertise_host at $stream_url" <<<"$control" ||
+  fail "the pod shape did not refuse a pod told --connect tcp://$bind:$port_worker_stream for it: ${control:-no departure}"
+note "negative control: a recorded pod told --connect tcp://$bind:$port_worker_stream departs from the pod shape: $control"
+# The daemon's loader on the proof's own file: advertise_host dropped, then a loopback bind beside it.
+sed '/^advertise_host: /d' "$work/legion.yaml" >"$work/legion-no-advertise-host.yaml"
+if out=$("$work/legion" start --check-config --config "$work/legion-no-advertise-host.yaml" 2>&1); then
+  fail "legion start --check-config passed bind $bind with no advertise_host: $out"
+fi
+case $out in
+  *"bind $bind is not an address a pod can reach"*) ;;
+  *) fail "bind $bind with no advertise_host was refused without naming bind: $out" ;;
+esac
+note "bind $bind, no advertise_host: $out"
+sed 's/^bind: .*/bind: 127.0.0.1/' "$work/legion.yaml" >"$work/legion-loopback-bind.yaml"
+if out=$("$work/legion" start --check-config --config "$work/legion-loopback-bind.yaml" 2>&1); then
+  fail "legion start --check-config passed bind 127.0.0.1 beside advertise_host: $out"
+fi
+case $out in
+  *"bind 127.0.0.1 is loopback, where no pod reaches the worker stream"*) ;;
+  *) fail "bind 127.0.0.1 beside advertise_host was refused without naming bind: $out" ;;
+esac
+note "bind 127.0.0.1 beside advertise_host: $out"
+pass
+
 begin tree-separation
 wait_for_worker "$tree1" planner
-send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$tree1" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree1" implementing 900
 wait_for_worker "$tree1" implementer
 # Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
@@ -1781,7 +1885,7 @@ printf '%s\n' "$markers" >"$evidence/fixture-markers.txt"
 argv=$(op get pod "$pod" -o json | jq -c '[.spec.containers[] | select(.name == "worker") | .command[]?]')
 note "tree 2 pod $pod: fixture markers [${markers:-none}]; agent argv $argv"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the pod's agent runs with --no-extensions"; else note "the pod's agent runs without --no-extensions"; fi
-send_agent "$tree2" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
+send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
 wait_for_phase "$tree2" implementing 900
 pass
 
@@ -1965,10 +2069,10 @@ pass
 begin review-pair
 # The reviewer's two review passes are the image's thermonuclear agents, dispatched by name, and each
 # must have run: one of its runs completed, by the task-result block the reviewer received (a
-# delivery or a hub snapshot) or, with none, by its own session, which beside the reviewer's ends in
-# an accepted yield, every turn on the review target. A missing agent is refused to the model
-# as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No model
-# selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
+# delivery, a `wait`, or a `proc://` read) or, with none, by its own session, which beside the
+# reviewer's ends in an accepted yield, every turn on the review target. A missing agent is refused
+# to the model as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No
+# model selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
 # the same from outside. tree-moved recorded the dispatches (record_pair); each failure below
 # quotes them.
 stem=$(cat "$evidence/review-pair/session-stem")
@@ -2209,7 +2313,7 @@ wait_for_worker "$tree3" planner
 # is fresh: the planner is told to plan, and each implementer launch is killed once its agent is
 # ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
 # either budget.
-send_agent "$tree3" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$tree3" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree3" implementing 900
 wait_for_worker "$tree3" implementer
 killed=" "
@@ -2418,7 +2522,7 @@ note "killed $tree4's planner mid-turn (uid $planner_killed)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
 until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
-send_agent "$tree4" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree4" implementing 900
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
 # (b) Kills after each ready, the task outstanding, until the claim fails.
@@ -2574,11 +2678,11 @@ lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
 until_true 900 "the re-admitted tree 1 to report its tree volume lost and relaunch a fresh architect" lost_seen
 wait_for_worker "$tree1" architect
 pod=$(tree_pod "$tree1")
-recovered=$(pod_exec "$pod" cat "/legion/workspaces/$repo/${tree1,,}/.legion/workspace-recovered.json")
+recovered=$(pod_exec "$pod" cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
 lost=$(log_lines "$lost_msg" | wc -l)
 [ "$lost" = 1 ] || fail "the daemon reported the tree volume lost $lost times, want exactly once"
-note "the tree volume reported lost once, then a fresh session whose workspace holds .legion/workspace-recovered.json naming legion/$tree1"
+note "the tree volume reported lost once, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
 pass
 
 begin operator-close
@@ -2633,8 +2737,7 @@ missing=$(stream_missing "$evidence/pod-watch.json")
 [ -z "$missing" ] || fail "the pod watch never recorded pods the run knows from other sources: $(tr '\n' ' ' <<<"$missing")"
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
-judged=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-  | select(any(.status.containerStatuses[]?; .name == "worker" and .ready)) | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
+judged=$(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
 # The Secret-value check: the helper judges the recorded pods against every value it held, on TERM.
 stop_pid "$leaks_pid"
 leaks_pid=

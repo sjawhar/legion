@@ -257,6 +257,68 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	}
 }
 
+// A tree's launch wait (awaitTreeInitialized) is bounded by treeWaitBound, wider than the
+// lock-wait budget alone: a sibling whose workspace-fetch is still cloning outlasts the lock-wait
+// budget but finishes inside treeWaitBound, so the waiting launch is not given up on. Small
+// BootTimeout/BootIntervals (via withOptions) keep the lock-wait budget well under the 3 s this
+// sleeps, so the test stays fast.
+func TestATreesLaunchWaitDoesNotGiveUpWhileASiblingsWorkspaceFetchIsStillCloning(t *testing.T) {
+	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond; o.BootIntervals = 1 }))
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	root := SandboxName(rootToken)
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, workerSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(workerToken)
+	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+
+	// Past the old lock-wait-alone bound (2 s here), with the root's workspace-init still
+	// running: the worker's launch must not have given up early.
+	time.Sleep(3 * time.Second)
+	select {
+	case err := <-done:
+		t.Fatalf("the worker's launch finished (%v) before the root's workspace-init did, past the old lock-wait-alone bound — it gave up early", err)
+	default:
+	}
+
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
+// The real-time test above proves the wait outlasts the lock-wait-alone bound; it cannot wait
+// out the real ~30-minute bound to prove ProvisionBound's own value is exact. Pin it against a
+// literal instead, for this rig's own testOptions (BootTimeout 2 s, BootIntervals 3): the lock
+// wait is ceil(2s)×(3+1) = 8s, plus workspace.FetchTimeout (30m).
+func TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly(t *testing.T) {
+	g := newRig(t, nil)
+	want := 30*time.Minute + 8*time.Second
+	if got := g.r.ProvisionBound(); got != want {
+		t.Fatalf("ProvisionBound = %s, want %s", got, want)
+	}
+}
+
+// treeWaitBound's own exact value, pinned to a literal: base (2s×3=6s) + ProvisionBound (30m8s,
+// TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly) + one more boot interval (2s) =
+// 30m16s. runtime.RegistrationDeadline is the one place armRegistration (machine.go) and
+// treeWaitBound compute the sibling's own pre-hello deadline, so nothing here needs to compare
+// the two independently.
+func TestTheTreeWaitBoundIsTheRegistrationDeadlinePlusOneIntervalExactly(t *testing.T) {
+	g := newRig(t, nil)
+	if want := 30*time.Minute + 16*time.Second; g.r.treeWaitBound() != want {
+		t.Fatalf("treeWaitBound = %s, want %s", g.r.treeWaitBound(), want)
+	}
+}
+
 // Every pod of a tree, the root included, gets the tree's pod affinity exactly when another pod of
 // the tree is scheduled at its launch: the tree volume attaches to one node (P2, R1).
 func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {

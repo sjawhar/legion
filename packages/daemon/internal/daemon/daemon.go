@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -90,6 +92,10 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
+	// githubAPI is the GitHub REST root a workflow integration test points the workflow at (its
+	// required-checks reads and its issue branches' creates); empty, in production, is
+	// https://api.github.com.
+	githubAPI string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 }
@@ -153,7 +159,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	}
 	// The App mint waits out GitHub's transient failures, which the boot budget does not bound, as
 	// it does not bound the plugin gate or the image probe: the work after it has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens)
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens, o.githubAPI)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
@@ -237,23 +243,43 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
-		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg, plan.nats); err != nil {
-			s.stop()
-			listener.Close()
-			workflow.stop()
-			st.Close()
-			return err
+		// listing misses (a move published while it is read) the consumer delivers. Both wait out
+		// an unreachable dependency on ctx, not the bounded boot budget just spent on everything
+		// before them, through the same bootprobe.Run mechanism mintAtBoot already uses, here with
+		// Attempts left at its unbounded zero. natsauth.Unreachable and dispatch.Unreachable each
+		// judge their own dependency; their own docs are the record of what each one waits on and
+		// what it still refuses loud. reconcile's own Postgres transaction is judged by neither: a
+		// design choice, not an inability to tell its failures apart from NATS's or Dispatch's — an
+		// unreachable Postgres refuses earlier, at store.Open
+		// (TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword, scripts/e2e/stage1-skeleton.sh).
+		plan.nats.log(log)
+		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
+			readinessAttempt(func(attempt context.Context) error {
+				return workflow.connect(attempt, cfg, plan.nats)
+			}, natsauth.Unreachable))
+		if err == nil {
+			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
+				readinessAttempt(workflow.reconcile, dispatch.Unreachable))
 		}
-		if err := workflow.reconcile(boot); err != nil {
+		if err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
 			st.Close()
+			if ctx.Err() != nil {
+				log.Info("legion daemon stopped before its workflow dependencies were reachable", "project", cfg.Project)
+				return nil
+			}
 			return err
 		}
 		log.Info("legion workflow boot stage", "stage", "admission")
 		workflow.attach(s)
+		// Both waited out whatever they waited out on ctx, which the boot budget does not bound:
+		// what follows gets a budget of its own, as the App mint and the image probe's callers
+		// already do.
+		var cancelAfterReady context.CancelFunc
+		boot, cancelAfterReady = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+		defer cancelAfterReady()
 	}
 
 	startedAt := time.Now().UTC()
@@ -325,7 +351,8 @@ type plan struct {
 	// roleReferences are the task agents and skills the shared role prompts name
 	// (prompts.RoleReferences), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
-	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
+	// stream is the worker stream's address: the listener binds it, and every agent's shim dials
+	// it, or advertise_host at its port when the file sets one (shimAddress).
 	stream     string
 	newRuntime runtimeFactory
 	// gate is the plugin gate run before anything is opened (pluginGate); nil under a runtime with
@@ -512,6 +539,25 @@ type supervision struct {
 	stopOnce     sync.Once
 }
 
+// shimAddress is the address every agent's shim dials: the listener's bound address, or, when
+// advertiseHost (the top-level advertise_host, which only runtime: kubernetes accepts) names one,
+// that host at the bound port, the kernel's choice when worker_stream_port was 0. A bound address
+// it cannot split into tcp://host:port beside an advertiseHost is refused, never handed to pods.
+func shimAddress(bound, advertiseHost string) (string, error) {
+	if advertiseHost == "" {
+		return bound, nil
+	}
+	hostport, ok := strings.CutPrefix(bound, "tcp://")
+	if !ok {
+		return "", fmt.Errorf("advertise_host %s needs a tcp:// worker stream, and the listener bound %s", advertiseHost, bound)
+	}
+	_, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return "", fmt.Errorf("advertise_host %s: the worker stream listener's address %s: %w", advertiseHost, bound, err)
+	}
+	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
+}
+
 // openSupervision reads the claims the store holds, takes the worker stream, and builds the
 // runtime over it, for supervision's lifetime and with the workflow's App tokens (nil without a
 // workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
@@ -534,7 +580,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps)
+	dial, err := shimAddress(listener.Addr(), cfg.AdvertiseHost)
+	if err != nil {
+		cancel()
+		cancelStream()
+		return nil, err
+	}
+	rt, err := p.newRuntime(supervising, listener, dial, apps)
 	if err != nil {
 		cancel()
 		cancelStream()

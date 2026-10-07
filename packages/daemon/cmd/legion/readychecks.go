@@ -150,6 +150,7 @@ func workspaceRepository(workspace string) (ghrepo.Repository, error) {
 // skipped counts as a success, as GitHub counts it for a required check.
 func headCheckResults(ctx context.Context, github githubrest.Client, sha string) (map[string]string, error) {
 	type run struct {
+		ID         int64  `json:"id"`
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
@@ -159,7 +160,19 @@ func headCheckResults(ctx context.Context, github githubrest.Client, sha string)
 		return nil, err
 	}
 	results := map[string]string{}
+	// GitHub documents no ordering for this list (unlike the combined-status endpoint below,
+	// whose docs guarantee "the most recent status for each context"), and a cancelled run
+	// superseded by a concurrency group's newer run can list after the newer run's own success
+	// (pr-title.yaml's `edited` re-trigger after a concurrency-group cancellation is one way this
+	// happens). Keeping whichever run a name is seen last in the list would then let a cancelled
+	// run overwrite a later success. Check run IDs are assigned at creation and never reused, so
+	// the highest ID per name is always its most recent run, regardless of list order.
+	latestID := map[string]int64{}
 	for _, run := range runs {
+		if prevID, seen := latestID[run.Name]; seen && prevID >= run.ID {
+			continue
+		}
+		latestID[run.Name] = run.ID
 		results[run.Name] = classify.RunResult(run.Status, run.Conclusion)
 	}
 	var combined struct {

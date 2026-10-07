@@ -42,8 +42,9 @@ and `@legion/envoy-client` are inlined), `dist/THIRD_PARTY_NOTICES`, the eight L
 the manifest's `omp.skills: ["dist/skills"]` is what lets Oh My Pi discover them), and `agents/`,
 the task agents Legion's prompts dispatch (`oracle`; the reviewer's pair
 `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's
-`plan-gap-analyst` and `plan-reviewer`), each declaring its model as a role the operator maps
-(`docs/kubernetes.md`, "Model roles"). The Dispatch and Envoy skills (`dispatch`, `dispatch-first`,
+`plan-gap-analyst`, which also reads a spec before a human does, and `plan-reviewer`), each
+declaring its model as a role the operator maps (`docs/kubernetes.md`, "Model roles"). The Dispatch
+and Envoy skills (`dispatch`, `dispatch-first`,
 `dispatch-brainstorming`, `envoy`) ship in `@sjawhar/pi-envoy`; a link from a Legion skill into one
 of them is written `skill://dispatch/...`, which resolves by name once both are installed.
 

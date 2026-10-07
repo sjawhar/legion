@@ -14,16 +14,26 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
-// runs — a clone, a fetch, a jj operation, or a git configuration edit — each bounded
-// independently.
+// runs — the shared clone's own clone, a fetch, a jj operation, or a git configuration edit —
+// each bounded independently. The fetch's one clone is the exception, under FetchTimeout instead
+// (below).
 const CommandTimeout = 5 * time.Minute
 
-// Command is one process the provisioner runs. Every command holds the runner's slow-command
-// budget so a clone, fetch, jj operation, or git configuration edit is bounded independently.
+// FetchTimeout is the outer bound for the fetch's clone: long enough for a large repository's
+// slow but steadily progressing transfer to finish. Every other provisioning command keeps
+// CommandTimeout: this widens the one command whose duration follows the repository's size and
+// the network's speed, not a fixed step in provisioning.
+const FetchTimeout = 30 * time.Minute
+
+// Command is one process the provisioner runs, each bounded independently of every other: most
+// hold the runner's own slow-command budget (RunChecked), and the fetch's clone holds a wider
+// bound of its own instead (runCheckedTimeout, FetchTimeout) — never a budget shared across the
+// whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string
@@ -31,8 +41,8 @@ type Command struct {
 	Timeout time.Duration
 }
 
-// Result is the process result. A non-zero ExitCode is a process failure; a non-nil Run error
-// means the process could not be started or observed.
+// Result is the process result. A non-zero ExitCode, or TimedOut, is a process failure; a
+// non-nil Run error means the process could not be started or observed.
 type Result struct {
 	Stdout   string
 	Stderr   string
@@ -139,21 +149,27 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		return Result{}, err
 	}
 	child.Env = env
+	// A command that reaches a remote over https can have git spawn git-remote-https, a helper
+	// holding the same stdout/stderr pipes: exec.CommandContext alone only kills the direct child
+	// when bounded expires, and that helper, now reparented, can keep the pipe open forever,
+	// leaving Wait (and so Run) never returning. procgroup.Configure's Setpgid plus Cancel signals
+	// the whole process group instead, killing the helper too; after that, Wait normally returns
+	// an ordinary *exec.ExitError for the signaled process.
+	procgroup.Configure(child)
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
 	err = child.Run()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String()}
-	if err == nil {
-		return result, nil
+	if runErr := procgroup.Err(err); runErr != nil {
+		return result, runErr
 	}
+	result.ExitCode = child.ProcessState.ExitCode()
 	var exited *exec.ExitError
 	if errors.As(err, &exited) {
-		result.ExitCode = exited.ExitCode()
 		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
-		return result, nil
 	}
-	return result, err
+	return result, nil
 }
 
 // merge is base with each override entry replacing the entry of the same name, or appended.
@@ -213,11 +229,23 @@ func tomlString(value string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }
 
+// runCommand runs argv with the runner's own slow-command budget: run is nil-checked before
+// run.Timeout() is ever read, so a nil Runner always returns the error below rather than a panic.
 func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
 	}
-	timeout := run.Timeout()
+	return runCommandTimeout(ctx, run, argv, env, dir, run.Timeout())
+}
+
+// runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
+// budget: runCommand itself calls it with run.Timeout(); runCheckedTimeout calls it with an
+// explicit value instead, for the fetch's clone, that path's one caller (see FetchTimeout for why
+// it needs one).
+func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
+	if run == nil {
+		return Result{}, errors.New("workspace runner is required")
+	}
 	if timeout <= 0 {
 		return Result{}, errors.New("workspace runner timeout must be positive")
 	}
@@ -229,10 +257,26 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 // command.
 func RunChecked(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
 	result, err := runCommand(ctx, run, argv, env, dir)
+	return checkedResult(argv, result, err)
+}
+
+// runCheckedTimeout is RunChecked, but for timeout instead of the runner's own slow-command
+// budget (see FetchTimeout).
+func runCheckedTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
+	result, err := runCommandTimeout(ctx, run, argv, env, dir, timeout)
+	return checkedResult(argv, result, err)
+}
+
+// checkedResult is RunChecked's and runCheckedTimeout's shared answer: a process that could not
+// start, exited non-zero, or outlived its budget is an error naming the command. A clean exit
+// whose I/O draining outlived WaitDelay (exec.ErrWaitDelay) is not this: execRunner.Run already
+// reads that as the process's own true ExitCode, so it passes through the same as any other
+// answer.
+func checkedResult(argv []string, result Result, err error) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("run %s: %w", strings.Join(argv, " "), err)
 	}
-	if result.ExitCode != 0 {
+	if result.ExitCode != 0 || result.TimedOut {
 		return Result{}, commandFailure(argv, result)
 	}
 	return result, nil

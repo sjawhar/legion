@@ -98,9 +98,10 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
-	// Decision is the review round's decision, on the reviewer's row: the newest review GitHub
-	// reported for the round that carried one, kept until the round ends, since the reviewer's
-	// completion can come after the review it posted. Nil until a review decides.
+	// Decision is the review round's decision, on the reviewer's row: the newest review the review
+	// App or an account with write access to the repository submitted for the round that carried one
+	// (workflow's decidesRound), kept until the round ends, since the reviewer's completion can come
+	// after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
@@ -187,13 +188,22 @@ type PullRequest struct {
 	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
 	Workflows     []RequiredWorkflow
 	WorkflowsHead string
-	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
-	// the pull request: a deciding review not after it was submitted before one already processed,
-	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
-	// pull request's record: across rounds, a reopen, and a new generation while the pull request
-	// is open; a new generation deletes one that is not.
+	// ReviewSeen is the newest deciding review (changes requested or approved, from the review App
+	// or an account with write access to the repository) GitHub reported for the pull request: a
+	// deciding review not after it was submitted before one already processed, and records nothing.
+	// A comment, or anyone else's review, decides nothing and leaves it as it is. It lasts as long
+	// as the pull request's record: across rounds, a reopen, and a new generation while the pull
+	// request is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
+	// Mergeability is GitHub's lazily computed verdict for whether this head can be merged into
+	// its base branch without a conflict, as the daemon's periodic required-checks read of
+	// GitHub's /pulls/{number} last found it (daemon.readRequiredChecks), decoding GitHub's
+	// nullable `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a
+	// transient conflict - GitHub reports no checks run on a mergeability GitHub has not computed
+	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
+	// MergeabilityConflicting once it cannot. "" means the read has never run.
+	Mergeability Mergeability
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
@@ -222,6 +232,17 @@ const (
 	PullRequestOpen   PullRequestState = "open"
 	PullRequestMerged PullRequestState = "merged"
 	PullRequestClosed PullRequestState = "closed"
+)
+
+// Mergeability is GitHub's lazily computed verdict for whether a pull request's head can be
+// merged into its base without a conflict, decoded from GitHub's nullable `mergeable` field
+// (daemon.readRequiredChecks). "" (the zero value) means the daemon has never read it.
+type Mergeability string
+
+const (
+	MergeabilityUnknown     Mergeability = "UNKNOWN"
+	MergeabilityMergeable   Mergeability = "MERGEABLE"
+	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
 
 // DesignGate records the current document version and the version a human approved, if any.

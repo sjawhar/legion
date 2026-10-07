@@ -1,8 +1,9 @@
-import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
-import { useCallback, useMemo } from "react";
+import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type { IssueSummary } from "../../api/types";
+import { useCappedSearchParam } from "../../lib/query-param";
+import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import { useAgents } from "../conversation/useAgents";
 import { claimHasLapsed } from "../issue/ClaimChip";
 import { issueIsUnread } from "./UnreadDot";
@@ -49,6 +50,10 @@ export function projectIssuesQueryKey(
     : ["issues", "project", project, "labels", labels];
 }
 
+/** The two repeatable params `useIssueFilters` reads; passed to `useRepeatableSearchParams`,
+ *  whose memo depends on this array's own identity, so it is a module-level constant. */
+const ISSUE_ARRAY_PARAM_KEYS = ["label", "status"] as const;
+
 /**
  * The project page's issue filters, read from and written to the URL - `?label=` and `?status=`
  * (both repeatable), `?q=`, `?needs-you=1`, `?unread=1` - so List and Board share one filter
@@ -56,29 +61,16 @@ export function projectIssuesQueryKey(
  * label filter always has.
  */
 export function useIssueFilters(): IssueFiltersState {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const labels = useMemo(() => searchParams.getAll("label"), [searchParams]);
-  const statuses = useMemo(() => searchParams.getAll("status"), [searchParams]);
-  const search = searchParams.get("q") ?? "";
+  const [searchParams] = useSearchParams();
+  const { label: labels, status: statuses } = useRepeatableSearchParams(ISSUE_ARRAY_PARAM_KEYS);
+  const [search, setSearch] = useCappedSearchParam("q");
   const needsYou = searchParams.get("needs-you") === "1";
   const unread = searchParams.get("unread") === "1";
   const unclaimed = searchParams.get("unclaimed") === "1";
   // The one deduped ["agents"] query every claim chip on the page already shares, fetched only
   // while the filter that needs it is on.
   const registry = useAgents(unclaimed);
-  const update = useCallback(
-    (mutate: (params: URLSearchParams) => void) => {
-      setSearchParams(
-        (current) => {
-          const next = new URLSearchParams(current.toString());
-          mutate(next);
-          return next;
-        },
-        { replace: true }
-      );
-    },
-    [setSearchParams]
-  );
+  const update = useSearchParamsUpdate();
   const setAll = useCallback(
     (name: "label" | "status", next: string[]) =>
       update((params) => {
@@ -91,21 +83,6 @@ export function useIssueFilters(): IssueFiltersState {
   );
   const setLabels = useCallback((next: string[]) => setAll("label", next), [setAll]);
   const setStatuses = useCallback((next: string[]) => setAll("status", next), [setAll]);
-  // The text lands in the page URL, which the load balancer refuses past 16 K on reload or share;
-  // the one search cap keeps it well under that. A `?q=` from a link can already be longer, so the
-  // cut lands on a code point: a trailing lone high surrogate would be written as U+FFFD.
-  const setSearch = useCallback(
-    (next: string) =>
-      update((params) => {
-        if (next === "") {
-          params.delete("q");
-        } else {
-          const capped = next.slice(0, SEARCH_QUERY_MAX);
-          params.set("q", /[\uD800-\uDBFF]$/.test(capped) ? capped.slice(0, -1) : capped);
-        }
-      }),
-    [update]
-  );
   const setFlag = useCallback(
     (name: "needs-you" | "unread" | "unclaimed", next: boolean) =>
       update((params) => {
