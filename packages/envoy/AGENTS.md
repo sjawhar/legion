@@ -1995,10 +1995,20 @@ returns `errMoreThanOneLine`, else `errPasteCutShort`, never what was read; ever
 SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGTTIN or SIGTTOU unless inherited as ignored, turns bracketed
 paste off and puts the terminal back with the flushing set call, so nothing typed at the prompt
 reaches the shell. SIGINT/SIGQUIT/SIGTERM then re-raise themselves, so the process dies by the
-signal and a shell reads $? as 130, 131 or 143, an exit only if that fails. A job-control signal
-stops with SIGSTOP because Go's default ignores those signals, then on SIGCONT re-notifies it,
-rehides the terminal and turns bracketed paste back on. `TestPromptRehidesAfterJobControlStop`
-holds that), elsewhere all of stdin less one trailing newline, and an empty value is a usage error.
+signal and a shell reads $? as 130, 131 or 143, an exit only if that fails; SIGQUIT is set to its
+default action first, since Go's own handler dumps every goroutine and exits 2, and the process is
+made one the kernel writes no core of, since a core would hold what was typed (`quitWithoutCore`:
+`PR_SET_DUMPABLE` 0 on Linux, a core limit of 0 on macOS). A job-control signal stops the process
+at its default action (`stopBy`), which Go's runtime otherwise leaves ignoring these signals; on
+Linux it is sent to the watcher's own thread with `tgkill` under `runtime.LockOSThread`, so the
+stop takes effect before any more of the prompt runs, and Go's handler is put back with the saved
+action, never through `signal.Ignore`, whose SIG_IGN discards a stop still pending. macOS sends it
+to the process and puts the handler back with `signal.Ignore` then `signal.Notify`, correct only
+if the stop takes effect before `kill` returns, which no Darwin run has shown. On SIGCONT the
+watcher rehides the terminal and turns bracketed paste back on. No test holds a stop at a real
+`bash -i`: a test's process group is orphaned, and the kernel discards its stop;
+`TestPromptQuitEndsTheProcessBySIGQUITWithNoCore` holds the quit), elsewhere all of stdin
+less one trailing newline, and an empty value is a usage error.
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a

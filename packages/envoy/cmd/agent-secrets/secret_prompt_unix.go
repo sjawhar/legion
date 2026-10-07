@@ -257,9 +257,10 @@ var readTerminal = func(fd int, buf []byte) (int, error) {
 }
 
 // restoreOnSignal restores the terminal and re-raises a signal that interrupts, quits or stops the
-// prompt. A stop resumes at the call to Kill: then the watcher re-arms that signal, reapplies
-// hidden and turns bracketed paste on before the reader keeps going. A signal inherited as ignored,
-// as from a script that traps it with an empty action, stays ignored.
+// prompt. A stop (stopBy) resumes once SIGCONT continues the process: then the watcher reapplies
+// hidden and turns bracketed paste on before the reader keeps going. A quit writes no core, which
+// would hold what was typed (quitWithoutCore). A signal inherited as ignored, as from a script that
+// traps it with an empty action, stays ignored.
 func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 	var watched []os.Signal
 	for _, sig := range []os.Signal{
@@ -289,20 +290,11 @@ func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 					os.Exit(1)
 				}
 				fmt.Fprintln(os.Stderr)
-				signal.Reset(sig)
 				if promptStopSignal(sig) {
-					if err := resetJobControlSignalDefault(sig.(syscall.Signal)); err != nil {
-						fmt.Fprintf(os.Stderr, "agent-secrets: reset job-control signal: %v\n", err)
+					if err := stopBy(sig.(syscall.Signal), signals); err != nil {
+						fmt.Fprintf(os.Stderr, "agent-secrets: %v\n", err)
 						os.Exit(1)
 					}
-				}
-				_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
-				if promptStopSignal(sig) {
-					// signal.Ignore clears Go's handlingSig bit; the following Notify must then
-					// reinstall the runtime handler that SIG_DFL temporarily replaced.
-					signal.Ignore(sig)
-					// SIGCONT from fg resumes at the next statement.
-					signal.Notify(signals, sig)
 					if err := rehide(); err != nil {
 						_ = restore()
 						fmt.Fprintf(os.Stderr, "agent-secrets: re-hide the value prompt: %v\n", err)
@@ -310,6 +302,14 @@ func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 					}
 					continue
 				}
+				signal.Reset(sig)
+				if sig == syscall.SIGQUIT {
+					if err := quitWithoutCore(); err != nil {
+						fmt.Fprintf(os.Stderr, "agent-secrets: %v\n", err)
+						os.Exit(1)
+					}
+				}
+				_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 				time.Sleep(time.Second)
 				switch sig {
 				case syscall.SIGTERM:
@@ -330,7 +330,7 @@ func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 	}
 }
 
-// promptStopSignal is a job-control signal that resumes at the statement after it is re-raised.
+// promptStopSignal is a job-control signal, which stops the prompt rather than ending it.
 func promptStopSignal(sig os.Signal) bool {
 	switch sig {
 	case syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU:

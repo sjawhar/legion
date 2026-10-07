@@ -152,21 +152,6 @@ func shown(t *testing.T, controller *os.File) []byte {
 	}
 }
 
-// awaitOutput drains pty output until it contains want, failing after ten seconds.
-func awaitOutput(t *testing.T, controller *os.File, want string) []byte {
-	t.Helper()
-	var out bytes.Buffer
-	for deadline := time.Now().Add(10 * time.Second); ; {
-		out.Write(shown(t, controller))
-		if bytes.Contains(out.Bytes(), []byte(want)) {
-			return out.Bytes()
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the terminal did not show %q; got %q", want, out.String())
-		}
-	}
-}
-
 // TestPromptReadsOneTypedLineWithEchoOff: Enter ends the value, which is never echoed; the reader
 // asks the terminal to bracket pastes while it reads and to stop once it is done, and leaves it as
 // it was, echo on.
@@ -404,15 +389,23 @@ func TestPromptCtrlCEndsTheProcessBySIGINT(t *testing.T) {
 	}
 }
 
-// TestPromptQuitRestoresTerminal: Ctrl-\ at the prompt restores echo before the process quits.
-func TestPromptQuitRestoresTerminal(t *testing.T) {
+// TestPromptQuitEndsTheProcessBySIGQUITWithNoCore: Ctrl-\ at the prompt restores echo and ends the
+// process by SIGQUIT, which a shell reads as 131, with no goroutine dump from Go's runtime and no
+// core, which would hold what was typed. The prompt runs with its core limit raised to the hard
+// limit, in a directory of its own, so a core the kernel would write shows in its wait status and
+// in that directory.
+func TestPromptQuitEndsTheProcessBySIGQUITWithNoCore(t *testing.T) {
 	controller, terminal := openPTY(t)
 	fd, err := unix.Dup(terminal)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tty := os.NewFile(uintptr(fd), "terminal")
-	cmd := exec.Command("env", "--default-signal=QUIT", os.Args[0], "-test.run=^TestPromptSignalHelper$")
+	dir := t.TempDir()
+	cmd := exec.Command("bash", "-c",
+		`ulimit -c "$(ulimit -Hc)" && exec env --default-signal=QUIT "$0" -test.run='^TestPromptSignalHelper$'`,
+		os.Args[0])
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_PROMPT_HELPER=1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
@@ -433,7 +426,25 @@ func TestPromptQuitRestoresTerminal(t *testing.T) {
 		_ = cmd.Process.Kill()
 		t.Fatal("the process did not quit within 10s of Ctrl-\\")
 	}
+	status := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	out := shown(t, controller)
+	if !status.Signaled() || status.Signal() != syscall.SIGQUIT {
+		t.Fatalf("wait status %v (%s); want ended by SIGQUIT. The terminal showed %q", status, cmd.ProcessState, out)
+	}
+	if status.CoreDump() {
+		t.Fatal("the kernel dumped core")
+	}
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range left {
+		t.Errorf("the prompt left %s in its directory", entry.Name())
+	}
+	if bytes.Contains(out, []byte("goroutine")) || bytes.Contains(out, []byte("RETURNED")) {
+		t.Fatalf("the terminal showed %q: want no goroutine dump and no return from the read", out)
+	}
 	if lflag(t, terminal)&unix.ECHO == 0 {
-		t.Fatalf("echo is off after Ctrl-\\; the terminal showed %q", shown(t, controller))
+		t.Fatalf("echo is off after Ctrl-\\; the terminal showed %q", out)
 	}
 }

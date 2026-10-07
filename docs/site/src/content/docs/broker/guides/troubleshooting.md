@@ -42,8 +42,8 @@ generated from the code, lists every code.
 
 These are the messages of `agent-secrets secret`
 ([manage a secret](/legion/broker/guides/manage-a-secret/)). A usage error exits 2 and writes
-nothing, Ctrl-C or a termination signal at the value prompt ends the CLI by that signal (a shell
-reports 130 or 143) and writes nothing, and every other failure exits 1.
+nothing, Ctrl-C, Ctrl-\ or a termination signal at the value prompt ends the CLI by that signal (a
+shell reports 130, 131 or 143) and writes nothing, and every other failure exits 1.
 
 | Message | Cause | Fix |
 | --- | --- | --- |
