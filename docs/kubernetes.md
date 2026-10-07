@@ -1571,6 +1571,27 @@ and the daemon relaunches the claim fresh. A `legion claims stop` of the control
 `controller: daemon` releases it the same way, so the keeper's retry after it starts a fresh
 controller too.
 
+**Rolling back the image.** A daemon built before LEGION-592 cannot run against a database a
+`controller: daemon` daemon used: it lists the controller's claim as an issue keyed `""`, which every
+agent's plugin refuses. Nothing deletes a claim row, and a switch back only retires this one, while
+that release lists every claim of its project whatever its state or role. With the row present,
+every agent's `read_record` fails, and the operator's controller cannot claim, since it reads the
+state before it registers. So the fallback from `controller: daemon` is `controller: operator` on
+this release, never the previous image. A revert that cannot be avoided goes in this order:
+
+1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the earlier
+   release refuses both as unknown keys, and without them this release runs `controller: operator`.
+   Restart this release with that file and let it boot once: the claim retires and its Sandbox and
+   volume are released. Deleting the row while the Sandbox is still there would leave it to the
+   earlier release's orphan sweep, which deletes at its first boot any Sandbox of the project that
+   no claim names.
+2. Stop that daemon. A running daemon holds the claim and writes its row back, so a delete made
+   while it runs does nothing.
+3. Delete that project's row alone: `delete from claims where token = 'legion-<project>-controller'`.
+   Several projects' daemons can share the database, so never delete by role. Its pending delivery,
+   if any, goes with it (`on delete cascade`).
+4. Start the earlier release.
+
 ### Operator-launched controller
 
 Under `controller: operator` the daemon launches no controller, under either runtime: it has no

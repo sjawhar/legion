@@ -262,6 +262,23 @@ and restart the daemon: at boot it stops its own controller's claim and releases
 the pod's volume and the session on it, and you then start the controller on your machine as below.
 Switching to `controller: daemon` again starts a fresh controller, not the old session.
 
+A daemon built before LEGION-592 cannot run against a database a `controller: daemon` daemon used:
+it lists the controller's claim as an issue keyed `""`, which every agent's plugin refuses. So to
+stop using the in-cluster controller, switch to `controller: operator` on this release rather than
+rolling back the image. If you must roll back, do it in this order:
+
+1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the
+   earlier release refuses both as unknown keys, and without them this release runs
+   `controller: operator`. Restart this release once with that file: it retires the controller's
+   claim and releases its pod and volume.
+2. Stop that daemon. A running daemon writes the claim's row back, so a delete made while it runs
+   does nothing.
+3. Delete that project's row: `delete from claims where token = 'legion-<project>-controller'`.
+   Other projects' daemons may share the database, so never delete by role.
+4. Start the earlier release.
+
+`docs/kubernetes.md` in the repository ("Daemon-launched controller") explains why.
+
 ### On your machine
 
 The controller runs in your terminal as an interactive Oh My Pi session. It reads a small file of
