@@ -30,7 +30,7 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 }
 
 const ISSUE_REFERENCE =
-  "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
+  "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
@@ -260,7 +260,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
     description:
-      "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
@@ -400,7 +400,7 @@ export const dispatchToolSpecs = [
       "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
       "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " +
       "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
-      "issue list and board, dispatch_read, and dispatch_issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +
       "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
       "person, not a session: there is nothing running to message, so ask them on the issue rather than " +
@@ -409,7 +409,7 @@ export const dispatchToolSpecs = [
       "the issue and decide again. A claim whose session is no longer running may be " +
       "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
       "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
-      "dispatch_issue_update when you start. A claim is released by its holder or any human, and by " +
+      "dispatch issue-update when you start. A claim is released by its holder or any human, and by " +
       "any agent once the holder's session is no longer running. " +
       ISSUE_REFERENCE,
     arguments: (z) => ({
@@ -442,11 +442,11 @@ export const dispatchToolSpecs = [
     description:
       "Open a to-do or permission only a human can give, or a decision that has no document to " +
       "live in. A question about the design an issue's document records is not this tool: write " +
-      "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " +
+      "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " +
       "end of the section it concerns), at every phase, approved spec or not; the block reaches " +
       "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " +
-      "document is approved through dispatch_request_approval. Do not use this tool for a status " +
-      "update or discussion; use dispatch_message instead. " +
+      "document is approved through dispatch request-approval. Do not use this tool for a status " +
+      "update or discussion; use dispatch message instead. " +
       ASK_QUESTION_CONTRACT +
       " " +
       ASK_OPTIONS_CONTRACT +
@@ -609,7 +609,7 @@ export const dispatchToolSpecs = [
       "Resolve a review comment thread once it has been addressed - typically your own comment " +
       "after the document was fixed. Any session or human may resolve any open comment on an " +
       "open issue or project document; reopening a resolved comment is human-only (the dashboard). " +
-      "Not for asks: use dispatch_resolve_ask.",
+      "Not for asks: use dispatch resolve-ask.",
     arguments: (z) => ({
       comment: z
         .string()
@@ -643,9 +643,9 @@ export const dispatchToolSpecs = [
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
     description:
-      "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " +
+      "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
+      `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -703,7 +703,7 @@ export const dispatchToolSpecs = [
     },
     description:
       "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " +
-      `dispatch_comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
+      `dispatch comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -736,11 +736,11 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", body: "Implementation started." },
     description:
       "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " +
-      "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " +
-      "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " +
+      "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " +
+      "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " +
       "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " +
       "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
-      "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " +
+      "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " +
       "that conversation back. Every other message names its issue. " +
       `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
@@ -779,13 +779,13 @@ export const dispatchToolSpecs = [
     },
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
-      "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
+      "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
-      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
-      "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " +
+      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
+      "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
@@ -867,7 +867,7 @@ export const dispatchToolSpecs = [
         .object({
           document: z
             .string({ min: 1 })
-            .describe("Token for the exact canonical document returned by dispatch_doc_read.")
+            .describe("Token for the exact canonical document returned by dispatch doc-read.")
             .optional(),
           blocks: z
             .array(
@@ -900,8 +900,8 @@ export const dispatchToolSpecs = [
     description:
       "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
       "Do not use it for issue status, asks, or events; " +
-      "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
-      "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " +
+      "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
+      "A live read returns its document token for an optional dispatch doc-edit precondition; use /blocks for per-block tokens. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
@@ -934,7 +934,7 @@ export const dispatchToolSpecs = [
       "artifact.approved or artifact.changes_requested. An open request follows the document: a " +
       "later version moves it to that version and leaves it waiting on you, as a human's reply in " +
       "its thread does. Only the first move since the request was opened or handed back sends an " +
-      "event, and never to the session whose version made it; dispatch_doc_read shows whom it " +
+      "event, and never to the session whose version made it; dispatch doc-read shows whom it " +
       "waits on. Once the revision is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
       ", call this again to hand that same Inbox row back. The request carries nothing new. A " +
@@ -973,7 +973,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      "dispatch doc-edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
@@ -1012,7 +1012,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1" },
     description:
       "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " +
-      "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " +
+      "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
       "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
@@ -1027,8 +1027,8 @@ export const dispatchToolSpecs = [
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
       "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " +
-      "one shown, in order, and the rest by reference, for dispatch_doc_read. A picture this session was already shown is named, not sent again " +
-      "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch_doc_read shows it again. " +
+      "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " +
+      "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1099,7 +1099,7 @@ export const dispatchToolSpecs = [
       'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' +
       "session that is not running at the moment of the read, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
-      "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
+      "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " +
       "Dispatch pages the list: limit sets the page size (default " +
       `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` +
       "(default 0), and the answer names how many issues match, so repeat with the next offset to " +

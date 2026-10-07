@@ -87,7 +87,7 @@ test("announces a followed ask once as a plain channel notification and never su
       method: "notifications/claude/channel",
       params: {
         content:
-          "Following ask ask-3 on DSP-3: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on DSP-3: envoy_subscribe notifications.dispatch.issue.DSP-3.>.",
+          "Following ask ask-3 on DSP-3: its answer and replies reach you directly (dispatch follow --ask ask-3 --action unfollow to stop). For every event on DSP-3: envoy_subscribe notifications.dispatch.issue.DSP-3.>.",
         meta: { producer: "dispatch" },
       },
     },

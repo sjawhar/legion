@@ -2770,7 +2770,7 @@ describe("envoy OMP extension", () => {
     // goes through the same sendMessage/steer channel `deliver` uses for
     // inbound envelopes.
     expect(fixture.messages).toEqual([
-      `Following ask ask-1 on LEGION-1: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}.`,
+      `Following ask ask-1 on LEGION-1: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}.`,
     ]);
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
     // The session's own doing, not an inbound event: the Legion phase-stall check skips it.

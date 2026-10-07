@@ -114,6 +114,14 @@ export function commandFlags(tool: string): readonly string[] {
   return [...surfaceFor(tool).flags.keys()];
 }
 
+/** The flag that sets `field` on the command: `--option` for `options`, `--ops-json` for `ops`. */
+export function fieldFlag(tool: string, field: string): string {
+  for (const [flag, entry] of surfaceFor(tool).flags) {
+    if (entry.field === field) return flag;
+  }
+  return `--${flagName(field)}`;
+}
+
 /** The command's flags with their value placeholders and what each sends, for help and docs. */
 export function commandFlagTable(tool: string): readonly CommandFlagRow[] {
   return [...surfaceFor(tool).flags].map(([flag, entry]) => ({

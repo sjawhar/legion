@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
+import { commandFlags, commandLine } from "../dispatch-command";
 import { formatZodIssues, ToolInputError } from "../tool-input-errors";
 
 function specFor(name: string) {
@@ -9,52 +10,79 @@ function specFor(name: string) {
   return spec;
 }
 
-function problemsFor(name: string, args: unknown): string[] {
+function problemsFor(name: string, args: unknown, syntax: "json" | "cli" = "json"): string[] {
   const schema: z.ZodType = dispatchToolSchema(specFor(name), zodSchemaApi(z), { strict: true });
   const parsed = schema.safeParse(args, { reportInput: true });
   if (parsed.success) throw new Error("expected the call to be refused");
-  return formatZodIssues(parsed.error.issues, schema);
+  return syntax === "cli"
+    ? formatZodIssues(parsed.error.issues, schema, { syntax: "cli", tool: name })
+    : formatZodIssues(parsed.error.issues, schema);
 }
 
 describe("ToolInputError", () => {
   test("counts the problems and lists each on its own line", () => {
-    const error = new ToolInputError("dispatch_message", ["body is required (string)"]);
+    const error = new ToolInputError("dispatch_message", ["--body is required (string)"], {
+      syntax: "cli",
+    });
     expect(error.message).toBe(
       [
-        "dispatch_message was not called: 1 problem",
-        "- body is required (string)",
-        "- Allowed keys: issue, body, in_reply_to, images",
-        '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
+        "dispatch message was not called: 1 problem",
+        "- --body is required (string)",
+        "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
     );
-    expect(error.problems).toEqual(["body is required (string)"]);
+    expect(error.problems).toEqual(["--body is required (string)"]);
 
-    const two = new ToolInputError("dispatch_ask", ["a", "b"]);
-    expect(two.message).toBe(
-      [
-        "dispatch_ask was not called: 2 problems",
-        "- a",
-        "- b",
-        "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor, images",
-        `- Example: dispatch_ask(${JSON.stringify(specFor("dispatch_ask").example)})`,
-      ].join("\n")
+    const two = new ToolInputError("dispatch_ask", ["a", "b"], { syntax: "cli" });
+    expect(two.message.split("\n").slice(0, 3)).toEqual([
+      "dispatch ask was not called: 2 problems",
+      "- a",
+      "- b",
+    ]);
+  });
+
+  test("an Envoy tool's refusal keeps its JSON wording, with no flags or example", () => {
+    expect(new ToolInputError("envoy_send", ["message is required (string)"]).message).toBe(
+      ["envoy_send was not called: 1 problem", "- message is required (string)"].join("\n")
     );
   });
-  test("gives every Dispatch validation failure its allowed keys and a valid call", () => {
+
+  test("gives every Dispatch refusal the command's flags and an example that parses", () => {
     for (const spec of dispatchToolSpecs) {
-      const shape = spec.arguments(zodSchemaApi(z));
-      const example = spec.example;
       const schema = dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
-      const error = new ToolInputError(spec.name, ["invalid input"]);
+      const error = new ToolInputError(spec.name, ["invalid input"], { syntax: "cli" });
 
       expect(error.message, spec.name).toContain(
-        `- Allowed keys: ${Object.keys(shape).join(", ") || "none"}`
+        `- Allowed flags: ${commandFlags(spec.name).join(", ")}`
       );
       expect(error.message, spec.name).toContain(
-        `- Example: ${spec.name}(${JSON.stringify(example)})`
+        `- Example: ${commandLine(spec.name, { ...spec.example })}`
       );
-      expect(schema.safeParse(example).success, spec.name).toBe(true);
+      expect(schema.safeParse(spec.example).success, spec.name).toBe(true);
     }
+  });
+});
+
+describe("formatZodIssues in command syntax", () => {
+  test("names each field by the flag that sets it, and an element by its position", () => {
+    expect(
+      problemsFor(
+        "dispatch_ask",
+        { issue: "DSP-42", question: "q", options: [{ label: "a" }, {}], urgency: "now" },
+        "cli"
+      )
+    ).toEqual([
+      "--option[1] label is required (string)",
+      '--urgency must be one of low|med|high|blocking; got "now"',
+    ]);
+    expect(
+      problemsFor(
+        "dispatch_doc_edit",
+        { issue: "DSP-42", artifact: "spec", ops: [{ op: "replace", find: 3 }] },
+        "cli"
+      )
+    ).toEqual(["--ops-json[0] find must be a string, not 3"]);
   });
 });
 

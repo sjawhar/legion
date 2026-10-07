@@ -36588,7 +36588,7 @@ function dispatchToolSchema(spec, z2, opts) {
   const schemaOptions = strict === undefined ? undefined : { strict };
   return spec.validation === undefined ? z2.object(shape, schemaOptions) : z2.refineObject(shape, spec.validation.check, spec.validation.message, schemaOptions);
 }
-var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
+var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
@@ -36689,7 +36689,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string().describe("Concise issue title."),
@@ -36736,7 +36736,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch_read, and dispatch_issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch_issue_update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       release: z2.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -36759,7 +36759,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch_request_approval. Do not use this tool for a status " + "update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36833,7 +36833,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_resolve_comment",
     example: { comment: "01234567-0000-4000-8000-000000000001" },
-    description: "Resolve a review comment thread once it has been addressed - typically your own comment " + "after the document was fixed. Any session or human may resolve any open comment on an " + "open issue or project document; reopening a resolved comment is human-only (the dashboard). " + "Not for asks: use dispatch_resolve_ask.",
+    description: "Resolve a review comment thread once it has been addressed - typically your own comment " + "after the document was fixed. Any session or human may resolve any open comment on an " + "open issue or project document; reopening a resolved comment is human-only (the dashboard). " + "Not for asks: use dispatch resolve-ask.",
     arguments: (z2) => ({
       comment: z2.string().describe("Comment id (uuid), or a dispatch://KEY/comment/<id> or " + "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " + "8+ character id prefix that is unique on its owner.")
     }),
@@ -36852,7 +36852,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " + "Do not use it for an exact replacement; use " + `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36876,7 +36876,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch_comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36892,7 +36892,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z2.string({ max: DISPATCH_BODY_MAX }).describe("Update text, at most 2,000 characters."),
@@ -36909,7 +36909,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36929,7 +36929,7 @@ var dispatchToolSpecs = [
         attributes: z2.unknown().describe("Typed block attributes for retype; a CR LF or a lone carriage return in a string value is written as a line feed.").optional()
       }, { strict: true })).describe("Flat tagged edits; an operation takes only the keys below, a misspelled one is refused rather than ignored, and the server validates the fields its op requires."),
       precondition: z2.object({
-        document: z2.string({ min: 1 }).describe("Token for the exact canonical document returned by dispatch_doc_read.").optional(),
+        document: z2.string({ min: 1 }).describe("Token for the exact canonical document returned by dispatch doc-read.").optional(),
         blocks: z2.array(z2.object({
           id: z2.string({ min: 1 }).describe("Stable block id from GET /api/v1/artifacts/{id}/blocks."),
           token: z2.string({ min: 1 }).describe("That block's full-state token, including inline marks.")
@@ -36942,7 +36942,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36955,7 +36955,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch_doc_read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes after it: request approval again once that " + "revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ". A new version of a Legion root spec closes its armed design gate until a human approves " + "it. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes after it: request approval again once that " + "revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ". A new version of a Legion root spec closes its armed design gate until a human approves " + "it. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36968,7 +36968,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key for an unlinked document.").optional(),
@@ -36988,7 +36988,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch_doc_read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch_doc_read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -37023,7 +37023,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -37748,6 +37748,222 @@ function askAnswerText(answer) {
   return `${selected} - ${text}`;
 }
 
+// ../envoy-client/src/errors.ts
+function messageFor(error48) {
+  return error48 instanceof Error ? error48.message : String(error48);
+}
+
+// ../envoy-client/src/dispatch-command.ts
+var BARE_WORD = /^[A-Za-z0-9_./:@%+=,-]+$/;
+var OPTION_SEPARATOR = ": ";
+function commandName(tool) {
+  return tool.replace(/^dispatch_/, "").replaceAll("_", "-");
+}
+function flagName(field) {
+  return field.replaceAll("_", "-");
+}
+var toolsByCommand = new Map(dispatchToolSpecs.map((spec) => [commandName(spec.name), spec.name]));
+function commandFlags(tool) {
+  return [...surfaceFor(tool).flags.keys()];
+}
+function fieldFlag(tool, field) {
+  for (const [flag, entry] of surfaceFor(tool).flags) {
+    if (entry.field === field)
+      return flag;
+  }
+  return `--${flagName(field)}`;
+}
+var surfaces = new Map;
+function surfaceFor(tool) {
+  const cached2 = surfaces.get(tool);
+  if (cached2 !== undefined)
+    return cached2;
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  if (spec === undefined)
+    throw new Error(`Unknown Dispatch tool: ${tool}`);
+  const fields = fieldKinds(spec);
+  const surface = {
+    spec,
+    command: commandName(spec.name),
+    fields,
+    flags: flagTable(spec.name, fields)
+  };
+  surfaces.set(tool, surface);
+  return surface;
+}
+function fieldKinds(spec) {
+  const schema = exports_external.toJSONSchema(dispatchToolSchema(spec, zodSchemaApi(exports_external)));
+  const required2 = new Set(schema.required ?? []);
+  const fields = new Map;
+  for (const [field, node] of Object.entries(schema.properties ?? {})) {
+    const nonNull = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+    const nullable2 = node.anyOf !== undefined && nonNull.length < node.anyOf.length;
+    const inner = nonNull.length === 1 ? nonNull[0] : undefined;
+    const kind = inner === undefined ? "json" : kindOf(field, inner);
+    const values = inner?.enum?.map(String);
+    fields.set(field, {
+      kind,
+      nullable: nullable2,
+      required: required2.has(field),
+      ...node.description === undefined && inner?.description === undefined ? {} : { description: node.description ?? inner?.description },
+      ...values === undefined ? {} : { values }
+    });
+  }
+  return fields;
+}
+function kindOf(field, node) {
+  switch (node.type) {
+    case "string":
+      return "string";
+    case "integer":
+    case "number":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "array": {
+      const item = node.items;
+      if (item === undefined)
+        return "json";
+      if (field === "options" && item.type === "object")
+        return "options";
+      if (item.type === "string")
+        return { array: "string" };
+      if (item.type === "integer" || item.type === "number")
+        return { array: "number" };
+      const members = item.anyOf ?? [];
+      const numeric = members.filter((m) => m.type === "integer" || m.type === "number");
+      if (members.length === 2 && numeric.length === 1 && members.some((member) => member.type === "null")) {
+        return { array: "number-or-null" };
+      }
+      return "json";
+    }
+    default:
+      return "json";
+  }
+}
+function singular(field) {
+  return field.endsWith("s") ? field.slice(0, -1) : field;
+}
+function placeholder(info) {
+  if (info.values !== undefined)
+    return `<${info.values.join("|")}>`;
+  if (info.kind === "number")
+    return "<n>";
+  if (typeof info.kind === "object")
+    return info.kind.array === "string" ? "<text>" : "<n>";
+  return "<text>";
+}
+function flagTable(tool, fields) {
+  const flags = new Map;
+  const add = (flag, entry) => {
+    if (flags.has(flag))
+      throw new Error(`${tool}: two fields claim the flag ${flag}`);
+    flags.set(flag, entry);
+  };
+  for (const [field, info] of fields) {
+    const name = flagName(field);
+    const about = [info.description, info.required ? "Required." : undefined].filter((part) => part !== undefined).join(" ");
+    const { kind } = info;
+    if (kind === "string") {
+      add(`--${name}`, { field, action: "set", value: placeholder(info), text: about });
+      add(`--${name}-file`, {
+        field,
+        action: "file",
+        value: "<path>",
+        text: `--${name} read from a file; - reads stdin.`
+      });
+    } else if (kind === "number") {
+      add(`--${name}`, { field, action: "set", value: "<n>", text: about });
+    } else if (kind === "boolean") {
+      add(`--${name}`, { field, action: "true", text: about });
+      add(`--no-${name}`, { field, action: "false", text: `Sends ${field} as false.` });
+    } else if (kind === "options") {
+      add(`--${singular(name)}`, {
+        field,
+        action: "append",
+        value: '"<label>: <description>"',
+        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label).`.trim()
+      });
+    } else if (kind === "json") {
+      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json-file`, {
+        field,
+        action: "json-file",
+        value: "<path>",
+        text: `--${name}-json read from a file; - reads stdin.`
+      });
+    } else {
+      const none = kind.array === "number-or-null" ? " none is null." : "";
+      add(`--${singular(name)}`, {
+        field,
+        action: "append",
+        value: placeholder(info),
+        text: `${about} One item per flag, repeated.${none}`.trim()
+      });
+    }
+    if (info.nullable || typeof kind === "object" || kind === "options") {
+      add(`--clear-${name}`, {
+        field,
+        action: "clear",
+        text: info.nullable ? `Sends ${field} as null.` : `Sends ${field} as an empty list.`
+      });
+    }
+  }
+  add("--help", { action: "help", text: "Prints this help." });
+  add("--dry-run", { action: "dry-run", text: "Prints the arguments as JSON and sends nothing." });
+  return flags;
+}
+function quoteWord(value) {
+  return BARE_WORD.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+function flagWithValue(flag, value) {
+  return value.startsWith("--") ? [`${flag}=${quoteWord(value)}`] : [flag, quoteWord(value)];
+}
+function scalarText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+function fieldWords(field, info, value) {
+  const name = flagName(field);
+  const { kind } = info;
+  if (value === null && info.nullable)
+    return [`--clear-${name}`];
+  if (kind === "boolean" && typeof value === "boolean") {
+    return [value ? `--${name}` : `--no-${name}`];
+  }
+  if (kind === "json")
+    return flagWithValue(`--${name}-json`, JSON.stringify(value));
+  if ((kind === "options" || typeof kind === "object") && Array.isArray(value)) {
+    if (value.length === 0)
+      return [`--clear-${name}`];
+    const flag = `--${singular(name)}`;
+    return value.flatMap((item) => {
+      if (kind === "options") {
+        const option = item;
+        const label = scalarText(option.label);
+        const text = option.description === undefined ? label : `${label}${OPTION_SEPARATOR}${scalarText(option.description)}`;
+        return flagWithValue(flag, text);
+      }
+      return flagWithValue(flag, item === null ? "none" : scalarText(item));
+    });
+  }
+  return flagWithValue(`--${name}`, scalarText(value));
+}
+function commandLine(tool, args) {
+  const surface = surfaceFor(tool);
+  const words = ["dispatch", surface.command];
+  for (const [field, info] of surface.fields) {
+    const value = args[field];
+    if (value !== undefined)
+      words.push(...fieldWords(field, info, value));
+  }
+  for (const [field, value] of Object.entries(args)) {
+    if (value !== undefined && !surface.fields.has(field)) {
+      words.push(...flagWithValue(`--${flagName(field)}`, scalarText(value)));
+    }
+  }
+  return words.join(" ");
+}
+
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
@@ -38123,8 +38339,11 @@ function dispatchCommentReplyWith(event, topic, comment) {
   const threadID = thread === "reply_to" ? comment.id : String(reply);
   if (event.issue_key !== null) {
     return {
-      tool: "dispatch_comment",
-      args: { issue: event.issue_key, [thread]: threadID, body: "..." }
+      command: commandLine("dispatch_comment", {
+        issue: event.issue_key,
+        [thread]: threadID,
+        body: "..."
+      })
     };
   }
   let project = comment.project_key;
@@ -38135,8 +38354,12 @@ function dispatchCommentReplyWith(event, topic, comment) {
   if (project === undefined || project === "" || artifact === undefined || artifact === "")
     return;
   return {
-    tool: "dispatch_comment",
-    args: { project, artifact, [thread]: threadID, body: "..." }
+    command: commandLine("dispatch_comment", {
+      project,
+      artifact,
+      [thread]: threadID,
+      body: "..."
+    })
   };
 }
 function askResolutionText(resolution) {
@@ -38376,7 +38599,7 @@ function renderInbound(raw, sessionID, subject2) {
           const ask = follower.data.ask_id ?? "?";
           return {
             skip: false,
-            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch_follow unfollow to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
+            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch follow --ask ${ask} --action unfollow to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
             envelope: envelope2
           };
         }
@@ -38409,12 +38632,11 @@ function renderInbound(raw, sessionID, subject2) {
               ...typeof message2.data.broadcast_id === "string" ? { broadcastId: message2.data.broadcast_id } : {}
             };
             dispatchReply = {
-              tool: "dispatch_message",
-              args: {
+              command: commandLine("dispatch_message", {
                 ...frame.event.issue_key === null ? {} : { issue: frame.event.issue_key },
                 in_reply_to: message2.data.id,
                 body: "..."
-              }
+              })
             };
           }
         } else if (frame.event.type === "comment.created") {
@@ -38524,11 +38746,6 @@ function renderInbound(raw, sessionID, subject2) {
 import { readFileSync as readFileSync2 } from "fs";
 import { homedir } from "os";
 import * as path from "path";
-
-// ../envoy-client/src/errors.ts
-function messageFor(error48) {
-  return error48 instanceof Error ? error48.message : String(error48);
-}
 
 // ../envoy-client/src/secret-file.ts
 import { readFileSync } from "fs";
@@ -39214,13 +39431,17 @@ import { basename, resolve as resolvePath } from "path";
 class ToolInputError extends Error {
   tool;
   problems;
-  constructor(tool, problems) {
+  constructor(tool, problems, options = {}) {
     const count = problems.length;
-    const help = dispatchInputHelp(tool);
+    const cli = options.syntax === "cli" && isDispatchTool(tool);
+    const help = cli ? [
+      `Allowed flags: ${commandFlags(tool).join(", ")}`,
+      `Example: ${commandLine(tool, exampleFor(tool))}`
+    ] : [];
     super([
-      `${tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
       ...problems.map((problem) => `- ${problem}`),
-      ...help === undefined ? [] : help.map((line) => `- ${line}`)
+      ...help.map((line) => `- ${line}`)
     ].join(`
 `));
     this.name = "ToolInputError";
@@ -39228,13 +39449,12 @@ class ToolInputError extends Error {
     this.problems = problems;
   }
 }
-function dispatchInputHelp(tool) {
+function isDispatchTool(tool) {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+function exampleFor(tool) {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  if (spec === undefined)
-    return;
-  const schema = dispatchToolSchema(spec, zodSchemaApi(exports_external), { strict: true });
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ") || "none";
-  return [`Allowed keys: ${allowed}`, `Example: ${tool}(${JSON.stringify(spec.example)})`];
+  return { ...spec?.example };
 }
 function unwrap(schema) {
   let current = schema;
@@ -39302,16 +39522,32 @@ function describeExpected(expected, schema) {
       return `a ${expected}`;
   }
 }
-function formatZodIssues(issues, schema) {
+function pathText(path2, cliTool) {
+  const [head, ...rest] = path2.map(String);
+  if (cliTool === undefined || head === undefined)
+    return path2.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+function formatZodIssues(issues, schema, options = {}) {
+  const cliTool = options.syntax === "cli" ? options.tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue2) => {
-    const path2 = issue2.path.map(String).join(".");
+    const path2 = pathText(issue2.path, cliTool);
     switch (issue2.code) {
       case "invalid_type":
         return issue2.input === undefined ? [`${path2} is required (${issue2.expected})`] : [
           `${path2} must be ${describeExpected(issue2.expected, schemaAt(schema, issue2.path))}, not ${describeInput(issue2.input)}`
         ];
       case "unrecognized_keys": {
+        if (cliTool !== undefined && issue2.path.length === 0) {
+          return issue2.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
         const here = Object.keys(shapeOf(schemaAt(schema, issue2.path)) ?? {}).join(", ") || allowed;
         const where = path2 === "" ? "" : ` in ${path2}`;
         return issue2.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
@@ -39384,9 +39620,7 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
   const fix = `${limit.shorten} or send fewer pictures`;
   const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
   if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
+    throw new ToolInputError(tool, [`${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`], { syntax: "cli" });
   }
   const lines = [];
   const addresses = [];
@@ -39513,15 +39747,15 @@ async function readPictures(client, addresses, shown) {
   const showing = [];
   const lines = ["Pictures:"];
   let shownBytes = 0;
-  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
+  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch doc-read shows it`;
   for (const address of addresses) {
     const skip = (reason) => lines.push(`- not shown: ${address} (${reason})`);
     if (shown?.has(address)) {
-      skip("shown earlier this session; dispatch_doc_read shows it again");
+      skip("shown earlier this session; dispatch doc-read shows it again");
       continue;
     }
     if (images.length === PICTURES_SHOWN_MAX) {
-      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch_doc_read shows it`);
+      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch doc-read shows it`);
       continue;
     }
     const target = pictureTarget(address);
@@ -39929,9 +40163,7 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   if (fullID !== undefined)
     return fullID;
   if (!idPrefixPattern.test(id)) {
-    throw new ToolInputError(tool, [
-      `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`
-    ]);
+    throw new ToolInputError(tool, [`${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`], { syntax: "cli" });
   }
   const prefix = id.toLowerCase();
   const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
@@ -39939,7 +40171,7 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
     return matches[0].id;
   throw new ToolInputError(tool, [
     matches.length === 0 ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id` : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`
-  ]);
+  ], { syntax: "cli" });
 }
 var askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
 async function sessionOpenAsks(client, sessionId) {
@@ -39960,9 +40192,7 @@ async function resolveAskArgument(tool, args, client, sessionId) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => {
       return;
     });
-    throw new ToolInputError(tool, [
-      asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`
-    ]);
+    throw new ToolInputError(tool, [asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`], { syntax: "cli" });
   }
   return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
 }
@@ -40085,7 +40315,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? document : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch_doc_read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 var toolSchemas = new Map;
 function toolSchema(tool) {
@@ -40112,7 +40342,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
     const agentArtifact = parseAgentArtifactRef(refText);
     if (agentArtifact !== null) {
       if (tool !== "dispatch_doc_read") {
-        problems.push(`ref ${refText} names a picture in a conversation on the Agents page; only dispatch_doc_read reads one`);
+        problems.push(`ref ${refText} names a picture in a conversation on the Agents page; only dispatch doc-read reads one`);
       }
       if (args.issue !== undefined || args.project !== undefined || args.artifact !== undefined) {
         problems.push("a dispatch://agent/... ref names its upload alone: name no issue, project, or artifact with it");
@@ -40653,7 +40883,7 @@ async function readUploadedFile(client, artifact, details, requested, owner, sho
   const of = number4 === latest ? "" : ` of ${latest}`;
   const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`;
   const tooLarge = (mime, bytes) => ({
-    text: `${oversizePictureText(artifact.name, bytes)}, so dispatch_doc_read cannot show this ` + `uploaded ${mime} picture (version ${number4}${of}). ${bytesRoute}`,
+    text: `${oversizePictureText(artifact.name, bytes)}, so dispatch doc-read cannot show this ` + `uploaded ${mime} picture (version ${number4}${of}). ${bytesRoute}`,
     details
   });
   const stated = artifact.versions.find((version2) => version2.number === number4);
@@ -40682,7 +40912,7 @@ async function readUploadedFile(client, artifact, details, requested, owner, sho
     text = new TextDecoder("utf-8", { fatal: true }).decode(file2.bytes);
   } catch {
     return {
-      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch_doc_read cannot show it. ${bytesRoute}`,
+      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch doc-read cannot show it. ${bytesRoute}`,
       details
     };
   }
@@ -40722,16 +40952,16 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
       return [named];
     const next = ask.state === "answered" ? "fold the answer into the text" : "write the decision into the text";
     return [
-      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`
     ];
   });
   if (open.length === 0)
     return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error([
-    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
+    `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
     ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
   ].join(`
 `));
 }
@@ -40761,9 +40991,9 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
     return;
   const [what, question] = open.length === 1 ? ["a decision block whose ask is", "question"] : [`${open.length} decision blocks whose asks are`, "questions"];
   throw new Error([
-    `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+    `dispatch ${commandName(tool)} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
     ...open.map((ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`),
-    "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it."
+    "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it."
   ].join(`
 `));
 }
@@ -40820,12 +41050,12 @@ async function executeDispatchTool(input) {
   const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
   if (!parsed.success) {
     const issues = parsed.error.issues.filter((issue3) => !ownerMissing || !(issue3.code === "invalid_type" && issue3.path.length === 1 && issue3.path[0] === "issue" && issue3.input === undefined || issue3.code === "custom" && issue3.path.length === 0 && (issue3.message.startsWith("Exactly one of issue and project is required") || issue3.message.startsWith("issue is required unless in_reply_to"))));
-    problems.push(...formatZodIssues(issues, schema));
+    problems.push(...formatZodIssues(issues, schema, { syntax: "cli", tool: input.tool }));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
   const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args.images, input.cwd, problems) : [];
   if (problems.length > 0)
-    throw new ToolInputError(input.tool, problems);
+    throw new ToolInputError(input.tool, problems, { syntax: "cli" });
   const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   if (input.tool === "dispatch_open_asks") {
     const client2 = dispatchClient();
@@ -40836,14 +41066,14 @@ async function executeDispatchTool(input) {
     }
     const sessionId = input.sessionId?.trim();
     if (!sessionId)
-      throw new Error("host session id is required for dispatch_open_asks");
+      throw new Error("host session id is required for dispatch open-asks");
     const response = await client2.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId)
-      throw new Error("host session id is required for dispatch_whoami");
+      throw new Error("host session id is required for dispatch whoami");
     const client2 = dispatchClient();
     const identity = await client2.whoami();
     const owner2 = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
@@ -40944,7 +41174,7 @@ async function executeDispatchTool(input) {
               const href = new URL(candidate.href, configUrl).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} \u2192 ${href}`;
             }),
-            "Reference the existing issue, or call dispatch_issue again with force: true after reading it."
+            "Reference the existing issue, or run dispatch issue again with --force after reading it."
           ].join(`
 `),
           details: { duplicates: candidates }
@@ -41058,7 +41288,7 @@ async function executeDispatchTool(input) {
         if (held === null) {
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
+        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: [text, notSubscribed(issueTopic(issueKey))].join(`
@@ -41250,9 +41480,7 @@ ${followsAsk(askOwner)}`,
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
-        throw new ToolInputError(input.tool, [
-          await invalidReplyToAskProblem(client, owner2, resolved)
-        ]);
+        throw new ToolInputError(input.tool, [await invalidReplyToAskProblem(client, owner2, resolved)], { syntax: "cli" });
       }
       const requestedTurn = optionalString(args, "turn");
       const body = await writePictures(resolved, stringArg(args, "body"), {
@@ -41349,7 +41577,7 @@ ${followsAsk(askOwner)}`,
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false }
           };
         }
-        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
+        const readBack = `${commandLine("dispatch_read", { message: inReplyTo })} reads the conversation back.`;
         const parent = reply.in_reply_to ?? undefined;
         const follows = parent === inReplyTo ? undefined : parent;
         return {
@@ -41536,7 +41764,7 @@ ${SPEC_CHECK_REMINDER}` : ""}`,
     case "dispatch_follow": {
       const sessionId = input.sessionId?.trim();
       if (!sessionId)
-        throw new Error("host session id is required for dispatch_follow");
+        throw new Error("host session id is required for dispatch follow");
       const ask = await resolveAskArgument(input.tool, args, client, sessionId);
       const action = stringArg(args, "action");
       if (action === "unfollow") {
@@ -41561,7 +41789,7 @@ ${SPEC_CHECK_REMINDER}` : ""}`,
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
         if (!sessionId)
-          throw new Error("host session id is required for dispatch_read({message})");
+          throw new Error("host session id is required for dispatch read --message");
         const thread = await client.getMessageThread(messageIdOf(message), sessionId);
         const issueKey2 = thread.message.issue_key;
         const [pictures3, graph2] = await Promise.all([
@@ -41686,7 +41914,7 @@ async function resolveExistingIssue(client, issueReference) {
     return await client.resolveIssue(issueReference);
   } catch (error48) {
     if (dispatchAnswered(error48, 404)) {
-      throw new Error(`no Dispatch issue is linked to ${issueReference}; create it first with ` + `dispatch_issue({ external: "${issueReference}", ... })`);
+      throw new Error(`no Dispatch issue is linked to ${issueReference}; create it first with ` + `${commandLine("dispatch_issue", { external: issueReference })} --project <key> --title <title>`);
     }
     throw error48;
   }
@@ -41718,7 +41946,7 @@ function dispatchFollowNotice(details) {
   }
   return {
     ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch follow --ask ${ask} --action unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
   };
 }
 function createFollowAnnouncer(emit) {

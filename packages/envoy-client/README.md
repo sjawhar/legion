@@ -91,17 +91,39 @@ true` and no `dispatch.serverUrl`, the URL defaults to `http://localhost:8766`,
 the Go server's listen address. Invalid configuration, malformed URLs, and
 empty tokens leave Dispatch disabled and name the failing source in `error`.
 
-### Driving a tool by hand
+### The `dispatch` command
 
-`bun bin/dispatch-tool.ts <dispatch_tool> '<json arguments>'` runs one tool through
-`executeDispatchTool`, the function every host's registered tool calls, and prints what the model
-would see: the result text (exit 0) or the failure text (exit 1), with each request traced on
-stderr. It resolves Dispatch as the hosts do, so to aim it at a stand-in set both `DISPATCH_URL`
-and `DISPATCH_TOKEN`; against a real Dispatch a write tool writes, as the session
-`ENVOY_SESSION_ID` names. `bun bin/stand-in-gateway.ts --status 502 --body html` serves one
-non-Dispatch answer (`html`, `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on
-`--port` (ephemeral by default) and prints its URL, for proving what a tool shows when a gateway,
-not Dispatch, answers.
+Agents reach Dispatch through one command, `dispatch <command> [flags]`, which each host plugin
+bundles from `bin/dispatch.ts` into its `dist/dispatch.js` and puts on its agents' shell `PATH`
+through a `bin/dispatch` shim. `dispatch-command.ts` derives the commands and flags from the tool
+specs: one command per spec (`dispatch_issue_update` → `issue-update`), one flag per field
+(`reply_to_ask` → `--reply-to-ask`), `--<field>-file <path>` for every string (`-` reads stdin),
+`--no-<field>` for a boolean, `--clear-<field>` for a nullable field or a list, a repeated
+singular flag for a list (`--label a --label b`, `--option "Label: what it costs"`), and
+`--<field>-json` for any other object. `dispatch --help` lists the commands, `dispatch <command>
+--help` its flags and an example, and `--dry-run` prints the arguments a command would send.
+
+`runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
+`DISPATCH_HOST` (`omp`, `claude` or `opencode`) and the session's id (`CLAUDE_CODE_SESSION_ID`
+under Claude Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
+naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
+directory's `title` file, names the session on what it writes. It resolves Dispatch as
+`activeDispatchConfig` does. stdout carries what the model reads: the result, one
+`- picture: <path>` line per image (written under the session directory), the follow notice the
+first time a call follows an ask, and every refusal. It exits 0 on success, 1 when Dispatch or the
+arguments refused the call, and 2 on a usage error. Under Claude Code a result over 25,000
+characters is cut there and the whole of it written to a file the output names.
+
+`dispatch-session-state.ts` keeps one directory per session under `DISPATCH_STATE_DIR` (default
+`<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
+long-lived host remembered across calls (the triage lines and pictures already shown, the asks
+whose follow notice was printed), and `results.jsonl` gets one line per call with the tool's
+`details` or its refusal, which pi-envoy's run-end check reads. Directories idle for 14 days are
+removed, at most once a day.
+
+`bun bin/stand-in-gateway.ts --status 502 --body html` serves one non-Dispatch answer (`html`,
+`empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on `--port` (ephemeral by default) and
+prints its URL, for proving what a command shows when a gateway, not Dispatch, answers.
 
 ## Tool contract
 
