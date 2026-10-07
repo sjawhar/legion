@@ -5,8 +5,22 @@ import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { messageFor } from "@legion/envoy-client/errors";
+import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
+import {
+  ENVOY_PLUGIN_INTERFACE_VERSION,
+  LEGACY_LEGION_LOADED_KEY,
+  LEGION_PLUGIN_LOADED_KEY,
+  readEnvoyPluginInterface,
+} from "@legion/pi-shared/interface";
+import type {
+  CommandContext,
+  PiApi,
+  SessionContext,
+  ToolCallEvent,
+  ToolCallEventResult,
+} from "@legion/pi-shared/pi-types";
+import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
-import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
 import { createClaimSession } from "../src/legion/claim-session";
 import {
   classifySession,
@@ -27,14 +41,6 @@ import {
 } from "../src/legion/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/legion/session-title";
 import { createLegionTool } from "../src/legion/tools";
-import type {
-  CommandContext,
-  PiApi,
-  SessionContext,
-  ToolCallEvent,
-  ToolCallEventResult,
-} from "../src/pi-types";
-import { subagentSessionCheck } from "../src/subagent-session";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -338,11 +344,31 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   return undefined;
 }
 
-// Read by the daemon's boot gate (packages/daemon/internal/daemon/bootgate.go) to prove this
-// extension actually loaded from an ambient installed-plugin discovery -- not just that a
-// manifest file exists, which stays true even when the plugin is disabled or unregistered in
-// OMP's own plugin registry.
-const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
+/**
+ * Why this Legion entry cannot run in this process, or undefined when it can. Legion claims roles
+ * and reads deliveries through the interface the Envoy plugin publishes
+ * (`@legion/pi-shared/interface`), so a process without `@sjawhar/pi-envoy`, or with one that
+ * speaks another interface version, has nothing to claim through; and the pre-split
+ * `@sjawhar/pi-legion-envoy` still installed beside this plugin would run a second Legion entry
+ * against the same pane. The sentence names the remedy, since the daemon's boot log and the
+ * operator's own session are where it lands.
+ */
+function envoyPluginRefusal(): string | undefined {
+  const legacy = (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
+  if (legacy !== undefined) {
+    const where = typeof legacy === "string" ? ` from ${legacy}` : "";
+    return `Legion plugin at ${import.meta.url} found the pre-split @sjawhar/pi-legion-envoy loaded${where}; uninstall @sjawhar/pi-legion-envoy (omp plugin uninstall @sjawhar/pi-legion-envoy) and keep @sjawhar/pi-envoy beside @sjawhar/pi-legion`;
+  }
+  const reading = readEnvoyPluginInterface();
+  switch (reading.kind) {
+    case "present":
+      return undefined;
+    case "absent":
+      return `Legion plugin at ${import.meta.url} needs @sjawhar/pi-envoy at interface version ${ENVOY_PLUGIN_INTERFACE_VERSION}, found none; install @sjawhar/pi-envoy beside @sjawhar/pi-legion`;
+    case "mismatch":
+      return `Legion plugin at ${import.meta.url} needs @sjawhar/pi-envoy at interface version ${reading.expected}, found version ${reading.found} from ${reading.from}; install the @sjawhar/pi-envoy released with this @sjawhar/pi-legion`;
+  }
+}
 
 /** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
  * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`).
@@ -373,7 +399,14 @@ export default function legionExtension(pi: PiApi): void {
   // below to the instance that emitted it, so a per-call grant count can be attributed.
   const instance = randomUUID().slice(0, 8);
   logger.debug("extension instance loaded", { extension: import.meta.url, instance });
-  (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
+  // Read by the daemon's boot gate to prove this extension actually loaded from an ambient
+  // installed-plugin discovery -- not just that a manifest file exists, which stays true even when
+  // the plugin is disabled or unregistered in OMP's own plugin registry -- and which interface
+  // version it speaks.
+  (globalThis as Record<symbol, unknown>)[LEGION_PLUGIN_LOADED_KEY] = {
+    from: import.meta.url,
+    envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION,
+  };
 
   // Gates session_start, tool_call and the session-change re-claim below, one call per hook; its
   // settled answer is kept, so it runs once per session, not once per tool call.
@@ -443,6 +476,15 @@ export default function legionExtension(pi: PiApi): void {
     phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
     const { kind } = classifySession(process.env);
     if (kind === "not-legion") return;
+    // Every Legion session (a root architect, a phase worker, the controller) claims through the
+    // Envoy plugin's interface, so a process without it ends here, the way a refused boot
+    // registration does: one log line, then the exit the daemon sees and relaunches from. A
+    // person's own session returned above and never exits.
+    const refusal = envoyPluginRefusal();
+    if (refusal !== undefined) {
+      logger.error(refusal);
+      exitProcess(1);
+    }
     // The operator-launched controller registers through the controller session and carries no
     // `legion` tool: its operations are an architect's and a worker's.
     if (kind === "controller") {
@@ -657,6 +699,12 @@ export default function legionExtension(pi: PiApi): void {
     // Inside the controller's own session (the `LEGION_CONTROLLER` marker) this is the manual
     // override for a lost claim. From a hand-started session it is an interactive takeover: the
     // role and recorded session id move to this session (see `controllerSession.claim`).
-    handler: async (_args, context) => controllerSession.claim(context),
+    // The operator started this session and reads it, so a missing Envoy plugin is answered as
+    // the command's error, never an exit, and nothing is claimed.
+    handler: async (_args, context) => {
+      const refusal = envoyPluginRefusal();
+      if (refusal !== undefined) throw new Error(refusal);
+      await controllerSession.claim(context);
+    },
   });
 }

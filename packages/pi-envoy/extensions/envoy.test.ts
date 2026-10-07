@@ -9,15 +9,15 @@ import {
   dispatchToolSpecs,
 } from "@legion/contracts";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
+import { LOCAL_ENVOY_NOTICE, resetEnvoyPluginInterfaceForTests } from "@legion/pi-shared/interface";
+import type { MessageRenderer, MessageRendererTheme, PiApi } from "@legion/pi-shared/pi-types";
+import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
+import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
-import { matchInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
-import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
-import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
-import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -245,9 +245,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   ...hostAgentRegistryMock,
 }));
 // Reads the host package, so it loads only after the mock above is in place.
-const { recordBootstrappedSession, resetLegionBootstrappedSessionForTests } = await import(
-  "../src/subagent-session"
-);
+const { recordBootstrappedSession } = await import("@legion/pi-shared/subagent-session");
 
 const originalFetch = globalThis.fetch;
 
@@ -264,12 +262,11 @@ const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
-  // globalThis would otherwise make every transcript here look like a subagent's, and the
-  // top-level session one test publishes would be the reply address the next test's subagent
-  // instance reports.
-  resetLegionBootstrappedSessionForTests();
+  // the process-wide interface would otherwise make every transcript here look like a
+  // subagent's, the top-level session one test publishes would be the reply address the next
+  // test's subagent instance reports, and a stale claim instance would capture a later claim.
+  resetEnvoyPluginInterfaceForTests();
   resetEnvoySessionsForTests();
-  resetInjectedUserTurnsForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener

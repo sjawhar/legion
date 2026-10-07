@@ -11,7 +11,7 @@ import {
   serveStandin,
   spawnRpc,
   writeStandinProfile,
-} from "./test-omp-harness";
+} from "@legion/pi-shared/test/omp-harness";
 
 // The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
@@ -231,7 +231,7 @@ async function runPane(
   const rpc = spawnRpc(
     binary,
     {
-      extensions: ["envoy.ts", "legion.ts"],
+      extensions: [path.join(import.meta.dir, "envoy.ts"), path.join(import.meta.dir, "legion.ts")],
       home,
       workspace,
       sessions,

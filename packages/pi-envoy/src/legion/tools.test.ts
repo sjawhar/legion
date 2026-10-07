@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
-import type { PiApi, SessionContext } from "../pi-types";
 import { createLegionTool } from "./tools";
 
 function context(sessionId = "ses_208"): SessionContext {

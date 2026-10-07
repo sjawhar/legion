@@ -1,4 +1,4 @@
-import type { PiApi, SessionContext } from "../pi-types";
+import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import type { LegionSessionKind } from "./classify";
 
 /**

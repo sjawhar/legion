@@ -1,5 +1,5 @@
 import { asObject } from "@legion/envoy-client/dispatch-execute";
-import type { ToolResultEvent } from "./pi-types";
+import type { ToolResultEvent } from "@legion/pi-shared/pi-types";
 
 /** The count a write's advice reports under key, 0 when it reports none. */
 function adviceCount(details: unknown, key: "decision_blocks" | "decision_blocks_added"): number {

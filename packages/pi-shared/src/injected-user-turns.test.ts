@@ -3,8 +3,8 @@ import {
   endInjectedUserTurns,
   matchInjectedUserTurn,
   noteInjectedUserTurn,
-  resetInjectedUserTurnsForTests,
-} from "./dispatch-user-turn";
+} from "./injected-user-turns";
+import { resetEnvoyPluginInterfaceForTests } from "./interface";
 
 /** A user message as the host records one: a prompt's text part, stamped once. */
 function user(timestamp: number, text: string) {
@@ -12,7 +12,7 @@ function user(timestamp: number, text: string) {
 }
 
 beforeEach(() => {
-  resetInjectedUserTurnsForTests();
+  resetEnvoyPluginInterfaceForTests();
 });
 
 /**

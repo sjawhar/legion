@@ -1,10 +1,12 @@
-import type { SessionContext } from "../pi-types";
+import { envoyPluginInterface } from "./interface";
+import type { SessionContext } from "./pi-types";
 
 /**
- * The process-wide role-claim bridge between the two pi-envoy extensions. `extensions/envoy.ts`
- * registers each bound instance's claim entry point and fires the regain hook from its
- * heartbeat; `extensions/legion.ts` and `controller-session.ts` claim through it and register
- * that hook. It lives under `src/` so the session module never imports an extension entry point.
+ * The process-wide role-claim bridge between the Envoy and Legion plugins. The Envoy entry
+ * (`extensions/envoy.ts`) registers each bound instance's claim entry point and fires the regain
+ * hook from its heartbeat; the Legion entry (`extensions/legion.ts`, `controller-session.ts`)
+ * claims through it and registers that hook. The bridge object itself is the `roleClaim` member of
+ * the versioned interface (`interface.ts`), which both plugins reach through `globalThis`.
  */
 export type LegionRoleClaim = (
   sessionID: string,
@@ -72,40 +74,10 @@ export type LegionRoleClaimBridge = {
   regained: LegionRoleRegained | undefined;
 };
 
-interface GlobalLegionRoleClaimBridgeStore {
-  [key: symbol]: LegionRoleClaimBridge | undefined;
-}
-
-// A process-wide symbol bridges legion.ts's `claimEnvoyRole` import to the
-// envoyExtension(pi) instances OMP actually ran, since each manifest entry
-// loads as its own module instance with its own module-scope state.
-const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.pi-envoy.role-claim-bridge");
-
+/** The bridge, read from the interface at each call: a consumer never keeps the object, so the
+ * publish order of the two plugins is irrelevant. */
 export function legionRoleClaimBridge(): LegionRoleClaimBridge {
-  const store = globalThis as typeof globalThis & GlobalLegionRoleClaimBridgeStore;
-  const bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
-  if (bridge) return bridge;
-
-  const createdBridge: LegionRoleClaimBridge = {
-    instances: [],
-    managedSessions: new Set(),
-    regained: undefined,
-  };
-  store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
-  return createdBridge;
-}
-
-/**
- * Test seam. The bridge is process-wide and an instance leaves it only through OMP's
- * `session_shutdown`; a suite that binds a fixture per test without shutting it down clears the
- * bridge between tests, or a stale instance still serving a reused session id would capture a
- * later test's claim.
- */
-export function resetLegionRoleClaimBridgeForTests(): void {
-  const bridge = legionRoleClaimBridge();
-  bridge.instances.length = 0;
-  bridge.managedSessions.clear();
-  bridge.regained = undefined;
+  return envoyPluginInterface().roleClaim;
 }
 
 /**

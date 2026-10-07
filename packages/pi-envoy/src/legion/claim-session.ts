@@ -1,12 +1,12 @@
 import type { LegionRole } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
+import type { SessionContext } from "@legion/pi-shared/pi-types";
+import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
+import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../../package.json";
-import type { SessionContext } from "../pi-types";
-import { recordBootstrappedSession } from "../subagent-session";
 import { requiredEnvironment, requiredSecret } from "./classify";
 import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "./role-claim-bridge";
 
 /** The claim a session registered: its own id, the daemon's answer for tree, issue and role, and
  * the secret every credentialed request carries. */

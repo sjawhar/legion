@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fillNativesCache, linkTree } from "./test-omp-natives";
+import { fillNativesCache, linkTree } from "./omp-natives";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {

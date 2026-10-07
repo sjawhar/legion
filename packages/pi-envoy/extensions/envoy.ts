@@ -59,6 +59,31 @@ import {
   expandSubscriptionTopics,
   mergeInterestSources,
 } from "@legion/envoy-client/transport";
+import {
+  endInjectedUserTurns,
+  matchInjectedUserTurn,
+  noteInjectedUserTurn,
+} from "@legion/pi-shared/injected-user-turns";
+import { LOCAL_ENVOY_NOTICE, publishEnvoyPluginInterface } from "@legion/pi-shared/interface";
+import type {
+  PiApi,
+  SessionContext,
+  SessionSwitchReason,
+  SideTurn,
+  ToolResult,
+} from "@legion/pi-shared/pi-types";
+import {
+  type LegionNoticeSubscription,
+  type LegionRoleClaim,
+  type LegionRoleClaimInstance,
+  legionRoleClaimBridge,
+  type RoleRegainReason,
+} from "@legion/pi-shared/role-claim-bridge";
+import {
+  type SessionIdentityContext,
+  subagentSessionCheck,
+} from "@legion/pi-shared/subagent-session";
+import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
@@ -66,35 +91,15 @@ import { AgentStreamPublisher } from "../src/agent-stream";
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
   type AcceptedUserTurn,
-  endInjectedUserTurns,
   HANDLED_ATTEMPT_ENTRY,
   handledAttemptKey,
   handledAttempts,
   isUserTurnCandidate,
-  matchInjectedUserTurn,
-  noteInjectedUserTurn,
   turnFromAccept,
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
-import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
-import {
-  type LegionNoticeSubscription,
-  type LegionRoleClaim,
-  type LegionRoleClaimInstance,
-  legionRoleClaimBridge,
-  type RoleRegainReason,
-} from "../src/legion/role-claim-bridge";
 import { deviceTool, opensAsk } from "../src/opens-ask";
-import type {
-  PiApi,
-  SessionContext,
-  SessionSwitchReason,
-  SideTurn,
-  ToolResult,
-} from "../src/pi-types";
 import { sideTurn } from "../src/side-turn";
-import { type SessionIdentityContext, subagentSessionCheck } from "../src/subagent-session";
-import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -345,6 +350,10 @@ const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(S
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
+  // The interface the Legion plugin reads (`@legion/pi-shared/interface`). `undefined` when an
+  // Envoy entry at another interface version published first: that entry's object stays the one
+  // Legion finds, and this instance pushes no claim instance onto it (first wins).
+  const publishedInterface = publishEnvoyPluginInterface(import.meta.url);
   const defaults = envoyDefaultsFromEnvironment(process.env);
   // One loader for the shared envoy.json contract: the dispatch tools are
   // registered only where the file names a service at load, and an invalid file
@@ -1303,7 +1312,8 @@ export default function envoyExtension(pi: PiApi): void {
     return run;
   };
 
-  const bridge = legionRoleClaimBridge();
+  // The bridge's state is read through `legionRoleClaimBridge()` at each use; only the instance
+  // list is this instance's own entry on the object it published into.
   const claim: LegionRoleClaim = async (targetSessionID, role, callerContext) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
@@ -1353,7 +1363,7 @@ export default function envoyExtension(pi: PiApi): void {
     // `sessionID` follows only once this instance's own rebind has run.
     sessionID: () => activeSessionContext?.sessionManager.getSessionId() ?? sessionID,
   };
-  bridge.instances.push(claimInstance);
+  if (publishedInterface !== undefined) publishedInterface.roleClaim.instances.push(claimInstance);
 
   // A `task` subagent loads its own instance of this module in the parent's process and fires
   // its own session_start. It shares the parent's Envoy identity: registering it would list an
@@ -1486,8 +1496,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
-    const bound = bridge.instances.indexOf(claimInstance);
-    if (bound !== -1) bridge.instances.splice(bound, 1);
+    if (publishedInterface !== undefined) {
+      const bound = publishedInterface.roleClaim.instances.indexOf(claimInstance);
+      if (bound !== -1) publishedInterface.roleClaim.instances.splice(bound, 1);
+    }
     // This session is about to deregister with the listener, so it stops being an address a
     // reply can reach: a subagent still running in this process must report none rather than
     // name it, and a dead entry must not be what makes some other session ambiguous.

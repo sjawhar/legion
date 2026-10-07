@@ -1,6 +1,6 @@
 /**
  * Test double for the host's `AgentRegistry` (`@oh-my-pi/pi-coding-agent`), shared by every
- * suite in this directory. `bun test` runs the suites in one process, and a module evaluated
+ * plugin's suites. `bun test` runs the suites in one process, and a module evaluated
  * under one suite's `mock.module` keeps that binding for the rest of the run, so every suite's
  * mock of the host package spreads this in and the roster itself lives on `globalThis`: whichever
  * mock won, the subagent check (`registeredSubagent`) reads the roster the running test filled.

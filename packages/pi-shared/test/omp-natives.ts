@@ -1,5 +1,5 @@
 // Oh My Pi's native modules for the tests that run the real binary under a fresh HOME
-// (test-omp-harness.ts's ompRoot). Oh My Pi extracts them from its own binary into
+// (omp-harness.ts's ompRoot). Oh My Pi extracts them from its own binary into
 // .omp/natives/<version> under any HOME that lacks them, about 354 MiB at the pin, and has no
 // setting for that directory short of XDG_DATA_HOME, which moves its whole profile. Each HOME's
 // natives are instead hardlinks to one copy per binary under the user's cache directory.

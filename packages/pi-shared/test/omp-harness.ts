@@ -1,13 +1,12 @@
-// The harness shared by the tests that run the real Oh My Pi binary (legion-phase-stall-omp.test.ts,
-// dispatch-first-omp.test.ts): a stand-in server that is the model gateway and whatever else a test
-// answers, a profile whose every model role is that stand-in, and one `omp --mode rpc` child with
-// only this checkout's extensions loaded. The profile format, the flags and the RPC stream are the
-// Oh My Pi pin's (the repository's .omp-pin), so a pin bump that changes one is fixed
-// here once.
+// The harness shared by the tests that run the real Oh My Pi binary (each plugin's `*-omp.test.ts`):
+// a stand-in server that is the model gateway and whatever else a test answers, a profile whose
+// every model role is that stand-in, and one `omp --mode rpc` child with only the caller's
+// extensions loaded. The profile format, the flags and the RPC stream are the Oh My Pi pin's (the
+// repository's .omp-pin), so a pin bump that changes one is fixed here once.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { linkOmpNatives } from "./test-omp-natives";
+import { linkOmpNatives } from "./omp-natives";
 
 export interface Request {
   readonly path: string;
@@ -23,7 +22,7 @@ export type Cleanup = (() => Promise<void>)[];
 
 /**
  * A scratch root with the profile's home, the session's workspace and its transcript directory.
- * The home's Oh My Pi natives are hardlinks to `binary`'s one cached copy (test-omp-natives.ts), so
+ * The home's Oh My Pi natives are hardlinks to `binary`'s one cached copy (omp-natives.ts), so
  * a case writes none of them.
  */
 export async function ompRoot(
@@ -135,7 +134,8 @@ export interface Rpc {
 }
 
 /**
- * Starts `omp --mode rpc` in `workspace` with only `extensions` (files beside this one) loaded, no
+ * Starts `omp --mode rpc` in `workspace` with only `extensions` loaded — absolute paths, since this
+ * module lives in another package than its callers (pass `path.join(import.meta.dir, …)`) — no
  * skills, rules, LSP or title call, its transcripts under `sessions`, `home` as HOME and `bin`, when
  * given, first on PATH. `onFrame` gets each RPC frame omp prints, in order. Both of omp's streams
  * are read to the end, so a full pipe never blocks it, and the child is killed at cleanup.
@@ -159,7 +159,7 @@ export function spawnRpc(
       "--mode",
       "rpc",
       "--no-extensions",
-      ...options.extensions.flatMap((file) => ["-e", path.join(import.meta.dir, file)]),
+      ...options.extensions.flatMap((file) => ["-e", file]),
       "--no-skills",
       "--no-rules",
       "--no-lsp",

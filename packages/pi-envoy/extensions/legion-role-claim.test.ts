@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
-import type { ZodNumberProperty } from "../src/pi-types";
+import type { ZodNumberProperty } from "@legion/pi-shared/pi-types";
 
 /** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
  * adds to it reaches the stub below. */
@@ -34,7 +34,7 @@ mock.module("nats", () => ({
   }),
 }));
 
-import { hostAgentRegistryMock } from "./test-host-registry";
+import { hostAgentRegistryMock } from "@legion/pi-shared/test/host-registry";
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,

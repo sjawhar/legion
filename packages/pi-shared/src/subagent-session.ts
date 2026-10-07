@@ -3,6 +3,7 @@ import path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
 import * as host from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
+import { envoyPluginInterface } from "./interface";
 import type { CommandContext, SessionContext } from "./pi-types";
 
 /**
@@ -13,25 +14,10 @@ export type SessionIdentityContext = Pick<SessionContext | CommandContext, "sess
 
 // The transcript path of the session this process bootstrapped as its Legion identity (root
 // architect, phase worker, or controller). A `task` subagent's extension instance is a separate
-// module instance with its own closure state, so the record lives on `globalThis` under a
-// process-wide symbol, beside `LEGION_ROLE_CLAIM_BRIDGE` (role-claim-bridge.ts) and
-// `LEGION_LOADED_MARKER` (extensions/legion.ts).
-const LEGION_BOOTSTRAPPED_SESSION = Symbol.for("legion.pi-envoy.bootstrapped-session");
-
-interface GlobalLegionBootstrappedSessionStore {
-  [key: symbol]: string | undefined;
-}
-
-const bootstrappedSessionStore = globalThis as unknown as GlobalLegionBootstrappedSessionStore;
-
+// module instance with its own closure state, so the record lives on the process-wide interface
+// (`interface.ts`, `bootstrappedSession`), read at each use.
 export function recordBootstrappedSession(sessionFile: string): void {
-  bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION] = sessionFile;
-}
-
-// The record outlives every extension instance in the process; a test suite that boots several
-// Legion sessions in one process clears it between tests. Production callers never call this.
-export function resetLegionBootstrappedSessionForTests(): void {
-  delete bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION];
+  envoyPluginInterface().bootstrappedSession.file = sessionFile;
 }
 
 /** What `isSubagentSession` found. */
@@ -104,7 +90,7 @@ function transcriptSaysSubagent(context: SessionIdentityContext): boolean {
     if (fs.existsSync(`${path.dirname(sessionFile)}.jsonl`)) return true;
     if (fs.existsSync(sessionFile)) return false;
   }
-  const bootstrapped = bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION];
+  const bootstrapped = envoyPluginInterface().bootstrappedSession.file;
   return bootstrapped !== undefined && bootstrapped !== sessionFile;
 }
 

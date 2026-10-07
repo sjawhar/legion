@@ -37,7 +37,7 @@
     },
     "packages/claude-envoy": {
       "name": "@sjawhar/claude-envoy",
-      "version": "0.6.2",
+      "version": "0.6.4",
       "dependencies": {
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
@@ -131,7 +131,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "4.0.2",
+      "version": "5.4.6",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -161,11 +161,12 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-legion-envoy",
-      "version": "6.0.3",
+      "version": "7.4.6",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
+        "@legion/pi-shared": "workspace:*",
         "@oh-my-pi/pi-tui": "^18.1.15",
         "@oh-my-pi/pi-utils": "^18.1.15",
         "@toon-format/toon": "^4.1.1",
@@ -173,6 +174,18 @@
         "nats": "^2.29.2",
         "typescript": "^5.3.0",
         "zod": "4.3.6",
+      },
+    },
+    "packages/pi-shared": {
+      "name": "@legion/pi-shared",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@biomejs/biome": "^2.3.14",
+        "@legion/envoy-client": "workspace:*",
+        "@oh-my-pi/pi-tui": "^18.1.15",
+        "@oh-my-pi/pi-utils": "^18.1.15",
+        "@types/bun": "latest",
+        "typescript": "^5.3.0",
       },
     },
     "packages/proof-editor": {
@@ -590,6 +603,8 @@
     "@legion/docs-site": ["@legion/docs-site@workspace:docs/site"],
 
     "@legion/envoy-client": ["@legion/envoy-client@workspace:packages/envoy-client"],
+
+    "@legion/pi-shared": ["@legion/pi-shared@workspace:packages/pi-shared"],
 
     "@legion/proof-editor": ["@legion/proof-editor@workspace:packages/proof-editor"],
 

@@ -3,8 +3,8 @@ import {
   LegionGateRegisterRequest,
   type LegionState,
 } from "@legion/contracts/legion-api";
-import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
-import { toolFailure, toolSuccess } from "../tool-result";
+import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "@legion/pi-shared/pi-types";
+import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
 import type { LegionDaemonClient } from "./daemon-client";
 import {
   HANDOFF_DESCRIPTION,

@@ -14,18 +14,27 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
-import { logger } from "@oh-my-pi/pi-utils";
-import pkg from "../package.json";
-import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
-import { classifySession } from "../src/legion/classify";
-import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
+import { noteInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
+import {
+  ENVOY_PLUGIN_INTERFACE_KEY,
+  ENVOY_PLUGIN_INTERFACE_VERSION,
+  type EnvoyPluginInterface,
+  envoyPluginInterface,
+  LEGACY_LEGION_LOADED_KEY,
+  LOCAL_ENVOY_NOTICE,
+  resetEnvoyPluginInterfaceForTests,
+} from "@legion/pi-shared/interface";
 import type {
   CommandContext,
   PiApi,
   RegisteredTool,
   SessionContext,
   ZodNumberProperty,
-} from "../src/pi-types";
+} from "@legion/pi-shared/pi-types";
+import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { logger } from "@oh-my-pi/pi-utils";
+import pkg from "../package.json";
+import { classifySession } from "../src/legion/classify";
 
 const natsConnections: {
   readonly name: string;
@@ -85,8 +94,6 @@ mock.module("nats", () => ({
   }),
 }));
 
-import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
-
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
   ...hostAgentRegistryMock,
@@ -94,8 +101,6 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
-const { resetLegionRoleClaimBridgeForTests } = await import("../src/legion/role-claim-bridge");
-const { resetLegionBootstrappedSessionForTests } = await import("../src/subagent-session");
 const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
 
 type RegisteredCommand = {
@@ -195,17 +200,17 @@ beforeEach(() => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
-  // OMP's `session_shutdown` removes each envoy instance from the process-wide role-claim
-  // bridge; this suite binds a fixture per test and never shuts it down, so it clears the
-  // bridge itself — otherwise a stale instance still serving a reused session id (its client
-  // bound to a previous test's fetch stub) would capture a later test's claim.
-  resetLegionRoleClaimBridgeForTests();
+  // OMP's `session_shutdown` removes each envoy instance from the process-wide interface's
+  // role-claim bridge; this suite binds a fixture per test and never shuts it down, so it clears
+  // the interface itself — otherwise a stale instance still serving a reused session id (its
+  // client bound to a previous test's fetch stub) would capture a later test's claim, and one
+  // test's bootstrapped session would make the next test's transcript look like a subagent's.
+  resetEnvoyPluginInterfaceForTests();
   natsConnections.splice(0);
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
-  resetLegionBootstrappedSessionForTests();
+  delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
-  resetInjectedUserTurnsForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
     if (value === undefined) delete process.env[key];
@@ -505,8 +510,7 @@ async function claimPane(options: {
   readonly title?: { readonly name: string; readonly source: "auto" | "user" };
   readonly bindEnvoy?: boolean;
 }): Promise<ClaimPane> {
-  resetLegionBootstrappedSessionForTests();
-  resetLegionRoleClaimBridgeForTests();
+  resetEnvoyPluginInterfaceForTests();
   const tree = options.tree ?? "REPO-42";
   const issue = options.issue ?? "REPO-43";
   const sessionId = options.sessionId ?? `ses_${options.role}`;
@@ -737,6 +741,153 @@ describe("Legion OMP extension", () => {
     ).rejects.toThrow(
       "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller. Launch OMP with one of them in its environment before running /legion-claim-controller."
     );
+  });
+  describe("the Envoy plugin the Legion entry claims through", () => {
+    const store = globalThis as typeof globalThis & { [key: symbol]: unknown };
+    /** `logger.error` lines while `run` ran, as the daemon's boot log would carry them. `run` is
+     * usually an `expect(…).rejects` assertion, which bun's types declare `void` though it is
+     * awaited. */
+    const errorsLogged = async (run: () => unknown): Promise<string[]> => {
+      const lines: string[] = [];
+      const stopSink = logger.registerLogSink((entry) => {
+        if (entry.level === "error") lines.push(entry.message);
+      });
+      try {
+        await run();
+      } finally {
+        stopSink();
+      }
+      return lines;
+    };
+    /** The interface an Envoy entry built at `version` would have published from `from`. */
+    const foreignInterface = (version: number, from: string): EnvoyPluginInterface => ({
+      version,
+      publishers: [from],
+      roleClaim: { instances: [], managedSessions: new Set(), regained: undefined },
+      injectedUserTurns: new Map(),
+      bootstrappedSession: { file: undefined },
+    });
+
+    test("a worker whose process has no Envoy plugin logs one line naming @sjawhar/pi-envoy, the version it needs and none, exits, and claims nothing", async () => {
+      // legion.ts alone: no Envoy entry published the interface.
+      const pane = await claimPane({ role: "implementer", bindEnvoy: false });
+
+      const lines = await errorsLogged(() =>
+        expect(pane.start()).rejects.toThrow("process would exit")
+      );
+
+      expect(pane.exits).toEqual([1]);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("@sjawhar/pi-envoy");
+      expect(lines[0]).toContain(`interface version ${ENVOY_PLUGIN_INTERFACE_VERSION}`);
+      expect(lines[0]).toContain("found none");
+      expect(daemonRequests(pane.requests)).toEqual([]);
+      expect(pane.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    });
+
+    test("a worker beside an Envoy plugin at another interface version logs one line naming both versions and exits", async () => {
+      const pane = await claimPane({ role: "implementer", bindEnvoy: false });
+      const other = ENVOY_PLUGIN_INTERFACE_VERSION + 1;
+      store[ENVOY_PLUGIN_INTERFACE_KEY] = foreignInterface(
+        other,
+        "file:///plugins/pi-envoy-next/dist/envoy.js"
+      );
+
+      const lines = await errorsLogged(() =>
+        expect(pane.start()).rejects.toThrow("process would exit")
+      );
+
+      expect(pane.exits).toEqual([1]);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("@sjawhar/pi-envoy");
+      expect(lines[0]).toContain(`interface version ${ENVOY_PLUGIN_INTERFACE_VERSION}`);
+      expect(lines[0]).toContain(`found version ${other}`);
+      expect(lines[0]).toContain("file:///plugins/pi-envoy-next/dist/envoy.js");
+      expect(daemonRequests(pane.requests)).toEqual([]);
+    });
+
+    test("a worker beside the pre-split @sjawhar/pi-legion-envoy logs one line naming both entries and the uninstall, and exits", async () => {
+      const pane = await claimPane({ role: "implementer" });
+      store[LEGACY_LEGION_LOADED_KEY] = "file:///plugins/pi-legion-envoy/dist/legion.js";
+
+      const lines = await errorsLogged(() =>
+        expect(pane.start()).rejects.toThrow("process would exit")
+      );
+
+      expect(pane.exits).toEqual([1]);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("file:///plugins/pi-legion-envoy/dist/legion.js");
+      expect(lines[0]).toContain("uninstall @sjawhar/pi-legion-envoy");
+      expect(lines[0]).toContain(import.meta.dir);
+      expect(daemonRequests(pane.requests)).toEqual([]);
+    });
+
+    test("the launched controller is checked too", async () => {
+      const controller = await launchedController({ sessionId: "ses_controller_alone" });
+      // The Envoy entry's publish is gone, as in a process that never loaded it.
+      resetEnvoyPluginInterfaceForTests();
+
+      const lines = await errorsLogged(() =>
+        expect(
+          controller.handlers.get("session_start")?.({}, controller.context("ses_controller_alone"))
+        ).rejects.toThrow("process would exit")
+      );
+
+      expect(controller.exits).toEqual([1]);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("@sjawhar/pi-envoy");
+      expect(daemonRequests(controller.requests)).toEqual([]);
+    });
+
+    test("a person's own session is untouched: no Legion environment, no check, no exit", async () => {
+      const fixture = createPi({ bindEnvoy: false });
+      const exits: number[] = [];
+      setLegionBootstrapExitForTests((code) => {
+        exits.push(code);
+        throw new Error("process would exit");
+      });
+      legionExtension(fixture.pi);
+
+      const lines = await errorsLogged(async () => {
+        await expect(
+          fixture.handlers.get("session_start")?.({}, sessionContext("ses_person"))
+        ).resolves.toBeUndefined();
+      });
+
+      expect(exits).toEqual([]);
+      expect(lines).toEqual([]);
+    });
+
+    test("/legion-claim-controller without the Envoy plugin answers the sentence, claims nothing, and never exits", async () => {
+      process.env.ENVOY_URL = "http://envoy.test";
+      process.env.LEGION_DAEMON_URL = "http://daemon.test";
+      process.env.LEGION_PROJECT = "omp";
+      process.env.LEGION_CONTROLLER_SECRET = "controller-capability";
+      const requests: string[] = [];
+      globalThis.fetch = (async (input) => {
+        requests.push(new URL(input.toString()).pathname);
+        return Response.json({});
+      }) as typeof fetch;
+      const fixture = createPi({ bindEnvoy: false });
+      const exits: number[] = [];
+      setLegionBootstrapExitForTests((code) => {
+        exits.push(code);
+        throw new Error("process would exit");
+      });
+      legionExtension(fixture.pi);
+      const claimCommand = fixture.commands.find(
+        (command) => command.name === "legion-claim-controller"
+      );
+      if (claimCommand === undefined)
+        throw new Error("controller claim command was not registered");
+
+      await expect(claimCommand.handler("", sessionContext("ses_interactive"))).rejects.toThrow(
+        `needs @sjawhar/pi-envoy at interface version ${ENVOY_PLUGIN_INTERFACE_VERSION}, found none`
+      );
+
+      expect(exits).toEqual([]);
+      expect(requests).toEqual([]);
+    });
   });
   test("a claim registers, claims its Envoy role, and reports ready through the claim routes alone", async () => {
     const pane = await bootPane({ role: "tester", sessionId: "ses_worker" });
@@ -3066,7 +3217,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     );
     // A later `legion controller start`: a second session registers and takes the role. It is
     // another process, so this one's record of the session it bootstrapped does not apply to it.
-    resetLegionBootstrappedSessionForTests();
+    envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
     await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
@@ -3099,7 +3250,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     });
     await first.handlers.get("session_start")?.({}, first.context("ses_controller_first"));
     // A later `legion controller start` takes the role, in another process.
-    resetLegionBootstrappedSessionForTests();
+    envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
     await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
@@ -3107,7 +3258,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     // The first session's process died, and the session is resumed within the listener's reap
     // window: its transcript records the role claim, which the listener now refuses it.
-    resetLegionBootstrappedSessionForTests();
+    envoyPluginInterface().bootstrappedSession.file = undefined;
     // Only the resumed instance connects from here on; the first instance's connections came
     // before this point.
     const connectionsBeforeResume = natsConnections.length;
@@ -3184,7 +3335,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await reconnecting.promise;
     // While the subscription waits, a later `legion controller start` takes the role, and the
     // first session's heartbeat is refused.
-    resetLegionBootstrappedSessionForTests();
+    envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
     await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
@@ -3240,7 +3391,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       await reconnecting.promise;
       // Meanwhile a later `legion controller start` takes the role, and the first session's
       // heartbeat is refused.
-      resetLegionBootstrappedSessionForTests();
+      envoyPluginInterface().bootstrappedSession.file = undefined;
       const second = createPi();
       legionExtension(second.pi);
       await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
@@ -3316,7 +3467,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       await reconnecting.promise;
       // A later `legion controller start` takes the role, and the heartbeat is refused while the
       // reconnect is in flight.
-      resetLegionBootstrappedSessionForTests();
+      envoyPluginInterface().bootstrappedSession.file = undefined;
       const second = createPi();
       legionExtension(second.pi);
       await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
@@ -3359,7 +3510,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
       // The replaced session is resumed in a new process: nothing in the registry brings the
       // topic back.
-      resetLegionBootstrappedSessionForTests();
+      envoyPluginInterface().bootstrappedSession.file = undefined;
       const connectionsBeforeResume = natsConnections.length;
       const resumed = createPi();
       legionExtension(resumed.pi);

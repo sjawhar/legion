@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { HANDOFF_PHASES } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
-import type { PiZod, ToolResult } from "../pi-types";
+import type { PiZod, ToolResult } from "@legion/pi-shared/pi-types";
 import { requiredEnvironment } from "./classify";
 import { writeMintedGrant } from "./grant-file";
 
