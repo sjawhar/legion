@@ -121,7 +121,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record, err := r.recordFor(generation)
+		record, err := r.recordFor(claim.RoleTester, generation)
 		if err != nil {
 			t.Fatal(err)
 		}

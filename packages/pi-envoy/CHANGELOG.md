@@ -60,7 +60,7 @@
   and architect skills and the headless worker prompt say so, in place of the phase-end suspension
   LEGION-223's entry below describes.
 - `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
-  pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
+  pod, whose agent's environment carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
   release registers it with the launch's boot token, where an earlier one reads it as the
   operator's controller and never registers. Install this release with a Go `legion` built from
   the same commit; the daemon's image probe refuses a worker image whose plugin declares 13.

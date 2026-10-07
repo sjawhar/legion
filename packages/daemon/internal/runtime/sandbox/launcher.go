@@ -281,8 +281,10 @@ func (d *launchers) stop(ctx context.Context, token claim.Token, podUID string, 
 	return nil
 }
 
+// bindLauncherSecrets binds each launcher role's Secret of the pod l launches to the new pod's uid,
+// so only that pod's launchers authenticate with it.
 func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch, uid string) error {
-	for _, role := range claim.Roles {
+	for _, role := range l.roles {
 		name := roleSecretName(s.Name, role)
 		updating, cancel := call(ctx)
 		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(updating, name, metav1.GetOptions{})
@@ -308,11 +310,12 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 	return nil
 }
 
-// launcherBound reports whether pod is an issue pod whose role launchers this runtime bound: every
-// role Secret's pod-UID binding names it. A running pod an older runtime made (one worker container,
-// no launchers) or one whose binding never landed is replaced rather than trusted.
-func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod) bool {
-	for _, role := range claim.Roles {
+// launcherBound reports whether pod is one whose launchers this runtime bound: the Secret of every
+// role of roles, the pod's launcher roles, binds it by uid. A running pod an older runtime made
+// (one worker container, no launchers) or one whose binding never landed is replaced rather than
+// trusted.
+func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) bool {
+	for _, role := range roles {
 		reading, cancel := call(ctx)
 		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(reading, roleSecretName(s.Name, role), metav1.GetOptions{})
 		cancel()
@@ -329,7 +332,7 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	if r.mountsProviders() {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
-	if r.agentSecrets != nil {
+	if broker := r.enrolledWith(l.spec.Role); broker != nil {
 		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile, "--agent-secrets-bin", r.tools.AgentSecrets)
 	}
 	_, values := r.launchEnvironment(l)

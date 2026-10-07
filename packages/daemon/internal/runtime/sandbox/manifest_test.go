@@ -47,11 +47,12 @@ const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smok
 
 // manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
 // placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
-// whose workspace is recovered after its volume was lost; and the root enrolled with the secrets
-// broker. colocate is whether another pod of the tree is scheduled when the launch runs, and
-// agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
-// (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
-// building that case's manifest, and restore nil after — every other case runs unenrolled).
+// whose workspace is recovered after its volume was lost; the root enrolled with the secrets
+// broker; and the project controller's one-role pod, launched fresh and resuming. colocate is
+// whether another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
+// root-enrolled alone, is the runtime's enrollment for that one case (TestManifestGoldens,
+// TestManifestMatchesTheSandboxCRD apply it to the shared runtime before building that case's
+// manifest, and restore nil after — every other case runs unenrolled).
 func manifestCases(t *testing.T) map[string]struct {
 	spec         runtime.SpawnSpec
 	colocate     bool
@@ -61,6 +62,9 @@ func manifestCases(t *testing.T) map[string]struct {
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
 	recovered := workerSpec(t)
 	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
+	controllerResume := controllerSpec(t)
+	controllerResume.Generation, controllerResume.BootToken = 2, "boot-g2"
+	controllerResume.ResumeSessionFile = controllerSession
 	return map[string]struct {
 		spec         runtime.SpawnSpec
 		colocate     bool
@@ -71,6 +75,8 @@ func manifestCases(t *testing.T) map[string]struct {
 		"worker-no-affinity": {workerSpec(t), false, nil},
 		"resume":             {resume, true, nil},
 		"recovered":          {recovered, true, nil},
+		"controller":         {controllerSpec(t), false, nil},
+		"controller-resume":  {controllerResume, false, nil},
 		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
 			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
@@ -463,7 +469,8 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
 // in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
 // nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
-// Secret, the worker's container included.
+// Secret, the worker's container included; the controller's pod has no workspace-fetch, so none of
+// its containers reaches the token at all.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -519,6 +526,12 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 				if holds := c.Name == fetchContainer; (len(routes) > 0) != holds || pointed != holds {
 					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
 				}
+			}
+			if l.controller {
+				if slices.ContainsFunc(containers, func(c corev1.Container) bool { return c.Name == fetchContainer }) {
+					t.Errorf("the controller's pod runs %s", fetchContainer)
+				}
+				return
 			}
 			fetch := containerNamed(t, pod, fetchContainer)
 			for _, mount := range fetch.VolumeMounts {
@@ -581,24 +594,6 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 	}
 }
 
-// The project controller's launch (`controller: daemon`) is a valid spec — on the controller role,
-// with no issue, tree or repository — that this runtime refuses by name: an issue pod's launchers are
-// its issue's workflow roles, and a claim on no issue has no issue pod.
-func TestTheControllersLaunchIsRefused(t *testing.T) {
-	r, err := configure(testOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := testSpec(t, claim.ControllerToken(testProject), claim.RoleController, "")
-	spec.Tree, spec.Env, spec.Repository = "", map[string]string{}, ghrepo.Repository{}
-	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
-		t.Fatalf("the controller's spec is refused by the shared check (%v); this test is about the runtime's own refusal", err)
-	}
-	if _, err := r.prepare(spec); err == nil || !strings.Contains(err.Error(), "no pod for the project controller") {
-		t.Fatalf("prepare the controller's launch: %v, want the runtime's refusal", err)
-	}
-}
-
 // New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
 // does not choose.
@@ -628,10 +623,11 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// runtimeOwned is exactly what the worker container is told by the runtime itself: every name
-// mainEnvironment sets with Env empty and no secret of the spec's, every optional value configured.
-// A name added to the environment and not to runtimeOwned is one a spec could override; a name left
-// in runtimeOwned that the environment no longer sets is one a spec is refused for nothing.
+// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's
+// and the controller's together: every name mainEnvironment sets with Env empty and no secret of the
+// spec's, every optional value configured. A name added to the environment and not to runtimeOwned
+// is one a spec could override; a name left in runtimeOwned that the environment no longer sets is
+// one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -640,11 +636,12 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := workerSpec(t)
-	spec.Env, spec.Secrets = nil, nil
 	told := map[string]bool{}
-	for name := range envOf(workerOf(t, r, spec, false)) {
-		told[name] = true
+	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+		spec.Env, spec.Secrets = nil, nil
+		for name := range envOf(workerOf(t, r, spec, false)) {
+			told[name] = true
+		}
 	}
 	if !maps.Equal(told, runtimeOwned) {
 		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
@@ -653,11 +650,12 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 }
 
 // handedAddresses is exactly the addresses a role process launched now carries, every optional
-// address configured: each address-valued argument of every role launcher's command and of the
+// address configured: each address-valued argument of every launcher's command and of the
 // generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
 // variable the runtime itself sets in the generation's environment, an address being a value with a
 // scheme. An address added to a launch and not to handedAddresses is one the daemon could move
-// without any role it re-adopts being relaunched (evaluate).
+// without any role it re-adopts being relaunched (evaluate). A workflow role and the controller,
+// which never enrolls with the secrets broker, are each held to their own list.
 func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
@@ -666,35 +664,40 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := workerSpec(t)
-	l, err := r.prepare(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := launcherCommand(l, r)
-	carried := map[string]string{}
-	words := [][]string{start.Argv[:slices.Index(start.Argv, "--")]}
-	for _, c := range podOf(t, r, spec, false).Containers {
-		words = append(words, c.Command)
-	}
-	for _, command := range words {
-		for i := 1; i < len(command); i++ {
-			if strings.Contains(command[i], "://") {
-				carried[command[i-1]] = command[i]
+	for name, spec := range map[string]runtime.SpawnSpec{"a workflow role": workerSpec(t), "the controller": controllerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			l, err := r.prepare(spec)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-	}
-	for _, pair := range start.Env {
-		if name, value, _ := strings.Cut(pair, "="); runtimeOwned[name] && strings.Contains(value, "://") {
-			carried[name] = value
-		}
-	}
-	handed := map[string]string{}
-	for _, a := range r.handedAddresses() {
-		handed[a.name] = a.value
-	}
-	if !maps.Equal(carried, handed) {
-		t.Errorf("a role launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+			start := launcherCommand(l, r)
+			carried := map[string]string{}
+			words := [][]string{start.Argv[:slices.Index(start.Argv, "--")]}
+			for _, c := range podOf(t, r, spec, false).Containers {
+				words = append(words, c.Command)
+			}
+			for _, command := range words {
+				for i := 1; i < len(command); i++ {
+					if strings.Contains(command[i], "://") {
+						carried[command[i-1]] = command[i]
+					}
+				}
+			}
+			for _, pair := range start.Env {
+				if name, value, _ := strings.Cut(pair, "="); runtimeOwned[name] && strings.Contains(value, "://") {
+					carried[name] = value
+				}
+			}
+			handed := map[string]string{}
+			for _, a := range r.handedAddresses(spec.Role) {
+				if a.value != "" {
+					handed[a.name] = a.value
+				}
+			}
+			if !maps.Equal(carried, handed) {
+				t.Errorf("a role launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+			}
+		})
 	}
 }
 

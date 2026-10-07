@@ -21,7 +21,7 @@ func (r *Runtime) SuspendIssue(ctx context.Context, issue, tree string, authoriz
 	if err != nil {
 		return fmt.Errorf("suspend issue %s: %w", issue, err)
 	}
-	release, err := r.lockIssue(ctx, issue)
+	release, err := r.lockPod(ctx, issue)
 	if err != nil {
 		return err
 	}

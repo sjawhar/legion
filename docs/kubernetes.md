@@ -456,12 +456,17 @@ with one of its own tree. A Sandbox of the old tree that still runs roles is not
 launch is refused until they stop.
 
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
-that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
-layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
-claim that still records such a Sandbox. The daemon runs on a host
-its pods can reach and serves the worker stream they dial. The controller is
-`legion controller start` on the operator's machine, or, under `controller: daemon`, a pod the
-daemon launches ([The controller](#the-controller)).
+that Agent Sandbox is installed and refuses a namespace that holds a Sandbox of its project whose pod
+is not exactly the launchers its labels name — six for an issue's (`legion.dev/issue`), the
+controller's alone for the project controller's (`legion.dev/role=controller` with no tree) — naming
+it. That catches a per-claim Sandbox of the layout before issue pods and the controller Sandbox a
+`controller: daemon` daemon made before the controller ran in a launcher pod (`role=controller`, one
+`worker` container): remove either before enabling issue pods. Once the store opens and before it
+migrates, it refuses a claim that still records a Sandbox locator of the layout before issue pods
+(no pod uid, container or generation), that earlier controller's claim included. The daemon runs on
+a host its pods can reach and serves the worker stream they dial. The controller is `legion
+controller start` on the operator's machine, or, under `controller: daemon`, a pod of its own with
+one launcher that the daemon launches ([The controller](#the-controller)).
 
 ### Configuration
 
@@ -739,19 +744,26 @@ Every pod runs:
 - on the Legion pool, with its node selector and toleration;
 - annotated `karpenter.sh/do-not-disrupt: "true"`.
 
+The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
+same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
+no tree or issue label, one init container (`workspace-init controller`) and one launcher container,
+`controller` ([Daemon-launched controller](#daemon-launched-controller)).
+
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
 `shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
 
 ### A pod whose address moved
 
 A role process's addresses are fixed when it is launched, and nothing changes a running process's
-argv or environment. The daemon hands every role process six from its configuration. The worker
-stream listener, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in every
-role container's launcher command (item 3 of the anatomy list above), so it is fixed for the issue
-pod's life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
+argv or environment. The daemon hands every role process six from its configuration, and the
+daemon-launched controller, which never enrolls with the secrets broker, every one but
+`AGENT_SECRETS_URL`, which it is compared without. The
+worker stream listener, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in
+every launcher container's command (item 3 of the anatomy list above), so it is fixed for the pod's
+life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
 My Pi in the start command its launcher receives, never in the pod spec, so they are fixed for that
 generation's life: `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL`
-(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and `AGENT_SECRETS_URL`
+(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and, for a workflow role, `AGENT_SECRETS_URL`
 (`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts with its key changed,
 and with no `advertise_host` set the stream also moves when the daemon restarts on another host. A
 daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
@@ -796,7 +808,8 @@ The supervisor relaunches each reported claim at once, through the launch path a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
 replaces follows from what moved. An issue pod whose launchers dial a stale stream is not healthy,
 so the first of its roles relaunched replaces the pod, under the issue's lock, and the issue's other
-roles resume into the new pod, whose six launchers dial the current stream. A role whose
+roles resume into the new pod, whose six launchers dial the current stream; the controller's pod,
+whose one launcher dials a stale stream, is replaced the same way at its relaunch. A role whose
 environment alone moved starts its next generation in the same pod, handed the current addresses,
 and the pod and its other roles are left as they are. The stale observation is never charged, since
 the process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
@@ -828,11 +841,11 @@ The clone is only on the tree volume, so the commands run in a pod that mounts i
 operator's context: the daemon's identity creates no pod and has no exec
 ([RBAC](#rbac-the-go-daemon-needs)).
 
-**A pod of the tree is running.** Its `worker` container mounts the volume at `/legion`:
+**A pod of the tree is running.** Each of its role containers mounts the volume at `/legion`:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/tree=<KEY> --field-selector=status.phase=Running
-kubectl -n legion exec -it <pod> -c worker -- sh
+kubectl -n legion exec -it <pod> -c architect -- sh
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```
 
@@ -1633,8 +1646,9 @@ at each retry that fails again up to thirty minutes, and resetting it once the c
 `legion claims list` shows the claim; the workflow never sees it.
 
 **The credential.** The daemon mints the controller's credential at every launch: the launch's
-boot token, which it writes into the pod's own Secret, as for every pod. The pod's pi-envoy
-extension sees `LEGION_BOOT_TOKEN_FILE` beside `LEGION_CONTROLLER=1` and registers on
+boot token, which reaches the pod's launcher in the daemon's authenticated start command and which
+the launcher writes owner-only into that generation's private directory, as for every role. The
+session's pi-envoy extension sees `LEGION_BOOT_TOKEN_FILE` beside `LEGION_CONTROLLER=1` and registers on
 `POST /legion/v1/claims/register` with that token. The daemon records the registration on the claim
 and records the session as the project's controller, under a fresh capability nobody holds (never
 the boot token), which ends every earlier controller grant; the answer is the operator's
@@ -1650,18 +1664,27 @@ generation fence. `/legion-claim-controller` registers the boot token only in th
 session (`LEGION_CONTROLLER=1`); in a root architect's or phase worker's session it needs the
 operator's capability like any other takeover, and stops before any daemon call without one.
 
-**The pod.** Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace`, on the
-Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.pod`) and the providers
-Secret, so it reaches models by the route every worker does, and the pod baseline
-(`--pod-safety`). Its Sandbox owns a volume of its own (`tree-legion-<project>-controller`, of
+**The pod.** Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace` runs the pod an
+issue's Sandbox runs ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) with a one-role list,
+on the Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.pod`) and the
+providers Secret, so it reaches models by the route every worker does. Its one container,
+`controller`, runs `legion launcher --role controller`: it authenticates to the worker stream with
+its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on
+the pod baseline (`--pod-safety`), on the daemon's command, as an issue pod's role containers do
+theirs, so a relaunch in a healthy pod is a new generation of that child rather than a new pod. Its
+role Secret, `legion-<project>-controller-controller-boot`, holds that launcher's token alone, bound
+to the pod's uid, and is the only Secret its launch writes: there is no provisioning `-boot` Secret.
+Its Sandbox owns a volume of its own (`tree-legion-<project>-controller`, of
 `runtime.kubernetes.tree_volume` and `storage_class`), mounted at `/legion` with its `sessions`
 directory at Oh My Pi's sessions directory, so a relaunch resumes the session. It provisions no
 workspace and holds no repository credential: no `workspace-fetch`, no provisioning token, no gh
 shim. Its one init container, `legion workspace-init controller --root /legion`, makes the
-sessions directory; on a resume whose session file is gone it exits 3, which the daemon reads as a
-lost volume and answers with a fresh controller. The pod carries the project and role labels and no
-tree or issue label, so no tree pod's anti-affinity counts it as another tree's, and it is never
-enrolled with the secrets broker. It has no affinity of its own, so it lands on any Legion node,
+sessions directory; in a pod created to resume a session whose file is gone it exits 3, which the
+daemon reads as a lost volume and answers with a fresh controller. The pod carries
+`legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no tree pod's
+anti-affinity counts it as another tree's, and the boot census holds it to exactly the one launcher
+those labels name. It is never enrolled with the secrets broker: it has no agent-secrets volume,
+shim flag or `AGENT_SECRETS_URL`. It has no affinity of its own, so it lands on any Legion node,
 and like every Legion pod it is annotated `karpenter.sh/do-not-disrupt: "true"`: Karpenter never
 consolidates or replaces for drift the node it runs on while it runs, which is as long as the
 daemon keeps it, though tree pods can still be scheduled onto that node. Its agent is told
@@ -1669,14 +1692,23 @@ daemon keeps it, though tree pods can still be scheduled onto that node. Its age
 NATS and Dispatch settings and the launch secrets' `<NAME>_FILE` pointers, and nothing of a tree,
 an issue or a checkout. Its system prompt is the controller's role prompt, a part saying it runs
 headless in a pod, the daemon's `Design gate policy:` line and the deployment instructions. Both
-its containers carry `runtime.kubernetes.resources.controller`, the key a workflow role's pod is
-sized by; with none set the pod is BestEffort, the class the kubelet evicts first under node memory
-pressure, and each eviction is a relaunch whose ready costs the controller a start-procedure turn,
-so size it.
+its containers, the init container and the launcher, carry `runtime.kubernetes.resources.controller`,
+the key a workflow role's pod is sized by; with none set the pod is BestEffort, the class the
+kubelet evicts first under node memory pressure, and each eviction is a relaunch whose ready costs
+the controller a start-procedure turn, so size it.
+
+The Sandbox is the claim's alone, where an issue's is its tree's. A release of the claim (a switch
+back, or `legion claims stop`) deletes it, and its role Secret and volume with it. The orphan sweep
+keeps it while the daemon knows the claim, running or suspended, so a suspended controller's
+session survives, and deletes it once the claim is retired. The controller Sandbox a daemon made
+before the controller ran in a launcher pod (`role=controller`, one `worker` container) is refused
+at boot like every Sandbox of the layout before issue pods, naming it: remove it before enabling
+issue pods.
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its
-session with `kubectl -n <namespace> logs` on the pod or its transcript on the volume. Wakes reach
+session with `kubectl -n <namespace> logs legion-<project>-controller -c controller` (its launcher's
+log, which carries the shim's and Oh My Pi's) or its transcript on the volume. Wakes reach
 it as they reach the operator's controller: it subscribes to
 `notifications.legion.<project>.controller` once it holds the role.
 

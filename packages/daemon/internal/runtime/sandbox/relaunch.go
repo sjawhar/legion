@@ -44,15 +44,16 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 	return r.relaunch(ctx, prev, spec)
 }
 
-// relaunch ensures the issue pod once, then starts only this role's worker-shim through its
-// authenticated launcher. An existing healthy issue pod is never suspended or reinitialized when
-// another role starts or one role recovers; a pod whose launchers dial a stream other than the one
-// a pod created now is handed is not healthy, since they never redial (dialsStaleStream), so the
-// first role relaunched after the stream moved replaces it, and its siblings resume into the new
-// pod. Before each start the Sandbox records the addresses the generation is handed
-// (recordAddresses). The claim passed its tree's lifecycle check before the call (supervise's
-// checkLaunch), so the tree's cleanup, which waits for every claim of the tree to retire, lists
-// whatever Sandbox this creates.
+// relaunch ensures the claim's pod once, then starts only this role's worker-shim through its
+// authenticated launcher. An existing healthy pod is never suspended or reinitialized when another
+// role starts or one role recovers; a pod whose launchers dial a stream other than the one a pod
+// created now is handed is not healthy, since they never redial (dialsStaleStream), so the first
+// role relaunched after the stream moved replaces it, and its siblings resume into the new pod.
+// Before each start the Sandbox records the addresses the generation is handed (recordAddresses).
+// A workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so
+// the tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox
+// this creates. The project controller's pod belongs to no tree: it takes no tree turn, waits for
+// no sibling's init, and mints no provisioning token.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -62,9 +63,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
 	}
 	r.forget(spec.Claim)
-	release, err := r.lockIssue(ctx, spec.Issue)
+	release, err := r.lockPod(ctx, l.turn)
 	if err != nil {
-		return fail("take its issue pod launch turn", err)
+		return fail("take its pod's launch turn", err)
 	}
 	defer release()
 	s, err := r.ensureSandbox(ctx, l)
@@ -73,7 +74,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
-	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || r.dialsStaleStream(pod) || !r.launcherBound(ctx, s, pod) {
+	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || r.dialsStaleStream(pod) || !r.launcherBound(ctx, s, pod, l.roles) {
 		if s.mode() != modeSuspended {
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
@@ -83,59 +84,62 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err != nil {
 			return fail("wait out its previous pod", err)
 		}
-		treeRelease, err := r.lockTree(ctx, l.spec.Tree)
-		if err != nil {
-			return fail("take its tree's launch turn", err)
-		}
-		defer treeRelease()
-		if err := r.awaitTreeInitialized(ctx, l); err != nil {
-			return fail("wait for its tree's other pods to finish initializing", err)
-		}
-		if !l.expectTreeVolume && spec.WorkspaceRecoveredFrom == "" {
-			l.expectTreeVolume, err = r.store.TreeHasSessions(ctx, r.project, spec.Tree)
+		var provisionToken string
+		if !l.controller {
+			treeRelease, err := r.lockTree(ctx, l.spec.Tree)
 			if err != nil {
-				return fail("read its tree's retained sessions", err)
+				return fail("take its tree's launch turn", err)
 			}
-		}
-		if r.removable != nil {
-			// Computed now, under the tree's launch turn, after every other pod of the tree has
-			// finished initializing: the latest moment before this pod's own manifest is written, so
-			// a sibling that became live in the time this launch spent waiting is not judged by a
-			// list that was already stale when this launch started (dispatch://LEGION-583). Only a
-			// launch that creates the issue pod reaches here: a role started in a running issue pod
-			// runs no init container, so it has no list to carry. That guarantee is this relaunch's
-			// own, though: a pod the Sandbox controller recreates on its own (eviction, node drain,
-			// a hand deletion) runs workspace-init from this same pod template, list included,
-			// without ever passing through here again. workspace-init closes that case itself: it
-			// refuses to act on this list unless its own fetch (fetchStartedFile) started no later
-			// than the notAfter stamped below, this launch's time plus initWaitSeconds
-			// (workspace_init.go's own removableWorkspacesEnv doc comment), since a recreated pod's
-			// fetch starts hours later, whatever its own clone then takes.
-			//
-			// removableWorkspaces states the candidate rule from the daemon's own claim store;
-			// withoutLiveTreePods below checks the pod itself, a second guarantee on different
-			// evidence: it cannot tell a claim whose fail persisted StateFailed despite its own
-			// suspendProcess erroring from one truly gone, so a candidate can still have a live,
-			// non-terminal pod of this tree right now.
-			candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
+			defer treeRelease()
+			if err := r.awaitTreeInitialized(ctx, l); err != nil {
+				return fail("wait for its tree's other pods to finish initializing", err)
+			}
+			if !l.expectTreeVolume && spec.WorkspaceRecoveredFrom == "" {
+				l.expectTreeVolume, err = r.store.TreeHasSessions(ctx, r.project, spec.Tree)
+				if err != nil {
+					return fail("read its tree's retained sessions", err)
+				}
+			}
+			if r.removable != nil {
+				// Computed now, under the tree's launch turn, after every other pod of the tree has
+				// finished initializing: the latest moment before this pod's own manifest is written,
+				// so a sibling that became live in the time this launch spent waiting is not judged by
+				// a list that was already stale when this launch started (dispatch://LEGION-583). Only
+				// a launch that creates the issue pod reaches here: a role started in a running issue
+				// pod runs no init container, so it has no list to carry. That guarantee is this
+				// relaunch's own, though: a pod the Sandbox controller recreates on its own (eviction,
+				// node drain, a hand deletion) runs workspace-init from this same pod template, list
+				// included, without ever passing through here again. workspace-init closes that case
+				// itself: it refuses to act on this list unless its own fetch (fetchStartedFile)
+				// started no later than the notAfter stamped below, this launch's time plus
+				// initWaitSeconds (workspace_init.go's own removableWorkspacesEnv doc comment), since a
+				// recreated pod's fetch starts hours later, whatever its own clone then takes.
+				//
+				// removableWorkspaces states the candidate rule from the daemon's own claim store;
+				// withoutLiveTreePods below checks the pod itself, a second guarantee on different
+				// evidence: it cannot tell a claim whose fail persisted StateFailed despite its own
+				// suspendProcess erroring from one truly gone, so a candidate can still have a live,
+				// non-terminal pod of this tree right now.
+				candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
+				if err != nil {
+					return fail("compute its tree's removable workspaces", err)
+				}
+				notAfter := r.now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
+				if err := l.setRemovable(r.withoutLiveTreePods(l, candidates), notAfter); err != nil {
+					return fail("build its removable-workspaces list", err)
+				}
+			}
+			minting, cancel := call(ctx)
+			provisionToken, err = r.tokens.Token(minting, l.spec.Repository.Owner())
+			cancel()
 			if err != nil {
-				return fail("compute its tree's removable workspaces", err)
+				return fail("mint the provisioning token for "+l.spec.Repository.Owner(), err)
 			}
-			notAfter := r.now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
-			if err := l.setRemovable(r.withoutLiveTreePods(l, candidates), notAfter); err != nil {
-				return fail("build its removable-workspaces list", err)
-			}
-		}
-		minting, cancel := call(ctx)
-		provisionToken, err := r.tokens.Token(minting, l.spec.Repository.Owner())
-		cancel()
-		if err != nil {
-			return fail("mint the provisioning token for "+l.spec.Repository.Owner(), err)
 		}
 		if err := r.writeSecret(ctx, s, l, provisionToken); err != nil {
 			return fail("write its secret", err)
 		}
-		template := r.podTemplate(l, r.treePodScheduled(l))
+		template := r.podTemplate(l, !l.controller && r.treePodScheduled(l))
 		running, err := r.patch(ctx, s,
 			jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 			jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
@@ -377,19 +381,22 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 	return detail + "; it has no pod"
 }
 
-// writeSecret makes the issue's init-only provisioning Secret and, for each of the six fixed
-// launchers, a role-private Secret holding a fresh launcher token. It runs only before a new issue
-// pod starts, so every pod's launchers authenticate with tokens no earlier pod held; a role's
-// launch credentials travel in its launcher's start command instead (launcherCommand).
+// writeSecret makes an issue pod's init-only provisioning Secret and, for each launcher role of the
+// pod (l.roles), a role-private Secret holding a fresh launcher token. It runs only before a new pod
+// starts, so every pod's launchers authenticate with tokens no earlier pod held; a role's launch
+// credentials travel in its launcher's start command instead (launcherCommand). The controller's
+// pod provisions nothing, so it has no provisioning Secret, only its one role's.
 func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisionToken string) error {
-	if err := r.upsertSecret(ctx, corev1.Secret{
-		ObjectMeta: r.secretMeta(s, l, secretName(s.Name)),
-		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{provisionTokenKey: []byte(provisionToken)},
-	}); err != nil {
-		return err
+	if !l.controller {
+		if err := r.upsertSecret(ctx, corev1.Secret{
+			ObjectMeta: r.secretMeta(s, l, secretName(s.Name)),
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{provisionTokenKey: []byte(provisionToken)},
+		}); err != nil {
+			return err
+		}
 	}
-	for _, role := range claim.Roles {
+	for _, role := range l.roles {
 		token, err := launcherToken()
 		if err != nil {
 			return err
@@ -405,13 +412,20 @@ func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisi
 	return nil
 }
 
+// secretMeta is a pod's Secret's metadata: the pod's labels, the Sandbox as owner, and for an issue
+// pod the exact issue key (annotationIssue), from which the launcher resolver derives a role's
+// claim token; the controller's token needs none.
 func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMeta {
-	return metav1.ObjectMeta{
-		Name: name, Namespace: r.namespace, Labels: r.labels(l.spec), Annotations: map[string]string{annotationIssue: l.spec.Issue},
+	meta := metav1.ObjectMeta{
+		Name: name, Namespace: r.namespace, Labels: r.labels(l.spec),
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox", Name: s.Name, UID: s.UID,
 		}},
 	}
+	if !l.controller {
+		meta.Annotations = map[string]string{annotationIssue: l.spec.Issue}
+	}
+	return meta
 }
 
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
@@ -518,11 +532,12 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	return r.takeTurn(ctx, r.trees, tree)
 }
 
-// lockIssue serializes first creation, replacement, suspension and orphan deletion of one issue
-// pod. Role starts in a healthy pod share this lock only while they select a launcher command;
-// child issue pods remain distinct.
-func (r *Runtime) lockIssue(ctx context.Context, issue string) (func(), error) {
-	return r.takeTurn(ctx, r.issues, issue)
+// lockPod serializes first creation, replacement, suspension and orphan deletion of one pod, keyed
+// by turn: an issue pod's issue key, or the project controller's Sandbox name, which no issue key
+// can be (launch.turn). Role starts in a healthy pod share this lock only while they select a
+// launcher command; child issue pods remain distinct.
+func (r *Runtime) lockPod(ctx context.Context, turn string) (func(), error) {
+	return r.takeTurn(ctx, r.issues, turn)
 }
 
 // takeTurn waits for key's turn in turns, a map r.mu guards, until ctx ends; the returned func

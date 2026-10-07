@@ -77,3 +77,17 @@ func (t Token) Cut() (issue string, role Role, ok bool) {
 // ControllerToken is the project controller's role token, `legion-<project>-controller`
 // (legion-roles.ts:66-69). project is already a ProjectToken.
 func ControllerToken(project string) Token { return Token("legion-" + project + "-controller") }
+
+// Role is the role t names: the workflow role it ends in (Cut), or RoleController for the
+// project controller's token (ControllerToken); ok is false for a token that is neither.
+func (t Token) Role() (role Role, ok bool) {
+	if _, role, ok := t.Cut(); ok {
+		return role, true
+	}
+	project, prefixed := strings.CutPrefix(string(t), "legion-")
+	project, suffixed := strings.CutSuffix(project, "-"+string(RoleController))
+	if prefixed && suffixed && projectToken.MatchString(project) {
+		return RoleController, true
+	}
+	return "", false
+}

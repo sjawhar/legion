@@ -43,9 +43,11 @@ type TmuxLocator struct {
 	Pane   string `json:"pane"`
 }
 
-// SandboxLocator identifies one role process in an issue's Agent Sandbox. The pod UID, container
-// and generation are required because all six role launchers share one Sandbox and pod. A process
-// incarnation is `PodUID/Generation`, rather than a pod UID alone.
+// SandboxLocator identifies one role process in an Agent Sandbox: an issue's, whose six role
+// launchers share one Sandbox and pod, or the project controller's, whose pod runs the controller's
+// launcher alone. The pod UID, container (the claim's role) and generation are required because a
+// pod's launchers start one generation after another. A process incarnation is
+// `PodUID/Generation`, rather than a pod UID alone.
 type SandboxLocator struct {
 	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`
@@ -107,7 +109,7 @@ func (l Locator) Validate() error {
 		if want := SandboxIncarnation(l.Sandbox.PodUID, l.Sandbox.Generation); l.Incarnation != want {
 			return fmt.Errorf("locator %s: sandbox incarnation %q, want %q from pod UID and generation", l.Claim, l.Incarnation, want)
 		}
-		_, role, ok := l.Claim.Cut()
+		role, ok := l.Claim.Role()
 		if !ok || l.Sandbox.Container != string(role) {
 			return fmt.Errorf("locator %s: sandbox container %q does not match claim role", l.Claim, l.Sandbox.Container)
 		}

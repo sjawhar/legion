@@ -167,8 +167,11 @@ close an admitted root tree (a root architect only), and read records; phase wor
 backward move and read records. No `claims/exit` report runs at shutdown, because a
 daemon-requested suspend ends the session but keeps its claim for resumption.
 
-A daemon that sets `controller: daemon` launches the controller itself, as a pod with
-`LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE` (`controllerSession` in
+A daemon that sets `controller: daemon` launches the controller itself, in a Sandbox pod of its own
+whose one container, `controller`, runs `legion launcher` as an issue pod's role containers do: the
+launcher starts the session's shim and Oh My Pi with `LEGION_CONTROLLER=1` and
+`LEGION_BOOT_TOKEN_FILE`, the generation's boot token it wrote into its private directory from the
+daemon's start command (`controllerSession` in
 `src/legion/controller-session.ts`): the session registers on `claims/register` with that boot
 token in place of a capability, is answered with the same controller registration, claims the role,
 subscribes to the controller topic, and then calls `claims/ready`, which is when the daemon sends

@@ -488,7 +488,7 @@ func (g *rig) createPod(s *sandbox) {
 	}
 	if g.autoStart.Load() {
 		pod.Spec.NodeName = "ip-192-0-2-7"
-		pod.Status = runningStatus()
+		pod.Status = runningStatusOf(pod.Spec)
 	}
 	// A new pod's role launchers are new processes, bound to its exact UID. The runtime waits
 	// for their first state instead of treating the previous pod's connection as current.
@@ -506,16 +506,28 @@ func (g *rig) createPod(s *sandbox) {
 	}
 }
 
+// runningStatus is a Running issue pod's status: workspace-init done and every role launcher
+// running.
 func runningStatus() corev1.PodStatus {
+	containers := make([]corev1.Container, 0, len(claim.Roles))
+	for _, role := range claim.Roles {
+		containers = append(containers, corev1.Container{Name: string(role)})
+	}
+	return runningStatusOf(corev1.PodSpec{Containers: containers})
+}
+
+// runningStatusOf is the status of a pod of spec once Running: workspace-init done and each of its
+// containers running.
+func runningStatusOf(spec corev1.PodSpec) corev1.PodStatus {
 	status := corev1.PodStatus{
 		Phase: corev1.PodRunning,
 		InitContainerStatuses: []corev1.ContainerStatus{{
 			Name: initContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
 		}},
 	}
-	for _, role := range claim.Roles {
+	for _, c := range spec.Containers {
 		status.ContainerStatuses = append(status.ContainerStatuses, corev1.ContainerStatus{
-			Name: string(role), State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			Name: c.Name, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 		})
 	}
 	return status
@@ -737,9 +749,9 @@ func claimLabels(_ claim.Role) map[string]string {
 	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
 }
 
-// sandboxLocator is a recorded role process locator in one issue pod.
+// sandboxLocator is a recorded role process locator in its claim's pod.
 func sandboxLocator(token claim.Token, uid string) runtime.Locator {
-	_, role, ok := token.Cut()
+	role, ok := token.Role()
 	if !ok {
 		panic("test token has no role")
 	}

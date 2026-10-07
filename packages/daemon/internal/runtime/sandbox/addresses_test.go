@@ -39,7 +39,7 @@ func addressRuntime(t *testing.T, edit func(*Options)) *Runtime {
 func movedSince(t *testing.T, launched, now *Runtime) []string {
 	t.Helper()
 	pod := &corev1.Pod{Spec: podOf(t, launched, workerSpec(t), false)}
-	record, err := launched.recordFor(1)
+	record, err := launched.recordFor(claim.RoleTester, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestTheAddressRecordHoldsNoCredential(t *testing.T) {
 		o.DispatchURL = "https://legion:dispatch-password@dispatch.internal.example"
 		o.AgentSecrets.URL = "https://secrets.internal.example/?token=broker-query"
 	})
-	record, err := r.recordFor(7)
+	record, err := r.recordFor(claim.RoleTester, 7)
 	if err != nil {
 		t.Fatal(err)
 	}

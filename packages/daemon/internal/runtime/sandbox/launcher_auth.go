@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
+	"slices"
 	"sync"
 
 	"golang.org/x/sync/singleflight"
@@ -29,18 +30,20 @@ type launcherCredentials struct {
 	loads  singleflight.Group
 }
 
-// LauncherResolver rejects unknown pods from informer state before consulting credentials.
-// Tokens minted here are cached as hashes; after restart a known role's first read is single-flight,
-// so unauthenticated hellos cannot turn into an unbounded stream of Kubernetes requests.
+// LauncherResolver rejects unknown pods from informer state before consulting credentials: a
+// launcher's role must be one its pod's labels name (podRoles), a workflow role of an issue pod or
+// the controller of the project controller's. Tokens minted here are cached as hashes; after
+// restart a known role's first read is single-flight, so unauthenticated hellos cannot turn into
+// an unbounded stream of Kubernetes requests.
 func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 	return func(hello shimwire.LauncherHello) (stream.LauncherHandler, string) {
 		role := claim.Role(hello.Role)
-		if !claim.IsRole(role) {
-			return nil, "launcher role is not a Legion role"
-		}
 		view, err := r.view(hello.Sandbox)
-		if err != nil || view.sandbox == nil || view.pod == nil || string(view.pod.UID) != hello.PodUID || view.sandbox.Labels[labelIssue] == "" {
-			return nil, "launcher pod is not the current controller-owned issue pod"
+		if err != nil || view.sandbox == nil || view.pod == nil || string(view.pod.UID) != hello.PodUID {
+			return nil, "launcher pod is not the current controller-owned pod"
+		}
+		if roles, err := podRoles(view.sandbox.Labels); err != nil || !slices.Contains(roles, role) {
+			return nil, "launcher role is not one of its pod's roles"
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
 		defer cancel()
@@ -61,11 +64,14 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		// under either daemon), and go through it before naming a claim.
 		project, err := claim.ProjectToken(r.project)
 		if err != nil {
-			return nil, "launcher credential does not name this issue role"
+			return nil, "launcher credential does not name this pod's role"
 		}
-		token, err := claim.NewToken(project, credential.issue, role)
+		token := claim.ControllerToken(project)
+		if role != claim.RoleController {
+			token, err = claim.NewToken(project, credential.issue, role)
+		}
 		if err != nil || SandboxName(token) != hello.Sandbox {
-			return nil, "launcher credential does not name this issue role"
+			return nil, "launcher credential does not name this pod's role"
 		}
 		return r.launchers.accept(token, hello), ""
 	}
@@ -126,10 +132,13 @@ func (r *Runtime) cacheLauncherCredential(s *sandbox, secret *corev1.Secret) {
 	r.launcherAuth.values[secret.Name] = credentialFromSecret(s.UID, secret)
 }
 
+// forgetLauncherCredentials drops the cached credential of every launcher role of the Sandbox named
+// name, once that Sandbox is deleted: whichever roles its pod ran, no other Sandbox's Secret has a
+// name of its.
 func (r *Runtime) forgetLauncherCredentials(name string) {
 	r.launcherAuth.mu.Lock()
 	defer r.launcherAuth.mu.Unlock()
-	for _, role := range claim.Roles {
+	for _, role := range launcherRoles {
 		delete(r.launcherAuth.values, roleSecretName(name, role))
 	}
 }

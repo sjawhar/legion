@@ -253,7 +253,8 @@ same model access as the workers and a volume of its own for its session, relaun
 dies, and resumes the same session. You start nothing, and `legion controller start` against this
 daemon is refused: one controller runs per project. Nobody types into the pod: reach the controller
 through Dispatch (a message to its session on the Agents page, a reply to an ask it opened, a
-mention) and read its session with `kubectl logs` on its pod. `legion claims list` shows its claim.
+mention) and read its session with `kubectl logs <pod> -c controller`, its one container's log.
+`legion claims list` shows its claim.
 Size its pod under `runtime.kubernetes.resources.controller`: with no requests it is the first pod
 the kubelet evicts under memory pressure.
 To hand the controller back to a person, set `controller: operator`, drop
@@ -371,11 +372,12 @@ Closing the terminal leaves the project without one, and the daemon logs
   controller's daily report on the project's `Legion daily report` issue.
 - **The controller's terminal** is where the controller says what it did each turn. You can type to
   it at any time; a message from you is always handled first.
-- **The cluster** shows each agent as a Sandbox and a pod labelled with its tree, issue and role:
+- **The cluster** shows each issue as a Sandbox and a pod labelled with its tree and issue, with one
+  container per role:
 
   ```sh
   kubectl -n legion get sandboxes,pods -l legion.dev/tree=WIDGETS-12
-  kubectl -n legion logs <pod> -c worker            # the agent's shim and Oh My Pi
+  kubectl -n legion logs <pod> -c implementer       # that role's launcher, its shim and Oh My Pi
   kubectl -n legion logs <pod> -c workspace-init    # the workspace provisioning
   ```
 
