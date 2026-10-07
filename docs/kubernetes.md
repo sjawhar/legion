@@ -659,7 +659,9 @@ environment. The daemon hands every pod six from its configuration: the worker s
 shim's `--connect` names, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>` (item
 3 of the anatomy list above), and, in the worker's environment, `LEGION_DAEMON_URL` (`daemon_url`),
 `ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL` (`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and
-`AGENT_SECRETS_URL` (`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts
+`AGENT_SECRETS_URL` (`runtime.kubernetes.agent_secrets.url`). The controller's pod
+(`controller: daemon`) is never enrolled with the broker, so it is handed the first five and no
+`AGENT_SECRETS_URL`. Each moves when the daemon restarts
 with its key changed, and with no `advertise_host` set the stream also moves when the daemon
 restarts on another host. A daemon that restarts re-adopts each live claim's pod by its recorded
 locator (the boot orphan sweep), and re-adoption alone would leave that pod holding the old

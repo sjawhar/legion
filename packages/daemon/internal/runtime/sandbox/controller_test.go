@@ -139,6 +139,25 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	}
 }
 
+// A controller pod is never enrolled with the secrets broker, so under a runtime that enrolls every
+// worker pod it carries no AGENT_SECRETS_URL, and that is exactly what a controller pod launched
+// now is handed: holding none is no address that moved. Its pod probes Alive while the daemon's
+// addresses stay put, and a daemon restarted at the same addresses re-adopts it as it is, rather
+// than replacing it at every observation.
+func TestAControllerPodIsNotStaleForWantOfTheBrokersAddress(t *testing.T) {
+	broker := func(o *Options) {
+		o.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	}
+	g := newRig(t, nil, withOptions(broker))
+	loc := g.spawn(controllerSpec(t))
+	if obs, err := g.r.Probe(g.ctx, loc); err != nil || obs.Kind != runtime.Alive {
+		t.Fatalf("Probe the controller right after its launch: %+v, %v; want Alive", obs, err)
+	}
+	if obs := readopt(t, g.ctx, secondRuntime(t, g, broker), loc); obs.Kind != runtime.Alive {
+		t.Fatalf("a daemon restarted at the same addresses re-adopts the controller as %s (%s), want Alive", obs.Kind, obs.Detail)
+	}
+}
+
 // refusingTokens refuses every installation token, as a GitHub outage would.
 type refusingTokens struct{}
 

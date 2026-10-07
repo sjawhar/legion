@@ -802,11 +802,13 @@ type handedAddress struct{ name, value string }
 // handedAddresses are every address a pod launched now carries (podTemplate, mainEnvironment): the
 // worker stream listener the shim dials, then the daemon's API, NATS, Envoy, Dispatch and the
 // secrets broker as the agent's environment names them. A pod's are fixed at its creation, so a pod
-// a daemon launched under other addresses holds those until it is replaced (evaluate, row 9).
+// a daemon launched under other addresses holds those until it is replaced (evaluate, row 9). The
+// controller's pod (`controller: daemon`) is never enrolled with the broker, so it is handed no
+// broker address however the runtime is configured.
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
-func (r *Runtime) handedAddresses() []handedAddress {
+func (r *Runtime) handedAddresses(controller bool) []handedAddress {
 	broker := ""
-	if r.agentSecrets != nil {
+	if r.agentSecrets != nil && !controller {
 		broker = r.agentSecrets.URL
 	}
 	return []handedAddress{
