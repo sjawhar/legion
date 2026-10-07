@@ -523,17 +523,19 @@ func (s *Service) LiveCredentials(ctx context.Context, approver string) ([]LiveC
 // or not: from then on no launcher proof signed with it authenticates (AuthenticateLauncher), and
 // every enrollment it made that has not ended — a person's host sessions and boxes, or every pod a
 // service's login enrolled, which outlive the credential's expiry — is ended as Revoke ends one
-// (endEnrollment, actor "human:<approver>", an enrollment.revoked audit row), revoking each one's
-// grants and cancelling its pending requests, all in one transaction with one
-// launcher_credential.revoked audit row. approver must be the approver of the launcher_credential
-// record the credential was minted from (ErrNotApprover); an unknown id, like a credential minted
-// from no such record (which only ApplyDecision mints, always from one), is ErrNoCredential.
-// Revoking a credential already revoked succeeds and changes nothing. It takes the credential's
-// row before its enrollments' rows, so an enrollment Create is inserting under the credential
-// (which holds the row for share) commits first and is ended here, or waits and finds the
-// credential revoked; and it takes those enrollments' rows, so a launcher's own Revoke of one
+// (endEnrollment, an enrollment.revoked audit row), revoking each one's grants and cancelling its
+// pending requests, all in one transaction with one launcher_credential.revoked audit row. approver
+// must be the approver of the launcher_credential record the credential was minted from
+// (ErrNotApprover); an unknown id, like a credential minted from no such record (which only
+// ApplyDecision mints, always from one), is ErrNoCredential. actor is what every row it writes
+// records as having done it, which the caller proved: "human:<approver>" for a revoke Dispatch
+// relays from its signed-in person, "launcher:<credential id>" for one the person's own machine
+// login makes. Revoking a credential already revoked succeeds and changes nothing. It takes the
+// credential's row before its enrollments' rows, so an enrollment Create is inserting under the
+// credential (which holds the row for share) commits first and is ended here, or waits and finds
+// the credential revoked; and it takes those enrollments' rows, so a launcher's own Revoke of one
 // either commits first, leaving it out of the list here, or waits and finds it ended.
-func (s *Service) RevokeCredential(ctx context.Context, id, approver string) error {
+func (s *Service) RevokeCredential(ctx context.Context, id, approver, actor string) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -551,8 +553,7 @@ func (s *Service) RevokeCredential(ctx context.Context, id, approver string) err
 	if err != nil {
 		return err
 	}
-	person := record.CanonicalLogin(approver)
-	if approvedBy != person {
+	if approvedBy != record.CanonicalLogin(approver) {
 		return ErrNotApprover
 	}
 	if revokedAt != nil {
@@ -569,7 +570,6 @@ func (s *Service) RevokeCredential(ctx context.Context, id, approver string) err
 	if err != nil {
 		return err
 	}
-	actor := "human:" + person
 	for _, enrollment := range ended {
 		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", "its machine login was revoked"); err != nil {
 			return err

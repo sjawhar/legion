@@ -74,14 +74,21 @@ type launcherCredentialsResponse struct {
 	Credentials []launcherCredentialResp `json:"credentials"`
 }
 
-// listLauncherCredentials lists the machine logins the person ?approver= names approved, their own
-// machines' and any service's, that can still reach a secret: not revoked, and either unexpired or
-// expired with a session it enrolled still running (enroll.Service.LiveCredentials).
+// listLauncherCredentials lists the machine logins the person ?approver= names approved
+// (writeLauncherCredentials).
 func (s *server) listLauncherCredentials(w http.ResponseWriter, r *http.Request) {
 	approver := r.URL.Query().Get("approver")
 	if !requireApprover(w, approver) {
 		return
 	}
+	s.writeLauncherCredentials(w, r, approver)
+}
+
+// writeLauncherCredentials answers the machine logins approver approved, their own machines' and
+// any service's, that can still reach a secret: not revoked, and either unexpired or expired with a
+// session it enrolled still running (enroll.Service.LiveCredentials). Dispatch's machine-logins
+// page and the operator's own machine list both answer through it, so the two agree.
+func (s *server) writeLauncherCredentials(w http.ResponseWriter, r *http.Request, approver string) {
 	rows, err := s.deps.Enroll.LiveCredentials(r.Context(), approver)
 	if err != nil {
 		writeInternal(w, "list launcher credentials", err)
@@ -94,10 +101,8 @@ func (s *server) listLauncherCredentials(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, launcherCredentialsResponse{Credentials: out})
 }
 
-// revokeLauncherCredential ends a machine login, expired or not, on the word of the person who
-// approved it (enroll.Service.RevokeCredential): no launcher proof signed with it authenticates
-// again, and every session it enrolled ends — a service's login's pods among them — with their
-// grants and pending requests. Revoking one already revoked answers the same.
+// revokeLauncherCredential ends a machine login on the word of the person who approved it, as the
+// person Dispatch names (revokeCredentialAs).
 func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id", "CREDENTIAL_ID_INPUT", "launcher credential")
 	if !ok {
@@ -110,7 +115,16 @@ func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request
 	if !requireApprover(w, body.Approver) {
 		return
 	}
-	err := s.deps.Enroll.RevokeCredential(r.Context(), id, body.Approver)
+	s.revokeCredentialAs(w, r, id, body.Approver, humanActor(body.Approver))
+}
+
+// revokeCredentialAs ends machine login id, expired or not, on the word of approver, the person who
+// approved it (enroll.Service.RevokeCredential), recording actor on every row it writes: no
+// launcher proof signed with it authenticates again, and every session it enrolled ends — a
+// service's login's pods among them — with their grants and pending requests. Revoking one already
+// revoked answers the same.
+func (s *server) revokeCredentialAs(w http.ResponseWriter, r *http.Request, id, approver, actor string) {
+	err := s.deps.Enroll.RevokeCredential(r.Context(), id, approver, actor)
 	switch {
 	case errors.Is(err, enroll.ErrNoCredential):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())

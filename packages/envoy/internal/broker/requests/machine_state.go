@@ -710,22 +710,24 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 	return tx.Commit(ctx)
 }
 
-// RevokeByApprover ends a grant on a human's Dispatch login. The login must be the grant's
-// approver or its enrollment's operator (mayRevoke). When the operator revokes, every name the
-// grant's request got automatically is withheld from the grant's session from then on, and every
-// other live grant of the session that got one of those names automatically ends with it
-// (withhold), so the session asks before it gets the name again (Create). The withhold belongs to
-// the session rather than the grant, so the operator's revoke of a grant already revoked (by its
-// session, or by an earlier withhold, after the operator's Live grants list was loaded) withholds
-// the same names, recorded as a grant.withheld audit row rather than a second grant.revoked.
-// Another person's revoke (an approver's of the grant) ends the grant alone and withholds nothing:
-// the session is not theirs. It locks the session's row in the statement that reads the grant,
-// before it writes the grant: the order every writer that locks both takes them in, and the one
-// lock Create and ApplyDecision read the withheld names under, so a request deciding on the session
-// as this runs either is written first, and then ended here if it got a withheld name, or decides
-// with the name withheld. A revoke that ends nothing and withholds nothing new succeeds and changes
-// nothing.
-func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) error {
+// RevokeByApprover ends a grant on a person's login. The login must be the grant's approver or its
+// enrollment's operator (mayRevoke). actor is what every row it writes records as having done it,
+// which the caller proved: "human:<login>" for a revoke Dispatch relays from its signed-in person,
+// "launcher:<credential id>" for one the operator's own machine login makes. When the operator
+// revokes, every name the grant's request got automatically is withheld from the grant's session
+// from then on, and every other live grant of the session that got one of those names
+// automatically ends with it (withhold), so the session asks before it gets the name again
+// (Create). The withhold belongs to the session rather than the grant, so the operator's revoke of
+// a grant already revoked (by its session, or by an earlier withhold, after the operator's Live
+// grants list was loaded) withholds the same names, recorded as a grant.withheld audit row rather
+// than a second grant.revoked. Another person's revoke (an approver's of the grant) ends the grant
+// alone and withholds nothing: the session is not theirs. It locks the session's row in the
+// statement that reads the grant, before it writes the grant: the order every writer that locks
+// both takes them in, and the one lock Create and ApplyDecision read the withheld names under, so a
+// request deciding on the session as this runs either is written first, and then ended here if it
+// got a withheld name, or decides with the name withheld. A revoke that ends nothing and withholds
+// nothing new succeeds and changes nothing.
+func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -741,7 +743,6 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 	if !allowed {
 		return ErrNotApprover
 	}
-	actor := "human:" + record.CanonicalLogin(login)
 	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, actor)
 	if err != nil {
 		return err

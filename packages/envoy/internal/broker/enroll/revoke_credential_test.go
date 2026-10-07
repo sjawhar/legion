@@ -93,7 +93,7 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 		t.Fatalf("LiveCredentials before the revoke = %v, want the laptop then the devbox", got)
 	}
 
-	if err := svc.RevokeCredential(ctx, devbox.ID.String(), " Ada@Example.com "); err != nil {
+	if err := svc.RevokeCredential(ctx, devbox.ID.String(), " Ada@Example.com ", "human:ada@example.com"); err != nil {
 		t.Fatalf("RevokeCredential by the person who approved it: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 		t.Fatalf("Create under the revoked credential = %v, want ErrUnauthenticated", err)
 	}
 
-	if err := svc.RevokeCredential(ctx, devbox.ID.String(), "ada@example.com"); err != nil {
+	if err := svc.RevokeCredential(ctx, devbox.ID.String(), "ada@example.com", "human:ada@example.com"); err != nil {
 		t.Fatalf("RevokeCredential again: %v", err)
 	}
 	var credentialAudits, enrollmentAudits int
@@ -190,7 +190,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 		{"another person, an expired login", stale.ID.String(), "bob@example.com", ErrNotApprover},
 		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
 	} {
-		if err := svc.RevokeCredential(ctx, tc.id, tc.approver); !errors.Is(err, tc.want) {
+		if err := svc.RevokeCredential(ctx, tc.id, tc.approver, "human:"+tc.approver); !errors.Is(err, tc.want) {
 			t.Fatalf("RevokeCredential(%s) = %v, want %v", tc.name, err, tc.want)
 		}
 	}
@@ -204,7 +204,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 		t.Fatalf("revoked credentials after the refused revokes = %d (%v), want none", revoked, err)
 	}
 
-	if err := svc.RevokeCredential(ctx, stale.ID.String(), "ada@example.com"); err != nil {
+	if err := svc.RevokeCredential(ctx, stale.ID.String(), "ada@example.com", "human:ada@example.com"); err != nil {
 		t.Fatalf("RevokeCredential(the expired login) by ada: %v", err)
 	}
 	if _, live, err := svc.Lookup(ctx, staleBox.ID.String()); err != nil || live {
@@ -286,13 +286,13 @@ func TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
 		t.Fatalf("LiveCredentials(ada) = %+v, %v; want the legion-daemon login on cluster she approved", creds, err)
 	}
 
-	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "bob@example.com"); !errors.Is(err, ErrNotApprover) {
+	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "bob@example.com", "human:bob@example.com"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeCredential by bob, who approved another login = %v, want ErrNotApprover", err)
 	}
 	if _, live, err := svc.Lookup(ctx, implementer.ID.String()); err != nil || !live {
 		t.Fatalf("Lookup(implementer pod) after bob's refused revoke = live %v, %v; want live", live, err)
 	}
-	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "ada@example.com"); err != nil {
+	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "ada@example.com", "human:ada@example.com"); err != nil {
 		t.Fatalf("RevokeCredential by ada, who approved it: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt(t *testing.T) {
 		{"a record of another kind", secret, ErrNoCredential},
 		{"no record", unbacked, ErrNoCredential},
 	} {
-		if err := svc.RevokeCredential(ctx, tc.c.ID.String(), "ada@example.com"); !errors.Is(err, tc.want) {
+		if err := svc.RevokeCredential(ctx, tc.c.ID.String(), "ada@example.com", "human:ada@example.com"); !errors.Is(err, tc.want) {
 			t.Fatalf("RevokeCredential(%s) by ada = %v, want %v", tc.name, err, tc.want)
 		}
 	}
@@ -368,7 +368,7 @@ func TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt(t *testing.T) {
 	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where revoked_at is not null`).Scan(&revoked); err != nil || revoked != 0 {
 		t.Fatalf("revoked credentials after ada's refused revokes = %d (%v), want none", revoked, err)
 	}
-	if err := svc.RevokeCredential(ctx, bobs.ID.String(), "bob@example.com"); err != nil {
+	if err := svc.RevokeCredential(ctx, bobs.ID.String(), "bob@example.com", "human:bob@example.com"); err != nil {
 		t.Fatalf("RevokeCredential by bob, its record's approver: %v", err)
 	}
 }
@@ -432,7 +432,9 @@ func TestARevokeEndsAnEnrollmentCreatedWhileItWaited(t *testing.T) {
 		t.Fatalf("insert the enrollment: %v", err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
+	go func() {
+		done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com", "human:ada@example.com")
+	}()
 	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the enrollment: %v", err)
@@ -466,7 +468,9 @@ func TestTwoRevokesOfOneLoginEndItOnce(t *testing.T) {
 	}
 	done := make(chan error, 2)
 	for range 2 {
-		go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
+		go func() {
+			done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com", "human:ada@example.com")
+		}()
 	}
 	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 2)
 	if err := tx.Commit(ctx); err != nil {
@@ -512,7 +516,9 @@ func TestARevokeRacingTheLaunchersOwnRevokeEndsTheSessionOnce(t *testing.T) {
 		t.Fatalf("end the enrollment as its launcher: %v", err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
+	go func() {
+		done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com", "human:ada@example.com")
+	}()
 	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the launcher's revoke: %v", err)

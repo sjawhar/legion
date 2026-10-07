@@ -1891,13 +1891,15 @@ runtime, requests grants, polls a pending decision to completion, and either pri
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
-carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
-`approver` field. The bearer
+revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
+its server, carrying the UI bearer and the deciding person's Dispatch login, their email, in the
+body's `approver` field. The bearer
 vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
 and the broker checks it against the record's approver and records it on the decision event. The
 UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
-agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
+agents is the deployment's job; a person's own machine ends their machine logins and grants through
+the operator routes instead (below), under its machine login. `internal/broker/enroll` turns a
+launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
 service-account token). An operator credential's enrollment is its operator's, the email of the
 person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
@@ -2121,7 +2123,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 23 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2250,7 +2252,8 @@ scheduled for deletion, which Secrets Manager keeps until its recovery window pa
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch email, allowed only when that email is the grant's approver or its
+on a person's login (a Dispatch email, or the operator of the machine login calling
+`/v1/operator/grants/{id}/revoke`), allowed only when that login is the grant's approver or its
 enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
 `403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
 from the grant's session every name its request got automatically (a `withheld_secrets` row per
@@ -2284,8 +2287,14 @@ person's sessions, automatic ones included, and every grant the person approved,
 null `approver` and `record_id` for an automatic one. Audit rows never carry secret values:
 `audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
-`grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
-`broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
+`grant_id`, `actor`, and a non-secret JSON `detail`. The actor is what authenticated the change:
+`human:<login>` for one Dispatch relays from its signed-in person, `session:<enrollment id>` for a
+session's own, `launcher:<credential id>` for one a machine login's own proof made (an enrollment
+its launcher revoked, or a machine login or grant its operator ended through `/v1/operator/*`), and
+`broker` for what the broker ends on its own (a lapsed lease); `RevokeCredential` and
+`RevokeByApprover` take theirs from their caller, and record it on every row they write
+(`grants.revoked_by`, a cancelled request's `decided_by` and event, each audit row). The granted
+value itself is read fresh from
 `secrets.Reader` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
@@ -2338,7 +2347,7 @@ mints the operator from the approving login), so one rule covers both. Anyone bu
 In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
 authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
 sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
-cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes one
+cancelled, the caller's actor, an `enrollment.revoked` row each) and writes one
 `launcher_credential.revoked` audit row naming them, the host and any service; revoking it again
 changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
 `for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
@@ -2352,6 +2361,20 @@ session learns it at its next enrollment, and the Legion daemon at its next pod 
 unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes the signed-in person's through these
 two routes.
+
+The operator routes (`api/handlers_operator.go`) are the same lists and revokes for a person at
+their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than the
+UI bearer, and acting for the calling credential's `operator`: `GET /v1/operator/machines` and
+`GET /v1/operator/grants` answer exactly what `GET /v1/launcher-credentials` and `GET /v1/grants`
+answer for that person (each pair writes through one function, `writeLauncherCredentials` and
+`writeApproverGrants`), and `POST /v1/operator/machines/{id}/revoke` and
+`POST /v1/operator/grants/{id}/revoke`, which take no body, revoke as that person through
+`RevokeCredential` and `RevokeByApprover`, with the same refusals (`403 NOT_APPROVER`,
+`404 NOT_FOUND`) and the operator's withhold. A service's login has no operator and is refused every
+one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an operator revoke writes names the calling
+machine login, `launcher:<credential id>`, whose own row names its operator, since no Dispatch
+sign-in vouched for it. Revoking the calling credential itself ends that machine's access: its next
+launcher proof is `401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

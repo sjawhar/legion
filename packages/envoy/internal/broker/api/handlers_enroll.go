@@ -134,7 +134,7 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	if !ok {
 		return
 	}
-	err := s.deps.Enroll.Revoke(r.Context(), cred, id, "launcher:"+cred.ID.String())
+	err := s.deps.Enroll.Revoke(r.Context(), cred, id, launcherActor(cred))
 	if errors.Is(err, enroll.ErrOperatorMismatch) {
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return

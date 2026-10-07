@@ -123,7 +123,7 @@ func TestRevokingAnAutomaticGrantWithholdsItFromThatSessionAlone(t *testing.T) {
 			if others, err := m.GrantsForApprover(ctx, otherPerson); err != nil || len(others) != 0 {
 				t.Fatalf("GrantsForApprover(%s) = %+v, %v; want nothing: the grant is neither theirs to approve nor on their session", otherPerson, others, err)
 			}
-			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 				t.Fatalf("RevokeByApprover: %v", err)
 			}
 			if actor, withheld := revokedAudit(t, m, *auto.GrantID); actor != "human:"+operator || !slices.Equal(withheld, []string{c.name}) {
@@ -186,7 +186,7 @@ func TestAWithheldNameIsNotReleasedThroughAnotherLiveGrant(t *testing.T) {
 	if err != nil || shared.GrantID == nil {
 		t.Fatalf("Create(%s) = %+v, %v; want granted", sharedToken, shared, err)
 	}
-	if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *single.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	if again, err := m.Create(ctx, enr, signRequest(t, m, key, "one again", "AUTO_TOKEN"), ""); err != nil || again.State != "pending" {
@@ -225,14 +225,14 @@ func TestRevokingAGrantOfAnAlreadyWithheldNameSucceeds(t *testing.T) {
 	if err != nil || auto.GrantID == nil {
 		t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", auto, err)
 	}
-	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(automatic grant): %v", err)
 	}
 	dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, operator)
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(approved grant holding the withheld AUTO_TOKEN) = %v; want it revoked", err)
 	}
 	if actor, withheld := revokedAudit(t, m, dec.GrantID); actor != "human:"+operator || withheld != nil {
@@ -256,7 +256,7 @@ func TestAnAnyoneApprovalOfAWithheldSecretStopsOnceTheSecretIsTheOperators(t *te
 	if err != nil || auto.GrantID == nil {
 		t.Fatalf("Create = %+v, %v; want granted", auto, err)
 	}
-	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", sharedToken), "")
@@ -295,7 +295,7 @@ func TestAnAnyoneApprovalAfterTheWithholdDoesNotReleaseAPersonsWithheldSecret(t 
 	if got := recordApprover(t, m, mixed); got != record.AnyoneApprover {
 		t.Fatalf("mixed approver = %q, want %s", got, record.AnyoneApprover)
 	}
-	if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *single.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol); !errors.Is(err, record.ErrNotApprover) {
@@ -327,7 +327,7 @@ func TestTheOwnersApprovalOfAWithheldSecretOutlivesAnUnrelatedTagChange(t *testi
 	if err != nil || auto.GrantID == nil {
 		t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", auto, err)
 	}
-	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, operator)
@@ -361,7 +361,7 @@ func TestAnAnyoneApprovalOfAWithheldSharedSecretOutlivesAnUnrelatedTagChange(t *
 	if err != nil || auto.GrantID == nil {
 		t.Fatalf("Create(%s) = %+v, %v; want granted", sharedToken, auto, err)
 	}
-	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol)
@@ -398,7 +398,7 @@ func TestTheOperatorsRevokeOfAGrantThatAlreadyEndedStillWithholds(t *testing.T) 
 		t.Fatalf("RevokeGrant by its session: %v", err)
 	}
 	for range 2 {
-		if err := m.RevokeByApprover(ctx, listed[0].GrantID, operator); err != nil {
+		if err := m.RevokeByApprover(ctx, listed[0].GrantID, operator, "human:"+operator); err != nil {
 			t.Fatalf("RevokeByApprover(the grant its session ended) = %v; want success", err)
 		}
 	}
@@ -439,7 +439,7 @@ func TestTheWithholdLeavesTheSessionsApprovedGrantOfTheSecretLive(t *testing.T) 
 	if err != nil || auto.GrantID == nil || auto.RecordID != nil {
 		t.Fatalf("Create(DEEL_API_KEY, AUTO_TOKEN) once DEEL_API_KEY is agent tier = %+v, %v; want an automatic grant", auto, err)
 	}
-	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	if got := withheldFrom(t, m, enr); !slices.Equal(got, []string{"AUTO_TOKEN", "DEEL_API_KEY"}) {
@@ -476,7 +476,7 @@ func TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes(t *testing.T
 	if err != nil || pair.GrantID == nil {
 		t.Fatalf("Create(AUTO_TOKEN, %s) = %+v, %v; want granted", sharedToken, pair, err)
 	}
-	if err := m.RevokeByApprover(ctx, *pair.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *pair.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(pair): %v", err)
 	}
 	var approved []string
@@ -495,11 +495,11 @@ func TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes(t *testing.T
 			}
 		}
 	}
-	if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *single.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(the AUTO_TOKEN grant the withhold ended): %v", err)
 	}
 	releases("the operator's revoke of the ended AUTO_TOKEN grant", approved)
-	if err := m.RevokeByApprover(ctx, approved[0], operator); err != nil {
+	if err := m.RevokeByApprover(ctx, approved[0], operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(first approval): %v", err)
 	}
 	releases("the operator's revoke of the first approval", approved[1:])
@@ -520,7 +520,7 @@ func TestAnotherPersonsRevokeDoesNotWithholdTheOperatorsOwnSecret(t *testing.T) 
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(%s) = %+v, %v", carol, dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, carol); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, carol, "human:"+carol); err != nil {
 		t.Fatalf("RevokeByApprover(%s) = %v", carol, err)
 	}
 	if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
@@ -555,7 +555,7 @@ func TestTheOperatorWhoApprovedAGrantWithholdsWhenRevokingIt(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(%s) = %v", operator, err)
 	}
 	if got := withheldFrom(t, m, enr); !slices.Equal(got, []string{"AUTO_TOKEN"}) {
@@ -606,7 +606,7 @@ func TestAnApprovalOfAWithheldSecretTheBrokerDoesNotServeIsRefused(t *testing.T)
 			if err != nil || single.GrantID == nil {
 				t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", single, err)
 			}
-			if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
+			if err := m.RevokeByApprover(ctx, *single.GrantID, operator, "human:"+operator); err != nil {
 				t.Fatalf("RevokeByApprover: %v", err)
 			}
 			madeUnder := m.Policy.Get().Version
@@ -653,7 +653,7 @@ func TestAnUnservedNameTheSessionDoesNotWithholdIsLeftToTheRecordsApprover(t *te
 			if err != nil || auto.GrantID == nil {
 				t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", auto, err)
 			}
-			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 				t.Fatalf("RevokeByApprover: %v", err)
 			}
 			deel, err := m.Create(ctx, enr, signRequest(t, m, key, "deel", "DEEL_API_KEY"), "")
@@ -685,7 +685,7 @@ func TestRetagToOwnersAgentTierLeavesAWithheldRequestToItsOwner(t *testing.T) {
 	if err != nil || auto.GrantID == nil {
 		t.Fatalf("Create = %+v, %v", auto, err)
 	}
-	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatal(err)
 	}
 	again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", sharedToken), "")
@@ -775,7 +775,7 @@ func TestRevokeByApproverWaitsForARequestDecidingOnItsSession(t *testing.T) {
 		t.Fatalf("lock the session: %v", err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- m.RevokeByApprover(ctx, *auto.GrantID, operator) }()
+	go func() { done <- m.RevokeByApprover(ctx, *auto.GrantID, operator, "human:"+operator) }()
 	storetest.AwaitLockWaiters(t, m.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)

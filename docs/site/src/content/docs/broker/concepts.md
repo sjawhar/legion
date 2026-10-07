@@ -65,8 +65,8 @@ approved a **machine login** for it. The login works like a device code:
    token: the machine uses it by signing with that key.
 
 A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The person who approved it may
-revoke it from Dispatch's machine-login page, before or after it expires, which also ends every
-session it enrolled
+revoke it from Dispatch's machine-login page, or from any of their own machines under its machine
+login, before or after it expires, which also ends every session it enrolled
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)); no one
 else may. Its sessions outlive its expiry: a session renews its lease with its own key, never with
 the machine's credential, so a box keeps working after the machine's credential expires, and the
@@ -268,6 +268,8 @@ that revoke ended, the withheld secrets that grant held), `grant.withheld` (an o
 a grant already revoked, naming under `withheld` the secrets it withheld from the session) and
 `launcher_credential.revoked` (naming the machine login's `credential_id`, its `host`, its
 `service` for a service's login, and under `enrollments` the sessions the revoke ended). Each row
-names its actor: `human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or
-`broker`. No record, event or audit row ever holds a secret value.
+names its actor: `human:<email>` for a change Dispatch made for its signed-in person,
+`session:<enrollment id>` for a session's own, `launcher:<credential id>` for one a machine login
+made under its own credential, a person's revoke from their machine included, or `broker`. No
+record, event or audit row ever holds a secret value.
 [Operating the broker](/legion/broker/operate/#the-audit-record) shows how to read them.

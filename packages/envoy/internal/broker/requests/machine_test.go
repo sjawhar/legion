@@ -862,13 +862,13 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if err != nil || automatic.GrantID == nil {
 		t.Fatalf("Create(automatic) = %+v, %v", automatic, err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory", "human:mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(mallory, not the operator) = %v, want ErrNotApprover", err)
 	}
 	if _, _, err := m.Values(ctx, *automatic.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator, "human:"+operator); err != nil {
 		t.Fatalf("RevokeByApprover(the operator) = %v", err)
 	}
 
@@ -882,13 +882,13 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice): %+v %v", dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory", "human:mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(a login that is neither approver nor operator) = %v, want ErrNotApprover", err)
 	}
 	if _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com"); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com", "human:"+otherPerson); err != nil {
 		t.Fatalf("RevokeByApprover(the approver) = %v", err)
 	}
 	var actor string
