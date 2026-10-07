@@ -646,11 +646,12 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // a failed listing leaves it queued and uncertain until the bounded retry succeeds. Only then are
 // hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
 // A daemon that leaves the controller to its operator first stops the controller's claim an
-// earlier boot under `controller: daemon` left (stopLaunchedController), which leaves the claim
-// absent or retired, so nothing launches it again: launchUnfinished's ReleaseUncertainLaunch acts
-// only on a launch-uncertain claim (supervise/machine.go:427-431). Its token still leaves the
-// unrecorded launches, where a launch of it a crash cut short would be, so the boot log names no
-// launch as uncertain or settled that the stop already ended.
+// earlier boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
+// retired. The only controller claim among the unrecorded launches is a launch a crash cut short,
+// and by then the stop has retired it, so launchUnfinished would not relaunch it: its
+// ReleaseUncertainLaunch acts only on a launch-uncertain claim (supervise/machine.go:427-431).
+// Dropping that token is a second guard beside that check, so boot does not report the retired
+// claim as an unrecorded launch.
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
