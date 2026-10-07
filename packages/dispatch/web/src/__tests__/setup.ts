@@ -1,5 +1,8 @@
 import { afterEach } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+// happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
+// this in-memory one, which keeps IndexedDB's transaction ordering.
+import "fake-indexeddb/auto";
 import { notifyManager } from "@tanstack/react-query";
 import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../api/types";
