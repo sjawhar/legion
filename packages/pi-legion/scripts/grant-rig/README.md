@@ -27,18 +27,20 @@ listener (inherited `ENVOY_URL`), which collides with nothing.
 `RIG_PLUGINS=production` makes the rig profile load the real `legion` profile's whole plugin tree:
 `setup.sh` copies `~/.omp/profiles/legion/plugins` (about 240 MB: `package.json`, `bun.lock`,
 `node_modules`) into `~/.omp/profiles/l12rig/plugins`, removes the profile's `agent/extensions`
-so exactly one copy of each extension loads, and then swaps only the Legion plugin inside the
-copy, for a tarball extracted in the installed package's place, so the rig runs exactly what
-`npm pack` ships (`dist/` with the bundles and `dist/skills`, `agents/`, `package.json`):
+so exactly one copy of each extension loads, and then swaps only the two Legion plugins inside the
+copy, `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, each for a tarball extracted in the installed
+package's place, so the rig runs exactly what `npm pack` ships (`dist/` with the bundle and
+`dist/skills`, the Legion plugin's `agents/`, `package.json`):
 
-- `RIG_LEGION_BUILD=branch` (default): the checkout's plugin, packed by
+- `RIG_LEGION_BUILD=branch` (default): the checkout's plugins, each packed by
   `scripts/e2e/lib/pack-plugin.sh` as the release packs it — the same pack step the stage proofs'
   `install-plugin-profile.sh` uses;
-- `RIG_LEGION_BUILD=<version>` (e.g. `1.17.1`): `npm pack @sjawhar/pi-legion-envoy@<version>`, the
-  released tarball, exactly what `bun add` would install.
+- `RIG_LEGION_BUILD=<version>` (e.g. `8.0.0`): `npm pack @sjawhar/pi-envoy@<version>` and
+  `npm pack @sjawhar/pi-legion@<version>`, the released tarballs, exactly what `bun add` would
+  install; both release from one commit at one version.
 
-The rest of the copied tree stays, `secretsd` and the other plugins included. The Legion package
-needs none of it: its bundles inline every dependency except the `@oh-my-pi/*` packages Oh My Pi
+The rest of the copied tree stays, `secretsd` and the other plugins included. Neither package
+needs any of it: its bundle inlines every dependency except the `@oh-my-pi/*` packages Oh My Pi
 itself provides.
 
 Why: Sami's ruling (2026-09-13) after pi-envoy 1.17.1 shipped broken — proven on a rig

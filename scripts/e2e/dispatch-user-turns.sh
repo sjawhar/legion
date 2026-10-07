@@ -197,7 +197,9 @@ env -i PATH="$PATH" HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME
 dispatch_pid=$!
 until_true 90 "Dispatch to serve, with NATS" sh -c "curl -fsS http://127.0.0.1:$dispatch_port/healthz | jq -e '.ok and .nats'"
 
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
+# The session runs outside Legion, with no role, so it needs only the Envoy plugin, the one this
+# proof is about.
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile"
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" \
   --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||

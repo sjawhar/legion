@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Installs this checkout's @sjawhar/pi-legion-envoy into a named OMP profile, packed exactly as the
-# release packs it, so a stage proof runs the branch-built plugin while the
-# user's own profiles stay untouched.
+# Installs one of this checkout's two Oh My Pi plugins, @sjawhar/pi-envoy (packages/pi-envoy) or
+# @sjawhar/pi-legion (packages/pi-legion), into a named OMP profile, packed exactly as the release
+# packs it, so a stage proof runs the branch-built plugins while the user's own profiles stay
+# untouched. A Legion pane needs both: the daemon's boot gate refuses pi-legion without pi-envoy, so
+# every stage installs each in turn, into a --dest of its own.
 #
-#   scripts/e2e/lib/install-plugin-profile.sh --profile <name> --home <dir> --dest <dir>
+#   scripts/e2e/lib/install-plugin-profile.sh --package <pi-envoy|pi-legion> --profile <name> --home <dir> --dest <dir>
 #
 # --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh): the
 # profile is <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
@@ -13,8 +15,8 @@
 #
 # The plugin is packed by lib/pack-plugin.sh, the one pack step every branch-built install shares
 # (its header maps each step to the release's), then:
-#   1. unpack the tarball into <dir>           worker.Dockerfile's `tar xzf ./*.tgz -C /out/pi-legion-envoy`
-#   2. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile's `omp plugin install /opt/legion/pi-legion-envoy`
+#   1. unpack the tarball into <dir>           worker.Dockerfile's `tar xzf ./*.tgz -C /out/<package>`
+#   2. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile's `omp plugin install /opt/legion/<package>`
 #   3. verify with OMP_PROFILE=<name> omp plugin list
 # Steps 2 and 3 run the Oh My Pi the daemon pins (.omp-pin) under HOME=<home>.
 # Each source is cited by what it runs, never by line number: the lines move with every edit
@@ -25,18 +27,25 @@ set -euo pipefail
 me=install-plugin-profile
 refuse() {
   echo "$me: $*" >&2
-  echo "usage: $0 --profile <name> --home <dir> --dest <dir>" >&2
+  echo "usage: $0 --package <pi-envoy|pi-legion> --profile <name> --home <dir> --dest <dir>" >&2
   exit 2
 }
 
+package=
 profile=
 home=
 dest=
+have_package=
 have_profile=
 have_home=
 have_dest=
 while [ $# -gt 0 ]; do
   case "$1" in
+  --package)
+    [ $# -ge 2 ] || refuse "--package needs a value: pi-envoy or pi-legion, the plugin to install"
+    package=$2 have_package=1
+    shift 2
+    ;;
   --profile)
     [ $# -ge 2 ] || refuse "--profile needs a value: the OMP profile to install into"
     profile=$2 have_profile=1
@@ -55,6 +64,11 @@ while [ $# -gt 0 ]; do
   *) refuse "unknown argument: $1" ;;
   esac
 done
+[ -n "$have_package" ] || refuse "--package is required: pi-envoy or pi-legion, the plugin to install"
+case "$package" in
+pi-envoy | pi-legion) ;;
+*) refuse "--package '$package' is not a plugin this checkout packs; it is pi-envoy or pi-legion" ;;
+esac
 [ -n "$have_profile" ] || refuse "--profile is required: the OMP profile to install into"
 [ -n "$have_home" ] || refuse "--home is required: the HOME Oh My Pi runs under for the profile"
 [ -n "$have_dest" ] || refuse "--dest is required: the directory the plugin is unpacked into"
@@ -102,7 +116,9 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" "$work/pack")
+tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" "$package" "$work/pack")
+# The package's npm name and the checkout's version, as the packed manifest carries them.
+name=$(tar xzOf "$tarball" package/package.json | jq -r .name)
 version=$(tar xzOf "$tarball" package/package.json | jq -r .version)
 
 mkdir -p "$dest"
@@ -110,17 +126,17 @@ tar xzf "$tarball" -C "$dest" --strip-components=1
 run_omp plugin install "$dest" >&2
 
 listing=$(run_omp plugin list --json)
-plugin=$(jq -c '[.npm[]? | select(.name == "@sjawhar/pi-legion-envoy")]' <<<"$listing")
+plugin=$(jq -c --arg name "$name" '[.npm[]? | select(.name == $name)]' <<<"$listing")
 if ! jq -e --arg v "$version" 'length == 1 and .[0].version == $v and .[0].enabled == true' \
   <<<"$plugin" >/dev/null; then
-  echo "$me: omp $pin plugin list under HOME=$home OMP_PROFILE=$profile does not show @sjawhar/pi-legion-envoy@$version enabled: $plugin" >&2
+  echo "$me: omp $pin plugin list under HOME=$home OMP_PROFILE=$profile does not show $name@$version enabled: $plugin" >&2
   exit 1
 fi
 installed=$(jq -r '.[0].path' <<<"$plugin")
 resolved=$(realpath -m -- "$installed")
 if [ "$resolved" != "$dest" ]; then
-  echo "$me: profile $profile resolves @sjawhar/pi-legion-envoy to $resolved, not the unpacked $dest" >&2
+  echo "$me: profile $profile resolves $name to $resolved, not the unpacked $dest" >&2
   exit 1
 fi
-echo "$me: @sjawhar/pi-legion-envoy@$version enabled in OMP profile $profile under $home ($installed -> $dest)" >&2
+echo "$me: $name@$version enabled in OMP profile $profile under $home ($installed -> $dest)" >&2
 printf '%s\n' "$installed/package.json"

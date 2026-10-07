@@ -73,7 +73,7 @@ jobs:
       # packages/daemon), so it is formatted here with the daemon.
       - name: Check the Go daemon's formatting
         run: |
-          unformatted=$(gofmt -l packages/daemon packages/pi-envoy/scripts/grant-rig/daemon-pane.go)
+          unformatted=$(gofmt -l packages/daemon packages/pi-legion/scripts/grant-rig/daemon-pane.go)
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
             echo "$unformatted"

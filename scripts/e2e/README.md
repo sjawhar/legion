@@ -12,10 +12,10 @@ through `scripts/e2e/.shellcheckrc`.
 | script | proves |
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state`, registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
-| `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
+| `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's two plugins in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a profile without the Envoy plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
-| `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
+| `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
 
@@ -48,17 +48,20 @@ The daemon supervises its agents under tmux, and it refuses to start without wha
 plugin gate holds the Oh My Pi plugin a pane would load to this daemon's contract
 (`packages/daemon/internal/daemon/bootgate.go`). The run supplies all of it: its `legion.yaml`
 names a 0600 operator token file in the work directory; `LEGION_OMP_PATH` points at a stub there
-that answers the gate's load probe (`omp models --extension <probe> --json`) as a loaded plugin does
-— `LEGION_PLUGIN_LOADED=yes` and, beside it, `LEGION_PLUGIN_LOADED_FROM=file://…/dist/legion.js`
-inside the package the gate read; `LEGION_PROMPT_AGENTS=resolved` and `LEGION_PROMPT_SKILLS=resolved`
+that answers the gate's load probe (`omp models --extension <probe> --json`) as a pane loading both
+plugins does — `LEGION_PLUGIN_LOADED=yes` and, beside it, `LEGION_PLUGIN_LOADED_FROM=file://…/dist/legion.js`
+inside the `@sjawhar/pi-legion` package the gate read and `LEGION_PLUGIN_ENVOY_INTERFACE=1`, then
+`LEGION_ENVOY_INTERFACE=1` and `LEGION_ENVOY_LOADED_FROM=file://…/dist/envoy.js` inside an
+`@sjawhar/pi-envoy` package; `LEGION_PROMPT_AGENTS=resolved` and `LEGION_PROMPT_SKILLS=resolved`
 when the gate asks for the task agents and skills the role prompts name; and
 `LEGION_AGENT_MODELS=resolved` when it asks whether those agents' models resolve — and exits 1 on
 anything else, because this proof launches no agent; and the daemon runs with `HOME=<work>/home`
 and no `OMP_PROFILE`/`PI_PROFILE`, where
-`<work>/home/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json` is the checkout's
+`<work>/home/.omp/plugins/node_modules/@sjawhar/pi-legion/package.json` is the checkout's
 own manifest (`name`, `version`, `legion`), so it declares the contract this checkout's daemon
-requires. The real gate against a real Oh My Pi is proven where a proof installs the plugin
-(`lib/install-plugin-profile.sh`); this one proves the skeleton.
+requires, and `@sjawhar/pi-envoy/package.json` beside it owns the file the stub says the Envoy
+plugin loaded from. The real gate against a real Oh My Pi is proven where a proof installs the
+plugins (`lib/install-plugin-profile.sh`); this one proves the skeleton.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -107,7 +110,7 @@ On every pull request, the required `typecheck` job of `.github/workflows/pr-and
 `go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
 `packages/daemon`, and its required `test` job installs `tmux` — the tmux runtime's tests drive a
 real tmux server and skip without one, and the daemon refuses to start without it — and the pinned
-`jj` (through mise, as the pi-envoy job does) — the workspace tests drive a real jj, and the daemon
+`jj` (through mise, as the pi-legion job does) — the workspace tests drive a real jj, and the daemon
 resolves jj at boot and refuses to start without it — then runs `go test ./...` against its
 `postgres:16` service (`LEGION_TEST_PG_DSN`), then this script with `LEGION_E2E_PG_DSN` pointing at
 the same service, so the script runs no docker of its own there.
@@ -139,11 +142,13 @@ What it stands up, all of it the run's own:
   (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
   and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
   names.
-- **The plugin**: this checkout's `pi-legion-envoy`, packed as the release packs it, installed into
-  the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`, under the run's
-  own Oh My Pi home `<work>/omp-home` ([`lib/omp-home.sh`](#libomp-homesh)). The daemons run with
-  that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load it, and the
-  operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks that last.
+- **The plugins**: this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, each packed as
+  the release packs it, installed into the OMP profile `legion-e2e2-<pid>-<epoch>` by
+  `lib/install-plugin-profile.sh` (`--package pi-envoy`, then `--package pi-legion`), under the
+  run's own Oh My Pi home `<work>/omp-home` ([`lib/omp-home.sh`](#libomp-homesh)). The daemons run
+  with that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load both,
+  and the operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks
+  that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
   `.omp-pin`. At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
@@ -174,12 +179,13 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 
 | check | what it does and requires |
 | :--- | :--- |
-| `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `daemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
-| `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
+| `gate-refuses-another-contract` | edits the installed (unpacked) `pi-legion` manifest to declare the next `daemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
+| `gate-refuses-a-disabled-plugin` | `omp plugin disable @sjawhar/pi-legion`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
+| `gate-refuses-without-the-envoy-plugin` | `omp plugin disable @sjawhar/pi-envoy`; `legion start` refuses with "but no pi-envoy is: install the @sjawhar/pi-envoy release", naming the package to install before any skill it ships is reported missing; `omp plugin enable` |
 | `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
 | `gate-refuses-a-skill-only-a-role-prompt-loads` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's own role prompts can say; the skill put back |
 | `gate-refuses-an-unconfigured-model-role` | `modelRoles.oracle` removed from the isolated profile's `config.yml`; `legion start` refuses with "on its model @oracle: role oracle is not configured", naming `task agent oracle` and the prompts that dispatch it; the profile put back byte for byte |
-| `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
+| `architect-registers-and-is-ready` | `legion start` passes the gate (its log line, `boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy`); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
 | `envoy-role-held` | `GET /v1/roles/<claim token>` on the listener names the claim's session as holder |
 | `ready-in-state` | `legion state --json` shows the issue's architect `ready`, with that session and a tmux locator |
 | `task-queued-before-ready-runs-once` | a second claim spawned with a task: the spawn's answer holds the delivery unsent while the claim is launching; it ends `idle` with nothing pending, and OMP's session file holds the task once |
@@ -261,7 +267,7 @@ shell, a pane, an argv, or the transcript.
 
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
-checkout's plugin in an isolated OMP profile and runs the Go daemon with a separate state
+checkout's two plugins in an isolated OMP profile and runs the Go daemon with a separate state
 directory, private tmux server, ports from [`lib/free-port.sh`](#libfree-portsh), a root-only
 Dispatch project, `admission_cap: 2`, `review_round_cap: 3`, and the root design gate armed. Its
 host-side helpers are [`lib/rig.sh`](#librigsh), and the workflow's vocabulary (Dispatch, the
@@ -790,7 +796,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 ## controller-start-tmux.sh
 
 Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon runs on a real Postgres
-with this checkout's plugin in an isolated OMP profile, against a real Envoy listener and NATS, and
+with this checkout's two plugins in an isolated OMP profile, against a real Envoy listener and NATS, and
 the command runs in real tmux panes, as an operator would. The pinned Oh My Pi is launched through
 mise. The run needs no model route: the controller's one model turn, the start message
 `legion controller start` opens it with, fails against the profile's default, a static-key
@@ -831,7 +837,7 @@ is written there.
 
 LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
 session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
-Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's plugin in an isolated
+Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's Envoy plugin in an isolated
 profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
@@ -1000,38 +1006,43 @@ changed goes unseen. Every caller runs the helper right after its build.
 
 ## lib/pack-plugin.sh
 
-Packs this checkout's `@sjawhar/pi-legion-envoy` the way the release packs it, and prints the
-tarball's path: what `npm pack` ships (`package.json` `files`: `dist/` with the two bundles and
-`prepack.sh`'s `dist/skills`, `agents/`, and the packed manifest). Every script that installs a
+Packs one of this checkout's two plugins, `@sjawhar/pi-envoy` (`packages/pi-envoy`) or
+`@sjawhar/pi-legion` (`packages/pi-legion`), the way the release packs it, and prints the tarball's
+path: what `npm pack` ships (`package.json` `files`: `dist/` with the one bundle and the prepack's
+`dist/skills`, the Legion plugin's `agents/`, and the packed manifest). Every script that installs a
 branch-built plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh),
 which `controller-start-tmux.sh`, `stage2-tmux-supervision.sh`, `stage3-devbox-workflow.sh`,
-`stage3-4b13b-acceptance.sh` and `stage4b-sandbox-tree.sh` call, and the grant rig's branch mode
-(`packages/pi-envoy/scripts/grant-rig/setup.sh`). The worker image packs on its own, as the release
-does: `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` rewrites `omp.extensions` with `jq`
-and runs `bun pm pack`, and `prepack.sh` refuses to pack any other `omp.extensions`, which holds all
-of them to the same manifest.
+`stage3-4b13b-acceptance.sh`, `stage4b-sandbox-tree.sh` and `dispatch-user-turns.sh` call, and the
+grant rig's branch mode (`packages/pi-legion/scripts/grant-rig/setup.sh`). The worker image packs
+on its own, as the release does: `packages/daemon/docker/worker.Dockerfile`'s two plugin `RUN`s each
+rewrite `omp.extensions` with `jq` and run `bun pm pack`, and the prepack
+(`scripts/pi-plugin-prepack.sh`) refuses to pack any other `omp.extensions`, which holds all of
+them to the same manifest.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
-tarball=$(scripts/e2e/lib/pack-plugin.sh "$work/pack")
+envoy=$(scripts/e2e/lib/pack-plugin.sh pi-envoy "$work/pack/pi-envoy")
+legion=$(scripts/e2e/lib/pack-plugin.sh pi-legion "$work/pack/pi-legion")
 ```
 
-`<out dir>` is created when missing, and refused inside the checkout (jj would snapshot the tarball)
-or when it already holds a `.tgz`. Stdout is exactly one line, the tarball's path; every step's own
-output goes to stderr.
+The first argument is the package's directory under `packages/`, `pi-envoy` or `pi-legion`; any
+other is refused, since the other workspace packages are not plugins. `<out dir>` is created when
+missing, and refused inside the checkout (jj would snapshot the tarball) or when it already holds a
+`.tgz`. Stdout is exactly one line, the tarball's path; every step's own output goes to stderr.
 
-The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
-because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
+The steps are the release's, run in the checkout — a copy of the package cannot build, because the
+prepack copies the repository's `skills/` and the bundle resolves `@legion/*` through the root's
 `node_modules`:
 
-1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
-   in "Point extensions at the packed bundles");
-2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
-   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
+1. save the package's `package.json` and arm an `EXIT` trap that copies it back byte-identical
+   (`.github/workflows/release.yaml`'s pi_envoy and pi_legion jobs save it to
+   `$RUNNER_TEMP/<package>-manifest.json` in "Point extensions at the packed bundle");
+2. rewrite `omp.extensions` to `["dist/<entry>.js"]` with `jq`, where `extensions/<entry>.ts` is
+   the committed manifest's one entry (the same step, and the `jq '.omp.extensions = …'` line of
+   `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` for that package);
 3. `bun pm pack --destination <out dir>`, whose `prepack` builds `dist/` (the release's "Pack
-   extension" step, `packages/pi-envoy/scripts/prepack.sh`); the bundles inline `package.json`, so
-   they are built while it names the packed bundles, as the release builds them;
+   extension" step, `scripts/pi-plugin-prepack.sh`); the bundle inlines `package.json`, so it is
+   built while the manifest names the packed bundle, as the release builds it;
 4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
    manifest").
 
@@ -1048,35 +1059,41 @@ otherwise kill it before the trap ran. It keeps the run's status; if the copy ba
 says where the saved bytes are, leaves them there, and exits non-zero. Afterwards `jj status` is as
 it was before the run: `dist/` is gitignored, and nothing else is written inside the checkout.
 
-Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
-itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
-has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
-rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
-jj snapshots the rewritten `package.json`. Two stage proofs in one checkout, or a stage proof and the
-grant rig, can pack at the same time, and the lock takes them in turn.
+Runs in one checkout take turns at each package's manifest from the save to the copy back, under a
+`flock` on the manifest itself (rewritten and restored in place, so the lock's inode lasts the
+whole window); a run that has to wait says so on stderr. Without the lock, a run that starts while
+another has the manifest rewritten saves that rewrite as its "before" and puts it back at its own
+exit: both runs exit 0 and jj snapshots the rewritten `package.json`. Two stage proofs in one
+checkout, or a stage proof and the grant rig, can pack at the same time, and the lock takes them in
+turn; the two packages' packs never wait on each other.
 
 ## lib/install-plugin-profile.sh
 
-Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
-release packs it, so a stage proof runs the branch-built plugin and the user's own profiles are never
-touched.
+Installs one of this checkout's two plugins, `@sjawhar/pi-envoy` or `@sjawhar/pi-legion`, into a
+named OMP profile, packed the way the release packs it, so a stage proof runs the branch-built
+plugins and the user's own profiles are never touched. A Legion pane needs both — the daemon's boot
+gate refuses `pi-legion` without `pi-envoy` — so every stage calls it twice, with a `--dest` of its
+own each time.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
 . scripts/e2e/lib/omp-home.sh && make_omp_home "$work/omp-home"
-manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/plugin")
-# → $work/omp-home/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json
+envoy_manifest=$(scripts/e2e/lib/install-plugin-profile.sh --package pi-envoy --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/pi-envoy")
+manifest=$(scripts/e2e/lib/install-plugin-profile.sh --package pi-legion --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/pi-legion")
+# → $work/omp-home/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-envoy/package.json
+# → $work/omp-home/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion/package.json
 ```
 
 | flag | meaning |
 | :--- | :--- |
+| `--package <pi-envoy\|pi-legion>` | the plugin to install, by its directory under `packages/`; any other value is refused, since the other workspace packages are not plugins. The listing below is checked by that package's npm name. |
 | `--profile <name>` | the OMP profile to install into (`OMP_PROFILE=<name>`). Refused when OMP would read it as its default profile — empty, all whitespace, or `default` — since that is the profile every plain `omp` uses. Any other name goes to OMP as given, and OMP refuses one it cannot use. |
 | `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, which is then `<dir>/.omp/profiles/<name>`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the tarball is unpacked. `omp plugin install` links this directory into the profile rather than copying it, so it **is** the installed plugin and must outlive the run. Refused inside the checkout (jj would snapshot it, symlinks resolved first) and when it exists and is not an empty directory (an unpack over an earlier build would keep that build's stale files). |
 
-All three flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
-installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
-the manifest the daemon's contract gate reads under the same profile
+All four flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
+installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; for
+`pi-legion` that is the manifest the daemon's contract gate reads under the same profile
 (`pluginManifestPath`, `packages/daemon/internal/daemon/bootgate.go`). Every step's own output
 goes to stderr.
 
@@ -1084,12 +1101,12 @@ The plugin is packed by [`lib/pack-plugin.sh`](#libpack-pluginsh), the release's
 checkout, into the run's `mktemp -d` directory (never beside `package.json`, so an interrupted run
 strands no `.tgz` in the checkout). Then:
 
-1. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
-   `tar xzf ./*.tgz -C /out/pi-legion-envoy --strip-components=1`);
+1. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/<package>` and
+   `tar xzf ./*.tgz -C /out/<package> --strip-components=1`);
 2. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
-   `omp plugin install /opt/legion/pi-legion-envoy`);
-3. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the tarball's version,
-   enabled, and resolving to `<dir>`.
+   `omp plugin install /opt/legion/<package>`);
+3. `OMP_PROFILE=<name> omp plugin list --json` must show the package, by its npm name, at the
+   tarball's version, enabled, and resolving to `<dir>`.
 
 Steps 2 and 3 run the Oh My Pi the daemon pins (`.omp-pin`, through `mise x <pin>`) under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper

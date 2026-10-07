@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Skill scenarios: fresh Oh My Pi agents, each running one checkout's packed plugin (and so that
+# Skill scenarios: fresh Oh My Pi agents, each running one checkout's packed plugins (and so that
 # checkout's skills), each given one task a skill rule governs, scored afterwards from what the
 # agent actually wrote. Two checkouts under the same scenario compare two versions of a skill.
 #
@@ -145,8 +145,8 @@ cmd_profile() {
   printf '%s\n' "$co" >"$P/checkout"
   printf '%s\n' "$profile" >"$P/profile"
   # What the label runs: the checkout's working-copy commit and a digest of its skills tree, the
-  # files the packed plugin stages into dist/skills, listed in byte order (LC_ALL=C) so the digest
-  # is the same in every locale.
+  # files the packed plugins stage into their dist/skills, listed in byte order (LC_ALL=C) so the
+  # digest is the same in every locale.
   {
     printf 'checkout %s\n' "$co"
     printf 'commit %s\n' "$(jj -R "$co" log -r @ --no-graph -T 'commit_id ++ " parents=" ++ parents.map(|c| c.commit_id()).join(",")')"
@@ -157,8 +157,13 @@ cmd_profile() {
     source "$co/scripts/e2e/lib/omp-home.sh"
     make_omp_home "$P/home"
   )
-  bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$P/home" --dest "$P/plugin" >"$P/install.log" 2>&1 ||
-    fail "install-plugin-profile.sh failed; see $P/install.log"
+  # Both plugins: a tester-proof worker's pane loads the Legion extension, which exits a Legion
+  # session that finds no Envoy plugin, and every plain session gets its Dispatch skills and tools
+  # from the Envoy plugin.
+  bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$P/home" --dest "$P/pi-envoy" >"$P/install.log" 2>&1 ||
+    fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
+  bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
+    fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
     fail "install-model-gateway.sh failed; see $P/install.log"
   cp "$co/.omp-pin" "$P/pin"
