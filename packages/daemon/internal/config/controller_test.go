@@ -71,18 +71,27 @@ state_dir: ./state
 	}
 }
 
-// `--daemon-url` wins over the file's daemon_url, validated and trimmed the same way.
+// `--daemon-url` wins over the file's daemon_url, validated and trimmed the same way. It keeps a
+// base path because the controller appends its routes there, but refuses a query or fragment.
 func TestLoadControllerTakesTheDaemonURLOverride(t *testing.T) {
 	path := controllerFile(t, requiredControllerKeys)
-	got, err := LoadController(path, "http://127.0.0.1:13370//")
+	got, err := LoadController(path, "http://127.0.0.1:13370/tenant//")
 	if err != nil {
 		t.Fatalf("LoadController: %v", err)
 	}
-	if got.DaemonURL != "http://127.0.0.1:13370" {
-		t.Fatalf("DaemonURL = %q, want the override without its trailing slashes", got.DaemonURL)
+	if got.DaemonURL != "http://127.0.0.1:13370/tenant" {
+		t.Fatalf("DaemonURL = %q, want the override with its base path and no trailing slashes", got.DaemonURL)
 	}
-	if _, err := LoadController(path, "not a url"); err == nil || err.Error() != "--daemon-url must be a valid URL" {
-		t.Fatalf("a broken override: err = %v, want the refusal naming --daemon-url", err)
+	for _, tc := range []struct {
+		override, want string
+	}{
+		{"not a url", "--daemon-url must be a valid URL"},
+		{"http://127.0.0.1:13370?token=token", "--daemon-url must not include a query string or fragment"},
+		{"http://127.0.0.1:13370#fragment", "--daemon-url must not include a query string or fragment"},
+	} {
+		if _, err := LoadController(path, tc.override); err == nil || err.Error() != tc.want {
+			t.Errorf("override %q error = %v, want %q", tc.override, err, tc.want)
+		}
 	}
 }
 
@@ -127,6 +136,10 @@ func TestLoadControllerRefuses(t *testing.T) {
 		{"a broken daemon_url", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "daemon", 1), "daemon_url must be a valid URL"},
 		{"a broken envoy_url", strings.Replace(requiredControllerKeys, "http://envoy.test:9020", "envoy", 1), "envoy_url must be a valid URL"},
 		{"dispatch_url alone", requiredControllerKeys + "dispatch_url: https://d.test\n", "dispatch_token_file is required when dispatch_url is configured"},
+		{"a daemon_url with a query string", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "http://daemon.test:13370?token=token", 1),
+			"daemon_url must not include a query string or fragment"},
+		{"a daemon_url with a fragment", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "http://daemon.test:13370#fragment", 1),
+			"daemon_url must not include a query string or fragment"},
 		{"a broken nats_urls entry", without("nats_urls") + "nats_urls: [nats]\n", `nats_urls entry "nats" must be a valid URL`},
 		{"an envoy_url with a query string", strings.Replace(requiredControllerKeys, "http://envoy.test:9020", "https://envoy.test?access_token=token", 1),
 			"envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials"},

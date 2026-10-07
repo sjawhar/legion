@@ -178,10 +178,8 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	return cfg, nil
 }
 
-// daemonBase is a daemon URL the command appends a route to: valid, without trailing slashes.
+// daemonBase is a daemon URL the command appends a route to: baseURL keeps an operator's path but
+// refuses a query or fragment, which would otherwise turn that route into request data.
 func daemonBase(value, key string) (string, error) {
-	if _, err := validURL(value, key); err != nil {
-		return "", err
-	}
-	return strings.TrimRight(value, "/"), nil
+	return baseURL(value, key)
 }

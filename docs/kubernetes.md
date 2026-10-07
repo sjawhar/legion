@@ -629,14 +629,13 @@ pod lacks counting as unset. A pod holding any other value is reported `stale_ad
 `alive` (`ObservationKind`, `internal/runtime/runtime.go`), and the observation's detail names each
 address that moved, with the value the pod holds and the one a new pod is handed
 (`LEGION_DAEMON_URL http://192.0.2.5:13370, now http://192.0.2.7:13370`). The supervisor logs
-that detail, so a single URL's userinfo is named `xxxxx` and its query and fragment are omitted
-(`nats://xxxxx@nats.example:4222`), since the daemon's log has readers a pod's spec does not. This
-also covers a pod an earlier daemon launched before the current endpoint grammar refused queries
-and fragments. A pod's `ENVOY_NATS_URL` joins its old daemon's NATS list with commas, and raw
-commas are valid in URL userinfo: a raw `@` beside a comma is ambiguous, so the old field is named
-only `xxxxx`, never split back into URLs. A single parsed NATS URL with an `@` only in its path is
-safe to name. A pod this runtime launched always compares equal, so only the pods a daemon under
-another configuration launched are ever
+that detail, so it constructs every printed endpoint from only its scheme, host and port, adding
+`xxxxx@` when userinfo is present. Path, query and fragment never appear, which also protects a pod
+an earlier daemon launched before the current endpoint grammar refused queries and fragments. A
+pod's `ENVOY_NATS_URL` is its old daemon's comma-joined list; it is parsed whole, never split, so
+later URLs and their paths never appear either. A malformed field is named only `xxxxx`. A pod this
+runtime launched always compares equal, so only the pods a daemon under another configuration
+launched are ever
 reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
 variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods launched
 after it. The supervisor relaunches each reported claim at once, through the launch path a death

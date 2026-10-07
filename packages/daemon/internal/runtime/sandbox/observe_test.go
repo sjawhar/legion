@@ -302,7 +302,7 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 		},
 		"NATS moved": {
 			launched: func(o *Options) { o.NATSURLs = []string{"nats://192.0.2.9:4222", "nats://192.0.2.10:4222"} },
-			want:     "ENVOY_NATS_URL nats://192.0.2.9:4222,nats://192.0.2.10:4222, now nats://192.0.2.250:4222",
+			want:     "ENVOY_NATS_URL nats://192.0.2.9:4222,nats:, now nats://192.0.2.250:4222",
 		},
 		"Envoy moved": {
 			launched: func(o *Options) { o.EnvoyURL = "http://192.0.2.9:9020" },
@@ -320,7 +320,7 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			launched: func(o *Options) {
 				o.NATSURLs = []string{"nats://legion:nats-password@192.0.2.9:4222", "nats://nats-token@192.0.2.10:4222"}
 			},
-			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+			want: "ENVOY_NATS_URL nats://xxxxx@192.0.2.9:4222,nats:, now nats://192.0.2.250:4222",
 		},
 		"NATS moved, naming no userinfo with a raw comma in it": {
 			launched: func(o *Options) {
@@ -330,7 +330,7 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 					"nats://user,more:password,more@192.0.2.11:4222",
 				}
 			},
-			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+			want: "ENVOY_NATS_URL nats://xxxxx@192.0.2.9:4222,nats:, now nats://192.0.2.250:4222",
 		},
 		"NATS configured now names no raw-comma userinfo": {
 			now: func(o *Options) {
@@ -346,7 +346,7 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			launched: func(o *Options) {
 				o.NATSURLs = []string{"nats://192.0.2.9:4222?token=nats-old-token"}
 			},
-			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
 		},
 		"NATS configured now names no query token": {
 			now: func(o *Options) {
@@ -366,11 +366,44 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			},
 			want: "ENVOY_URL " + testOptions().EnvoyURL + ", now http://192.0.2.9:9020",
 		},
+		"NATS moved to a percent-encoded credential-shaped path": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222/tenant%2Fnats-old-credential"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
+		},
+		"NATS configured now names no percent-encoded credential-shaped path": {
+			now: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222/tenant%2Fnats-current-credential"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://192.0.2.9:4222",
+		},
+		"Envoy moved to a percent-encoded credential-shaped path": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant%2Fenvoy-old-credential"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"Envoy configured now names no percent-encoded credential-shaped path": {
+			now: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant%2Fenvoy-current-credential"
+			},
+			want: "ENVOY_URL " + testOptions().EnvoyURL + ", now http://192.0.2.9:9020",
+		},
+		"Envoy path change is stale without naming either path": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant/old"
+			},
+			now: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant/new"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now http://192.0.2.9:9020",
+		},
 		"NATS moved, naming no fragment in an old pod": {
 			launched: func(o *Options) {
 				o.NATSURLs = []string{"nats://192.0.2.9:4222#token=nats-old-token"}
 			},
-			want: "ENVOY_NATS_URL xxxxx, now nats://192.0.2.250:4222",
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
 		},
 		"Envoy moved to a URL with a fragment token": {
 			launched: func(o *Options) {
@@ -378,11 +411,11 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			},
 			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
 		},
-		"NATS moved, preserving an at sign in a path": {
+		"NATS moved to a path containing an at sign": {
 			launched: func(o *Options) {
 				o.NATSURLs = []string{"nats://192.0.2.9:4222/route@blue"}
 			},
-			want: "ENVOY_NATS_URL nats://192.0.2.9:4222/route@blue, now nats://192.0.2.250:4222",
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
 		},
 		"Envoy moved to a URL with raw commas in its userinfo": {
 			launched: func(o *Options) {
@@ -439,6 +472,56 @@ func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
 			}
 			if !slices.Equal(moved, want) {
 				t.Fatalf("moved addresses %q, want %q", moved, want)
+			}
+		})
+	}
+}
+
+// An old ENVOY_NATS_URL is one comma-joined string. namedNATSPodValue must never split it: the
+// allowlist can safely show only one parse's scheme, host and port, not any other URL's path.
+func TestNamedNATSPodValueNeverLeaksTheJoinedField(t *testing.T) {
+	for name, tc := range map[string]struct {
+		value    string
+		contains []string
+		absent   []string
+	}{
+		"a raw comma in userinfo": {
+			value:    "nats://user:pa,ss@host.example:4222",
+			contains: []string{"nats://xxxxx@host.example:4222"},
+			absent:   []string{"user:pa", "pa,ss"},
+		},
+		"two endpoints": {
+			value:    "nats://a.example:4222,nats://b.example:4222",
+			contains: []string{"nats://a.example:4222,nats:"},
+			absent:   []string{"xxxxx"},
+		},
+		"a second endpoint's userinfo and path": {
+			value:    "nats://a.example:4222,nats://u:p@b.example:4222/tok",
+			contains: []string{"nats://a.example:4222,nats:"},
+			absent:   []string{"u:p", "tok"},
+		},
+		"an at sign in a path": {
+			value:    "nats://host.example:4222/route@blue",
+			contains: []string{"nats://host.example:4222"},
+			absent:   []string{"route@blue"},
+		},
+		"a percent-encoded path": {
+			value:    "nats://host.example:4222/tenant%2Ftoken",
+			contains: []string{"nats://host.example:4222"},
+			absent:   []string{"tenant", "%2F", "token"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := namedNATSPodValue(tc.value)
+			for _, want := range tc.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("namedNATSPodValue(%q) = %q, want it to contain %q", tc.value, got, want)
+				}
+			}
+			for _, forbidden := range tc.absent {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("namedNATSPodValue(%q) = %q, must not contain %q", tc.value, got, forbidden)
+				}
 			}
 		})
 	}

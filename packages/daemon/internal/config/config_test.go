@@ -569,6 +569,25 @@ func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
 	}
 }
 
+func TestEndpointURLKeepsAPath(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"envoy_url", "https://envoy.example/tenant"},
+		{"nats_urls", "nats://nats.example:4222/tenant"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			got, err := endpointURL(tc.value, tc.key)
+			if err != nil {
+				t.Fatalf("endpointURL: %v", err)
+			}
+			if got.Path != "/tenant" {
+				t.Errorf("path = %q, want /tenant", got.Path)
+			}
+		})
+	}
+}
+
 func TestLoadRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name string

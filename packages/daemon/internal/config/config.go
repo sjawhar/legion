@@ -717,14 +717,14 @@ func validURL(value, key string) (*url.URL, error) {
 
 // endpointURL is validURL for a URL that names an endpoint, never a request: NATS and Envoy
 // credentials belong in URL userinfo or a secret, not in a query that would reach a pod's
-// environment and any diagnostic that names it.
+// environment and any diagnostic that names it. An endpoint path remains valid.
 func endpointURL(value, key string) (*url.URL, error) {
 	parsed, err := validURL(value, key)
 	if err != nil {
 		return nil, err
 	}
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return nil, fmt.Errorf("%s must not include a query string or fragment; use URL userinfo or a secret for credentials", key)
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return nil, fmt.Errorf("%w; use URL userinfo or a secret for credentials", err)
 	}
 	return parsed, nil
 }
