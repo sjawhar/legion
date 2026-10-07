@@ -124,9 +124,10 @@ func defaultsFor(port int) Config {
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
 		},
-		Linger:         72 * time.Hour,
-		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
+		Linger:           72 * time.Hour,
+		ReviewRoundCap:   3,
+		MaxFixAttempts:   3,
+		ControllerLaunch: ControllerLaunchOperator,
 	}
 }
 
@@ -569,6 +570,25 @@ func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
 	}
 }
 
+func TestEndpointURLKeepsAPath(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"envoy_url", "https://envoy.example/tenant"},
+		{"nats_urls", "nats://nats.example:4222/tenant"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			got, err := endpointURL(tc.value, tc.key)
+			if err != nil {
+				t.Fatalf("endpointURL: %v", err)
+			}
+			if got.Path != "/tenant" {
+				t.Errorf("path = %q, want /tenant", got.Path)
+			}
+		})
+	}
+}
+
 func TestLoadRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -640,6 +660,28 @@ func TestLoadRefuses(t *testing.T) {
 			name: "daemon_url with a query string",
 			body: minimalFile + "daemon_url: http://127.0.0.1:13370/?x=1\n",
 			want: "daemon_url must not include a query string or fragment",
+		},
+		{
+			name: "nats_urls entry with a query string",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222?token=token"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222?token=token" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "nats_urls entry with a fragment",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222#fragment"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222#fragment" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "envoy_url with a query string",
+			body: minimalFile + "envoy_url: https://envoy.example?access_token=token\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
+		},
+		{
+			name: "envoy_url with a fragment",
+			body: minimalFile + "envoy_url: https://envoy.example#fragment\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
 		},
 		{
 			name: "worker_stream_port zero",

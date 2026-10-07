@@ -46,6 +46,11 @@ type Options struct {
 	Controller ControllerStore
 	// DesignGate is the project's `gates.design`, which the controller secret route answers.
 	DesignGate config.DesignGate
+	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
+	// daemon`): one controller runs per project, so the controller secret route refuses the operator
+	// and a registration registers the controller only from a launch of the controller's claim.
+	// Unset (`controller: operator`), only the operator's capability registers it.
+	ControllerLaunched bool
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -80,6 +85,8 @@ type server struct {
 	operatorHash      [sha256.Size]byte
 	controller        ControllerStore
 	designGate        config.DesignGate
+	// controllerLaunched is Options.ControllerLaunched.
+	controllerLaunched bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu  sync.Mutex
@@ -100,8 +107,8 @@ type server struct {
 }
 
 // NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface
-// only when bind is 0.0.0.0, as a daemon that runs as a pod binds. The caller owns its lifecycle
-// (ListenAndServe, Shutdown).
+// only when bind is 0.0.0.0 or ::, as a daemon that runs as a pod binds. The caller owns its
+// lifecycle (ListenAndServe, Shutdown).
 //
 // Three audiences, three kinds of route: the state everyone reads; the claim lifecycle an agent's
 // plugin drives (register, ready, exit), authenticated by its pane's boot token and then by the
@@ -109,23 +116,24 @@ type server struct {
 // operator bearer.
 func NewServer(bind string, port int, opts Options) *http.Server {
 	s := &server{
-		state:             opts.State,
-		stateTransactions: opts.StateTransactions,
-		supervisor:        opts.Supervisor,
-		bootTokens:        opts.BootTokens,
-		project:           opts.Project,
-		controller:        opts.Controller,
-		designGate:        opts.DesignGate,
-		tokens:            opts.Tokens,
-		githubOwner:       opts.GitHubOwner,
-		githubGraphQL:     opts.GitHubGraphQL,
-		grants:            opts.Grants,
-		pool:              opts.Pool,
-		handlers:          opts.Handlers,
-		records:           opts.Record,
-		dispatch:          opts.Dispatch,
-		claimReady:        opts.ClaimReady,
-		log:               opts.Log,
+		state:              opts.State,
+		stateTransactions:  opts.StateTransactions,
+		supervisor:         opts.Supervisor,
+		bootTokens:         opts.BootTokens,
+		project:            opts.Project,
+		controller:         opts.Controller,
+		designGate:         opts.DesignGate,
+		controllerLaunched: opts.ControllerLaunched,
+		tokens:             opts.Tokens,
+		githubOwner:        opts.GitHubOwner,
+		githubGraphQL:      opts.GitHubGraphQL,
+		grants:             opts.Grants,
+		pool:               opts.Pool,
+		handlers:           opts.Handlers,
+		records:            opts.Record,
+		dispatch:           opts.Dispatch,
+		claimReady:         opts.ClaimReady,
+		log:                opts.Log,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))

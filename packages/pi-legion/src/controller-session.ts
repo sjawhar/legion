@@ -9,7 +9,12 @@ import type { CommandContext, SessionContext } from "@legion/pi-shared/pi-types"
 import { claimEnvoyRole, subscribeLegionNotice } from "@legion/pi-shared/role-claim-bridge";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../package.json";
-import { classifySession, requiredControllerCapability, requiredEnvironment } from "./classify";
+import {
+  classifySession,
+  requiredControllerCapability,
+  requiredEnvironment,
+  requiredSecret,
+} from "./classify";
 import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
 
 type PersistedTranscript = (
@@ -32,6 +37,7 @@ export interface ControllerSession {
 export function createControllerSession(deps: {
   readonly daemon: () => LegionDaemonClient;
   readonly persistedTranscript: PersistedTranscript;
+  readonly exitProcess: (code: number) => never;
 }): ControllerSession {
   const { daemon, persistedTranscript } = deps;
   let controllerSessionID: string | undefined;
@@ -63,10 +69,42 @@ export function createControllerSession(deps: {
    * started this session and reads it; a refused capability was replaced by a later start. The
    * transcript is reported on every claim, a takeover's included, because the route requires one;
    * the daemon records only the session.
+   *
+   * A controller the daemon launched itself (`controller: daemon`) is the controller's own session
+   * (`LEGION_CONTROLLER=1`) carrying its launch's boot token (`LEGION_BOOT_TOKEN_FILE`) in place of
+   * a capability: it registers with that token, as every pane does, and once it holds the role and
+   * the topic it reports ready on `claims/ready`, which is when the daemon hands it the start
+   * message. Any step of its claim that fails exits Oh My Pi, so the daemon relaunches it, as a
+   * pane's failed boot does: nobody reads its session. A root architect's or phase worker's pane
+   * carries a boot token too, its own claim's: `/legion-claim-controller` run there is a takeover
+   * by hand like any other, which needs the capability and stops before any daemon call without it.
    */
   const claim = async (context: CommandContext | SessionContext): Promise<void> => {
+    const supervised =
+      classifySession(process.env).kind === "controller" &&
+      (process.env.LEGION_BOOT_TOKEN_FILE !== undefined ||
+        process.env.LEGION_BOOT_TOKEN !== undefined);
+    if (!supervised) return claimWith(context, false);
+    try {
+      await claimWith(context, true);
+    } catch (error) {
+      console.error(
+        `[legion] the daemon-launched controller's claim failed; exiting so the daemon launches it again: ${messageFor(error)}`
+      );
+      deps.exitProcess(1);
+    }
+  };
+
+  const claimWith = async (
+    context: CommandContext | SessionContext,
+    supervised: boolean
+  ): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
-    const capability = controllerCapability ?? requiredControllerCapability(process.env);
+    const capability =
+      controllerCapability ??
+      (supervised
+        ? requiredSecret(process.env, "LEGION_BOOT_TOKEN")
+        : requiredControllerCapability(process.env));
     controllerCapability = capability;
     // The controller's own transcript, which persistedTranscript puts on disk, is recorded so the
     // controller's own `task` subagents are recognised even when the transcript is not a file on
@@ -113,6 +151,14 @@ export function createControllerSession(deps: {
       envoyContext,
       registration.claimToken
     );
+    if (supervised) {
+      await client.ready({
+        claimToken: registration.claimToken,
+        sessionId: sessionID,
+        secret: registration.secret,
+        generation: registration.generation,
+      });
+    }
     mintControllerGrant = () =>
       client.controllerGrant({ sessionId: sessionID, secret: registration.secret });
     controllerSessionID = sessionID;

@@ -62,7 +62,7 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/claim-session.ts`) or, for the controller, the controller session
 (`src/controller-session.ts`). `package.json` declares the contract it was built against as
-`legion.daemonApiVersion` (currently 13): the claim, credential, workflow, controller, and state
+`legion.daemonApiVersion`: the claim, credential, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
 `src/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
@@ -82,8 +82,9 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 13 for contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583);
-the Envoy plugin's manifest carries no `legion` key, and the gate reads only this package's.
+number is 14 for contract 14's daemon-launched controller pod (LEGION-592), after contract 13's
+`push` grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest
+carries no `legion` key, and the gate reads only this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
@@ -151,7 +152,18 @@ close an admitted root tree (a root architect only), and read records; phase wor
 backward move and read records. No `claims/exit` report runs at shutdown, because a
 daemon-requested suspend ends the session but keeps its claim for resumption.
 
-The daemon launches no controller: the operator starts one with `legion controller start`, which
+A daemon that sets `controller: daemon` launches the controller itself, as a pod with
+`LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE` (`controllerSession` in
+`src/controller-session.ts`): the session registers on `claims/register` with that boot
+token in place of a capability, is answered with the same controller registration, claims the role,
+subscribes to the controller topic, and then calls `claims/ready`, which is when the daemon sends
+its start message. Any step of that claim that fails exits Oh My Pi, so the daemon relaunches it;
+the operator's controller logs and stays up instead. Only a session classified as the controller
+(`LEGION_CONTROLLER=1`) registers its boot token that way: `/legion-claim-controller` in a root
+architect's or phase worker's pane, whose boot token is its own claim's, is a takeover by hand that
+needs the capability and stops before any daemon call without it, never re-registering the
+worker's claim or exiting it. Every other daemon launches no controller: the
+operator starts one with `legion controller start`, which drops an inherited boot token,
 fetches the controller capability with the operator's bearer and runs Oh My Pi with
 `LEGION_CONTROLLER=1` and `LEGION_CONTROLLER_SECRET_FILE`. No boot gate checks the operator's
 machine, so the plugin's contract is held there three times. Before its one daemon call,

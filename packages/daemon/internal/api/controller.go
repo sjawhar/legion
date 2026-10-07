@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // ControllerStore is the project's controller record: the capability `legion controller start`
@@ -38,20 +39,19 @@ type ControllerSecretResponse struct {
 	DesignGate config.DesignGate `json:"designGate"`
 }
 
-// ControllerRole is the role a controller registration names: the operator's controller, which
-// holds no claim — the operator launches it and nothing supervises it — so it is no claim.Role.
-const ControllerRole = "controller"
-
 // ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
-// registered with the controller capability: the project's controller role token
-// (claim.ControllerToken), ControllerRole, the capability's generation, and the secret its
+// registered as the project's controller: the project's controller role token
+// (claim.ControllerToken), the role claim.RoleController, a generation, and the secret its
 // controller grants authenticate with. It has no tree and no issue; a claim's registration is
 // claim.RegisterResponse.
 type ControllerRegisterResponse struct {
 	ClaimToken claim.Token `json:"claimToken"`
-	Role       string      `json:"role"`
-	Generation uint64      `json:"generation"`
-	Secret     string      `json:"secret"`
+	Role       claim.Role  `json:"role"`
+	// Generation is the generation of the capability the operator's controller registered with,
+	// and, for the daemon's own controller (`controller: daemon`), the generation of the launch
+	// that registered, which its agent names on `claims/ready`.
+	Generation uint64 `json:"generation"`
+	Secret     string `json:"secret"`
 }
 
 // controllerSecret is `legion controller start`'s one daemon call: the operator's bearer, compared
@@ -60,12 +60,19 @@ type ControllerRegisterResponse struct {
 // able to act the moment this answers — last start wins. A request whose plugin contract is not
 // this daemon's is refused before the mint, naming both: the controller it would start is refused
 // at registration, so minting for it would only cut the running controller off (a `legion` binary
-// replaced before its daemon restarted, or the other way round). Every refusal is one log line and
-// mints nothing.
+// replaced before its daemon restarted, or the other way round). A daemon that launches its own
+// controller (`controller: daemon`) refuses every request, since a mint would cut that controller
+// off for a second one. Every refusal is one log line and mints nothing.
 func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	if !s.operatorAuthorized(r) {
 		s.log.Warn("api: refused a controller secret: no operator bearer, or the wrong one")
 		writeJSON(w, http.StatusForbidden, errorBody(invalidOperatorToken))
+		return
+	}
+	if s.controllerLaunched {
+		s.log.Warn("api: refused a controller secret: this daemon launches the project's controller itself")
+		writeJSON(w, http.StatusConflict, errorBody(
+			"this daemon launches the project's controller itself (controller: daemon), so legion controller start has none to start"))
 		return
 	}
 	var req ControllerSecretRequest
@@ -98,13 +105,14 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
 }
 
-// registerController is a registration whose token is no launch's boot token: it registers
-// req's session as the project's controller when the token is the current controller capability,
-// and answers the one refusal an unknown token gets otherwise. No boot gate checks the operator's
-// Oh My Pi — the daemon gates only the panes it launches — so a controller whose plugin speaks
-// another daemon API contract is refused here, naming both, and nothing is recorded. The
-// registration is issued a secret of its own, persisted by its hash before this answers, which
-// the session's controller grants authenticate with.
+// registerController is a registration whose token is no launch's boot token, on a daemon that
+// leaves the controller to its operator (`controller: operator`; register routes none here
+// otherwise): it registers req's session as the project's controller when the token is the current
+// controller capability, and answers the one refusal an unknown token gets otherwise. No boot gate
+// checks the operator's Oh My Pi — the daemon gates only the panes it launches — so a controller
+// whose plugin speaks another daemon API contract is refused here, naming both, and nothing is
+// recorded. The registration is issued a secret of its own, persisted by its hash before this
+// answers, which the session's controller grants authenticate with.
 func (s *server) registerController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest) {
 	ctx := context.WithoutCancel(r.Context())
 	s.controllerMu.Lock()
@@ -142,8 +150,54 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		"session", req.SessionID, "agent", req.AgentID)
 	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: token,
-		Role:       ControllerRole,
+		Role:       claim.RoleController,
 		Generation: record.Generation,
+		Secret:     secret,
+	})
+}
+
+// registerLaunchedController is the registration of a launch of the daemon's own controller, on a
+// daemon under `controller: daemon` (register refuses one otherwise): its agent registers with the
+// launch's boot token, which the daemon minted for that launch and wrote into the pod's Secret,
+// where the operator's controller presents the capability its bearer bought. The claim's machine
+// takes the registration first, behind the generation and same-agent fences every claim's has, and
+// persists the session, its transcript and the issued secret's hash; then the session is recorded
+// as the project's controller — the record admission's wakes, the controller grant route and the
+// state read — under controller.UnheldCapability, which revokes every earlier controller's grants
+// and keeps the boot token out of the record, whose invariant that function's doc states. The
+// answer is the operator's controller's registration, its generation the launch's, which the
+// agent's ready names.
+func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest, launch BootToken, m *supervise.Machine) {
+	ctx := context.WithoutCancel(r.Context())
+	secret := rand.Text()
+	s.controllerMu.Lock()
+	defer s.controllerMu.Unlock()
+	if err := m.Handle(ctx, supervise.RequestRegister{
+		Claim: launch.Claim, Generation: launch.Generation, Session: req.SessionID, SessionFile: req.OmpSessionFile,
+		CapabilityHash: capabilityHash(secret),
+	}); err != nil {
+		s.claimFailure(w, "register", launch.Claim, err)
+		return
+	}
+	generation, err := s.controller.MintController(ctx, s.project, controller.UnheldCapability())
+	if err != nil {
+		s.log.Error("api: record the launched controller's capability", "claim", launch.Claim, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
+		return
+	}
+	s.grants.RevokeControllers()
+	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
+	if err != nil || !registered {
+		s.log.Error("api: record the launched controller's registration", "claim", launch.Claim, "registered", registered, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
+		return
+	}
+	s.log.Info("api: launched controller registered", "claim", launch.Claim, "generation", launch.Generation,
+		"session", req.SessionID, "agent", req.AgentID, "pluginContract", req.PluginContract)
+	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
+		ClaimToken: launch.Claim,
+		Role:       claim.RoleController,
+		Generation: launch.Generation,
 		Secret:     secret,
 	})
 }
