@@ -80,6 +80,9 @@ template, and the later phases fill in their own lines:
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
 - **Production**: written by the implementer after the merge.
+- Any line your repository's own instructions derive from the paths the change touches, such as a
+  checklist named for each kind of path: after the approval, the retro recomputes it for the whole
+  change, its notes included, the way those instructions say, before it pushes the notes.
 
 Legion's reviewer posts its review as the review App. A review from anyone with write access to the
 repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
