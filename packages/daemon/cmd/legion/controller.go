@@ -159,7 +159,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	}
 	fmt.Fprintf(stderr, "[legion] checking the controller's Oh My Pi (%s) in %s before the daemon mints a capability\n",
 		omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), controllerDir)
-	secret, designGate, err := probeAndMint(ctx, cfg.DaemonURL, daemon.ControllerProbe{
+	answer, err := probeAndMint(ctx, cfg.DaemonURL, daemon.ControllerProbe{
 		Omp: invocation, Prefix: cfg.OmpLaunchPrefix, Env: env, WorkDir: controllerDir, Stdin: os.Stdin, Stderr: stderr,
 		Contract: api.DaemonAPIVersion, Log: slog.New(slog.NewTextHandler(stderr, nil)),
 	}, operatorToken)
@@ -168,7 +168,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 
-	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
+	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, answer.Secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
 	composer, err := prompts.New(stateDir)
@@ -192,13 +192,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	// The daemon's design gate policy is the controller's addressing, the line its take comment
-	// reads before it promises anyone a design approval (skill://legion-controller). The start
+	// The daemon's design gate policy and its Slack reporting channels are the controller's
+	// addressing: the line its take comment reads before it promises anyone a design approval, and
+	// the topics it subscribes to for reports (skill://legion-controller). The start
 	// message is Oh My Pi's first prompt, so a started or restarted controller runs its start
 	// procedure at once rather than waiting for a wake that, with every slot full, may not come.
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
-		Addressing:                 daemon.DesignGateFragment(designGate),
+		Addressing:                 daemon.ControllerAddressing(answer.DesignGate, answer.Slack),
 		DeploymentInstructionsPath: instructionsFile,
 	}) + " " + shellprefix.Word(daemon.ControllerStartMessage)
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
@@ -266,9 +267,9 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 // probeAndMint is the controller probe and then the one daemon call, which mints the capability:
 // the probe's refusal comes before the mint, never after it, and the call names the contract the
 // probe held the plugin to, so a daemon of another contract refuses it before minting.
-func probeAndMint(ctx context.Context, daemonURL string, probe daemon.ControllerProbe, operatorToken string) (string, config.DesignGate, error) {
+func probeAndMint(ctx context.Context, daemonURL string, probe daemon.ControllerProbe, operatorToken string) (api.ControllerSecretResponse, error) {
 	if err := daemon.ProbeController(ctx, probe); err != nil {
-		return "", "", err
+		return api.ControllerSecretResponse{}, err
 	}
 	return fetchControllerSecret(ctx, daemonURL, operatorToken, probe.Contract)
 }
@@ -298,39 +299,39 @@ func removeDirs(created []string) {
 }
 
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
-// bearer and the plugin's daemon API contract in the body, answering the capability and the
-// daemon's design gate policy. A failed request names the daemon URL and never tries another
-// address; a refusal quotes the daemon's `error`, except a daemon from before contract 12, which
-// refuses the contract field itself as unknown, so the refusal names the side to upgrade instead.
-// An answer without a known policy is a daemon from before the controller was told it, refused
-// rather than guessed at.
-func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string, contract int) (string, config.DesignGate, error) {
+// bearer and the plugin's daemon API contract in the body, answering the capability, the daemon's
+// design gate policy and its Slack reporting channels. A failed request names the daemon URL and
+// never tries another address; a refusal quotes the daemon's `error`, except a daemon from before
+// contract 12, which refuses the contract field itself as unknown, so the refusal names the side to
+// upgrade instead. An answer without a known policy is a daemon from before the controller was told
+// it, refused rather than guessed at.
+func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string, contract int) (api.ControllerSecretResponse, error) {
 	const route = "/legion/v1/controller/secret"
 	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, api.ControllerSecretRequest{PluginContract: contract})
 	if err != nil {
-		return "", "", fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
+		return api.ControllerSecretResponse{}, fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
 	if status/100 != 2 {
 		var refused legionclaim.Refusal
 		if status == http.StatusBadRequest && json.Unmarshal(body, &refused) == nil &&
 			strings.Contains(refused.Message, `unknown field "pluginContract"`) {
-			return "", "", fmt.Errorf("%s%s: the daemon speaks a daemon API contract older than 12, and this legion speaks %d; upgrade the daemon to this legion's release, or start the controller with the legion built with that daemon", daemonURL, route, contract)
+			return api.ControllerSecretResponse{}, fmt.Errorf("%s%s: the daemon speaks a daemon API contract older than 12, and this legion speaks %d; upgrade the daemon to this legion's release, or start the controller with the legion built with that daemon", daemonURL, route, contract)
 		}
 		hint := ""
 		if status == http.StatusForbidden {
 			hint = " — the operator token does not match the daemon's operator_token_file"
 		}
-		return "", "", fmt.Errorf("%s%s: %s%s", daemonURL, route, refusal(status, body), hint)
+		return api.ControllerSecretResponse{}, fmt.Errorf("%s%s: %s%s", daemonURL, route, refusal(status, body), hint)
 	}
 	var answer api.ControllerSecretResponse
 	if err := json.Unmarshal(body, &answer); err != nil {
-		return "", "", fmt.Errorf("%s%s answered with a body that is not JSON", daemonURL, route)
+		return api.ControllerSecretResponse{}, fmt.Errorf("%s%s answered with a body that is not JSON", daemonURL, route)
 	}
 	if answer.Secret == "" {
-		return "", "", fmt.Errorf("%s%s answered with no secret", daemonURL, route)
+		return api.ControllerSecretResponse{}, fmt.Errorf("%s%s answered with no secret", daemonURL, route)
 	}
 	if !answer.DesignGate.Valid() {
-		return "", "", fmt.Errorf("%s%s answered design gate policy %q, not 'root-issues' or 'off'; upgrade the daemon to this legion's release", daemonURL, route, answer.DesignGate)
+		return api.ControllerSecretResponse{}, fmt.Errorf("%s%s answered design gate policy %q, not 'root-issues' or 'off'; upgrade the daemon to this legion's release", daemonURL, route, answer.DesignGate)
 	}
-	return answer.Secret, answer.DesignGate, nil
+	return answer, nil
 }

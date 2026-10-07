@@ -256,12 +256,23 @@ export const LegionControllerRegisterResponse = z.strictObject({
 
 export type LegionControllerRegistration = z.output<typeof LegionControllerRegisterResponse>;
 
+/** `config.Slack`, the deployment's `slack` block: its Slack team and its reporting channels, each
+ * with the project a report there is filed in. */
+export const LegionSlackReporting = z.strictObject({
+  team: nonEmptyString,
+  reportingChannels: z
+    .array(z.strictObject({ channel: nonEmptyString, project: nonEmptyString }))
+    .min(1),
+});
+
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
- * capability the operator's bearer bought, and the project's `gates.design`, which
- * `legion controller start` tells the controller. The CLI reads it; the plugin never does. */
+ * capability the operator's bearer bought, the project's `gates.design`, and the deployment's
+ * Slack reporting channels (absent when it takes no Slack reports), which `legion controller start`
+ * tells the controller. The CLI reads it; the plugin never does. */
 export const LegionControllerSecretResponse = z.strictObject({
   secret: nonEmptyString,
   designGate: z.enum(["root-issues", "off"]),
+  slack: LegionSlackReporting.optional(),
 });
 
 /** Claim routes refuse with only a sentence; credential and workflow routes add a stable code. */

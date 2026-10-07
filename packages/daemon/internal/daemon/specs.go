@@ -35,6 +35,9 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
+	// slack is the deployment's `slack` block, nil when it sets none, which the controller is told
+	// after its design gate policy (SlackFragment).
+	slack *config.Slack
 	// reviewWorkflows is the project's review_workflows, which a reviewer is told after its
 	// addressing (ReviewWorkflowsFragment).
 	reviewWorkflows []string
@@ -96,10 +99,10 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part, the project's design gate policy as its addressing — what `legion controller
-// start` tells the operator's controller — the deployment instructions and the launch secrets. It
-// has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing.
+// the headless part, the project's design gate policy and its Slack reporting channels as its
+// addressing — what `legion controller start` tells the operator's controller — the deployment
+// instructions and the launch secrets. It has no repository and no git identity: the controller
+// works Dispatch, never a checkout, and commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -113,7 +116,7 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,
-			Addressing:                 DesignGateFragment(s.designGate),
+			Addressing:                 ControllerAddressing(s.designGate, s.slack),
 			DeploymentInstructionsPath: s.instructions,
 		},
 	}, nil
@@ -160,6 +163,28 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 // the architect is in its Go role part (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
+}
+
+// ControllerAddressing is the controller's launch addressing under either launcher: the design gate
+// policy, then, when the deployment takes Slack reports, its reporting channels (SlackFragment).
+func ControllerAddressing(policy config.DesignGate, slack *config.Slack) string {
+	if slack == nil {
+		return DesignGateFragment(policy)
+	}
+	return DesignGateFragment(policy) + " " + SlackFragment(*slack)
+}
+
+// SlackFragment is the sentence the controller is told after its design gate policy when the
+// deployment sets `slack`: the "Slack reporting channels" line its skill reads
+// (skill://legion-controller, "Reports from Slack"), naming each channel's mention topic, which the
+// controller subscribes to, and the project a report there is filed in. The topic is spelled here
+// so the model never hand-builds one.
+func SlackFragment(slack config.Slack) string {
+	channels := make([]string, 0, len(slack.ReportingChannels))
+	for _, c := range slack.ReportingChannels {
+		channels = append(channels, fmt.Sprintf("`notifications.slack.%s.%s.mention` (files in %s)", slack.Team, c.Channel, c.Project))
+	}
+	return fmt.Sprintf("Slack reporting channels: team `%s`; %s.", slack.Team, strings.Join(channels, ", "))
 }
 
 // ReviewWorkflowsFragment is the sentence a reviewer is told after its addressing: the required

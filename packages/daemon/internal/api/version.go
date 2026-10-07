@@ -51,4 +51,8 @@ package api
 // reporting ready on `claims/ready`. A plugin built before it reads that pod as the operator's
 // controller, throws for want of `LEGION_CONTROLLER_SECRET`, and never registers, so the image probe
 // must refuse such an image rather than leave the controller's keeper relaunching it forever.
-const DaemonAPIVersion = 14
+//
+// 15: LEGION-589 -- `POST /legion/v1/controller/secret` adds optional `slack` reporting channels.
+// The strict controller-secret schema parsed by `legion controller start` uses them to subscribe to
+// Slack report mentions, so a controller and daemon built against different shapes must not pair.
+const DaemonAPIVersion = 15

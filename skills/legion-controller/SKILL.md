@@ -100,14 +100,17 @@ procedure with nothing typed.
 At every start, after the claim recheck ([Turn discipline](#turn-discipline)) and before anything
 else:
 
-1. Read `legion state --json` and handle each issue whose `issues.<KEY>.phase` is `held` (its
+1. Read the `Slack reporting channels:` line in your `Legion addressing`. For every mention topic it
+   names, call `envoy_subscribe` with that exact topic. Do not poll Slack, subscribe to an unlisted
+   channel, or subscribe to direct messages.
+2. Read `legion state --json` and handle each issue whose `issues.<KEY>.phase` is `held` (its
    `issues.<KEY>.holdReason` is `escalated` when its architect sent it to you, and absent while the
    architect is still deciding or while its tree lingers or is closed, where the hold waits for the
    tree's re-admission and needs nothing from you), and each tree root whose
    `issues.<KEY>.architect.state` is `failed` and whose `issues.<KEY>.phase` is not `done`, exactly
    as the matching wake below. A parked tree (root phase `done`: it lingers or is closed) needs
    nothing from you: a failed architect ignores the park and reads `failed` until the tree closes.
-2. List the project's triage issues handed to Legion with
+3. List the project's triage issues handed to Legion with
    `dispatch_issues({project, status: "triage", label: "legion", limit: 250, offset: 0})`.
    When its first line ends `(showing 1-250 of N)`, read the next page with `offset: 250`, and so
    on until you have all N rows. The rows show no parent, so open each row with `dispatch_read`
@@ -118,11 +121,47 @@ else:
    `issues`. A root recorded there and now in `triage` is work the daemon holds that a human
    pulled back: never re-admit it yourself; name it in your summary to the human ("<KEY> was
    pulled back to triage; what do you want?").
-3. Fill the free admission slots ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
-4. Post the day's report when this is your first turn of the UTC day
+4. Fill the free admission slots ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
+5. Post the day's report when this is your first turn of the UTC day
    ([Daily report](#daily-report-go-daemon)).
 
 The issue record and Dispatch are the truth; the topic is the wake.
+
+### Reports from Slack
+
+The controller receives only an `app_mention` in a reporting channel whose exact
+`notifications.slack.<team>.<channel>.mention` topic appears on its `Slack reporting channels:`
+line. The event payload names `team_id`, `channel_id`, `ts`, and `thread_ts`. Its report thread is
+`thread_ts` when present, otherwise `ts`. Read it with:
+
+```text
+legion slack read --channel "<channel_id>" --thread-ts "<report thread timestamp>"
+```
+
+Build the report permalink from the event's team, channel, and root timestamp. It is the Slack
+client thread URL for that exact message:
+`https://app.slack.com/client/<team_id>/<channel_id>/thread/<channel_id>-<root timestamp>`.
+
+Before filing anything, read the thread for a Legion post that names an issue and search Dispatch
+for the permalink. When a working Legion issue owns the thread, verify it with `dispatch_read`,
+then route the report context to that issue's current architect role. Do not reply in the thread.
+When the thread was already handed to that issue, drop later duplicate mentions rather than routing
+or posting again.
+
+When no working issue owns the report, file one root issue in the reporting channel's project. Use
+another project from the same `Slack reporting channels:` line only when the report plainly belongs
+there; otherwise the channel's project wins. Put the permalink in the primary spec and attach it as
+the issue's `external_links`: first create the unlabelled issue, then add its external link. If
+adding the link returns `EXTERNAL_LINK_TAKEN`, another issue already owns the permalink: close the
+unlabelled issue you just created as its duplicate, read the owning issue, and post nothing. That
+refusal is the duplicate guard.
+
+After the link succeeds, set the new issue to `todo` and add the `legion` label. Then reply once in
+the Slack thread with `legion slack reply --channel "<channel_id>" --thread-ts "<report thread
+timestamp>" --text "<the Dispatch issue link>"`. The reply says the report was filed; it does not
+promise that work is underway. The root architect owns the thread from then on. The design gate is
+the human check: with `gates.design: root-issues`, no phase starts until a human approves the
+specification in Dispatch; `gates.design: off` removes that approval.
 
 ### Issues handed to Legion (Go daemon)
 
@@ -159,7 +198,7 @@ Picking the next work is your job: nobody hand-feeds issues to Legion. Keep ever
 filled with the highest-priority concrete issue Legion can take. The unit of Legion work is a
 leaf, an issue with no children, never an umbrella that holds other issues.
 
-**When.** At every start (step 3 above), and on each of the Go daemon's walk wakes. The daemon
+**When.** At every start (step 4 above), and on each of the Go daemon's walk wakes. The daemon
 sends each only while a controller is registered, and none while one of the same kind is still
 unsent:
 
@@ -330,7 +369,8 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick"}`) | the project key; the daemon's periodic wake, whatever the slots | Recheck the trees waiting on a claim, then walk if a slot is free; post the day's report if this is the day's first turn |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch_ask` only for a human to-do |
-| Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
+| Slack reporting-channel mention | `team_id`, `channel_id`, `ts`, `thread_ts`, and report text | Follow [Reports from Slack](#reports-from-slack) |
+| GitHub pull request @mention | mention text and artifact | Answer, or route to the owning issue's architect role |
 | `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `legion state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `legion status <root> backlog`; setting the root back to `todo` later re-admits it as a new generation, which starts again from its architect |
 | `worker-died on <KEY>` from the Go daemon with `role: "architect"` | the tree root whose architect's claim failed, and the phase the root was in | The tree's architect ran out of launches or prompts and the daemon relaunches nothing; every other notice of the tree goes to that architect, so nobody inside the tree can act. Verify in `legion state` (`issues.<KEY>.architect.state` is `failed`); if the root's phase is `done`, the tree is already parked: no action. Otherwise re-admit the tree (`legion status <root> backlog`, then `todo`: a new generation, whose architect starts again with fresh budgets) or leave it parked and say why on the issue |
 | Direct user message | — | Always first |
@@ -406,14 +446,15 @@ Never promote a child in place. Resolve capacity and cross-tree conflicts from v
 state, routing design decisions back to the owning architect when they are not controller
 judgments.
 
-## Mentions
+## GitHub pull request mentions
 
-Read the mention and its artifact. Answer it when it asks the controller for triage or
-human-facing information. A human asking how to let a root proceed past its design gate
-approves the root issue's spec document in Dispatch — the `Approve` control in the document's
-header, or the approval question the architect's request opened in the Inbox. The controller
-never opens a gate and there is no operator command for it; a project that does not want the
-gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the authoritative
-owning architect role and route the verified context with `envoy_publish`. Do not route raw
-event traffic or invent a role token from a partial issue reference.
+A Slack mention in a reporting channel follows [Reports from Slack](#reports-from-slack). For a
+GitHub pull request mention, read the mention and its artifact. Answer it when it asks the
+controller for triage or human-facing information. A human asking how to let a root proceed past
+its design gate approves the root issue's spec document in Dispatch — the `Approve` control in the
+document's header, or the approval question the architect's request opened in the Inbox. The
+controller never opens a gate and there is no operator command for it; a project that does not want
+the gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the authoritative
+owning architect role and route the verified context with `envoy_publish`. Do not route raw event
+traffic or invent a role token from a partial issue reference.
 

@@ -31,12 +31,15 @@ type ControllerSecretRequest struct {
 }
 
 // ControllerSecretResponse is `POST /legion/v1/controller/secret`'s answer: the capability the
-// controller's Oh My Pi registers with, and the project's design gate policy (`gates.design`),
-// which `legion controller start` tells the controller so its take comment promises a design
-// approval only when the gate is armed. `legion controller start` reads it; the plugin never does.
+// controller's Oh My Pi registers with, the project's design gate policy (`gates.design`), which
+// `legion controller start` tells the controller so its take comment promises a design approval
+// only when the gate is armed, and the deployment's Slack reporting channels (`slack`), absent when
+// it takes no Slack reports, which the controller subscribes to. `legion controller start` reads
+// it; the plugin never does.
 type ControllerSecretResponse struct {
 	Secret     string            `json:"secret"`
 	DesignGate config.DesignGate `json:"designGate"`
+	Slack      *config.Slack     `json:"slack,omitempty"`
 }
 
 // ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
@@ -102,7 +105,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	s.grants.RevokeControllers()
 	s.log.Info("api: minted a controller capability; the previous controller's registration and grants are revoked", "generation", generation)
-	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
+	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate, Slack: s.slack})
 }
 
 // registerController is a registration whose token is no launch's boot token, on a daemon that

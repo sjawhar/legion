@@ -101,11 +101,17 @@ func newControllerDaemon(t *testing.T) *controllerDaemon {
 
 // newControllerDaemonGated is newControllerDaemon for a project whose `gates.design` is gate.
 func newControllerDaemonGated(t *testing.T, gate config.DesignGate) *controllerDaemon {
+	return newControllerDaemonWithSlack(t, gate, nil)
+}
+
+// newControllerDaemonWithSlack is a controller daemon that gives its controller the supplied
+// reporting channels on the secret response.
+func newControllerDaemonWithSlack(t *testing.T, gate config.DesignGate, slack *config.Slack) *controllerDaemon {
 	t.Helper()
 	d := &controllerDaemon{t: t, controller: &memoryController{}, dispatch: &statusWrites{}}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
-		DesignGate: gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DesignGate: gate, Slack: slack, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -568,6 +574,24 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 	}
 }
 
+func TestControllerStartTellsTheControllerSlackReportingChannels(t *testing.T) {
+	d := newControllerDaemonWithSlack(t, config.DesignGateRootIssues, &config.Slack{
+		Team: "T0WORKSPACE",
+		ReportingChannels: []config.ReportingChannel{
+			{Channel: "C0REPORTS", Project: "ACME"},
+		},
+	})
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	want := "Slack reporting channels: team `T0WORKSPACE`; `notifications.slack.T0WORKSPACE.C0REPORTS.mention` (files in ACME)."
+	if len(argv) != 3 || !strings.Contains(argv[1], want) {
+		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry %q", argv, want)
+	}
+}
+
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the
 // controller would otherwise promise, or withhold, a design approval on an assumption.
 func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
@@ -576,7 +600,7 @@ func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
-		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
+		_, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
 		server.Close()
 		if err == nil || !strings.Contains(err.Error(), "not 'root-issues' or 'off'; upgrade the daemon") {
 			t.Fatalf("fetchControllerSecret(%s) error = %v; want the policy refusal", body, err)

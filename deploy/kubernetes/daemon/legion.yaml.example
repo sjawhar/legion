@@ -42,6 +42,15 @@ projects:
     # review_workflows:                # opt-in: required workflows that review the code and fail on
     #   - .github/workflows/review.yml #   their own findings; in testing and review a red only they
     #                                  #   make goes to the reviewer, not back to the implementer
+# Optional: report @Legion mentions in these public (C…) or private (G…) channels. The controller
+# subscribes only to their mention topics; a report files in the named Dispatch project, which need
+# not be one this daemon runs.
+# slack:
+#   team: T0EXAMPLE
+#   reporting_channels:
+#     C0REPORTS: WIDGETS
+#     G0PRIVATE: ACME
+
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- `LegionSlackReporting` and optional `LegionControllerSecretResponse.slack`: the controller
+  secret carries the reporting channels it subscribes to and the Dispatch project each channel
+  files in (LEGION-589).
+
 
 - `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
   `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for

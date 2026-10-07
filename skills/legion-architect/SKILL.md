@@ -82,6 +82,21 @@ Wave releases, child closures, and your own status are visible from the issue tr
 handoffs; do not narrate them into the spec or a `dispatch_message`. A to-do only a human can
 clear is a `dispatch_ask`.
 
+### Slack-origin root issues
+
+When the root specification carries a Slack thread permalink, the reporter is the person in that
+thread, not a Dispatch account. Read the source thread and brainstorm with that reporter there:
+ask one question at a time with `legion slack reply --channel "<channel_id>" --thread-ts "<root
+timestamp>" --text "<question>"`. The controller routes later mentions in that thread to your
+current architect role; continue the same thread and do not open a Dispatch ask for the reporter.
+
+Write each answer into the root specification in the reporter's own words. A Legion post in the
+thread names the root issue so the controller recognizes later mentions as owned. Once the
+specification has every answer the reporter gave and any necessary Dispatch-only decision blocks
+are settled, use `dispatch_request_approval` for the human who approves work. The reporter does
+not approve the design gate through Slack. Follow the policy below: `gates.design: root-issues`
+needs that human approval; `gates.design: off` has no approval step.
+
 The issue's primary document **is** the root specification. Extend it in place: a new version
 that adds only the evidence each decision needs and what the human decides, each as a
 decision block (`skill://dispatch`, "Decision blocks"). The decomposition and its waves, how each

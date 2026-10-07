@@ -248,9 +248,15 @@ func TestControllerRegisterResponseGolden(t *testing.T) {
 	})
 }
 
-// What `legion controller start` fetches with the operator's bearer.
+// What `legion controller start` fetches with the operator's bearer, for a deployment that takes
+// Slack reports.
 func TestControllerSecretResponseGolden(t *testing.T) {
-	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
+	golden(t, "controller-secret.json", ControllerSecretResponse{
+		Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues,
+		Slack: &config.Slack{Team: "T0EXAMPLE", ReportingChannels: []config.ReportingChannel{
+			{Channel: "C0EXAMPLE1", Project: "ACME"}, {Channel: "G0EXAMPLE2", Project: "WIDGETS"},
+		}},
+	})
 }
 
 // Every refusal a route answers is one sentence under `error`.

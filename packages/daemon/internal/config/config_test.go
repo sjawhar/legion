@@ -1087,6 +1087,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "gates", line: "gates: {design: off}", class: modelled},
 		{key: "github_apps", line: "github_apps: {implement: {app_id: \"1\", private_key: key}, review: {app_id: \"2\", private_key: key}}", class: modelled},
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
+		{key: "slack", line: "slack: {team: T0WORKSPACE, reporting_channels: {C0REPORTS: ACME}}", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
 

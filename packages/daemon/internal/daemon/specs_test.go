@@ -153,3 +153,26 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
 	}
 }
+
+// Slack reporting channels are part of the controller's launch addressing, alongside the design
+// gate policy. They contain the exact Envoy topics and filing projects, so the controller need not
+// reconstruct either from a report wake.
+func TestControllerAddressingIncludesSlackReportingChannels(t *testing.T) {
+	slack := &config.Slack{Team: "T0WORKSPACE", ReportingChannels: []config.ReportingChannel{
+		{Channel: "C0REPORTS", Project: "ACME"},
+		{Channel: "G0PRIVATE", Project: "OTHER"},
+	}}
+	wantFragment := "Slack reporting channels: team `T0WORKSPACE`; " +
+		"`notifications.slack.T0WORKSPACE.C0REPORTS.mention` (files in ACME), " +
+		"`notifications.slack.T0WORKSPACE.G0PRIVATE.mention` (files in OTHER)."
+	if got := SlackFragment(*slack); got != wantFragment {
+		t.Errorf("SlackFragment = %q, want %q", got, wantFragment)
+	}
+	want := DesignGateFragment(config.DesignGateRootIssues) + " " + wantFragment
+	if got := ControllerAddressing(config.DesignGateRootIssues, slack); got != want {
+		t.Errorf("ControllerAddressing = %q, want %q", got, want)
+	}
+	if got := ControllerAddressing(config.DesignGateOff, nil); got != DesignGateFragment(config.DesignGateOff) {
+		t.Errorf("ControllerAddressing without Slack = %q, want its gate policy only", got)
+	}
+}

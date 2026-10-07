@@ -151,6 +151,10 @@ type Config struct {
 	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
 	// the file says the daemon does, which only `runtime: kubernetes` with Dispatch allows.
 	ControllerLaunch ControllerLaunch
+	// Slack is the `slack` block, nil when the file sets none: the Slack workspace and the
+	// reporting channels `legion controller start` and the daemon's own controller launch tell the
+	// controller (daemon.SlackFragment), whose mentions it files as Dispatch issues.
+	Slack *Slack
 }
 
 const (
@@ -256,6 +260,7 @@ type fileConfig struct {
 	ReviewRoundCap         *int
 	MaxFixAttempts         *int
 	Controller             *string
+	Slack                  *Slack
 	Durations              map[string]int
 	Counts                 map[string]int
 }
@@ -387,6 +392,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		case "controller":
 			file.Controller, err = readString(value, key)
+		case "slack":
+			file.Slack, err = readSlack(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -866,6 +873,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, err
 	}
 	if err := resolveControllerLaunch(file, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := resolveSlack(file, &cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

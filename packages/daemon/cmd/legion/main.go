@@ -67,6 +67,7 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"gh":             {runGh, "run gh with a GitHub token from this session's grant; merges and GitHub-issue writes are refused"},
+	"slack":          {runSlack, "post as the Legion Slack app, reply in a thread, or read its replies"},
 	"credential":     {runCredential, "git credential helper answering with a token from this session's grant"},
 	"handoff":        {runHandoff, "write or read a phase's .legion/ handoff, or report the phase complete"},
 	"threads":        {runThreads, "resolve a pull request's review threads whose opener accepted the reply"},
