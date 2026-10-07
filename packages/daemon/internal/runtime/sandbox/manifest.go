@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -128,6 +129,29 @@ type launch struct {
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
 	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
+	// removableWorkspacesJSON is the tree's removable-workspace candidates (Options.Removable),
+	// JSON-encoded together with their expiry, one object; "" when there are none. Not set by
+	// prepare: relaunch calls setRemovable with what Options.Removable returns, last, under the
+	// tree's launch turn — prepare runs long before that turn is even requested, so a list this
+	// early could already be stale by the time a pod's manifest is actually written.
+	removableWorkspacesJSON string
+}
+
+// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON as
+// runtime.RemovableWorkspacesPayload, called from relaunch with Options.Removable's result and
+// the launch time plus initWaitSeconds, once the tree's launch turn is held. The encoding cannot
+// fail (plain strings and a time.Time), but initEnvironment has no error to return, so a refusal
+// here is relaunch's own to surface before it ever patches the Sandbox.
+func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
+	if err != nil {
+		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
+	}
+	l.removableWorkspacesJSON = string(encoded)
+	return nil
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -318,7 +342,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
 	_, providersMounts := r.providers()
-	shim := []string{legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--pod-safety"}
+	shim := []string{legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--pod-safety"}
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
@@ -430,11 +454,16 @@ func (r *Runtime) initContainers(l launch, resources corev1.ResourceRequirements
 // instructions included, as a tmux pane does.
 func kubeletLiteral(c *corev1.Container) {
 	for i := range c.Command {
-		c.Command[i] = strings.ReplaceAll(c.Command[i], "$", "$$")
+		c.Command[i] = kubeletEscape(c.Command[i])
 	}
 	for i := range c.Env {
-		c.Env[i].Value = strings.ReplaceAll(c.Env[i].Value, "$", "$$")
+		c.Env[i].Value = kubeletEscape(c.Env[i].Value)
 	}
+}
+
+// kubeletEscape is text as a container's command or env value carries it: every `$` doubled.
+func kubeletEscape(text string) string {
+	return strings.ReplaceAll(text, "$", "$$")
 }
 
 // volumes are every volume of the pod: the tree volume, the claim's Secret projected twice (its
@@ -627,9 +656,21 @@ func fetchEnvironment() []corev1.EnvVar {
 // PATH are never ones an agent put there; it carries no tool-path variables, and it is never
 // pointed at the provisioning token. A resume names the recorded session the command must find on
 // the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
-// recovered from; both are workspace-init's alone, never the agent's. The controller's
-// `workspace-init controller` provisions nothing and waits on no lock: it is told the image's PATH
-// and, on a resume, the session it must find.
+// recovered from; both are workspace-init's alone, never the agent's. LEGION_ROLE and
+// LEGION_GENERATION are l.spec.Role and l.spec.Generation, read together by workspace-init
+// provision's own candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates): a
+// generation alone does not distinguish each role's own first launch of one issue, all at
+// generation 1 — mainEnvironment's copies of both are the worker container's, a different
+// container, so workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is
+// l.removableWorkspacesJSON, set by setRemovable (called from relaunch, after the daemon's
+// candidate list is read, last, under the tree's launch turn), one JSON object carrying both the
+// list and notAfter (RFC 3339: the launch time plus initWaitSeconds) together, so
+// the two can never arrive apart; absent when the daemon found none. notAfter is what bounds how
+// long a pod the Sandbox controller recreates on its own may still trust this same list, read by
+// its own fresh workspace-fetch's start time rather than wall-clock time at removal
+// (dispatch://LEGION-583, cmd/legion/workspace_init.go's removableWorkspacesEnv doc comment).
+// The controller's `workspace-init controller` provisions nothing and waits on no lock: it is
+// told the image's PATH and, on a resume, the session it must find.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
 	if l.controller {
@@ -638,12 +679,19 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 		}
 		return env
 	}
-	env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)})
+	env = append(env,
+		corev1.EnvVar{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
+		corev1.EnvVar{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
+		corev1.EnvVar{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
+	)
 	if l.initResumeFile != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
+	}
+	if l.removableWorkspacesJSON != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
 	}
 	return append(env, xdgEnvironment()...)
 }
@@ -740,6 +788,35 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add(name+"_FILE", BootDir+"/"+name)
 	}
 	return append(env, r.providersPointers()...)
+}
+
+// connectFlag is the shim's flag naming the worker stream listener it dials.
+const connectFlag = "--connect"
+
+// handedAddress is one address the runtime hands every pod it launches from the daemon's
+// configuration: name is where the pod's main container carries it, the shim's connectFlag or one
+// of mainEnvironment's variables, and value is what a pod launched now carries there, "" for a
+// variable the runtime leaves unset.
+type handedAddress struct{ name, value string }
+
+// handedAddresses are every address a pod launched now carries (podTemplate, mainEnvironment): the
+// worker stream listener the shim dials, then the daemon's API, NATS, Envoy, Dispatch and the
+// secrets broker as the agent's environment names them. A pod's are fixed at its creation, so a pod
+// a daemon launched under other addresses holds those until it is replaced (evaluate, row 9).
+// TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
+func (r *Runtime) handedAddresses() []handedAddress {
+	broker := ""
+	if r.agentSecrets != nil {
+		broker = r.agentSecrets.URL
+	}
+	return []handedAddress{
+		{connectFlag, r.streamURL},
+		{"LEGION_DAEMON_URL", r.daemonURL},
+		{"ENVOY_NATS_URL", strings.Join(r.natsURLs, ",")},
+		{"ENVOY_URL", r.envoyURL},
+		{"DISPATCH_URL", r.dispatchURL},
+		{"AGENT_SECRETS_URL", broker},
+	}
 }
 
 // podPath is a main container's PATH: worker-bin, then the directory of the `legion` every

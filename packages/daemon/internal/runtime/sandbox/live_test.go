@@ -312,22 +312,22 @@ func (g *registry) mint(c claim.Token, armed bool) (string, uint64) {
 	return token, gen
 }
 
-func (g *registry) resolve(bootToken string) (claim.Token, uint64, bool, bool) {
+func (g *registry) resolve(bootToken string) (claim.Token, uint64, bool, bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	m, ok := g.byToken[bootToken]
 	switch {
 	case !ok:
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	case !m.armed:
 		g.refused[m.claim]++
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	case m.gen != g.current[m.claim]:
 		g.refused[m.claim]++
-		return m.claim, m.gen, true, true
+		return m.claim, m.gen, true, true, nil
 	}
 	g.pending[m.claim] = m.hash
-	return m.claim, m.gen, false, true
+	return m.claim, m.gen, false, true, nil
 }
 
 func (g *registry) hello(event stream.Hello) {

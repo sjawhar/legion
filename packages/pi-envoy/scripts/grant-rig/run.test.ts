@@ -8,10 +8,17 @@ import { launchArgv, workerPane } from "./run";
 const rig = mkdtempSync(path.join(tmpdir(), "grant-rig-"));
 const launch = { rig, port: 13399, omp: "/opt/omp/bin/omp", profile: "rig-profile" };
 
-// The pane names the gh, git and jj the daemon resolves on its PATH; this directory holds them.
+// The pane names the gh, git and jj the daemon resolves on its PATH; this directory holds them. The
+// daemon refuses a jj older than 0.38, or one whose `jj --version` it cannot read, so the jj stub
+// prints the worker image's version line.
 const tools = mkdtempSync(path.join(tmpdir(), "grant-rig-tools-"));
-for (const tool of ["gh", "git", "jj"]) {
-  writeFileSync(path.join(tools, tool), "#!/bin/sh\n");
+const stubs: Record<string, string> = {
+  gh: "#!/bin/sh\n",
+  git: "#!/bin/sh\n",
+  jj: "#!/bin/sh\necho 'jj 0.45.1-sami.20260910-043938-bb5ffc8f23b1e2a9dac6fdf05b0540058a3a21d0'\n",
+};
+for (const [tool, script] of Object.entries(stubs)) {
+  writeFileSync(path.join(tools, tool), script);
   chmodSync(path.join(tools, tool), 0o755);
 }
 afterAll(() => {

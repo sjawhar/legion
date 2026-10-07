@@ -57,10 +57,9 @@ type sandboxReads struct {
 
 // readSandbox is Agent Sandbox's share of readBoot (C1's translation, C3): the cluster's client from
 // runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes, with
-// the worker stream on tcp://<bind>:<worker_stream_port> (the address every pod's shim dials) and
 // paneNatsUser, the public key of the pane NATS nkey seed's user ("" with none), which the image
-// probe holds the providers Secret's seed to. None of the host's own agent machinery is read: no
-// Oh My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
+// probe holds the providers Secret's seed to. None of the host's own agent machinery is read: no Oh
+// My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
 // pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
 // from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
 func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
@@ -69,8 +68,7 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	if err != nil {
 		return sandboxReads{}, err
 	}
-	stream := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	opts, err := sandboxOptions(cfg, k, project, stream, dispatchToken, lookup, log)
+	opts, err := sandboxOptions(cfg, k, project, dispatchToken, lookup, log)
 	if err != nil {
 		return sandboxReads{}, err
 	}
@@ -78,9 +76,11 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 
-// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe.
+// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe. The
+// worker stream listens on tcp://<bind>:<worker_stream_port>; openSupervision hands the factory the
+// address every pod dials (shimAddress).
 func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
-	p.stream = reads.opts.StreamURL
+	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
@@ -130,11 +130,11 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 	return rc, nil
 }
 
-// sandboxOptions translates the configuration into the runtime's Options, all but the connection
-// directory and the token source, which boot hands the factory. It refuses what the cluster would
-// refuse only at the first pod: a role's request above its limit. lookup is the daemon's
-// environment, which can name the NATS nkey seed (launchSecrets).
-func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
+// sandboxOptions translates the configuration into the runtime's Options, all but the worker
+// stream's address, the connection directory and the token source, which boot hands the factory. It
+// refuses what the cluster would refuse only at the first pod: a role's request above its limit.
+// lookup is the daemon's environment, which can name the NATS nkey seed (launchSecrets).
+func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	treeVolume, err := resource.ParseQuantity(k.TreeVolume)
 	if err != nil {
 		return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.tree_volume: %w", err)
@@ -164,7 +164,6 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, TreeVolume: treeVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
 		Resources:  resources,
-		StreamURL:  stream,
 		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
 		NATSURLs:         cfg.NatsURLs,
 		Tools:            workerImageTools,
@@ -300,7 +299,7 @@ func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
 // whose informers run for ctx (supervision's lifetime), over the worker stream and with the
 // workflow's implement App as every pod's provisioning token source.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, budget time.Duration) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens) (runtime.Runtime, error) {
+	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		checking, cancel := context.WithTimeout(ctx, budget)
 		defer cancel()
 		if err := sandbox.CheckInstalled(checking, rc, agentSandbox); err != nil {
@@ -310,6 +309,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, budget time.Duration)
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 		}
+		opts.Removable = removable
 		return sandbox.New(ctx, rc, opts)
 	}
 }

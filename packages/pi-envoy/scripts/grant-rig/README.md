@@ -117,7 +117,7 @@ the daemon's own functions:
 | `LEGION_DAEMON_URL` | `http://127.0.0.1:<port>` (the stand-in) |
 | `LEGION_STATE_DIR`, `LEGION_WORKSPACE` | `$RIG/state`, `$RIG/ws` |
 | `ENVOY_URL`, `ENVOY_NATS_URL` | what the pane's own extension reaches from the current shell: its `ENVOY_URL` (else the extension's default listener) and `ENVOY_NATS_URL` |
-| `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` | the first `gh`, `git` and `jj` on the current shell's PATH less every `worker-bin` entry (a rig started from a Legion pane carries that pane's), as the daemon resolves them at boot |
+| `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` | the first `gh`, `git` and `jj` on the current shell's PATH less every `worker-bin` entry (a rig started from a Legion pane carries that pane's), as the daemon resolves them at boot; like the daemon, the rig refuses a `jj` older than 0.38, or one whose `jj --version` it cannot read |
 | `PI_SHELL_PREFIX` | the daemon's prefix over `$RIG/state/worker-bin` and `$RIG/state/bin`: drops every PATH entry that is either directory, wherever the shell's rc left it, then puts both in front, each once |
 | `GIT_TERMINAL_PROMPT` | `0` |
 | `LEGION_GRANT_FILE` | `$RIG/state/secrets/legion-l12rig-rig-1-implementer-grant` |

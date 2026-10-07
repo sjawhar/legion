@@ -135,7 +135,9 @@ environment:
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; launcher login names the page under it where the
                              operator types the code, and the exec form the page where a person
                              approves its waiting request
-  OMP_SESSION_ID             the agent session the broker notifies if a pending request expires
+  OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
+                             expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
+                             so a harness that sets one of those instead still names its session
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run
@@ -673,7 +675,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
+	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, requestSessionID())
 	if err != nil {
 		reportError(stderr, "agent-secrets request", err)
 		return 1
@@ -873,7 +875,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 	c := newClient(base)
 	ctx := context.Background()
-	result, _, err := c.CreateRequest(ctx, signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
+	result, _, err := c.CreateRequest(ctx, signer, names, *reason, requestSessionID())
 	if err != nil {
 		reportError(stderr, "agent-secrets", err)
 		return 1

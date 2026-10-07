@@ -174,14 +174,14 @@ type gate struct {
 	hellos int
 }
 
-func (g *gate) resolve(bootToken string) (claim.Token, uint64, bool, bool) {
+func (g *gate) resolve(bootToken string) (claim.Token, uint64, bool, bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if bootToken != integrationToken {
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	}
 	g.hellos++
-	return integrationClaim, integrationGeneration, false, g.open
+	return integrationClaim, integrationGeneration, false, g.open, nil
 }
 
 func (g *gate) state() (open bool, hellos int) {
@@ -203,11 +203,11 @@ type daemonEnd struct {
 	log      *lockedBuffer
 }
 
-func listen(t *testing.T, addr string, g *gate) *daemonEnd {
+func listen(t *testing.T, addr string, resolve stream.HelloResolver) *daemonEnd {
 	t.Helper()
 	log := &lockedBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
-	listener, err := stream.Listen(ctx, addr, g.resolve, stream.Options{
+	listener, err := stream.Listen(ctx, addr, resolve, stream.Options{
 		RPCTimeout: integrationWait,
 		Log:        slog.New(slog.NewTextHandler(log, nil)),
 	})
@@ -309,6 +309,85 @@ func childFrames(t *testing.T, path string) []string {
 	return frames
 }
 
+// fakeOMPShim is the real worker shim and its fake OMP child. It owns the process lifetime that
+// every real-shim integration test needs, but leaves each test's assertions about its exit to it.
+type fakeOMPShim struct {
+	output      *lockedBuffer
+	pidPath     string
+	stdinRecord string
+	exited      chan struct{}
+	waitErr     error
+	process     *exec.Cmd
+}
+
+func startFakeOMPShim(t *testing.T, legion, addr string) *fakeOMPShim {
+	t.Helper()
+	work := t.TempDir()
+	tokenPath := filepath.Join(work, "boot-token")
+	if err := os.WriteFile(tokenPath, []byte(integrationToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim := &fakeOMPShim{
+		output:      &lockedBuffer{},
+		pidPath:     filepath.Join(work, "omp.pid"),
+		stdinRecord: filepath.Join(work, "omp-stdin.ndjson"),
+		exited:      make(chan struct{}),
+	}
+	shim.process = exec.Command(legion, "worker-shim", "--connect", addr, "--boot-token-file", tokenPath, "--", self)
+	shim.process.Env = append(os.Environ(), fakeOMPEnv+"=1", "FAKE_OMP_STDIN="+shim.stdinRecord, "FAKE_OMP_PID="+shim.pidPath)
+	shim.process.Stdout = shim.output
+	shim.process.Stderr = shim.output
+	// The fake OMP writes its stderr into the shim's, so a test that fails with the child alive
+	// would otherwise wait on that pipe after the shim is gone.
+	shim.process.WaitDelay = time.Second
+	if err := shim.process.Start(); err != nil {
+		t.Fatalf("start the shim: %v", err)
+	}
+	go func() {
+		shim.waitErr = shim.process.Wait()
+		close(shim.exited)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-shim.exited:
+		default:
+			_ = shim.process.Process.Kill()
+			if pid, err := os.ReadFile(shim.pidPath); err == nil {
+				if childPID, err := strconv.Atoi(string(pid)); err == nil {
+					_ = syscall.Kill(childPID, syscall.SIGKILL)
+				}
+			}
+			<-shim.exited
+		}
+		if t.Failed() {
+			t.Logf("the shim's output:\n%s", shim.output.String())
+		}
+	})
+	return shim
+}
+
+func (s *fakeOMPShim) childStarted() bool {
+	_, err := os.Stat(s.pidPath)
+	return err == nil
+}
+
+func (s *fakeOMPShim) childPID(t *testing.T) int {
+	t.Helper()
+	pid, err := os.ReadFile(s.pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := strconv.Atoi(string(pid))
+	if err != nil {
+		t.Fatalf("the fake OMP's pid %q: %v", pid, err)
+	}
+	return childPID
+}
+
 // The real shim against the real listener, over both address families the listener speaks.
 func TestTheRealShimBridgesAFakeOMPToTheRealListener(t *testing.T) {
 	legion := buildLegion(t)
@@ -329,74 +408,24 @@ func TestTheRealShimBridgesAFakeOMPToTheRealListener(t *testing.T) {
 }
 
 func bridge(t *testing.T, legion, addr string) {
-	work := t.TempDir()
-	tokenFile := filepath.Join(work, "boot-token")
-	if err := os.WriteFile(tokenFile, []byte(integrationToken+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stdinRecord := filepath.Join(work, "omp-stdin.ndjson")
-	pidFile := filepath.Join(work, "omp.pid")
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	g := &gate{}
-	first := listen(t, addr, g)
+	first := listen(t, addr, g.resolve)
 	// The address the shim is told, and the one the restarted daemon binds again: under TCP it is
 	// the port the kernel chose for the first listener.
 	addr = first.listener.Addr()
-
-	shimOut := &lockedBuffer{}
-	shim := exec.Command(legion, "worker-shim", "--connect", addr, "--boot-token-file", tokenFile, "--", self)
-	shim.Env = append(os.Environ(), fakeOMPEnv+"=1", "FAKE_OMP_STDIN="+stdinRecord, "FAKE_OMP_PID="+pidFile)
-	shim.Stdout = shimOut
-	shim.Stderr = shimOut
-	// The fake OMP writes its stderr into the shim's, so a test that fails with the child alive
-	// would otherwise wait on that pipe after the shim is gone.
-	shim.WaitDelay = time.Second
-	if err := shim.Start(); err != nil {
-		t.Fatalf("start the shim: %v", err)
-	}
-	// exited is closed once the shim has been reaped; waitErr is what Wait returned.
-	exited := make(chan struct{})
-	var waitErr error
-	go func() {
-		waitErr = shim.Wait()
-		close(exited)
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-exited:
-		default:
-			_ = shim.Process.Kill()
-			if pid, err := os.ReadFile(pidFile); err == nil {
-				if childPid, err := strconv.Atoi(string(pid)); err == nil {
-					_ = syscall.Kill(childPid, syscall.SIGKILL)
-				}
-			}
-			<-exited
-		}
-		if t.Failed() {
-			t.Logf("the shim's output:\n%s", shimOut.String())
-		}
-	})
-	childStarted := func() bool {
-		_, err := os.Stat(pidFile)
-		return err == nil
-	}
+	shim := startFakeOMPShim(t, legion, addr)
 
 	// hello → refused while the token resolves to nothing: the shim redials with its hello, and
 	// never spawns OMP without an ack.
 	testwait.Eventually(t, "two hellos refused", func() bool { _, hellos := g.state(); return hellos >= 2 })
-	if childStarted() {
+	if shim.childStarted() {
 		t.Fatal("the shim spawned OMP before any hello was acked")
 	}
 
 	// hello → hello_ack → spawn.
 	g.opened()
 	first.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
-	testwait.Eventually(t, "the shim to spawn OMP after the ack", childStarted)
+	testwait.Eventually(t, "the shim to spawn OMP after the ack", shim.childStarted)
 	ctx := context.Background()
 	await, cancelAwait := context.WithTimeout(ctx, integrationWait)
 	defer cancelAwait()
@@ -417,7 +446,7 @@ func bridge(t *testing.T, legion, addr string) {
 		t.Fatalf("Prompt(delivery-1) repeated: %v", err)
 	}
 	first.expect(t, stream.TurnStart{Claim: integrationClaim, DeliveryID: "delivery-1"}, stream.TurnEnd{Claim: integrationClaim})
-	if got, want := childFrames(t, stdinRecord), []string{"negotiate_protocol", "prompt delivery-1"}; !reflect.DeepEqual(got, want) {
+	if got, want := childFrames(t, shim.stdinRecord), []string{"negotiate_protocol", "prompt delivery-1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the fake OMP read %q, want %q: a repeated delivery reached it", got, want)
 	}
 
@@ -429,25 +458,18 @@ func bridge(t *testing.T, legion, addr string) {
 		t.Fatalf("the first listener logged %q", lines)
 	}
 	testwait.Eventually(t, "the shim to notice the stream closed", func() bool {
-		return strings.Contains(shimOut.String(), "daemon stream "+strings.SplitN(addr, "://", 2)[1]+" closed")
+		return strings.Contains(shim.output.String(), "daemon stream "+strings.SplitN(addr, "://", 2)[1]+" closed")
 	})
 
 	// OMP reports turns while no daemon is listening: the shim holds them.
-	pid, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	childPid, err := strconv.Atoi(string(pid))
-	if err != nil {
-		t.Fatalf("the fake OMP's pid %q: %v", pid, err)
-	}
-	startsBefore := count(shimOut.lines(), shimwire.TypeAgentStart)
-	endsBefore := count(shimOut.lines(), shimwire.TypeAgentEnd)
-	if err := syscall.Kill(childPid, syscall.SIGUSR1); err != nil {
+	childPID := shim.childPID(t)
+	startsBefore := count(shim.output.lines(), shimwire.TypeAgentStart)
+	endsBefore := count(shim.output.lines(), shimwire.TypeAgentEnd)
+	if err := syscall.Kill(childPID, syscall.SIGUSR1); err != nil {
 		t.Fatalf("signal the fake OMP: %v", err)
 	}
 	testwait.Eventually(t, "the shim to read every turn OMP reported during the gap", func() bool {
-		lines := shimOut.lines()
+		lines := shim.output.lines()
 		return count(lines, shimwire.TypeAgentStart) == startsBefore+gapTurns &&
 			count(lines, shimwire.TypeAgentEnd) == endsBefore+gapTurns
 	})
@@ -455,7 +477,7 @@ func bridge(t *testing.T, legion, addr string) {
 
 	// The daemon is back on the same address: the shim redials, says hello again, and the turns
 	// from the gap arrive in the order OMP reported them, ahead of anything newer.
-	second := listen(t, addr, g)
+	second := listen(t, addr, g.resolve)
 	second.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
 	if _, hellos := g.state(); hellos <= hellosBefore {
 		t.Fatalf("the restarted listener resolved no new hello (%d before, %d after)", hellosBefore, hellos)
@@ -478,7 +500,7 @@ func bridge(t *testing.T, legion, addr string) {
 	}
 	second.expect(t, stream.TurnStart{Claim: integrationClaim}, stream.TurnEnd{Claim: integrationClaim})
 	want := []string{"negotiate_protocol", "prompt delivery-1", "negotiate_protocol", "prompt delivery-2"}
-	if got := childFrames(t, stdinRecord); !reflect.DeepEqual(got, want) {
+	if got := childFrames(t, shim.stdinRecord); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the fake OMP read %q, want %q", got, want)
 	}
 
@@ -488,15 +510,15 @@ func bridge(t *testing.T, legion, addr string) {
 	}
 	second.expect(t, stream.Closed{Claim: integrationClaim})
 	select {
-	case <-exited:
+	case <-shim.exited:
 		var exit *exec.ExitError
-		if !errors.As(waitErr, &exit) || exit.ExitCode() != 128+int(syscall.SIGTERM) {
-			t.Fatalf("the shim exited with %v, want exit status 143 (its OMP ended by SIGTERM)", waitErr)
+		if !errors.As(shim.waitErr, &exit) || exit.ExitCode() != 128+int(syscall.SIGTERM) {
+			t.Fatalf("the shim exited with %v, want exit status 143 (its OMP ended by SIGTERM)", shim.waitErr)
 		}
 	case <-time.After(integrationWait):
 		t.Fatal("the shim did not exit after the daemon's shutdown")
 	}
-	if got := childFrames(t, stdinRecord); !reflect.DeepEqual(got, want) {
+	if got := childFrames(t, shim.stdinRecord); !reflect.DeepEqual(got, want) {
 		t.Fatalf("after the shutdown the fake OMP had read %q, want %q: the shutdown frame reached it", got, want)
 	}
 	if rest := second.close(t); len(rest) != 0 {
@@ -504,5 +526,62 @@ func bridge(t *testing.T, legion, addr string) {
 	}
 	if lines := second.warnings(); len(lines) != 0 {
 		t.Fatalf("the restarted listener logged %q", lines)
+	}
+}
+
+// A hello the daemon could not resolve — its store did not answer — is no refusal: the real shim,
+// whose hello closed unacked, redials with its backoff, and the redial is acked and spawns OMP. The
+// listener logs the failed read once and refuses nothing.
+func TestTheRealShimRedialsAHelloTheDaemonCouldNotResolve(t *testing.T) {
+	legion := buildLegion(t)
+	var mu sync.Mutex
+	hellos := 0
+	d := listen(t, "tcp://127.0.0.1:0", func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if bootToken != integrationToken {
+			return "", 0, false, false, nil
+		}
+		hellos++
+		if hellos == 1 {
+			return "", 0, false, false, errors.New("read claim: context deadline exceeded")
+		}
+		return integrationClaim, integrationGeneration, false, true, nil
+	})
+
+	shim := startFakeOMPShim(t, legion, d.listener.Addr())
+
+	d.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
+	testwait.Eventually(t, "the shim to spawn OMP after the redial's ack", shim.childStarted)
+	mu.Lock()
+	resolved := hellos
+	mu.Unlock()
+	if resolved != 2 {
+		t.Fatalf("the listener resolved %d hellos, want the unresolved one and the redial", resolved)
+	}
+	if !strings.Contains(shim.output.String(), "stream closed before hello_ack") {
+		t.Fatalf("the shim never reported the unacked hello it redialled:\n%s", shim.output.String())
+	}
+
+	await, cancelAwait := context.WithTimeout(context.Background(), integrationWait)
+	defer cancelAwait()
+	conn, err := d.listener.Await(await, integrationClaim)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	if err := conn.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	d.expect(t, stream.Closed{Claim: integrationClaim})
+	select {
+	case <-shim.exited:
+	case <-time.After(integrationWait):
+		t.Fatal("the shim did not exit after the daemon's shutdown")
+	}
+
+	lines := d.log.lines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "worker-stream: could not resolve a hello's boot token; the shim redials") ||
+		!strings.Contains(lines[0], "read claim: context deadline exceeded") {
+		t.Fatalf("the listener logged %q, want only the failed read", lines)
 	}
 }

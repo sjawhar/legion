@@ -2477,7 +2477,8 @@ describe("Legion OMP extension", () => {
     ).resolves.toBeUndefined();
 
     expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-2", mode: 0o600 });
-    // Each mint names the claim's session and secret, and its tree and issue.
+    // Each mint names the claim's session and secret, and its tree and issue, and whether the
+    // command is a `legion push` invocation (dispatch://LEGION-583): neither command here is one.
     const grant = {
       path: "/legion/v1/grants",
       body: {
@@ -2485,6 +2486,7 @@ describe("Legion OMP extension", () => {
         secret: registration.secret,
         tree: "REPO-42",
         issue: "REPO-43",
+        push: false,
       },
     };
     expect(grantRequests(requests)).toEqual([grant, grant]);
@@ -2493,6 +2495,49 @@ describe("Legion OMP extension", () => {
     expect(secretFiles.filter((name) => name.startsWith(`${path.basename(grantFile)}.`))).toEqual(
       []
     );
+  });
+
+  // dispatch://LEGION-583: a grant minted for a `legion push` invocation asks the daemon for
+  // `push: true`, so the daemon mints it with the longer pushTTL rather than the ordinary ttl,
+  // since jj's own working-copy snapshot before the network push can outrun the ordinary grant on
+  // a near-full tree volume.
+  test("mints a grant with push:true for a legion push invocation, and only for one", async () => {
+    const { toolCall, context, requests } = await bootPane({
+      role: "implementer",
+      sessionId: "ses_push",
+    });
+    const pushOf = async (command: string): Promise<unknown> => {
+      await expect(
+        toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context)
+      ).resolves.toBeUndefined();
+      const mints = grantRequests(requests);
+      const body = mints.at(-1)?.body;
+      if (typeof body !== "object" || body === null || !("push" in body)) {
+        throw new Error(
+          `grant request body for ${JSON.stringify(command)} carries no push field: ${JSON.stringify(body)}`
+        );
+      }
+      return body.push;
+    };
+    // The command itself: `legion push` alone, and as a compound command's one segment that
+    // requests a push (a `cd` ahead of it, a trailing pipeline stage), and `legion` preceded by a
+    // word that is not itself part of the invocation (a timing wrapper, an env assignment, a
+    // negation, or the naive splitter's own leftover `if`/`then` words ahead of a `;`), and the
+    // worker-bin shim's absolute path (`.../legion`) in place of the bare name.
+    expect(await pushOf("legion push")).toBe(true);
+    expect(await pushOf("cd ws && legion push")).toBe(true);
+    expect(await pushOf("legion push | cat")).toBe(true);
+    expect(await pushOf("time legion push")).toBe(true);
+    expect(await pushOf("timeout 600 legion push")).toBe(true);
+    expect(await pushOf("FOO=1 legion push")).toBe(true);
+    expect(await pushOf("! legion push")).toBe(true);
+    expect(await pushOf("if legion push; then echo ok; fi")).toBe(true);
+    expect(await pushOf("/opt/legion/bin/legion push")).toBe(true);
+    // Anything else: a different `legion` command, a compound command with no push segment, and
+    // an ordinary shell command.
+    expect(await pushOf("legion state")).toBe(false);
+    expect(await pushOf("legion gh -- pr view 7 && legion state")).toBe(false);
+    expect(await pushOf("ls")).toBe(false);
   });
 
   for (const [status, sentence] of [

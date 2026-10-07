@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,7 +73,10 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 //  5. P Failed or Succeeded                          → Gone, quoting the container that ended
 //  6. P Pending, PodScheduled=False past BootTimeout → Gone, quoting the pod's events
 //  7. S's current Ready reason MultiplePods or ReconcilerError → Uncertain
-//  8. P Pending (any sub-state) or Running           → Alive
+//  8. P Pending (any sub-state) or Running, and it holds every address a pod
+//     launched now is handed                          → Alive
+//  9. P Pending or Running, and it holds an address a pod launched now is not
+//     handed — the daemon's configuration moved since the pod was launched → StaleAddress
 //
 // Terminal state is read from the pod, whose phase and container states belong to its one uid; a
 // Sandbox condition is quoted only when written for the Sandbox's current generation, so one left
@@ -118,9 +123,97 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	}
 	switch pod.Status.Phase {
 	case corev1.PodPending, corev1.PodRunning, "":
+		if moved := r.movedAddresses(pod); len(moved) > 0 {
+			return observe(runtime.StaleAddress, "pod %s (uid %s) holds addresses a pod launched now is not handed: %s",
+				name, pod.UID, strings.Join(moved, "; "))
+		}
 		return observe(runtime.Alive, "pod %s (uid %s) %s", name, pod.UID, phaseOf(pod))
 	}
 	return observe(runtime.Uncertain, "pod %s (uid %s) phase %s", name, pod.UID, pod.Status.Phase)
+}
+
+// movedAddresses are row 9's comparison: each address pod's main container holds that differs from
+// the one a pod launched now is handed (handedAddresses), as "<name> <held>, now <handed>", both
+// named without putting URL userinfo in the detail. A pod is compared only when its main container
+// runs the shim with connectFlag, as every pod this runtime builds does; one without (never one this
+// runtime built) has nothing to compare, and row 9 must never read it as stale for want of it. A
+// variable the container lacks holds "", as mainEnvironment leaves unset an address the runtime
+// hands none of. A handed value is compared as the pod spec carries it, escaped against the
+// kubelet's expansion (kubeletLiteral).
+func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
+	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == mainContainer })
+	if i < 0 {
+		return nil
+	}
+	main := pod.Spec.Containers[i]
+	flag := slices.Index(main.Command, connectFlag)
+	if flag < 0 || flag+1 >= len(main.Command) {
+		return nil
+	}
+	held := map[string]string{connectFlag: main.Command[flag+1]}
+	for _, v := range main.Env {
+		held[v.Name] = v.Value
+	}
+	var moved []string
+	for _, a := range r.handedAddresses() {
+		if handed := kubeletEscape(a.value); held[a.name] != handed {
+			heldName, handedName := namedURL(held[a.name]), namedURL(handed)
+			if a.name == "ENVOY_NATS_URL" {
+				heldName, handedName = namedNATSPodValue(held[a.name]), namedNATSURLs(r.natsURLs)
+			}
+			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, heldName, handedName))
+		}
+	}
+	return moved
+}
+
+// namedURL is the log boundary for one endpoint value: an existing pod can hold a value a previous
+// daemon accepted, or a direct Options caller supplied, even when this daemon's current loader no
+// longer accepts it. It names "(unset)" for none; otherwise it constructs the detail from exactly
+// the scheme, host and port it accepts to show, adding xxxxx@ when the URL carries userinfo. Path,
+// query and fragment never enter the detail. An endpoint that cannot yield a scheme and host is
+// xxxxx whole, so unexpected input cannot make the detail a credential reader.
+func namedURL(address string) string {
+	if address == "" {
+		return "(unset)"
+	}
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "xxxxx"
+	}
+	name := u.Scheme + "://"
+	if u.User != nil {
+		name += "xxxxx@"
+	}
+	return name + u.Host
+}
+
+// namedNATSURLs names the current ENVOY_NATS_URL from the distinct values r.natsURLs holds: the
+// entries readNatsURLs accepted, before mainEnvironment comma-joined them. Each is an endpoint, so
+// namedURL may parse its kubelet-escaped value whole.
+func namedNATSURLs(urls []string) string {
+	if len(urls) == 0 {
+		return "(unset)"
+	}
+	named := make([]string, len(urls))
+	for i, raw := range urls {
+		named[i] = namedURL(kubeletEscape(raw))
+	}
+	return strings.Join(named, ",")
+}
+
+// namedNATSPodValue names the ENVOY_NATS_URL an existing pod holds, which can be from the same
+// older grammar namedURL handles. mainEnvironment comma-joined the old daemon's list, but this
+// formatter never splits it: raw commas are valid in userinfo, so splitting
+// nats://user:pa,ss@host:4222 at the comma puts `user:pa` in a fragment's host position, which an
+// allowlist would print. url.Parse reads the whole string, and namedURL allowlists only its scheme,
+// host and port. A path holding a later URL or a credential-shaped value never prints. A parse
+// failure is the one case whose components are unknown, so it is xxxxx whole.
+func namedNATSPodValue(address string) string {
+	if address == "" {
+		return "(unset)"
+	}
+	return namedURL(address)
 }
 
 // podAbsent is row 3's detail: the Sandbox's mode, its Suspended condition when current, and any

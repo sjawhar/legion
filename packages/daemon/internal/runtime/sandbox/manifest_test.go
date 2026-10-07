@@ -413,6 +413,27 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 	t.Fatalf("the grant file %s is on volume %q, which is not an in-memory emptyDir", want, volume)
 }
 
+// A pod's own IP changes on every restart, so a daemon that runs as a pod hands pods a stable
+// address instead, a Kubernetes Service's DNS name: StreamURL is advertise_host at the worker
+// stream's port (shimAddress, internal/daemon/daemon.go) and DaemonURL is daemon_url. Neither
+// Options field needs an IP: the manifest carries each exactly as configured.
+func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
+	opts := goldenOptions()
+	opts.StreamURL = "tcp://legion-daemon-widgets.legion.svc:13371"
+	opts.DaemonURL = "http://legion-daemon-widgets.legion.svc:13370"
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := containerNamed(t, podOf(t, r, workerSpec(t), false), mainContainer)
+	if !slices.Contains(main.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
+		t.Errorf("the shim's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", main.Command)
+	}
+	if got := envOf(main)["LEGION_DAEMON_URL"]; got != "http://legion-daemon-widgets.legion.svc:13370" {
+		t.Errorf("LEGION_DAEMON_URL = %q, want http://legion-daemon-widgets.legion.svc:13370", got)
+	}
+}
+
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
 // Task 4b.6b): the claim's Secret projects it into workspace-fetch alone, the only container told
 // where it is, and no other container can write a volume workspace-fetch mounts — the feed it
@@ -599,6 +620,41 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	}
 }
 
+// handedAddresses is exactly the addresses a pod launched now carries, every optional address
+// configured: each address-valued argument of the shim (the words before `--`) by its flag, and each
+// address-valued variable the runtime itself sets in the worker container, an address being a value
+// with a scheme. An address added to the pod and not to handedAddresses is one the daemon could move
+// without any pod it re-adopts being replaced (evaluate, row 9).
+func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
+	opts := testOptions()
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := podOf(t, r, workerSpec(t), false).Containers[0]
+	carried := map[string]string{}
+	shim := main.Command[:slices.Index(main.Command, "--")]
+	for i := 1; i < len(shim); i++ {
+		if strings.Contains(shim[i], "://") {
+			carried[shim[i-1]] = shim[i]
+		}
+	}
+	for _, v := range main.Env {
+		if runtimeOwned[v.Name] && strings.Contains(v.Value, "://") {
+			carried[v.Name] = v.Value
+		}
+	}
+	handed := map[string]string{}
+	for _, a := range r.handedAddresses() {
+		handed[a.name] = a.value
+	}
+	if !maps.Equal(carried, handed) {
+		t.Errorf("a pod launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+	}
+}
+
 // The Dispatch bearer is the runtime's to carry, not the spec's: with Dispatch configured, every
 // claim's Secret holds it as DISPATCH_TOKEN and the worker container reads it through
 // DISPATCH_TOKEN_FILE; without it, neither exists.
@@ -658,6 +714,79 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			for _, name := range []string{fetchContainer, mainContainer} {
 				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
+				}
+			}
+		})
+	}
+}
+
+// LEGION_GENERATION reaches workspace-init's init container too, not only the main container
+// (mainEnvironment's own): workspace-init provision's own candidate-rotation seed
+// (cmd/legion/workspace_init.go's rotateCandidates) reads it from its own container's
+// environment, and a value only the main container carries would never reach it. The fetch
+// container, which never rotates anything, carries neither.
+func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	spec.Generation = 7
+	pod := podOf(t, r, spec, false)
+	for _, name := range []string{initContainer, mainContainer} {
+		got, set := envOf(containerNamed(t, pod, name))["LEGION_GENERATION"]
+		if !set || got != "7" {
+			t.Errorf("%s's LEGION_GENERATION = %q (set: %t), want \"7\"", name, got, set)
+		}
+	}
+	if _, set := envOf(containerNamed(t, pod, fetchContainer))["LEGION_GENERATION"]; set {
+		t.Errorf("%s carries LEGION_GENERATION", fetchContainer)
+	}
+}
+
+// The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
+// container alone, as one JSON object carrying both the list and its notAfter together, never
+// the agent; a launch with none names none. relaunch is what calls setRemovable in production,
+// after the tree's launch turn is held; this reaches directly for podTemplate's own contract,
+// that it reads removableWorkspacesJSON off the launch, not spec.
+func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	notAfter := time.Now().Add(time.Hour)
+	wantCandidates, err := json.Marshal(runtime.RemovableWorkspacesPayload{
+		NotAfter:   notAfter,
+		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		candidates []runtime.RemovableWorkspace
+		want       string
+	}{
+		"candidates": {[]runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}}, string(wantCandidates)},
+		"none":       {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l, err := r.prepare(workerSpec(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
+				t.Fatal(err)
+			}
+			pod := r.podTemplate(l, false).Spec
+			env := envOf(containerNamed(t, pod, initContainer))
+			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
+			if got != tc.want || set != (tc.want != "") {
+				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
+			}
+			for _, name := range []string{fetchContainer, mainContainer} {
+				env := envOf(containerNamed(t, pod, name))
+				if _, set := env["LEGION_REMOVABLE_WORKSPACES"]; set {
+					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", name)
 				}
 			}
 		})

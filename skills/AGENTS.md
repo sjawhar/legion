@@ -14,7 +14,7 @@ event intake, process lifecycle, credentials, and role delivery.
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, sign-off |
 | `legion-controller/` | the controller root process | wake routing, keeping the admission slots full from `todo`, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
-| `legion-retro/` | the implementer, at retro | the pre-merge retrospective and its Dispatch message |
+| `legion-retro/` | the implementer, at retro | the pre-merge retrospective, its Dispatch message, and the PR body content the pull request's changed paths require at its commit |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |
 | `thermonuclear-code-quality/` | the `thermonuclear-code-quality` agent | the maintainability rubric of the reviewer's pair (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |
 | `thermonuclear-deep-review/` | the `thermonuclear-deep-review` agent, and the reviewer (the Security Guidelines) | the correctness rubric of the reviewer's pair, with its tagged, diff-triggered Security Guidelines and the attack on the PR body's claims (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |

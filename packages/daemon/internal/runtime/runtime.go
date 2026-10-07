@@ -126,6 +126,30 @@ func (k Known) Validate() error {
 	return nil
 }
 
+// RemovableWorkspace is one sibling of a tree the daemon has judged safe to remove by lifecycle
+// alone (dispatch://LEGION-583): Issue it belongs to, and MergedHead, the merged pull request's
+// head commit when it merged, empty for one that never did — GitHub deletes a squash merge's
+// branch, so that commit carries no remote bookmark of its own, and workspace-init's push-safety
+// check needs the head to tell that commit from one that was never pushed at all. internal/runtime
+// is as low as this type can live: internal/workspace already imports internal/runtime for its
+// credential helper's GitIdentity, so the reverse import internal/workspace's own type would need
+// is a cycle; internal/workspace uses this type directly instead of a type of its own.
+type RemovableWorkspace struct {
+	Issue      string `json:"issue"`
+	MergedHead string `json:"mergedHead,omitempty"`
+}
+
+// RemovableWorkspacesPayload is LEGION_REMOVABLE_WORKSPACES' own wire shape (dispatch://LEGION-583):
+// Workspaces, the daemon's removable-workspace candidates, and NotAfter, the absolute instant past
+// which workspace-init must no longer trust them, together in one JSON object so the two can
+// never arrive apart. relaunch (internal/runtime/sandbox) encodes it; workspace-init
+// (cmd/legion/workspace_init.go) decodes it strictly — an unknown field, a zero NotAfter, or an
+// empty Workspaces is the same malformed input as invalid JSON: remove nothing, logged why.
+type RemovableWorkspacesPayload struct {
+	NotAfter   time.Time            `json:"notAfter"`
+	Workspaces []RemovableWorkspace `json:"workspaces"`
+}
+
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
 // working on, and the environment, secrets, and prompt it starts with. The claim token travels
 // with the process because the runtime addresses the agent's connection by it — `Suspend` and
@@ -182,6 +206,17 @@ const (
 	// is a fourth verdict precisely so that it is never read as either: the supervisor re-arms
 	// the probe and counts the streak, and changes no state on it.
 	Uncertain ObservationKind = "uncertain"
+	// StaleAddress: the process the locator recorded is running, but holds an address a process
+	// launched now is not handed — one of the addresses a runtime hands every new process from the
+	// daemon's configuration (the worker stream it dials, the daemon's API, NATS, Envoy, Dispatch,
+	// the secrets broker) moved since this one was launched, as each does when the daemon restarts
+	// with its key changed (the worker stream's: `advertise_host`, `bind` when no `advertise_host` is
+	// set, `worker_stream_port`). Only the Sandbox runtime reports it, since a pod's argv and
+	// environment are fixed at its launch. The detail names each address that moved. The
+	// supervisor's response is its own (supervise's repoint). Distinct from a "stale" event (Handle's
+	// own fence vocabulary, an observation of an incarnation the claim no longer holds): this one
+	// names the claim's current, live incarnation.
+	StaleAddress ObservationKind = "stale_address"
 )
 
 // Observation is one runtime fact about one process, with the moment it was observed and, for a

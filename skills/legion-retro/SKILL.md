@@ -9,8 +9,9 @@ Retro is mandatory for every issue that passed review. The daemon starts the imp
 once the reviewer approves, so the person with implementation context performs the retrospective,
 and the skill obtains a separate fresh-eyes perspective. Retro runs before merge.
 
-Every path this skill cites (`packages/...`, `docs/...`) is in sjawhar/legion, the Legion
-repository, which need not be the repository you are working in.
+The `scripts/e2e/` proofs this skill names are in sjawhar/legion, the Legion repository, which
+need not be the repository you are working in. `docs/solutions/` and `.legion/` are on the issue
+branch of the repository you are working in.
 
 ## Merge-gate ordering
 
@@ -22,8 +23,9 @@ retrospective's durable output.
    merge. The daemon strips whatever `.legion/` main still carries from the next issue's branch
    before any of its roles start, so that tree's own merge carries the removal onto the default
    branch; no operator sweep follows.
-3. Run this retro: commit durable learnings to `docs/solutions/` and post the retro message on
-   the Dispatch issue.
+3. Run this retro: commit durable learnings to `docs/solutions/`, bring the pull request body's
+   path-derived content up to date for that commit before you push it, and post the retro
+   message on the Dispatch issue.
    Retro writes **no `.legion` file**, so it never changes the approved head's handoffs.
 4. The merger verifies the tip is the approved head plus commits that change only
    `docs/solutions/` — `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY —
@@ -67,13 +69,26 @@ Do not start retro before step 2 or skip it because the change seems mechanical;
 ## Durable outputs
 
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
-Organize by reusable topic rather than by pull request. Search `docs/solutions/` for the topic
-first: when a document already states the rule, update it in place (sharpen the rule, add this
-issue and pull request to `related_issues`) rather than writing a sibling; when the new learning
-replaces an old document, set the old one's `status: superseded` and add
-`superseded_by: docs/solutions/<path>.md`. Open each document with the rule in a few imperative
-lines; the incident that taught it goes in an Evidence section below, never in the rule. Each
-document uses this front matter:
+Organize by reusable topic rather than by pull request, but never edit a document you did not
+write this retro — not its frontmatter, not its body. Two trees' retros can land within the same
+hour, and an in-place edit (another `related_issues` entry, a sharpened sentence, a `status`
+flip) conflicts with any other tree's edit to the same lines of the same file. Search
+`docs/solutions/` for the topic first; before relying on a hit, also search for
+`supersedes: docs/solutions/<its-path>` and `Extends docs/solutions/<its-path>` naming it —
+Legion runs no pass that reconciles these links, so a newer file that extends or supersedes the
+one you found is discoverable only by following them. Then write a new file of your own, named
+`docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose the same path:
+
+- **A fresh topic:** state the rule in a few imperative lines; the incident goes in an Evidence
+  section below, never in the rule.
+- **A topic an existing document already covers:** underneath its own H1 heading, the first line
+  reads `Extends docs/solutions/<existing-path>.md.`; the rule states only the delta.
+- **A topic an existing document states wrongly:** frontmatter adds
+  `supersedes: docs/solutions/<existing-path>.md`; the first line under the H1 says why. Leave
+  the old file's frontmatter and body untouched: Legion runs no pass that reconciles it, so the
+  `supersedes:` link is the only thing that makes the correction discoverable from the old file.
+
+Each document uses this front matter:
 
 ```yaml
 ---
@@ -90,8 +105,50 @@ related_issues:
 ---
 ```
 
-Commit the documentation on the existing issue branch and push it with `legion push`. Do not
-create a replacement branch or bookmark. Then post one Dispatch message on
+Commit the documentation on the existing issue branch. Do not create a replacement branch or
+bookmark.
+
+Before you push that commit, bring up to date the body content the repository derives from the
+pull request's changed paths. A repository can require such content, a line naming a checklist
+for each class of changed path for instance, and have a required check read it from the PR body.
+When your commit adds a `docs/solutions/` path the approved body never accounted for, that check
+fails at your head; the merger reports a stale body rather than rewriting it, and READY refuses a
+head whose required check failed, so the tree stops at the merger.
+
+1. Read what the deployment instructions in your system prompt, and the agent guide and pull
+   request template of the repository you are working in, derive from the changed paths. When
+   they derive nothing, skip steps 2 to 4 and go on to the push.
+2. Compute it the way they say, for the paths the pull request changes at your commit, the files
+   GitHub lists on it:
+   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <commit>)' --to <commit> --name-only`
+   lists them, `<base>` the pull request's base branch and `<commit>` your docs commit. Where a
+   line affirms work, such as a checklist completed for a class of path, do that work for the
+   paths your commit adds before you write the line: the line is a claim. That work may change
+   files under `docs/solutions/` only, folded into your docs commit before the push, since
+   anything else above the approved head voids the approval.
+3. In a fresh `mktemp -d` directory outside `$LEGION_WORKSPACE` (the one place you write outside
+   it: jj snapshots a file inside it, and a fixed name in a shared `/tmp` can hold another
+   session's body), save the live body twice, and stop unless the read succeeded and is not
+   empty. `pipefail` makes a failed read fail the line (without it the line exits with `tee`'s
+   status and leaves two empty files), and the parentheses keep it to that line, since your
+   session's shell persists and a later `cmd | head` would exit 141 under it:
+   `cd -- "$LEGION_WORKSPACE" && ( set -o pipefail && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md ) && test -s <dir>/before.md`.
+   In `<dir>/body.md`, change the lines it carries for that content and add any it lacks where
+   the instructions place them; other phases' lines stay as they wrote them.
+4. Write it back before the push:
+   `cd -- "$LEGION_WORKSPACE" && legion gh -- api --method PATCH repos/{owner}/{repo}/pulls/{number} -F body=@<dir>/body.md`.
+   The checks the push starts read the body as it stands then; an edit after the push re-runs
+   only a check that also starts on an edited body. Such a check re-runs now at the approved
+   head, on a diff without your commit, and may fail there; READY reads the head your push makes.
+
+When you cannot compute that content, cannot do the work a line affirms within
+`docs/solutions/`, the body read fails or comes back empty, or GitHub refuses the body, push
+nothing and do not complete: tell the architect with `envoy_publish` to its role topic, naming
+what failed.
+
+Then push the commit with `legion push`. When the push is refused after step 4 wrote the body,
+write `<dir>/before.md` back the same way before you report the refusal to the architect, so the
+body matches the head GitHub has. After the push, post one Dispatch message on
 the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, and the `gh` shim refuses every GitHub-issue write — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
@@ -117,10 +174,11 @@ dispatch_message({
 })
 ```
 
-The Dispatch message and the `docs/solutions/` commit are the only retro outputs. Never write a
-handoff, phase artifact, local feedback log, or completion label, and add or change nothing under
-`.legion/`. Report completion with the `legion` tool's `handoff_complete` alone (its
-summary: two sentences for the architect) — no `handoff_write`.
+The `docs/solutions/` commit, the PR body lines that commit makes stale, and the Dispatch message
+are the only retro outputs. Never write a handoff, phase artifact, local feedback log, or
+completion label, and add or change nothing under `.legion/`. Report completion with the `legion`
+tool's `handoff_complete` alone (its summary: two sentences for the architect) — no
+`handoff_write`.
 
 ## Completion check
 
@@ -129,6 +187,9 @@ Before returning, verify all of the following:
 - The reviewer-approved head remains below the retro documentation commit, and the reviewer's
   approval of that head stands: the merger accepts the approved head plus this commit.
 - The learning documents and the Dispatch message both exist (never a GitHub issue comment).
+- The PR body carries what the repository's instructions derive from the pull request's changed
+  paths at the retro head, written back before that head's push, and each line that affirms work
+  affirms work you did; or the instructions derive nothing.
 - Both proofs were read, and any gap in either is recorded as a learning.
 - No `.legion` file was created or modified by retro.
 - The fresh-eyes analysis was considered alongside the implementer's context.

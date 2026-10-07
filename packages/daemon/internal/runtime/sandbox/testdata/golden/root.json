@@ -321,6 +321,14 @@
                 "value": "480"
               },
               {
+                "name": "LEGION_ROLE",
+                "value": "architect"
+              },
+              {
+                "name": "LEGION_GENERATION",
+                "value": "1"
+              },
+              {
                 "name": "XDG_CONFIG_HOME",
                 "value": "/home/legion/.config"
               },

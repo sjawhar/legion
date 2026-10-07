@@ -15,7 +15,10 @@ import (
 
 // GrantRequest is a request to mint one short-lived grant, in one of three forms. The claim form
 // preserves the shipped route wire shape: a registered pane identifies its session, tree, issue,
-// and capability secret. The controller-session form is the session registered with the current
+// and capability secret, and, since dispatch://LEGION-583, whether the bash command it is minted
+// for runs `legion push` (pi-envoy's commandsRunPush): such a grant lives pushTTL rather than the
+// ordinary ttl, since jj's own working-copy snapshot before the network push can run past it on a
+// near-full tree volume. The controller-session form is the session registered with the current
 // controller capability and its registration secret, with no tree and no issue (the shipped
 // controller form, credentials.ts:26-47). An empty form is the operator's and must instead carry
 // the operator bearer header.
@@ -24,6 +27,7 @@ type GrantRequest struct {
 	Secret    string `json:"secret"`
 	Tree      string `json:"tree"`
 	Issue     string `json:"issue"`
+	Push      bool   `json:"push,omitempty"`
 }
 
 // GrantResponse is the bearer handle a pane stores in its per-command grant file.
@@ -115,7 +119,7 @@ func (s *server) claimGrant(w http.ResponseWriter, r *http.Request, req GrantReq
 		if !authenticated {
 			break
 		}
-		grant, err := s.grants.Mint(machine.Claim())
+		grant, err := s.grants.Mint(machine.Claim(), req.Push)
 		if err != nil {
 			s.log.Error("api: mint claim grant", "error", err)
 			writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
