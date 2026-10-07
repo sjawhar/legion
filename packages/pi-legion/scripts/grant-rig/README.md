@@ -155,17 +155,17 @@ RIG=/tmp/l54rig; mkdir -p $RIG
 PORT=13399
 
 # the branch's plugin, profile and Go legion
-RIG_PLUGINS=production RIG_LEGION_BUILD=branch sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh $SRC $RIG
+RIG_PLUGINS=production RIG_LEGION_BUILD=branch sh $SRC/packages/pi-legion/scripts/grant-rig/setup.sh $SRC $RIG
 
 # stand-in daemon (keep it running across the runs below)
-bun $SRC/packages/pi-envoy/scripts/grant-rig/daemon-standin.ts $PORT $RIG/standin.log $RIG/state/secrets/boot &
+bun $SRC/packages/pi-legion/scripts/grant-rig/daemon-standin.ts $PORT $RIG/standin.log $RIG/state/secrets/boot &
 
 # headless leg, 33 bash calls, 3 task spawns (every legion probe on call 30 or later)
-bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts drive --rig $RIG --port $PORT --omp $OMP --label fixed-rpc
+bun $SRC/packages/pi-legion/scripts/grant-rig/run.ts drive --rig $RIG --port $PORT --omp $OMP --label fixed-rpc
 
 # terminal leg, 8 bash calls, 1 task spawn, driven through tmux -L l12rig
 : > $RIG/standin.log; : > $RIG/seen-grants.log
-bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts tui --rig $RIG --port $PORT --omp $OMP --short --label fixed-tui
+bun $SRC/packages/pi-legion/scripts/grant-rig/run.ts tui --rig $RIG --port $PORT --omp $OMP --short --label fixed-tui
 
 # negative control (outside the worker): a fabricated credential in the file must 403
 printf '00000000-0000-4000-8000-000000000000' > $RIG/fake-grant && chmod 600 $RIG/fake-grant

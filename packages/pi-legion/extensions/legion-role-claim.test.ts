@@ -41,8 +41,9 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   ...hostAgentRegistryMock,
 }));
 // Distinct mtime queries force distinct module instances, exercising the
-// cross-module role-claim bridge documented in envoy.ts.
-const { default: envoyExtension } = await import("./envoy.ts?envoy-entry");
+// cross-module role-claim bridge documented in envoy.ts. The Envoy entry is the sibling plugin's,
+// reached by path: this test is the one place the two entries meet in one process.
+const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
 const { default: legionExtension } = await import("./legion.ts?legion-entry");
 type Context = {
   readonly cwd: string;

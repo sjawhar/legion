@@ -3,7 +3,7 @@ import { messageFor } from "@legion/envoy-client/errors";
 import type { SessionContext } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
-import pkg from "../../package.json";
+import pkg from "../package.json";
 import { requiredEnvironment, requiredSecret } from "./classify";
 import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";

@@ -10,10 +10,7 @@ import {
 /** A response the daemon's own golden test wrote (`packages/daemon/internal/api`). */
 function daemonFixture(name: string): Record<string, unknown> {
   return JSON.parse(
-    readFileSync(
-      path.resolve(import.meta.dir, "../../../contracts/fixtures/daemon-api", name),
-      "utf8"
-    )
+    readFileSync(path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api", name), "utf8")
   );
 }
 

@@ -18,7 +18,7 @@ describe("omp.skills / prepack manifest contract", () => {
     // omp discovers plugin skills only at `<plugin root>/skills` or at directories the
     // manifest's `omp.skills` array names. This package ships skills at `dist/skills` (staged
     // there by the prepack, not the package root), so the manifest must name it explicitly —
-    // dropping this field silently regresses every installed session back to no Dispatch skills.
+    // dropping this field silently regresses every installed session back to no Legion skills.
     expect(manifest.omp?.skills).toEqual(["dist/skills"]);
     // The release workflow rewrites `omp.extensions` (only) to the packed bundle path right
     // before packing; `omp.skills` ships as committed, so it must already be the `dist/` path a
@@ -40,12 +40,16 @@ describe("omp.skills / prepack manifest contract", () => {
       rmSync(path.dirname(staged), { recursive: true, force: true });
     });
 
-    test("are exactly this plugin's partition: the Dispatch and Envoy skills every session uses", () => {
+    test("are exactly this plugin's partition: the skills a Legion pane's prompts load", () => {
       expect(readdirSync(staged).sort()).toEqual([
-        "dispatch",
-        "dispatch-brainstorming",
-        "dispatch-first",
-        "envoy",
+        "ce-simplify-code",
+        "legion-architect",
+        "legion-controller",
+        "legion-oracle",
+        "legion-retro",
+        "legion-worker",
+        "thermonuclear-code-quality",
+        "thermonuclear-deep-review",
       ]);
     });
   });

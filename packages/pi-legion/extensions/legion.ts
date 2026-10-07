@@ -21,15 +21,11 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
-import { createClaimSession } from "../src/legion/claim-session";
-import {
-  classifySession,
-  type LegionSessionKind,
-  requiredEnvironment,
-} from "../src/legion/classify";
-import { createControllerSession } from "../src/legion/controller-session";
-import { createLegionDaemonClient, type LegionDaemonClient } from "../src/legion/daemon-client";
-import { writeMintedGrant } from "../src/legion/grant-file";
+import { createClaimSession } from "../src/claim-session";
+import { classifySession, type LegionSessionKind, requiredEnvironment } from "../src/classify";
+import { createControllerSession } from "../src/controller-session";
+import { createLegionDaemonClient, type LegionDaemonClient } from "../src/daemon-client";
+import { writeMintedGrant } from "../src/grant-file";
 import {
   assistantText,
   inboundKind,
@@ -38,9 +34,9 @@ import {
   type PhaseStallInput,
   restorePhaseStall,
   stepPhaseStall,
-} from "../src/legion/phase-stall";
-import { applySessionTitle, legionSessionTitle } from "../src/legion/session-title";
-import { createLegionTool } from "../src/legion/tools";
+} from "../src/phase-stall";
+import { applySessionTitle, legionSessionTitle } from "../src/session-title";
+import { createLegionTool } from "../src/tools";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -255,7 +251,7 @@ const JJ_LOG_REWRITE: PaneRule = {
 };
 
 // A worker completes its phase with the `legion` tool's `handoff_complete`
-// (src/legion/handoff-actions.ts), and the phase stall (src/legion/phase-stall.ts) closes only on
+// (src/handoff-actions.ts), and the phase stall (src/phase-stall.ts) closes only on
 // that call: the same command run from the pane's shell would complete the phase where the stall
 // cannot see it and draw a follow-up asking the worker to complete again. Only `complete` is
 // refused: `legion handoff write` and `read` from the shell leave no phase open, and the shell can
@@ -416,7 +412,7 @@ export default function legionExtension(pi: PiApi): void {
   // exactly as they bind the worker that spawned it.
   let paneRules: readonly PaneRule[] | undefined;
 
-  // The phase-stall check (src/legion/phase-stall.ts). It runs only in a session holding a
+  // The phase-stall check (src/phase-stall.ts). It runs only in a session holding a
   // claim for its own id with a phase role, so never in an architect (a root or a sub-architect),
   // the controller (whose claim lives in controllerSession), a session with no Legion environment,
   // or a `task` subagent (whose instance returns at checkSubagentSession before any capability
@@ -455,7 +451,7 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   /**
-   * Names the session by its Legion identity (`src/legion/session-title.ts`), so every Dispatch
+   * Names the session by its Legion identity (`src/session-title.ts`), so every Dispatch
    * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
    * session claims its Envoy role: that claim registers the session, and the registration carries
    * the title then rather than at the next heartbeat.

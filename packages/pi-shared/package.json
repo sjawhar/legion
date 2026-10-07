@@ -29,6 +29,10 @@
       "types": "./src/tool-result.ts",
       "bun": "./src/tool-result.ts"
     },
+    "./test/cross-imports": {
+      "types": "./test/cross-imports.ts",
+      "bun": "./test/cross-imports.ts"
+    },
     "./test/host-registry": {
       "types": "./test/host-registry.ts",
       "bun": "./test/host-registry.ts"
@@ -40,6 +44,10 @@
     "./test/omp-natives": {
       "types": "./test/omp-natives.ts",
       "bun": "./test/omp-natives.ts"
+    },
+    "./test/skills-guard": {
+      "types": "./test/skills-guard.ts",
+      "bun": "./test/skills-guard.ts"
     }
   },
   "scripts": {

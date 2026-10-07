@@ -213,7 +213,7 @@ const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): stri
 
 /**
  * A verdict whose first word is WAITING, after any markdown emphasis or quoting — the reply
- * convention the Legion phase-stall follow-up already uses (`src/legion/phase-stall.ts`).
+ * convention the Legion phase-stall follow-up already uses (`packages/pi-legion/src/phase-stall.ts`).
  * Case-sensitive and first-word-only on purpose: "NOT WAITING", "I am WAITING on Sami" and
  * "Waiting." are all PROCEEDING here, because a false WAITING is the expensive error — the
  * steer it buys asserts the agent said it is waiting, which sends it to page a human with a

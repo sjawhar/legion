@@ -11,9 +11,9 @@ function json(relative: string): unknown {
 // fixture: a bump on either side alone fails here or there, never at a boot. The manifest carries
 // that one number and nothing else under `legion`.
 test("package.json declares the daemon API contract version the daemon requires", () => {
-  const { daemonApiVersion } = json("../../../contracts/fixtures/daemon-api/version.json") as {
+  const { daemonApiVersion } = json("../../contracts/fixtures/daemon-api/version.json") as {
     readonly daemonApiVersion: number;
   };
-  const manifest = json("../../package.json") as { readonly legion: unknown };
+  const manifest = json("../package.json") as { readonly legion: unknown };
   expect(manifest.legion).toEqual({ daemonApiVersion });
 });

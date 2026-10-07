@@ -8,7 +8,7 @@ import { messageFor } from "@legion/envoy-client/errors";
 import type { CommandContext, SessionContext } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, subscribeLegionNotice } from "@legion/pi-shared/role-claim-bridge";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
-import pkg from "../../package.json";
+import pkg from "../package.json";
 import { classifySession, requiredControllerCapability, requiredEnvironment } from "./classify";
 import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
 

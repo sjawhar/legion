@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The agents the plugin ships (package.json `files`), each dispatched by a Legion prompt.
-const agentsDir = join(import.meta.dir, "..", "..", "agents");
+const agentsDir = join(import.meta.dir, "..", "agents");
 const agents = readdirSync(agentsDir).filter((name) => name.endsWith(".md"));
 
 function definition(file: string): { fields: Record<string, unknown>; body: string } {

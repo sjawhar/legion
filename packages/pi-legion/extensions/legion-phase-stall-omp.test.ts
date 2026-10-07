@@ -13,7 +13,7 @@ import {
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
 
-// The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
+// The phase-stall follow-up on the real Oh My Pi (src/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
 // what the model is sent, and that the transcript keeps the state a resumed worker restores.
 // LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which
@@ -231,7 +231,12 @@ async function runPane(
   const rpc = spawnRpc(
     binary,
     {
-      extensions: [path.join(import.meta.dir, "envoy.ts"), path.join(import.meta.dir, "legion.ts")],
+      extensions: [
+        // The Envoy entry is the sibling plugin's: a Legion pane loads both, and the Legion entry
+        // refuses to run without it.
+        path.resolve(import.meta.dir, "../../pi-envoy/extensions/envoy.ts"),
+        path.join(import.meta.dir, "legion.ts"),
+      ],
       home,
       workspace,
       sessions,

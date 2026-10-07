@@ -34,7 +34,7 @@ import type {
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
-import { classifySession } from "../src/legion/classify";
+import { classifySession } from "../src/classify";
 
 const natsConnections: {
   readonly name: string;
@@ -99,8 +99,9 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   ...hostAgentRegistryMock,
 }));
 
-// The extension modules must load after their OMP and NATS host dependencies are mocked.
-const { default: envoyExtension } = await import("./envoy");
+// The extension modules must load after their OMP and NATS host dependencies are mocked. The
+// Envoy entry is the sibling plugin's, reached by path: these panes run both, as a Legion pane does.
+const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy");
 const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
 
 type RegisteredCommand = {
@@ -1513,7 +1514,7 @@ describe("Legion OMP extension", () => {
     // the conflict merge, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
     const allowed = [
       "jj restore src/x.ts",
-      'jj -R "$LEGION_WORKSPACE" restore packages/pi-envoy/extensions/legion.ts',
+      'jj -R "$LEGION_WORKSPACE" restore packages/pi-legion/extensions/legion.ts',
       "jj op log",
       'jj -R "$LEGION_WORKSPACE" op log -n 5',
       "jj op show",

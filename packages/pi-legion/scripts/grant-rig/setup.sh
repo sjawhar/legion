@@ -34,7 +34,7 @@ if [ "$(realpath -m -- "$PROFILE_DIR")" = "$(realpath -m -- "$SOURCE_PROFILE_DIR
   exit 2
 fi
 
-test -f "$SRC/packages/pi-envoy/extensions/legion.ts" || {
+test -f "$SRC/packages/pi-legion/extensions/legion.ts" || {
   echo "not a legion checkout: $SRC" >&2
   exit 2
 }
@@ -96,7 +96,7 @@ else
   rm -rf "$PROFILE_DIR/plugins"
   mkdir -p "$AGENT/extensions"
   ln -sfn "$SRC/packages/pi-envoy/extensions/envoy.ts" "$AGENT/extensions/envoy.ts"
-  ln -sfn "$SRC/packages/pi-envoy/extensions/legion.ts" "$AGENT/extensions/legion.ts"
+  ln -sfn "$SRC/packages/pi-legion/extensions/legion.ts" "$AGENT/extensions/legion.ts"
 fi
 
 # Scratch state directory: what the daemon's `state_dir` holds for a pane.
@@ -115,7 +115,7 @@ test -f "$SRC/packages/daemon/cmd/legion/main.go" || {
 # worker-bin/gh and bin/legion, installed by the daemon's own boot step (workerbin.Install, run
 # through daemon-pane.ts): the `gh` shim drops its own directory from PATH and execs `legion gh`,
 # and the launcher execs the daemon's binary, here the one just built.
-WORKER_BIN=$(bun "$SRC/packages/pi-envoy/scripts/grant-rig/daemon-pane.ts" "$SRC/packages/daemon" install "$RIG/state" "$RIG/legion")
+WORKER_BIN=$(bun "$SRC/packages/pi-legion/scripts/grant-rig/daemon-pane.ts" "$SRC/packages/daemon" install "$RIG/state" "$RIG/legion")
 
 # Appends what the calling shell command actually ran under, so the worker prompt never has to
 # name the credential: the grant file's contents and mode (file delivery), then the plain

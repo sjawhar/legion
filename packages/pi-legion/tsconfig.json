@@ -8,11 +8,11 @@
     "paths": {
       "@legion/contracts": ["../contracts/src/index.ts"],
       "@legion/envoy-client/defaults": ["../envoy-client/src/defaults.ts"],
-      "@legion/envoy-client/delivery": ["../envoy-client/src/delivery.ts"],
+      "@legion/envoy-client/dispatch-config": ["../envoy-client/src/dispatch-config.ts"],
+      "@legion/envoy-client/dispatch-execute": ["../envoy-client/src/dispatch-execute.ts"],
+      "@legion/envoy-client/dispatch-http": ["../envoy-client/src/dispatch-http.ts"],
       "@legion/envoy-client/errors": ["../envoy-client/src/errors.ts"],
-      "@legion/envoy-client/machine": ["../envoy-client/src/machine.ts"],
-      "@legion/envoy-client/tool-contract": ["../envoy-client/src/tool-contract.ts"],
-      "@legion/envoy-client/transport": ["../envoy-client/src/transport.ts"],
+      "@legion/envoy-client/secret-file": ["../envoy-client/src/secret-file.ts"],
       "@legion/pi-shared/*": ["../pi-shared/src/*"],
       "@legion/pi-shared/test/*": ["../pi-shared/test/*"]
     },
@@ -22,9 +22,12 @@
     "skipLibCheck": true
   },
   "include": [
-    "extensions/envoy.ts",
-    "extensions/dispatch-first-omp.test.ts",
+    "extensions/legion.ts",
+    "extensions/legion.test.ts",
+    "extensions/legion-phase-stall-omp.test.ts",
     "../pi-shared/src/omp-host.d.ts",
+    "scripts/grant-rig/*.ts",
+    "scripts/skill-scenarios/*.ts",
     "scripts/*.ts",
     "src/**/*.ts"
   ]

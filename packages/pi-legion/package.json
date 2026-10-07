@@ -1,25 +1,29 @@
 {
-  "name": "@sjawhar/pi-envoy",
+  "name": "@sjawhar/pi-legion",
   "version": "7.4.6",
   "license": "Apache-2.0",
   "type": "module",
   "omp": {
     "extensions": [
-      "extensions/envoy.ts"
+      "extensions/legion.ts"
     ],
     "skills": [
       "dist/skills"
     ]
+  },
+  "legion": {
+    "daemonApiVersion": 12
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/sjawhar/legion"
   },
   "files": [
-    "dist"
+    "dist",
+    "agents"
   ],
   "scripts": {
-    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
+    "build": "bun build extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
     "prepack": "../../scripts/pi-plugin-prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
@@ -31,9 +35,7 @@
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
     "@legion/pi-shared": "workspace:*",
-    "@oh-my-pi/pi-tui": "^18.1.15",
     "@oh-my-pi/pi-utils": "^18.1.15",
-    "@toon-format/toon": "^4.1.1",
     "@types/bun": "latest",
     "nats": "^2.29.2",
     "typescript": "^5.3.0",
