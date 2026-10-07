@@ -4,6 +4,12 @@
 
 ### Added
 
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 - Pictures reach the model (LEGION-541): a Dispatch tool result carries its `images` as image
   blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
   pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn
@@ -41,6 +47,24 @@
   reference (`references/brainstorming.md`) is gone; its process is in the new skill.
 
 ### Changed
+
+- `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
+  pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
+  release registers it with the launch's boot token, where an earlier one reads it as the
+  operator's controller and never registers. Install this release with a Go `legion` built from
+  the same commit; the daemon's image probe refuses a worker image whose plugin declares 13.
+
+- `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
+  claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
+  it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
+  last stage), so the daemon mints that one grant with the longer `credential.pushTTL` (5 minutes)
+  rather than the ordinary 60-second `ttl` — jj's own working-copy snapshot before the network
+  push can outrun the ordinary grant on a near-full tree volume. Install this release together
+  with a Go `legion` built from the same commit: a daemon at 12 refuses the unknown field, and this
+  release against a daemon at 12 fails every grant mint, blocking every bash command in every pane.
+  Contract 13 also covers the worker image's `LEGION_REMOVABLE_WORKSPACES` payload, which the
+  image's own `legion` decodes strictly, so the daemon's image probe refuses an image that would
+  read a later shape of it the old way.
 
 - Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
   steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
@@ -164,6 +188,22 @@
 
 ### Fixed
 
+- The `legion-retro` skill brings the pull request body's path-derived content up to date before
+  the retro pushes its `docs/solutions/` commit (LEGION-592). A repository can require body content
+  that follows from the paths a diff touches, read by a required check; the retro commit can add a
+  path the approved body never accounted for, so that check failed at the retro head and the
+  merger, which reports a stale body rather than rewriting it, stopped before READY. The retro now
+  computes that content the way the repository's instructions say, for the files the pull request
+  changes at its commit, does the work any line of it affirms (inside `docs/solutions/` only, so
+  the approval stands), and writes only those lines into the live body before `legion push`, so
+  the push's checks read it. When it cannot, or its read of the body fails or comes back empty, it
+  pushes nothing and tells the architect, whose skill says how to answer; a push refused after the
+  body edit puts the body back. The
+  implementer's daemon prompt names `skill://legion-retro` for `Phase: retro`, and the merge-gate
+  reference, the architect skill, `skills/AGENTS.md` and the docs site name the body edit among
+  retro's outputs. The retro skill's opening no longer says its `docs/...` paths are in
+  sjawhar/legion: `docs/solutions/` and `.legion/` are on the issue branch of the repository being
+  worked in.
 - The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
   as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
   the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made

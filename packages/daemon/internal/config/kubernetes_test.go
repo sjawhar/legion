@@ -344,7 +344,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			// The TypeScript daemon's resource profiles are not roles.
 			name: "resources keyed by a profile",
 			body: kubernetesFile + "    resources: {small: {requests: {cpu: 500m}}}\n",
-			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger)`,
+			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger, controller)`,
 		},
 		{
 			name: "a role named twice",
@@ -417,6 +417,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "daemon_url http://localhost:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
 		},
 		{
+			name: "daemon_url on localhost with the root's trailing dot",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localhost.:13370"),
+			want: "daemon_url http://localhost.:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
 			name: "envoy_url on IPv6 loopback",
 			body: kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: http://[::1]:9020"),
 			want: "envoy_url http://[::1]:9020 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
@@ -447,6 +452,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "bind 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; bind the daemon host's own address when runtime is kubernetes",
 		},
 		{
+			name: "bind on localhost with the root's trailing dot",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: localhost."),
+			want: "bind localhost. is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://localhost.:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
 			name: "bind unspecified",
 			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0"),
 			want: "bind 0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://0.0.0.0:13371; bind the daemon host's own address when runtime is kubernetes",
@@ -455,6 +465,26 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "bind IPv6 unspecified",
 			body: kubernetesWith("bind: 10.0.0.5", "bind: \"::\""),
 			want: "bind :: is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://[::]:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host on loopback, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: 127.0.0.1"),
+			want: "advertise_host 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host unspecified, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: 0.0.0.0"),
+			want: "advertise_host 0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://0.0.0.0:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host on localhost, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: localhost"),
+			want: "advertise_host localhost is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://localhost:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "bind on loopback, advertise_host set",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 127.0.0.1\nadvertise_host: legion-daemon-legsmoke.legion.svc"),
+			want: "bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes",
 		},
 		{
 			name: "daemon_url absent",
@@ -484,7 +514,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "operator_token_file absent",
 			body: kubernetesWith("operator_token_file: /var/run/legion/OPERATOR_TOKEN\n", ""),
-			want: "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token",
+			want: "operator_token_file is required when runtime is kubernetes: legion claims presents this token, as legion controller start does under controller: operator",
 		},
 		{
 			name: "dispatch_url absent",
@@ -655,6 +685,27 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 				t.Errorf("LoadForValidation error =\n%q\nwant\n%q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// A pod's own IP changes on every restart, so a `runtime: kubernetes` daemon's bind is allowed to
+// become a listen-only address (0.0.0.0 included) once advertise_host names the stable, pod-facing
+// address instead — a Kubernetes Service's DNS name included, since openSupervision's shimAddress
+// (internal/daemon/daemon.go) builds every pod's `--connect` from it and the listener's port, and
+// sandbox.configure needs only a dialable host:port, never an IP.
+func TestLoadForValidationAcceptsBindUnspecifiedWithAdvertiseHost(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesWith(
+		"bind: 10.0.0.5",
+		"bind: 0.0.0.0\nadvertise_host: legion-daemon-legsmoke.legion.svc",
+	)), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("Bind = %q, want 0.0.0.0: a listen-only address once advertise_host is set", cfg.Bind)
+	}
+	if cfg.AdvertiseHost != "legion-daemon-legsmoke.legion.svc" {
+		t.Errorf("AdvertiseHost = %q, want the configured Service name", cfg.AdvertiseHost)
 	}
 }
 

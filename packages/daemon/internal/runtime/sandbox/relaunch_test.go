@@ -2,12 +2,14 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,6 +256,182 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
+// The daemon computes removable-workspace candidates last, under the tree's launch turn, after
+// every other pod of the tree has finished initializing (dispatch://LEGION-583): a sibling that
+// becomes live while this launch waits out another pod's workspace-init is read as live by the
+// time the list is actually built, not as whatever it was before the wait, and its workspace is
+// kept off the list the worker's own init container carries.
+func TestRemovableWorkspacesAreReadAfterATreesOtherPodsFinishInitializing(t *testing.T) {
+	var stillRemovable atomic.Bool
+	stillRemovable.Store(true)
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		if stillRemovable.Load() {
+			return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+		}
+		return nil, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	root := SandboxName(rootToken)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, workerSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(workerToken)
+	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+	time.Sleep(200 * time.Millisecond)
+	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
+		t.Fatalf("the worker was set Running while the root was still in workspace-init: %v", got)
+	}
+	// The sibling becomes live (no longer a candidate) while the worker's launch is still waiting
+	// out the root's workspace-init — exactly the window a stale, SpawnSpec-time list would have
+	// missed.
+	stillRemovable.Store(false)
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+	pod := g.pod(worker)
+	if pod == nil {
+		t.Fatal("the worker's pod does not exist")
+	}
+	got, set := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+	if set {
+		t.Errorf("the worker's init container carries LEGION_REMOVABLE_WORKSPACES=%q, want none: the sibling became live before the list was built", got)
+	}
+}
+
+// relaunch stamps notAfter, in LEGION_REMOVABLE_WORKSPACES' own combined JSON payload, at r.now()
+// plus the init-wait window (initWaitSeconds), reaching the init container alongside the list
+// itself: a pod the Sandbox controller recreates on its own (eviction, node drain, a hand
+// deletion) runs workspace-init from this same pod template without the daemon ever taking the
+// tree's launch turn again, so this is what bounds how long such a pod may still trust a list
+// that could by then be hours old (dispatch://LEGION-583).
+func TestRemovableWorkspacesCarryANotAfterTime(t *testing.T) {
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+	}
+	fixed := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable; o.Now = func() time.Time { return fixed } }))
+	g.spawn(rootSpec(t))
+
+	pod := g.pod(SandboxName(rootToken))
+	if pod == nil {
+		t.Fatal("the root's pod does not exist")
+	}
+	env := envOf(containerNamed(t, pod.Spec, initContainer))
+	got, set := env["LEGION_REMOVABLE_WORKSPACES"]
+	if !set {
+		t.Fatal("the init container carries no LEGION_REMOVABLE_WORKSPACES, want the list and its notAfter")
+	}
+	var payload struct {
+		NotAfter time.Time `json:"notAfter"`
+	}
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("LEGION_REMOVABLE_WORKSPACES = %q is not valid JSON: %v", got, err)
+	}
+	want := fixed.Add(time.Duration(g.r.initWaitSeconds()) * time.Second)
+	if !payload.NotAfter.Equal(want) {
+		t.Errorf("notAfter = %s, want exactly the fixed launch time plus the init-wait window: %s", payload.NotAfter, want)
+	}
+}
+
+// A candidate whose issue still has a live, non-terminal pod of this tree is dropped before it is
+// ever written to a pod template, regardless of what its claim record says: fail can persist
+// StateFailed even when suspendProcess itself errored (dispatch://LEGION-583), and GoneStates()
+// cannot tell that case from a claim whose process is in fact gone.
+func TestRemovableWorkspacesDropsACandidateWithALiveTreePod(t *testing.T) {
+	removable := func(context.Context, string, string) ([]runtime.RemovableWorkspace, error) {
+		return []runtime.RemovableWorkspace{{Issue: "LEGION-999"}}, nil
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Removable = removable }))
+	// A live, non-terminal pod of the tree whose own issue is the candidate's own.
+	g.spawn(testSpec(t, claim.Token("legion-legion-legion-999-reviewer"), claim.RoleReviewer, "LEGION-999"))
+	live := SandboxName(claim.Token("legion-legion-legion-999-reviewer"))
+	g.update(g.pod(live), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+
+	g.spawn(workerSpec(t))
+	worker := SandboxName(workerToken)
+	pod := g.pod(worker)
+	if pod == nil {
+		t.Fatal("the worker's pod does not exist")
+	}
+	got, set := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+	if set {
+		t.Errorf("the worker's init container carries LEGION_REMOVABLE_WORKSPACES=%q, want none: LEGION-999 has a live tree pod", got)
+	}
+}
+
+// A tree's launch wait (awaitTreeInitialized) is bounded by treeWaitBound, wider than the
+// lock-wait budget alone: a sibling whose workspace-fetch is still cloning outlasts the lock-wait
+// budget but finishes inside treeWaitBound, so the waiting launch is not given up on. Small
+// BootTimeout/BootIntervals (via withOptions) keep the lock-wait budget well under the 3 s this
+// sleeps, so the test stays fast.
+func TestATreesLaunchWaitDoesNotGiveUpWhileASiblingsWorkspaceFetchIsStillCloning(t *testing.T) {
+	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond; o.BootIntervals = 1 }))
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	root := SandboxName(rootToken)
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, workerSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(workerToken)
+	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+
+	// Past the old lock-wait-alone bound (2 s here), with the root's workspace-init still
+	// running: the worker's launch must not have given up early.
+	time.Sleep(3 * time.Second)
+	select {
+	case err := <-done:
+		t.Fatalf("the worker's launch finished (%v) before the root's workspace-init did, past the old lock-wait-alone bound — it gave up early", err)
+	default:
+	}
+
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
+// The real-time test above proves the wait outlasts the lock-wait-alone bound; it cannot wait
+// out the real ~30-minute bound to prove ProvisionBound's own value is exact. Pin it against a
+// literal instead, for this rig's own testOptions (BootTimeout 2 s, BootIntervals 3): the lock
+// wait is ceil(2s)×(3+1) = 8s, plus workspace.FetchTimeout (30m).
+func TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly(t *testing.T) {
+	g := newRig(t, nil)
+	want := 30*time.Minute + 8*time.Second
+	if got := g.r.ProvisionBound(); got != want {
+		t.Fatalf("ProvisionBound = %s, want %s", got, want)
+	}
+}
+
+// treeWaitBound's own exact value, pinned to a literal: base (2s×3=6s) + ProvisionBound (30m8s,
+// TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly) + one more boot interval (2s) =
+// 30m16s. runtime.RegistrationDeadline is the one place armRegistration (machine.go) and
+// treeWaitBound compute the sibling's own pre-hello deadline, so nothing here needs to compare
+// the two independently.
+func TestTheTreeWaitBoundIsTheRegistrationDeadlinePlusOneIntervalExactly(t *testing.T) {
+	g := newRig(t, nil)
+	if want := 30*time.Minute + 16*time.Second; g.r.treeWaitBound() != want {
+		t.Fatalf("treeWaitBound = %s, want %s", g.r.treeWaitBound(), want)
 	}
 }
 

@@ -358,14 +358,26 @@ badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_creden
 requested identifiers, and a
 relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
 to `/credentials/machine` instead, since only the typed code selects a machine login (a
-direct record link can never approve a machine login). `pending.ts`'s `useCredentialRequests` is
+direct record link can never approve a machine login) — then, below that link, the session the
+broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): a live one's
+title (or its short id, untitled), folder and machine, linked to `/agents/:id/live`; a dead one's
+bare id, "isn't running"; neither reachable (the agents list hasn't answered, or Envoy is down or
+unconfigured), "couldn't check"; and neither id ever set, "No session named." The enrollment's id
+alone, or both agreeing, shows one unlabeled line. A request-only id (the common host-session
+case, which has no enrollment `session_id` of its own) shows one line with no preamble
+(`session.ts`'s `credentialSessionLines`). Both ids set and differing shows both lines: the
+enrollment's under "The session that enrolled:", since that is the one the broker verified, and
+the request's bare (`CredentialSessionLines.tsx`, shared with the record page below); never
+"Requested by". `pending.ts`'s
+`useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, policy
+a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
+own line uses), lifetime, requested/expiry timestamps, policy
 version, approver - the broker's `anyone`, a shared secret's, reads "Anyone signed in to
 Dispatch" - then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
 pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,

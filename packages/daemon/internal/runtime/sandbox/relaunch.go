@@ -51,8 +51,10 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 //  5. patch the new pod template and `operatingMode: Running` in one write;
 //  6. wait for the new pod, and return its uid as the incarnation.
 //
-// Steps 4 to 6 take the tree's launch turn and wait until no other pod of the tree is in
-// workspace-init (awaitTreeInitialized).
+// Steps 4 to 6 run under a tree pod's turn (takeTreeTurn): the tree's launch turn, held until the
+// new pod is in the store, the wait until no other pod of the tree is in workspace-init, the tree's
+// removable workspaces, the provisioning token and the pod's affinity. The controller's launch
+// belongs to no tree, provisions nothing and is placed on any Legion node, so it takes no turn.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -81,27 +83,18 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if err != nil {
 		return fail("wait out its previous pod", err)
 	}
-	release, err := r.lockTree(ctx, l.spec.Tree)
-	if err != nil {
-		return fail("take its tree's launch turn", err)
+	turn := treeTurn{release: func() {}}
+	if !l.controller {
+		turn, err = r.takeTreeTurn(ctx, &l)
+		if err != nil {
+			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, err)
+		}
 	}
-	defer release()
-	if err := r.awaitTreeInitialized(ctx, l); err != nil {
-		return fail("wait for its tree's other pods to finish initializing", err)
-	}
-	// Minted now, not before the waits: an installation token can be handed out with minutes left.
-	// Bounded like an API call, since the tree's launch turn is held while it runs.
-	owner := l.spec.Repository.Owner()
-	minting, cancel := call(ctx)
-	provisionToken, err := r.tokens.Token(minting, owner)
-	cancel()
-	if err != nil {
-		return fail("mint the provisioning token for "+owner, err)
-	}
-	if err := r.writeSecret(ctx, s, l, provisionToken); err != nil {
+	defer turn.release()
+	if err := r.writeSecret(ctx, s, l, turn.provisionToken); err != nil {
 		return fail("write its secret", err)
 	}
-	template := r.podTemplate(l, r.treePodScheduled(l))
+	template := r.podTemplate(l, turn.colocate)
 	running, err := r.patch(ctx, s,
 		jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 		jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
@@ -118,6 +111,75 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	loc := r.locatorFor(spec.Claim, pod.UID)
 	r.join(loc)
 	return loc, nil
+}
+
+// treeTurn is what a tree pod's launch holds from before its Secret is written until its new pod
+// is in the store: release ends the tree's launch turn, provisionToken is the token its
+// workspace-fetch clones with, and colocate is whether another pod of the tree was scheduled, which
+// decides the pod's affinity.
+type treeTurn struct {
+	release        func()
+	provisionToken string
+	colocate       bool
+}
+
+// takeTreeTurn readies a tree pod's launch for its Secret and template: it takes the tree's launch
+// turn, waits until no other pod of the tree is in workspace-init (awaitTreeInitialized), lists the
+// tree's removable workspaces into l, mints the provisioning token, and reads whether another pod
+// of the tree is scheduled. Nothing else launches a pod of the tree while the turn is held, so what
+// it reads stands until the caller's new pod is in the store, when the caller releases the turn. A
+// failure releases the turn and names its step.
+func (r *Runtime) takeTreeTurn(ctx context.Context, l *launch) (turn treeTurn, err error) {
+	release, err := r.lockTree(ctx, l.spec.Tree)
+	if err != nil {
+		return treeTurn{}, fmt.Errorf("take its tree's launch turn: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			release()
+		}
+	}()
+	if err := r.awaitTreeInitialized(ctx, *l); err != nil {
+		return treeTurn{}, fmt.Errorf("wait for its tree's other pods to finish initializing: %w", err)
+	}
+	if r.removable != nil {
+		// Computed now, under the tree's launch turn, after every other pod of the tree has
+		// finished initializing: the latest moment before this pod's own manifest is written,
+		// so a sibling that became live in the time this launch spent waiting is not judged by
+		// a list that was already stale when this launch started (dispatch://LEGION-583). That
+		// guarantee is this relaunch's own, though: a pod the Sandbox controller recreates on
+		// its own (eviction, node drain, a hand deletion) runs workspace-init from this same
+		// pod template, list included, without ever passing through here again.
+		// workspace-init closes that case itself: it refuses to act on this list unless its
+		// own fetch (fetchStartedFile) started no later than the notAfter stamped below, this
+		// launch's time plus initWaitSeconds (workspace_init.go's own removableWorkspacesEnv
+		// doc comment), since a recreated pod's fetch starts hours later, whatever its own
+		// clone then takes.
+		//
+		// removableWorkspaces states the candidate rule from the daemon's own claim store;
+		// withoutLiveTreePods below checks the pod itself, a second guarantee on different
+		// evidence: it cannot tell a claim whose fail persisted StateFailed despite its own
+		// suspendProcess erroring from one truly gone, so a candidate can still have a live,
+		// non-terminal pod of this tree right now.
+		candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
+		if err != nil {
+			return treeTurn{}, fmt.Errorf("compute its tree's removable workspaces: %w", err)
+		}
+		notAfter := r.now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
+		if err := l.setRemovable(r.withoutLiveTreePods(*l, candidates), notAfter); err != nil {
+			return treeTurn{}, fmt.Errorf("build its removable-workspaces list: %w", err)
+		}
+	}
+	// Minted now, not before the waits: an installation token can be handed out with minutes
+	// left. Bounded like an API call, since the tree's launch turn is held while it runs.
+	owner := l.spec.Repository.Owner()
+	minting, cancel := call(ctx)
+	token, err := r.tokens.Token(minting, owner)
+	cancel()
+	if err != nil {
+		return treeTurn{}, fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
+	}
+	return treeTurn{release: release, provisionToken: token, colocate: r.treePodScheduled(*l)}, nil
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
@@ -272,11 +334,15 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // boot token among them, owned by the Sandbox so garbage collection deletes it with the Sandbox
 // (decision 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing
 // Secret or starts on the previous generation's token. A Secret left owned by an earlier Sandbox of
-// the same name is replaced, not updated: the collector may already be deleting it.
+// the same name is replaced, not updated: the collector may already be deleting it. The
+// controller's launch has no provisioning token, and its Secret no key for one.
 func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisionToken string) error {
 	ctx, cancel := call(ctx)
 	defer cancel()
-	data := map[string][]byte{provisionTokenKey: []byte(provisionToken)}
+	data := map[string][]byte{}
+	if !l.controller {
+		data[provisionTokenKey] = []byte(provisionToken)
+	}
 	for name, value := range l.secrets {
 		data[name] = []byte(value)
 	}
@@ -333,6 +399,29 @@ func (r *Runtime) treePods(l launch) []*corev1.Pod {
 	return pods
 }
 
+// withoutLiveTreePods drops any candidate that still has a live, non-terminal pod of l's tree (by
+// its legion.dev/issue label): a claim whose fail persisted StateFailed despite its own
+// suspendProcess erroring is indistinguishable, in the daemon's own claim store, from one truly
+// gone, so the pod itself, not that record, is checked here — a second guarantee on different
+// evidence than removableWorkspaces' own candidate rule.
+func (r *Runtime) withoutLiveTreePods(l launch, candidates []runtime.RemovableWorkspace) []runtime.RemovableWorkspace {
+	live := make(map[string]bool)
+	for _, pod := range r.treePods(l) {
+		if !terminal(pod) {
+			if issueLabel := pod.Labels[labelIssue]; issueLabel != "" {
+				live[issueLabel] = true
+			}
+		}
+	}
+	filtered := candidates[:0]
+	for _, candidate := range candidates {
+		if !live[labelValue(candidate.Issue)] {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
 // treePodScheduled is whether another pod of l's tree is scheduled now: placed on a node, not
 // finished, and not being deleted. A scheduled pod holds the tree volume's attachment from the
 // moment it is placed, before any container runs, so readiness would be too late a signal.
@@ -364,14 +453,23 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	}
 }
 
+// treeWaitBound is awaitTreeInitialized's budget: runtime.RegistrationDeadline, called with
+// ProvisionBound (the sibling's own pre-hello registration deadline), plus one more boot interval
+// of headroom — the same ceil(boot)×(intervals+1)-against-boot×intervals relationship
+// workspace-init's own lock wait holds to the registration deadline alone. A named function so a
+// test can assert its exact value without waiting it out.
+func (r *Runtime) treeWaitBound() time.Duration {
+	return runtime.RegistrationDeadline(r.bootTimeout, r.bootIntervals, r.ProvisionBound()) + r.bootTimeout
+}
+
 // awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's
 // workspace-init container provisions against the one shared clone on the tree volume, and under
 // gVisor its flock does not reach past its own pod (each sandbox keeps gofer file locks to
 // itself), so the runtime, through which every launch goes, is what keeps two of them from
 // provisioning at once. A pod counts as initializing from its start until workspace-init ends, its
-// workspace-fetch included. The wait is bounded as workspace-init's own lock wait is.
+// workspace-fetch included. The wait is bounded by treeWaitBound.
 func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
-	return r.await(ctx, time.Duration(r.initWaitSeconds())*time.Second, "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
+	return r.await(ctx, r.treeWaitBound(), "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
 		for _, pod := range r.treePods(l) {
 			if initializing(pod) {
 				return false, nil

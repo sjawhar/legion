@@ -232,6 +232,80 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 	}
 }
 
+// jj git clone names neither a workspace root nor a clone yet. Its empty guarded root must leave
+// the process working directory alone: specifically, no legacy disarm may turn config.toml into a
+// relative path and remove the caller's file while the clone still succeeds.
+func TestEnsureRepoCloneDoesNotDisarmTheCallersWorkingDirectory(t *testing.T) {
+	run := newLocalRunner(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	config := filepath.Join(cwd, "config.toml")
+	if err := os.WriteFile(config, []byte("[user]\nname = \"caller\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clone := filepath.Join(t.TempDir(), "clone")
+
+	if err := ensureRepoClone(context.Background(), run, clone, run.remote, nil); err != nil {
+		t.Fatalf("ensureRepoClone: %v", err)
+	}
+	if _, err := os.Stat(config); err != nil {
+		t.Errorf("jj git clone removed %s from its caller's working directory: %v", config, err)
+	}
+	if _, err := os.Stat(filepath.Join(clone, ".jj")); err != nil {
+		t.Errorf("ensureRepoClone did not complete %s: %v", clone, err)
+	}
+}
+
+// The two command constructors reject an empty Location component rather than building -R "":
+// jjWorkspaceRoot treats -R "" as no -R, the rootless path that once made the legacy disarm remove
+// config.toml from the daemon current working directory.
+func TestCloneAndWorkspaceCommandBuildersRefuseAnEmptyDirectory(t *testing.T) {
+	if _, err := onClone("", "log", "-r", "@"); err == nil || !strings.Contains(err.Error(), "clone directory is required") {
+		t.Errorf("onClone with an empty clone = %v, want a refusal", err)
+	}
+	run := newLocalRunner(t)
+	if _, err := RunCheckedIn(context.Background(), run, Workspace{}, []string{"jj", "log", "-r", "@"}); err == nil || !strings.Contains(err.Error(), "workspace directory is required") {
+		t.Errorf("RunCheckedIn with an empty workspace = %v, want a refusal", err)
+	}
+	if _, err := RunCheckedIn(context.Background(), run, Workspace{Dir: t.TempDir()}, []string{"jj", "log", "-r", "@"}); err == nil || !strings.Contains(err.Error(), "clone directory is required") {
+		t.Errorf("RunCheckedIn with an empty clone = %v, want a refusal", err)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("empty Location checks ran %#v", calls)
+	}
+}
+
+// A symlinked workspace layout directory is refused before Provision creates the workspace,
+// registers it in the clone or writes its .git and .jj outside the state layout.
+func TestProvisionRefusesASymlinkedWorkspaceLayoutBeforeCreatingAnything(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	request.Issue = "WIDGETS-43"
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(workspace.Dir)
+	if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Provision(context.Background(), run, request)
+	if err == nil || !strings.Contains(err.Error(), parent+" is a symlink") {
+		t.Fatalf("Provision through a symlinked workspace layout = %v, want a refusal naming %s", err, parent)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("Provision ran %#v before refusing the symlinked layout", calls)
+	}
+	if _, err := os.Stat(filepath.Join(outside, filepath.Base(workspace.Dir))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Provision created %s outside the layout: %v", workspace.Dir, err)
+	}
+}
+
 func commandEnv(command Command, key string) string {
 	prefix := key + "="
 	for _, entry := range command.Env {
@@ -269,6 +343,14 @@ func findCall(t *testing.T, calls []Command, prefix ...string) Command {
 // pointer, never as a value in its environment, under the slow-command budget.
 func assertCredentialedEnvironment(t *testing.T, command Command) {
 	t.Helper()
+	assertCredentialedEnvironmentBounded(t, command, testTimeout)
+}
+
+// assertCredentialedEnvironmentBounded is assertCredentialedEnvironment, but for a command bounded
+// by timeout instead of the runner's slow-command budget (the fetch's clone, bounded by
+// FetchTimeout).
+func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout time.Duration) {
+	t.Helper()
 	if commandEnv(command, "LEGION_PROVISIONING_TOKEN_FILE") == "" {
 		t.Errorf("%q has no token file pointer", command.Argv)
 	}
@@ -277,8 +359,8 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 			t.Errorf("%q carries the token value in its environment: %s", command.Argv, entry)
 		}
 	}
-	if command.Timeout != testTimeout {
-		t.Errorf("command timeout = %s, want slow-command budget %s", command.Timeout, testTimeout)
+	if command.Timeout != timeout {
+		t.Errorf("command timeout = %s, want %s", command.Timeout, timeout)
 	}
 }
 
@@ -453,7 +535,7 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	if want := []string{"git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets", feed}; !slices.Equal(clone.Argv, want) {
 		t.Errorf("Fetch ran %q, want %q", clone.Argv, want)
 	}
-	assertCredentialedEnvironment(t, clone)
+	assertCredentialedEnvironmentBounded(t, clone, FetchTimeout)
 	if entries, err := os.ReadDir(req.CredentialDir); err != nil || len(entries) != 0 {
 		t.Errorf("the one-shot credential outlived Fetch: %v (%v)", entries, err)
 	}
@@ -799,22 +881,31 @@ func TestProvisionExcludesTheCodegraphDirectoryFromEveryWorkspaceOfTheClone(t *t
 }
 
 // git writes a relative worktree pointer between real paths, so provisioning finds its own entry
-// through a symlinked repos directory: it locks it, re-adds the workspace after its directory went,
-// and removal deletes it.
+// through a state directory reached by a symlink: it locks it, re-adds the workspace after its
+// directory went, and removal deletes it. The state directory is the one place in the tree
+// volume's path a symlink is allowed (refuseSymlinkedLayout); git names the workspace by its
+// physical path through the resolved state directory.
 func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	run := newLocalRunner(t)
 	request := provisionRequest(t)
-	if err := os.MkdirAll(request.StateDir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(request.StateDir), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(request.StateDir, "repos")); err != nil {
+	if err := os.Symlink(t.TempDir(), request.StateDir); err != nil {
 		t.Fatal(err)
 	}
 	workspace, err := Provision(context.Background(), run, request)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
+	physical, err := filepath.EvalSymlinks(workspace.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical == workspace.Dir {
+		t.Fatalf("test setup: %s is not reached through the symlinked state directory", workspace.Dir)
+	}
+	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[physical] {
 		t.Errorf("provisioning left the workspace's git worktree unlocked: %v", locked)
 	}
 	if err := os.RemoveAll(workspace.Dir); err != nil {
@@ -823,14 +914,74 @@ func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	if _, err := Provision(context.Background(), run, request); err != nil {
 		t.Fatalf("re-provision the registered missing workspace: %v", err)
 	}
-	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
-		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != physical {
+		t.Errorf("git in the re-added workspace answers %q, want %q", got, physical)
 	}
 	if err := Remove(context.Background(), run, workspace); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
 		t.Errorf("Remove left git worktrees registered: %v", locks)
+	}
+}
+
+// gitWorktreeEntries must resolve the clone's worktree admin directory before resolving a
+// relative gitdir: git >= 2.48 writes that gitdir between real paths. Here the clone is reached
+// through a symlink while the workspace is outside that symlink, so without the admin
+// EvalSymlinks a lexical join misses its own entry. This calls gitWorktreeEntries directly,
+// outside the jj runner, because refuseSymlinkedLayout deliberately refuses that clone before a
+// production jj command reaches git.
+func TestGitWorktreeEntriesResolveACloneSymlinkOutsideTheWorkspace(t *testing.T) {
+	root := t.TempDir()
+	realClone := filepath.Join(root, "real", "clone")
+	runSetup(t, root, "git", "init", "--initial-branch=main", realClone)
+	runSetup(t, realClone, "git", "config", "user.name", "Legion test")
+	runSetup(t, realClone, "git", "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(realClone, "README"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, realClone, "git", "add", "README")
+	runSetup(t, realClone, "git", "commit", "-m", "seed")
+
+	logicalClone := filepath.Join(root, "logical", "clone")
+	if err := os.MkdirAll(filepath.Dir(logicalClone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realClone, logicalClone); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "workspace", "widgets-42")
+	if err := os.MkdirAll(filepath.Dir(workspace), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, logicalClone, "git", "worktree", "add", "--detach", workspace, "HEAD")
+
+	admin := filepath.Join(realClone, ".git", "worktrees")
+	entries, err := os.ReadDir(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("git registered %d worktrees at %s, want 1", len(entries), admin)
+	}
+	entry := filepath.Join(admin, entries[0].Name())
+	// Git >= 2.48 writes this relative path itself. The devbox's git 2.43 writes an absolute
+	// path, so write the newer format over the real worktree entry to test the parser against the
+	// worker-image behavior without asking the test host to upgrade git.
+	relative, err := filepath.Rel(entry, filepath.Join(workspace, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(entry, "gitdir"), []byte(relative+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := gitWorktreeEntries(logicalClone, workspace)
+	if err != nil {
+		t.Fatalf("gitWorktreeEntries(%s, %s): %v", logicalClone, workspace, err)
+	}
+	if !slices.Equal(got, []string{entry}) {
+		t.Errorf("gitWorktreeEntries(%s, %s) = %q, want %q", logicalClone, workspace, got, []string{entry})
 	}
 }
 

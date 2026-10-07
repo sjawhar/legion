@@ -43,9 +43,10 @@ func (b *syncBuffer) Reset() {
 	b.buf.Reset()
 }
 
-// The daemon launches no controller under either runtime, so it says when none is registered, or
-// when the Envoy role registry says the registered one is gone, and how to start one — once per
-// worker boot timeout, and never about a controller the registry holds alive.
+// Under `controller: operator` the daemon launches no controller, under either runtime, so it says
+// when none is registered, or when the Envoy role registry says the registered one is gone, and how
+// to start one — once per worker boot timeout, and never about a controller the registry holds
+// alive.
 func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 	const notRegistered = "controller not registered; run legion controller start"
 	for _, tc := range []struct {

@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
@@ -39,16 +41,35 @@ type Runtime struct {
 	Kubernetes *Kubernetes
 }
 
+// ControllerLaunch is who launches the project's controller (`controller`).
+type ControllerLaunch string
+
+const (
+	// ControllerLaunchOperator is the default: the operator runs `legion controller start` on a
+	// machine of theirs, and the daemon launches no controller.
+	ControllerLaunchOperator ControllerLaunch = "operator"
+	// ControllerLaunchDaemon is the daemon launching the controller itself, as an Agent Sandbox pod
+	// it supervises like a root architect, minting its credential at every launch; the operator's
+	// controller secret route then refuses, since one controller per project runs.
+	ControllerLaunchDaemon ControllerLaunch = "daemon"
+)
+
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
 // resolved into the values the daemon runs on.
 type Config struct {
-	Project      string
-	Port         int
-	Bind         string
-	PostgresDSN  string
-	StateDir     string
-	Runtime      Runtime
-	AdmissionCap int
+	Project string
+	Port    int
+	Bind    string
+	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at in
+	// Bind's place, so Bind can be the unspecified address a daemon running as a pod listens on; ""
+	// (the default) has pods dial Bind. Only runtime: kubernetes accepts it, and readAdvertiseHost
+	// holds it to an IP address or a DNS name. `daemon_url` names the pod-facing API address on its
+	// own.
+	AdvertiseHost string
+	PostgresDSN   string
+	StateDir      string
+	Runtime       Runtime
+	AdmissionCap  int
 
 	// DaemonURL is the API address every pane is told (`LEGION_DAEMON_URL`), with no trailing
 	// slash; the loopback address on Port unless the file names another.
@@ -78,8 +99,8 @@ type Config struct {
 
 	WorkerBootTimeout time.Duration
 	// WorkerBootRegistrationDeadlineIntervals × WorkerBootTimeout is the registration deadline: a
-	// pane whose process is alive but whose agent has not registered by then is retired and
-	// counted as a launch failure.
+	// pane whose process is alive but whose agent has not registered by then, or has not said it is
+	// ready that long after its registration, is retired and counted as a launch failure.
 	WorkerBootRegistrationDeadlineIntervals int
 	WorkerRPCTimeout                        time.Duration
 	WorkerStopTimeout                       time.Duration
@@ -127,6 +148,9 @@ type Config struct {
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
 	ControllerWakeInterval time.Duration
+	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
+	// the file says the daemon does, which only `runtime: kubernetes` with Dispatch allows.
+	ControllerLaunch ControllerLaunch
 }
 
 const (
@@ -205,6 +229,7 @@ type fileConfig struct {
 	Project           *string
 	Port              *int
 	Bind              *string
+	AdvertiseHost     *string
 	PostgresDSN       *string
 	StateDir          *string
 	AdmissionCap      *int
@@ -230,6 +255,7 @@ type fileConfig struct {
 	Linger                 *time.Duration
 	ReviewRoundCap         *int
 	MaxFixAttempts         *int
+	Controller             *string
 	Durations              map[string]int
 	Counts                 map[string]int
 }
@@ -307,6 +333,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Project, err = readString(value, key)
 		case "bind":
 			file.Bind, err = readString(value, key)
+		case "advertise_host":
+			file.AdvertiseHost, err = readAdvertiseHost(value, key)
 		case "postgres_dsn":
 			file.PostgresDSN, err = readString(value, key)
 		case "state_dir":
@@ -357,6 +385,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
 			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
+		case "controller":
+			file.Controller, err = readString(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -533,8 +563,8 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 	}
 	urls := make([]string, 0, len(read))
 	for _, raw := range read {
-		if _, err := validURL(raw, key); err != nil {
-			return nil, fmt.Errorf("%s entry %q must be a valid URL", key, raw)
+		if _, err := endpointURL(raw, key); err != nil {
+			return nil, fmt.Errorf("%s entry %q%s", key, raw, strings.TrimPrefix(err.Error(), key))
 		}
 		if !slices.Contains(urls, raw) {
 			urls = append(urls, raw)
@@ -706,6 +736,27 @@ func validURL(value, key string) (*url.URL, error) {
 	return parsed, nil
 }
 
+// endpointURL is validURL for a URL that names an endpoint, never a request: NATS and Envoy
+// credentials belong in URL userinfo or a secret, not in a query that would reach a pod's
+// environment and any diagnostic that names it. An endpoint path remains valid.
+func endpointURL(value, key string) (*url.URL, error) {
+	parsed, err := validURL(value, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return nil, fmt.Errorf("%w; use URL userinfo or a secret for credentials", err)
+	}
+	return parsed, nil
+}
+
+func noQueryOrFragment(parsed *url.URL, key string) error {
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("%s must not include a query string or fragment", key)
+	}
+	return nil
+}
+
 // baseURL is the shipped `normalizeBaseUrl` (config.ts): a URL a path is appended to, so
 // a query or fragment is refused and trailing slashes are dropped.
 func baseURL(value, key string) (string, error) {
@@ -720,8 +771,8 @@ func baseURL(value, key string) (string, error) {
 // refused and trailing slashes are dropped. dispatchBase shares it after its own scheme check,
 // which must read the parsed URL's Scheme directly rather than re-parsing a normalized string.
 func trimmedBase(parsed *url.URL, key string) (string, error) {
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", fmt.Errorf("%s must not include a query string or fragment", key)
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
@@ -781,6 +832,12 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if strings.TrimSpace(cfg.Bind) == "" {
 		return Config{}, errors.New("bind must not be empty")
 	}
+	if file.AdvertiseHost != nil {
+		if file.Kubernetes == nil {
+			return Config{}, errors.New("advertise_host is not used when runtime is tmux: every pane dials the daemon's own unix socket; remove advertise_host")
+		}
+		cfg.AdvertiseHost = *file.AdvertiseHost
+	}
 
 	if file.Kubernetes != nil {
 		if err := resolveKubernetes(file, configDir, &cfg); err != nil {
@@ -808,12 +865,41 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := resolveStage3(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
+	if err := resolveControllerLaunch(file, &cfg); err != nil {
+		return Config{}, err
+	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {
 			return Config{}, err
 		}
 	}
 	return cfg, nil
+}
+
+// resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
+// daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
+// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses it
+// rather than read a key that sizes nothing.
+func resolveControllerLaunch(file fileConfig, cfg *Config) error {
+	cfg.ControllerLaunch = ControllerLaunchOperator
+	if file.Controller != nil {
+		switch launch := ControllerLaunch(*file.Controller); launch {
+		case ControllerLaunchOperator:
+		case ControllerLaunchDaemon:
+			if cfg.Runtime.Name != "kubernetes" {
+				return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+			}
+			cfg.ControllerLaunch = launch
+		default:
+			return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
+		}
+	}
+	if k := cfg.Runtime.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon {
+		if _, sized := k.Resources[claim.RoleController]; sized {
+			return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+		}
+	}
+	return nil
 }
 
 // resolveStage2 settles the keys Stage 2 models. Each is read from the file alone: the shipped
@@ -883,7 +969,7 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 		cfg.OperatorTokenFile = underConfig(*file.OperatorTokenFile, configDir)
 	}
 	if file.EnvoyURL != nil {
-		if _, err := validURL(*file.EnvoyURL, "envoy_url"); err != nil {
+		if _, err := endpointURL(*file.EnvoyURL, "envoy_url"); err != nil {
 			return err
 		}
 		cfg.EnvoyURL = *file.EnvoyURL

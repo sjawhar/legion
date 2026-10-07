@@ -154,6 +154,16 @@ command is at fault; wait for the load to fall and re-run the single push. Do no
 loop that redeems a fresh grant per attempt only works because each attempt is a new bash call, and that is the
 model re-issuing the command, not a script.
 
+**Update (LEGION-583): `legion push` itself now gets a longer grant.** The pi-envoy extension
+judges a bash command that invokes `legion push` — alone, as a compound command's one segment, or
+a pipeline's last stage — and mints that one grant with `credential.pushTTL` (5 minutes) instead of
+the ordinary 60 seconds: the LEGION-17 case above, a push alone and first in its call outliving the
+grant on a loaded box, is what this closes. The hook mints one grant for the whole bash call, so a
+slow command *ahead of* the push in the same call benefits too — `slow_thing && legion push` gets
+the 5-minute grant for both, not the ordinary 60 seconds, since the push anywhere in the call is
+what the hook looks for. A push alone in its own later call, with the slow command in an earlier,
+separate call, still needs that earlier call to finish inside its own 60 seconds.
+
 **The fix (pi-envoy 1.20.1; LEGION-54, after LEGION-12's pull request #974).** Before each of your bash commands
 runs, the hook mints the grant and writes it to the file `$LEGION_GRANT_FILE` names — a 0600 file under
 `<state_dir>/secrets/`, written to a temp name and renamed into place — and `legion credential`, `legion gh`, and

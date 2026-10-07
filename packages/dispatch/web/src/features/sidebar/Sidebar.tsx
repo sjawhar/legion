@@ -175,6 +175,18 @@ export function Sidebar({
             )}
           </Link>
         </section>
+        <section>
+          <ul className="mt-1 space-y-0.5">
+            <RailRow
+              badge={undefined}
+              detail="Deploys, merges, and pipeline failures"
+              label="Delivery"
+              onNavigate={onNavigate}
+              selected={location.pathname === "/delivery"}
+              to="/delivery"
+            />
+          </ul>
+        </section>
         {pinned.data.length === 0 ? null : (
           <section>
             <h2 className={`px-2 text-xs font-semibold tracking-wide uppercase ${railMutedText}`}>

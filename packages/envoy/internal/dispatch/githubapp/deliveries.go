@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -51,11 +52,11 @@ func (c *Client) Deliveries(ctx context.Context, since time.Time, before func() 
 		if err != nil {
 			return nil, err
 		}
-		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, responseLimit)
+		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
 		if err != nil {
 			return nil, err
 		}
-		if limited := rateLimit(status, header, body); limited != nil {
+		if limited := RateLimit(status, header, body); limited != nil {
 			return nil, limited
 		}
 		if status != http.StatusOK {
@@ -93,11 +94,11 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 		return err
 	}
 	target := c.base + "/app/hook/deliveries/" + strconv.FormatInt(deliveryID, 10) + "/attempts"
-	body, status, header, err := c.request(ctx, http.MethodPost, target, "Bearer "+jwt, responseLimit)
+	body, status, header, err := c.request(ctx, http.MethodPost, target, "Bearer "+jwt, nil, responseLimit)
 	if err != nil {
 		return err
 	}
-	if limited := rateLimit(status, header, body); limited != nil {
+	if limited := RateLimit(status, header, body); limited != nil {
 		return limited
 	}
 	if status != http.StatusAccepted {
@@ -119,12 +120,22 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("rate-limited by GitHub (status %d), next request in %s: %s", e.Status, e.Wait, e.Body)
 }
 
-// rateLimit reads a rate-limited answer, as GitHub's REST rate-limit documentation describes one:
+// AsRateLimit is errors.As(err, &limited) collapsed to one line: delivery's reconcile.go,
+// github_prs.go and intake.go each repeated the same three-line var/errors.As idiom at every
+// point a *RateLimitError must be told apart from every other per-item failure.
+func AsRateLimit(err error) (*RateLimitError, bool) {
+	var limited *RateLimitError
+	ok := errors.As(err, &limited)
+	return limited, ok
+}
+
+// RateLimit reads a rate-limited answer, as GitHub's REST rate-limit documentation describes one:
 // a 429, or a 403 with no requests remaining, a Retry-After, or a message naming a rate limit
 // (any other 403 is a refusal of that request). The wait is Retry-After's seconds, else the time
 // until x-ratelimit-reset when no requests remain, else the one minute GitHub asks for when it
-// gives neither.
-func rateLimit(status int, header http.Header, body []byte) *RateLimitError {
+// gives neither. Exported so other GitHub-calling packages (delivery's reconcile) can reuse the
+// same detection this client already has, instead of treating every non-2xx the same.
+func RateLimit(status int, header http.Header, body []byte) *RateLimitError {
 	if status != http.StatusTooManyRequests && status != http.StatusForbidden {
 		return nil
 	}
@@ -140,6 +151,21 @@ func rateLimit(status int, header http.Header, body []byte) *RateLimitError {
 		limited.Wait = max(time.Until(time.Unix(reset, 0)), 0)
 	}
 	return limited
+}
+
+// CheckResponse turns a response's status/header/body into an error only when status is not 200:
+// RateLimit's own *RateLimitError when the response is a GitHub rate limit, else a generic
+// "status %d: %s" error carrying the raw body. Factors the identical "check rate limit, then
+// check status" three lines delivery's GitHub fetchers (github_prs.go, github_runs.go,
+// client.go's own ListInstallationRepositoriesByID) all repeated at every call site.
+func CheckResponse(status int, header http.Header, body []byte) error {
+	if status == http.StatusOK {
+		return nil
+	}
+	if limited := RateLimit(status, header, body); limited != nil {
+		return limited
+	}
+	return fmt.Errorf("status %d: %s", status, body)
 }
 
 // nextLink returns the rel="next" target of an RFC 8288 Link header, refusing one outside the

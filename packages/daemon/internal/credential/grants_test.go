@@ -21,7 +21,7 @@ func TestGrantServesEveryRedemptionUntilItExpires(t *testing.T) {
 		Issue:          "LEGION-208",
 		Role:           claim.RoleImplementer,
 		CapabilityHash: []byte("live-session-capability"),
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestGrantServesEveryRedemptionUntilItExpires(t *testing.T) {
 
 func TestGrantsRequireAnAuthenticatedClaim(t *testing.T) {
 	grants := New(func() time.Time { return time.Unix(0, 0) })
-	if _, err := grants.Mint(supervise.Claim{Role: claim.RoleImplementer}); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := grants.Mint(supervise.Claim{Role: claim.RoleImplementer}, false); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("Mint unauthenticated claim = %v, want ErrUnauthenticated", err)
 	}
 }
@@ -83,7 +83,7 @@ func TestGrantStillMatchesTheClaimThatMintedIt(t *testing.T) {
 		Issue:          "LEGION-208",
 		Role:           claim.RoleTester,
 		CapabilityHash: []byte("capability-at-mint"),
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRevokeControllersEndsOnlyControllerGrants(t *testing.T) {
 	worker, err := grants.Mint(supervise.Claim{
 		Token: "legion-legion-legion-208-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208",
 		Role: claim.RoleTester, CapabilityHash: []byte("tester-capability"),
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -119,5 +119,30 @@ func TestRevokeControllersEndsOnlyControllerGrants(t *testing.T) {
 	}
 	if _, err := grants.Redeem(worker.ID); err != nil {
 		t.Fatalf("Redeem of a claim grant after the controllers were revoked = %v, want it still served", err)
+	}
+}
+
+// legion push's grant must outlive jj's own working-copy snapshot before the network push,
+// measured at 63 to 100 seconds on a near-full tree volume (dispatch://LEGION-583): a grant minted
+// with forPush lives pushTTL, not the ordinary sixty seconds, so it still redeems past the point an
+// ordinary grant would have expired.
+func TestAPushGrantOutlivesASlowSnapshotPastTheOrdinaryTTL(t *testing.T) {
+	now := time.Date(2026, 10, 5, 19, 0, 0, 0, time.UTC)
+	grants := New(func() time.Time { return now })
+	issued, err := grants.Mint(supervise.Claim{
+		Token: "legion-legion-legion-208-implementer", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208",
+		Role: claim.RoleImplementer, CapabilityHash: []byte("live-session-capability"),
+	}, true)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if issued.ExpiresAt != now.Add(pushTTL) {
+		t.Fatalf("ExpiresAt = %s, want %s (pushTTL)", issued.ExpiresAt, now.Add(pushTTL))
+	}
+	// 100 seconds, the measured worst case: past the ordinary sixty-second ttl, which
+	// would already have expired here, but inside pushTTL.
+	now = now.Add(100 * time.Second)
+	if _, err := grants.Redeem(issued.ID); err != nil {
+		t.Fatalf("Redeem 100s after a push mint = %v, want it still served", err)
 	}
 }

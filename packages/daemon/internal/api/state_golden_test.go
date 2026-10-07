@@ -242,7 +242,7 @@ func TestRegisterResponseGolden(t *testing.T) {
 func TestControllerRegisterResponseGolden(t *testing.T) {
 	golden(t, "register-controller.json", ControllerRegisterResponse{
 		ClaimToken: "legion-legion-controller",
-		Role:       ControllerRole,
+		Role:       claim.RoleController,
 		Generation: 2,
 		Secret:     "Q29udHJvbGxlZEJ5TGVnaW9u",
 	})

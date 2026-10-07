@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -35,8 +36,9 @@ type Kubernetes struct {
 	Kubeconfig string
 	Context    string
 	Scheduling Scheduling
-	// Resources are each role's container requests and limits. A role absent here gets none,
-	// which is the default for every role: one tree runs per node, and the pool's floor sizes it.
+	// Resources are each role's container requests and limits, and the controller's under
+	// `controller: daemon`. A role absent here gets none, which is the default for every role: one
+	// tree runs per node, and the pool's floor sizes it.
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
@@ -155,12 +157,36 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	return block, nil
 }
 
+// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
+// listener may bind.
+func isUnspecifiedHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// readAdvertiseHost is `advertise_host`: an IP address or a DNS-1123 name, the host part alone of
+// every pod's `--connect tcp://<host>:<port>`. The daemon adds the worker stream's port itself
+// (shimAddress, internal/daemon/daemon.go), and the shim parses that address as a URL, so anything
+// else (a scheme, a port, brackets, a path, a user, a query, a space or an underscore) would build
+// an address no pod's shim dials.
+func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
+	read, err := readNonEmptyString(value, key)
+	if err != nil || read == nil {
+		return read, err
+	}
+	if host := *read; net.ParseIP(host) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(host))) != 0 {
+		return nil, fmt.Errorf("%s must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself (%s)", key, host)
+	}
+	return read, nil
 }
 
 // readKubernetes reads the `runtime.kubernetes` block, refusing any member it does not model and
@@ -727,7 +753,9 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 	return tolerations, nil
 }
 
-// readResources is a mapping of role to that role's requests and limits.
+// readResources is a mapping of role to that role's requests and limits: each workflow role, and
+// the controller, whose pod a daemon under `controller: daemon` launches (resolveControllerLaunch
+// refuses its key otherwise).
 func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	const key = kubernetesKey + ".resources"
 	if value == nil {
@@ -736,15 +764,16 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping of role to requests and limits", key)
 	}
-	roles := make([]string, len(claim.Roles))
-	for i, role := range claim.Roles {
-		roles[i] = string(role)
+	roles := make([]string, 0, len(claim.Roles)+1)
+	for _, role := range claim.Roles {
+		roles = append(roles, string(role))
 	}
+	roles = append(roles, string(claim.RoleController))
 	var resources map[claim.Role]RoleResources
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		name, entry := value.Content[i].Value, value.Content[i+1]
 		role := claim.Role(name)
-		if !claim.IsRole(role) {
+		if !claim.IsRole(role) && role != claim.RoleController {
 			return nil, fmt.Errorf("%s key %q must be a role (%s)", key, name, strings.Join(roles, ", "))
 		}
 		if _, exists := resources[role]; exists {
@@ -811,7 +840,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"envoy_url", file.EnvoyURL == nil, "a pod cannot reach the loopback listener it defaults to"},
 		{"nats_urls", len(file.NatsURLs) == 0, "every pod's Envoy client connects to NATS"},
 		{"envoy_token_file", file.EnvoyTokenFile == nil, "every pod receives the Envoy bearer"},
-		{"operator_token_file", file.OperatorTokenFile == nil, "the daemon cannot launch the controller there; legion controller start presents this token"},
+		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
 		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},
@@ -836,15 +865,24 @@ func checkKubernetesKeys(file fileConfig) error {
 }
 
 // checkPodReachable refuses an address pods are handed that no pod can reach. Every pod's shim
-// dials the worker stream at tcp://<bind>:<worker_stream_port>, so bind must name one of the
-// daemon host's own addresses, never loopback or the unspecified address it would listen on. Every
-// Legion URL a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must
-// name neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host
-// at all.
+// dials the worker stream at tcp://<host>:<worker_stream_port>, the host being AdvertiseHost when
+// the file sets one and Bind otherwise, so that host may be neither loopback nor the unspecified
+// address. Bind beside an AdvertiseHost is only where the daemon listens, so it may be the
+// unspecified address, but not loopback, where no pod reaches the listener at all. Every Legion URL
+// a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must name
+// neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host at
+// all.
 func checkPodReachable(cfg Config) error {
-	if ip := net.ParseIP(cfg.Bind); strings.EqualFold(cfg.Bind, "localhost") || ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
-		return fmt.Errorf("bind %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; bind the daemon host's own address when runtime is kubernetes",
-			cfg.Bind, net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)))
+	key, host, why := "bind", cfg.Bind, "bind the daemon host's own address when runtime is kubernetes"
+	if cfg.AdvertiseHost != "" {
+		if isLoopbackHost(cfg.Bind) {
+			return fmt.Errorf("bind %s is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes", cfg.Bind)
+		}
+		key, host, why = "advertise_host", cfg.AdvertiseHost, "name the host pods reach it at when runtime is kubernetes"
+	}
+	if isLoopbackHost(host) || isUnspecifiedHost(host) {
+		return fmt.Errorf("%s %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; %s",
+			key, host, net.JoinHostPort(host, strconv.Itoa(cfg.WorkerStreamPort)), why)
 	}
 	addresses := []struct{ key, value string }{
 		{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}, {"dispatch_url", cfg.DispatchURL},
@@ -858,12 +896,11 @@ func checkPodReachable(cfg Config) error {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
 		host := parsed.Hostname()
-		ip := net.ParseIP(host)
 		var why string
 		switch {
-		case strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback():
+		case isLoopbackHost(host):
 			why = "names a loopback host, which in a pod is the pod itself"
-		case ip != nil && ip.IsUnspecified():
+		case isUnspecifiedHost(host):
 			why = "names the unspecified address, which is no host a pod can dial"
 		default:
 			continue

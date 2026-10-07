@@ -22,7 +22,9 @@ legion start --config legion.yaml --check-config
 | It says | What to do |
 | --- | --- |
 | `runtime.kubernetes.image must be pinned by digest (@sha256:…)` | Pin the image by digest, never a tag ([The worker image](/legion/legion/running-legion/#the-worker-image)). |
-| `bind 127.0.0.1 is not an address a pod can reach, …` (or the same for `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry) | Every address handed to a pod must be one a pod reaches: the daemon host's own address, never loopback or `0.0.0.0`. |
+| `bind 127.0.0.1 is not an address a pod can reach, …` (or the same for `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry, or `advertise_host`) | Every address handed to a pod must be one a pod reaches: the daemon host's own address, never loopback or `0.0.0.0` — except `bind`, which may be `0.0.0.0` once `advertise_host` names the stable address pods dial instead. |
+| `bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; …` | With `advertise_host` set, `bind` is where the daemon listens: `0.0.0.0`, or the daemon host's own address. |
+| `advertise_host must be an IP address or a DNS name, …` or `advertise_host is not used when runtime is tmux: …` | `advertise_host` is the host alone (no scheme, port, path or brackets), and only `runtime: kubernetes` reads it. |
 | `<key> is required when runtime is kubernetes: …` | Add the key; the message says why a pod needs it. |
 | `projects must configure <PROJECT>, the daemon's own project` | `project` must also be a key of `projects`. |
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
@@ -61,6 +63,32 @@ legion start --config legion.yaml --check-config
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running
   the controller. Start it ([Start the controller](/legion/legion/running-legion/#start-the-controller)).
+- **`legion controller start` is refused: `this daemon launches the project's controller itself
+  (controller: daemon), so legion controller start has none to start`.** The daemon runs its own
+  controller as a pod; reach it through Dispatch instead.
+- **The daemon-launched controller keeps failing.** `legion claims list` shows its claim,
+  `legion-<project>-controller`, and the daemon logs why each launch failed and when it retries a
+  failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
+  pod's own side; a `workspace-init` exit 3 means its volume lost the session, and the daemon starts
+  a fresh controller.
+- **The daemon refuses to boot: `stop legion-<project>-controller, the controller an earlier boot
+  under controller: daemon launched, since this daemon leaves the controller to its operator
+  (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
+  daemon could not stop the pod it launched before; the end of the line says why (most often the
+  cluster refused the Sandbox's deletion). The refusal leaves the pod and its registration as they
+  were. Fix the cause and start the daemon again, or set `controller: daemon` back, which re-adopts
+  that controller with its registration, grants and wakes still working.
+- **The daemon refuses to boot: `end the registration of legion-<project>-controller, the controller
+  an earlier boot under controller: daemon launched, since this daemon leaves the controller to its
+  operator (controller: operator): …` (or `read the controller record to end the registration of
+  …`).** The daemon stopped its controller's pod but could not write the controller record; the end
+  of the line is the store's error. Start the daemon again once Postgres answers: the next boot finds
+  the claim retired and ends the registration before it serves anything. The record names the
+  stopped pod's session until then, but no refused boot serves the state; it shows as the state's
+  `controllerLocator` only if you set `controller: daemon` back before an operator boot succeeds.
+  Nothing can act as that session, since the process that held its registration secret ended with
+  the pod; the pod's Secret held no registration secret, only its boot token, which an operator's
+  daemon refuses (409), and the launch's Envoy and Dispatch bearers.
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.
@@ -189,6 +217,16 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.
   Nothing to do.
+- **`worker-stream: could not resolve a hello's boot token; the shim redials`** means the daemon's
+  Postgres did not answer while a pod's shim said hello. The hello is not refused: the shim
+  redials, and the hello is accepted once the store answers. If the line keeps coming, look at the
+  database, not the pod.
+- **`supervise: the agent registered and never said it was ready; retired its process`** means an
+  agent registered and its ready never came within the registration deadline
+  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, 6 minutes at the
+  defaults), often because the registration's answer never reached it. The daemon resumes the same
+  session one generation later and counts a launch failure; after `launch_failure_limit` of them
+  the claim fails.
 
 ## The work loops or stops
 

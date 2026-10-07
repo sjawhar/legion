@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -267,6 +268,7 @@ root="$HOME/.omp"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)
 case "$step" in
 yes) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; exit 0 ;;
+yes-then-linger) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; sleep 3 & echo $! >"$dir/lingering.pid"; exit 0 ;;
 yes-elsewhere) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/elsewhere/dist/legion.js?mtime=1\n' "$HOME" >&2; exit 0 ;;
 yes-unowned) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/unowned/legion.js\n' "$HOME" >&2; exit 0 ;;
 yes-then-die) echo LEGION_PLUGIN_LOADED=yes >&2; echo "database is locked" >&2; exit 1 ;;
@@ -465,6 +467,43 @@ func TestTheLoadProbeRunsWhatAPaneRunsAndPassesOnTheLoadedMarker(t *testing.T) {
 	if info, err := os.Stat(gate.env["XDG_DATA_HOME"]); err != nil || !info.IsDir() {
 		t.Errorf("the pane's XDG_DATA_HOME was not created before the probe: %v", err)
 	}
+}
+
+// Exit 0 with LEGION_PLUGIN_LOADED=yes already written is an answer, whatever the launch started
+// that is still running when Oh My Pi itself exits: a process it left behind (sleep 3 &, standing
+// in for whatever a real tmux pane's launch can leave running) holds the probe's output pipe open
+// past procgroup.WaitDelay, but the probe already answered before that, and must not be retried
+// for it. Attempts is capped at 1 so a reintroduced regression (treating the lingering child as a
+// transient non-answer) fails fast with this test's own message, instead of retrying until go
+// test's own timeout ends the run.
+func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutputPipe(t *testing.T) {
+	f := newFakeOmp(t, "yes-then-linger")
+	gate, _ := gateUnder(t, f, contractCurrent)
+	gate.retry.Attempts = 1
+	t.Cleanup(func() { killPIDFile(t, filepath.Join(f.dir, "lingering.pid")) })
+
+	if err := gate.verify(context.Background()); err != nil {
+		t.Fatalf("the gate refused a plugin that answered yes before a lingering child outlived it: %v", err)
+	}
+
+	if n := f.attempts(t); n != 1 {
+		t.Fatalf("Oh My Pi ran %d times, want once: a lingering descendant is not a reason to retry an answer already given", n)
+	}
+}
+
+// killPIDFile kills the process named by the PID pidFile holds, left running past a test's own
+// assertions by design (a backgrounded sleep standing in for a command's own lingering child).
+func killPIDFile(t *testing.T, pidFile string) {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
 
 // The plugin a pane loads must be the one whose manifest the contract probe read. A launch prefix

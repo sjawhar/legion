@@ -32,8 +32,9 @@ type State struct {
 	Admission           Admission            `json:"admission"`
 	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
-	// ControllerLocator is the project's controller, absent until a session registers with the
-	// capability `legion controller start` fetched.
+	// ControllerLocator is the project's controller, absent until a session registers as it: with
+	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
+	// token of the daemon's own controller launch.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
 	// AgentSecretsLogin is the daemon's own agent-secrets machine login
 	// (runtime.kubernetes.agent_secrets), absent when the deployment configures
@@ -41,11 +42,13 @@ type State struct {
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
 }
 
-// ControllerLocator is the external record of the project's controller (LEGION-206 Requirement
-// 11): the operator started it on their own machine, so the daemon has no process of it to
-// address — only the runtime the daemon runs under, the session registered with the current
-// controller capability, and when it registered. It is alive while the Envoy listener names that
-// session as the controller role's holder within the liveness window (`controller.Prober`).
+// ControllerLocator is the record of the session registered as the project's controller: the
+// runtime the daemon runs under, the session, and when it registered. External is true for both
+// launches, a wire constant since contract 4: the operator's controller has no process the daemon
+// can address, and the daemon's own (`controller: daemon`) is a claim whose process the operator
+// routes and the claims list show, as any claim's. The operator's is alive while the Envoy listener
+// names that session as the controller role's holder within the liveness window
+// (`controller.Prober`).
 type ControllerLocator struct {
 	Runtime      string    `json:"runtime"`
 	External     bool      `json:"external"`
