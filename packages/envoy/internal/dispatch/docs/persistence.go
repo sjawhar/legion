@@ -75,6 +75,56 @@ func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Versio
 	return p.head(ctx, rooms, room)
 }
 
+// DocumentStamp is the room's DocumentStamp now, read through the pool that owns loads, as Head
+// reads the head.
+func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentStamp, error) {
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return DocumentStamp{}, err
+	}
+	return readDocumentStamp(ctx, rooms, room)
+}
+
+// LoadedDocument is a room's document as of one stored state: Doc decoded from it, nil for a
+// document with no stored update, and Stamp naming it.
+type LoadedDocument struct {
+	Doc   *crdt.Doc
+	Stamp DocumentStamp
+}
+
+// LoadDocument is the room's document at its head, decoded once, and the stamp of the state it was
+// decoded from, both read in the one repeatable-read transaction Load reads in. Its document is
+// the one Load's state decodes into (documentThrough), so a read of it shows what a room load
+// would. A history that does not decode is ErrDocumentUnloadable.
+func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if err := ctx.Err(); err != nil {
+		return LoadedDocument{}, err
+	}
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return LoadedDocument{}, err
+	}
+	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return LoadedDocument{}, fmt.Errorf("begin document load: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	stamp, err := readDocumentStamp(ctx, tx, room)
+	if err != nil {
+		return LoadedDocument{}, err
+	}
+	loaded := LoadedDocument{Stamp: stamp}
+	if stamp.Version != 0 {
+		if loaded.Doc, err = documentThrough(ctx, tx, room, persistence.Version(stamp.Version)); err != nil {
+			return LoadedDocument{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return LoadedDocument{}, fmt.Errorf("commit document load: %w", err)
+	}
+	return loaded, nil
+}
+
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, true)
@@ -655,6 +705,40 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 	}
 	slog.Warn(misreadWarning+"; serving them merged",
 		"room", room, "version", int64(version), "error", misread)
+	return mergedThrough(ctx, tx, room, version)
+}
+
+// documentThrough is the document stateThrough's state decodes into, decoded once: the document
+// the fold's read-back check decoded when the state reads back, and otherwise - a log of one
+// update, which the fold returns as stored, or a log that does not fold, which is served merged -
+// the state decoded into a document with the server's pending queue, as a room decodes it. A state
+// that does not decode is ErrDocumentUnloadable; a log holding no update is no document.
+func documentThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (*crdt.Doc, error) {
+	state, readBack, misread, err := fold(ctx, tx, room, version)
+	switch {
+	case err != nil:
+		return nil, err
+	case misread != nil:
+		slog.Warn(misreadWarning+"; serving them merged",
+			"room", room, "version", int64(version), "error", misread)
+		if state, err = mergedThrough(ctx, tx, room, version); err != nil {
+			return nil, err
+		}
+	case readBack != nil:
+		return readBack, nil
+	}
+	if len(state) == 0 {
+		return nil, nil
+	}
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+	}
+	return doc, nil
+}
+
+// mergedThrough is the room's stored updates through version merged whole, as they were stored.
+func mergedThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
 	var updates [][]byte
 	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
 		updates = append(updates, update)
@@ -676,6 +760,14 @@ var errUnfoldable = errors.New("apply a stored document update")
 // stored updates through version do not fold into a state that reads back as them - an update the
 // fold's document could not apply, or a state that reads back otherwise.
 func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, misread error, err error) {
+	state, _, misread, err = fold(ctx, tx, room, version)
+	return state, misread, err
+}
+
+// fold is foldThrough with the document its read-back check decoded the state into, readBack, nil
+// unless the state reads back. A log of one update is returned as stored, with no document. The
+// fold holds one document at once: its own, until it has encoded the state, then the read-back's.
+func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, readBack *crdt.Doc, misread error, err error) {
 	var doc *crdt.Doc
 	apply := func(update []byte) error {
 		if doc == nil {
@@ -704,11 +796,11 @@ func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistenc
 	})
 	switch {
 	case errors.Is(err, errUnfoldable):
-		return nil, err, nil
+		return nil, nil, err, nil
 	case err != nil:
-		return nil, nil, err
+		return nil, nil, nil, err
 	case seen <= 1:
-		return first, nil, nil
+		return first, nil, nil, nil
 	}
 	state = crdt.EncodeStateAsUpdateV1(doc, nil)
 	made := doc.StateVector()
@@ -722,38 +814,40 @@ func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistenc
 			parts = append(parts, rest)
 			return nil
 		}); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if state, err = crdt.MergeUpdatesV1(parts...); err != nil {
-			return nil, nil, fmt.Errorf("keep parked document updates: %w", err)
+			return nil, nil, nil, fmt.Errorf("keep parked document updates: %w", err)
 		}
 	}
 	doc = nil
-	return state, readsBackOtherwise(state, made), nil
+	readBack, misread = readsBackOtherwise(state, made)
+	return state, readBack, misread, nil
 }
 
-// readsBackOtherwise names how state, decoded into a fresh document, differs from the state vector
-// made, the state vector of the document that encoded it, or returns nil when it does not.
-func readsBackOtherwise(state []byte, made crdt.StateVector) error {
+// readsBackOtherwise decodes state into a fresh document and names how that document's state
+// vector differs from made, the state vector of the document that encoded it. When it does not
+// differ it returns the document, the state decoded as a room decodes it, and a nil error.
+func readsBackOtherwise(state []byte, made crdt.StateVector) (*crdt.Doc, error) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
-		return fmt.Errorf("decode the folded state: %w", err)
+		return nil, fmt.Errorf("decode the folded state: %w", err)
 	}
 	read := doc.StateVector()
 	if maps.Equal(made, read) {
-		return nil
+		return doc, nil
 	}
 	for client, clock := range made {
 		if read[client] != clock {
-			return fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, read[client], clock)
+			return nil, fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, read[client], clock)
 		}
 	}
 	for client, clock := range read {
 		if made[client] != clock {
-			return fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, clock, made[client])
+			return nil, fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, clock, made[client])
 		}
 	}
-	return nil
+	return doc, nil
 }
 
 // eachUpdateThrough calls use with each of the room's stored updates through version, oldest first,
