@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -645,10 +646,19 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // is relaunched only after boot orphan reconciliation proves any pre-crash pane absent or reaped;
 // a failed listing leaves it queued and uncertain until the bounded retry succeeds. Only then are
 // hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
+// A daemon that leaves the controller to its operator first stops the controller's claim an
+// earlier boot under `controller: daemon` left (stopLaunchedController).
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
 		return err
+	}
+	if s.cfg.ControllerLaunch != config.ControllerLaunchDaemon {
+		stopped, err := s.stopLaunchedController(boot)
+		if err != nil {
+			return err
+		}
+		unfinished = slices.DeleteFunc(unfinished, func(token claim.Token) bool { return token == stopped })
 	}
 	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
 	if s.reconcileBootOrphans(boot) {
@@ -688,6 +698,32 @@ func (s *supervision) start(boot context.Context) error {
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
 	return nil
+}
+
+// stopLaunchedController ends the daemon's own controller's claim on a daemon that leaves the
+// controller to its operator (`controller: operator`), and returns its token when it stopped one. A
+// claim an earlier boot under `controller: daemon` stored would otherwise be re-adopted and
+// relaunched at every death, its pod contending with the operator's `legion controller start` for
+// the one controller record, which the register route refuses it on this daemon. The stop releases
+// its process (its Sandbox, under the Sandbox runtime) and retires the claim before anything
+// relaunches it. A stop that fails refuses the boot, naming the claim, rather than leave this
+// daemon supervising a controller it does not run.
+func (s *supervision) stopLaunchedController(ctx context.Context) (claim.Token, error) {
+	token := claim.ControllerToken(s.plan.project)
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		return "", nil
+	}
+	state := m.Claim().State
+	if state == supervise.StateRetired {
+		return "", nil
+	}
+	s.log.Warn("controller: stopping the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator",
+		"claim", token, "state", state)
+	if err := m.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
+		return "", fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+	}
+	return token, nil
 }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not

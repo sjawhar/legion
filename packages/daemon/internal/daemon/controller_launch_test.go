@@ -193,3 +193,50 @@ func TestARestartedDaemonReadoptsItsControllerAndLaunchesNoSecond(t *testing.T) 
 		t.Fatalf("the controller was spawned %d times across the restart, want once", spawns)
 	}
 }
+
+// A daemon restarted with `controller: operator` after a period under `controller: daemon` stops
+// the controller's claim it finds in the store, at boot and before anything relaunches it: its
+// process is released and the claim retires, so no pod of the daemon's contends with the operator's
+// `legion controller start` for the one controller record, and the operator's secret route mints.
+func TestADaemonSwitchedBackToTheOperatorStopsItsControllersClaim(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	launch := controllerLaunched(t, rt, token)
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchOperator
+	d = startDaemon(t, cfg, o)
+	if state := d.claim(token).State; state != string(supervise.StateRetired) {
+		t.Fatalf("the controller's claim is %s once the operator's daemon booted, want retired", state)
+	}
+	released := false
+	for _, call := range rt.CallsOf("Release") {
+		released = released || call.Released.Claim == token
+	}
+	if !released {
+		t.Fatalf("the operator's daemon never released the controller's process; runtime calls %+v", rt.Calls())
+	}
+	time.Sleep(5 * o.orphanSweep)
+	if spawns := controllerSpawns(rt, token); spawns != 1 {
+		t.Fatalf("the controller was spawned %d times across the switch, want once", spawns)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: launch.BootToken, SessionID: "ses_pod", OmpSessionFile: "/sessions/pod.jsonl",
+		AgentID: "ses_pod", PluginContract: api.DaemonAPIVersion,
+	}, false); status == http.StatusOK {
+		t.Fatalf("the stopped controller's launch registered = %d; body %s", status, body)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion}, true); status != http.StatusOK {
+		t.Fatalf("the operator's controller secret = %d %s, want 200", status, body)
+	}
+}

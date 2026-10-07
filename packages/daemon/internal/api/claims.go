@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -37,8 +38,10 @@ type Supervisor interface {
 // accepted one is issued a secret whose hash the machine has persisted before this answers — a
 // store that refuses the write is a 500 with no secret, so no agent holds a secret the daemon
 // forgot. A launch of the daemon's own controller registers as the project's controller too
-// (registerLaunchedController). A token no launch minted may be the controller capability `legion
-// controller start` fetched, which registers the project's controller (registerController).
+// (registerLaunchedController), and only under `controller: daemon`. A token no launch minted may
+// be the controller capability `legion controller start` fetched, which registers the project's
+// controller (registerController), and only under `controller: operator`: a daemon that launches
+// its own controller registers no other, so such a token is the unknown one it is.
 func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	var req claim.RegisterRequest
 	if !readBody(w, r, &req) || !requireFields(w,
@@ -54,6 +57,10 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !known {
+		if s.controllerLaunched {
+			writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
+			return
+		}
 		s.registerController(w, r, req)
 		return
 	}
@@ -63,6 +70,13 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m.Claim().Role == claim.RoleController {
+		if !s.controllerLaunched {
+			s.log.Warn("api: refused a launched controller's registration: this daemon leaves the controller to its operator",
+				"claim", launch.Claim, "generation", launch.Generation, "session", req.SessionID)
+			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+				"%s is a launch of the daemon's own controller, and this daemon leaves the controller to its operator (controller: operator)", launch.Claim)))
+			return
+		}
 		s.registerLaunchedController(w, r, req, launch, m)
 		return
 	}

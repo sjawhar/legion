@@ -71,6 +71,12 @@ legion start --config legion.yaml --check-config
   failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
   pod's own side; a `workspace-init` exit 3 means its volume lost the session, and the daemon starts
   a fresh controller.
+- **The daemon refuses to boot: `stop legion-<project>-controller, the controller an earlier boot
+  under controller: daemon launched, since this daemon leaves the controller to its operator
+  (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
+  daemon could not stop the pod it launched before; the end of the line says why (most often the
+  cluster refused the Sandbox's deletion). Fix that and start the daemon again, or set
+  `controller: daemon` back.
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.

@@ -47,7 +47,9 @@ type Options struct {
 	// DesignGate is the project's `gates.design`, which the controller secret route answers.
 	DesignGate config.DesignGate
 	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
-	// daemon`), so the controller secret route refuses the operator: one controller runs per project.
+	// daemon`): one controller runs per project, so the controller secret route refuses the operator
+	// and a registration registers the controller only from a launch of the controller's claim.
+	// Unset (`controller: operator`), only the operator's capability registers it.
 	ControllerLaunched bool
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger

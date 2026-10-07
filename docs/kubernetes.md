@@ -1496,7 +1496,11 @@ the answer is the operator's controller's registration (`{claimToken, role: "con
 generation, secret}`). The session then takes the controller role, subscribes to the controller
 topic, and calls `POST /legion/v1/claims/ready`; the daemon then delivers the start message
 `legion controller start` passes, so every launch runs the skill's start procedure. A claim step
-that fails exits Oh My Pi, and the daemon relaunches it. No operator token reaches the pod.
+that fails exits Oh My Pi, and the daemon relaunches it. No operator token reaches the pod. Under
+`controller: daemon` the claim route registers the controller only from a launch of this claim: a
+token no launch resolves is refused as an invalid boot token, the operator's capability and the
+token of a launch the claim has since replaced among them, so a replaced pod never registers
+outside its claim's generation fence.
 
 **The pod.** Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace`, on the
 Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.pod`) and the providers
@@ -1521,10 +1525,25 @@ session with `kubectl -n <namespace> logs` on the pod or its transcript on the v
 it as they reach the operator's controller: it subscribes to
 `notifications.legion.<project>.controller` once it holds the role.
 
+**Switching back.** To hand the controller back to a person, set `controller: operator` (or drop
+the key) and restart the daemon. At boot, before it re-adopts or relaunches anything, that daemon
+stops the controller's claim the earlier boot left: its Sandbox is released and the claim retires
+(`legion claims list` shows it `retired`), logged as `controller: stopping the controller an earlier
+boot under controller: daemon launched; this daemon leaves the controller to its operator`. A
+daemon that cannot stop it refuses to boot, naming the claim. The claim route refuses a launch of
+that claim on such a daemon (409, `legion-<project>-controller is a launch of the daemon's own
+controller, and this daemon leaves the controller to its operator (controller: operator)`), so no
+pod of the daemon's can replace the operator's registration. Then start the controller with
+`legion controller start` ([Operator-launched controller](#operator-launched-controller)).
+Switching to `controller: daemon` again relaunches the retired claim's session, after the keeper's
+first one-minute wait, on fresh budgets.
+
 ### Operator-launched controller
 
 Under `controller: operator` the daemon launches no controller, under either runtime: it has no
-process of the controller to start, stop or resume. It holds the controller's record and reads the
+process of the controller to start or resume, and it stops at boot the claim of one an earlier boot
+under `controller: daemon` launched ([Switching back](#daemon-launched-controller)). It holds the
+controller's record and reads the
 session's liveness from the Envoy role registry. While no session holds the current capability, or
 the registry says the session is gone, the daemon logs `controller not registered; run legion
 controller start` at most once per `worker_boot_timeout_seconds`.

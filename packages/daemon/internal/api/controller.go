@@ -106,13 +106,14 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
 }
 
-// registerController is a registration whose token is no launch's boot token: it registers
-// req's session as the project's controller when the token is the current controller capability,
-// and answers the one refusal an unknown token gets otherwise. No boot gate checks the operator's
-// Oh My Pi — the daemon gates only the panes it launches — so a controller whose plugin speaks
-// another daemon API contract is refused here, naming both, and nothing is recorded. The
-// registration is issued a secret of its own, persisted by its hash before this answers, which
-// the session's controller grants authenticate with.
+// registerController is a registration whose token is no launch's boot token, on a daemon that
+// leaves the controller to its operator (`controller: operator`; register routes none here
+// otherwise): it registers req's session as the project's controller when the token is the current
+// controller capability, and answers the one refusal an unknown token gets otherwise. No boot gate
+// checks the operator's Oh My Pi — the daemon gates only the panes it launches — so a controller
+// whose plugin speaks another daemon API contract is refused here, naming both, and nothing is
+// recorded. The registration is issued a secret of its own, persisted by its hash before this
+// answers, which the session's controller grants authenticate with.
 func (s *server) registerController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest) {
 	ctx := context.WithoutCancel(r.Context())
 	s.controllerMu.Lock()
@@ -156,15 +157,18 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 	})
 }
 
-// registerLaunchedController is the registration of a launch of the daemon's own controller
-// (`controller: daemon`): its agent registers with the launch's boot token, which the daemon minted
-// for that launch and wrote into the pod's Secret, where the operator's controller presents the
-// capability its bearer bought. The claim's machine takes the registration first, behind the
-// generation and same-agent fences every claim's has, and persists the session, its transcript and
-// the issued secret's hash; then the session is recorded as the project's controller — the record
-// admission's wakes, the controller grant route and the state read — with the boot token's hash as
-// its capability, which revokes every earlier controller's grants. The answer is the operator's
-// controller's registration, its generation the launch's, which the agent's ready names.
+// registerLaunchedController is the registration of a launch of the daemon's own controller, on a
+// daemon under `controller: daemon` (register refuses one otherwise): its agent registers with the
+// launch's boot token, which the daemon minted for that launch and wrote into the pod's Secret,
+// where the operator's controller presents the capability its bearer bought. The claim's machine
+// takes the registration first, behind the generation and same-agent fences every claim's has, and
+// persists the session, its transcript and the issued secret's hash; then the session is recorded
+// as the project's controller — the record admission's wakes, the controller grant route and the
+// state read — with the boot token's hash as its capability, which revokes every earlier
+// controller's grants. That capability registers nothing on its own: under `controller: daemon` a
+// token no launch resolves is refused, so the token of a launch since replaced, which a restart
+// forgets, never registers outside its claim's fence. The answer is the operator's controller's
+// registration, its generation the launch's, which the agent's ready names.
 func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest, launch BootToken, m *supervise.Machine) {
 	ctx := context.WithoutCancel(r.Context())
 	secret := rand.Text()
