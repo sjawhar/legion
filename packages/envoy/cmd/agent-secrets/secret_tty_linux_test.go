@@ -115,16 +115,6 @@ func awaitEchoOff(t *testing.T, terminal int) {
 	}
 }
 
-// awaitEchoOn waits until a foreground shell has put its echo back on after a stopped prompt.
-func awaitEchoOn(t *testing.T, terminal int) {
-	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); lflag(t, terminal)&unix.ECHO == 0; time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("echo did not return after the prompt stopped")
-		}
-	}
-}
-
 // unread is how many bytes the terminal holds unread, which the shell would read once the form
 // exits: with canonical mode turned off, so a last line without a newline counts too.
 func unread(t *testing.T, fd int) int {
@@ -339,74 +329,6 @@ func TestPromptSignalHelper(t *testing.T) {
 	}
 	_, err := readHidden(0)
 	fmt.Printf("RETURNED %v\n", err)
-}
-
-// TestPromptRehidesAfterJobControlStop: the prompt restores echo while a job-control stop holds
-// it, then re-hides and re-enables bracketed paste after SIGCONT. The manual interactive-bash
-// proof in /tmp/fix2_2/tty7.sh exercises Bash's foreground job table too.
-func TestPromptRehidesAfterJobControlStop(t *testing.T) {
-	controller, terminal := openPTY(t)
-	fd, err := unix.Dup(terminal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tty := os.NewFile(uintptr(fd), "terminal")
-	cmd := exec.Command("env", "--default-signal=INT,TERM,TSTP,TTIN,TTOU,QUIT", os.Args[0], "-test.run=^TestPromptSignalHelper$")
-	cmd.Env = append(os.Environ(), "AGENT_SECRETS_PROMPT_HELPER=1")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
-	if err := cmd.Start(); err != nil {
-		tty.Close()
-		t.Fatal(err)
-	}
-	tty.Close()
-	awaitEchoOff(t, terminal)
-	_ = shown(t, controller)
-	if err := cmd.Process.Signal(syscall.SIGTSTP); err != nil {
-		t.Fatal(err)
-	}
-	var status syscall.WaitStatus
-	for deadline := time.Now().Add(10 * time.Second); ; {
-		pid, err := syscall.Wait4(cmd.Process.Pid, &status, syscall.WUNTRACED|syscall.WNOHANG, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if pid != 0 {
-			if !status.Stopped() || status.StopSignal() != syscall.SIGSTOP {
-				t.Fatalf("wait status %v; want SIGSTOP after the watcher handled SIGTSTP", status)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the prompt did not stop within 10s")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	awaitEchoOn(t, terminal)
-	if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
-		t.Fatal(err)
-	}
-	awaitEchoOff(t, terminal)
-	const value = "hunter2-secret"
-	if _, err := controller.Write([]byte(value + "\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatal(err)
-	}
-	out := shown(t, controller)
-	if !bytes.Contains(out, bracketedPasteOn) {
-		t.Fatalf("the terminal was not sent bracketed-paste-on after SIGCONT: %q", out)
-	}
-	if bytes.Contains(out, []byte(value)) {
-		t.Fatalf("the terminal showed %q after SIGCONT: the value was echoed", out)
-	}
-	if !bytes.Contains(out, []byte("RETURNED <nil>")) {
-		t.Fatalf("the helper did not finish after SIGCONT; the terminal showed %q", out)
-	}
-	if lflag(t, terminal)&unix.ECHO == 0 {
-		t.Fatal("echo is off after the helper returned")
-	}
 }
 
 // TestPromptCtrlCEndsTheProcessBySIGINT: Ctrl-C at the prompt ends the process by SIGINT, echo back

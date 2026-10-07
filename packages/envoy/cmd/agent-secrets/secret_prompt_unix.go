@@ -290,11 +290,14 @@ func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 				}
 				fmt.Fprintln(os.Stderr)
 				signal.Reset(sig)
+				if promptStopSignal(sig) {
+					if err := resetJobControlSignalDefault(sig.(syscall.Signal)); err != nil {
+						fmt.Fprintf(os.Stderr, "agent-secrets: reset job-control signal: %v\n", err)
+						os.Exit(1)
+					}
+				}
 				_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 				if promptStopSignal(sig) {
-					// Go's default action for job-control signals is ignore, even after Reset. The
-					// re-sent signal preserves its disposition; SIGSTOP supplies the real stop.
-					_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
 					// SIGCONT from fg resumes at the next statement.
 					signal.Notify(signals, sig)
 					if err := rehide(); err != nil {
