@@ -608,9 +608,10 @@ subscription never delivers).
 
 ### Anatomy of a Sandbox pod
 
-Each object of a claim carries `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue` and
-`legion.dev/role` (`names.go`). The pod template (`manifest.go`) has two init containers and one
-main container:
+Each object of a tree claim carries `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue` and
+`legion.dev/role` (`names.go`); the controller's carry no tree or issue label. A tree pod's template
+(`manifest.go`) has two init containers and one main container (the controller's pod has one init
+container, `workspace-init controller`: [The pod](#daemon-launched-controller)):
 
 1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
    the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
@@ -1494,16 +1495,19 @@ at each retry that fails again up to thirty minutes, and resetting it once the c
 boot token, which it writes into the pod's own Secret, as for every pod. The pod's pi-envoy
 extension sees `LEGION_BOOT_TOKEN_FILE` beside `LEGION_CONTROLLER=1` and registers on
 `POST /legion/v1/claims/register` with that token. The daemon records the registration on the claim
-and records the session as the project's controller, which ends every earlier controller grant;
-the answer is the operator's controller's registration (`{claimToken, role: "controller",
-generation, secret}`). The session then takes the controller role, subscribes to the controller
-topic, and calls `POST /legion/v1/claims/ready`; the daemon then delivers the start message
-`legion controller start` passes, so every launch runs the skill's start procedure. A claim step
-that fails exits Oh My Pi, and the daemon relaunches it. No operator token reaches the pod. Under
-`controller: daemon` the claim route registers the controller only from a launch of this claim: a
-token no launch resolves is refused as an invalid boot token, the operator's capability and the
-token of a launch the claim has since replaced among them, so a replaced pod never registers
-outside its claim's generation fence.
+and records the session as the project's controller, under a fresh capability nobody holds (never
+the boot token), which ends every earlier controller grant; the answer is the operator's
+controller's registration (`{claimToken, role: "controller", generation, secret}`, its generation
+the launch's). The session then takes the controller role, subscribes to the controller topic, and
+calls `POST /legion/v1/claims/ready`; the daemon then delivers the start message `legion controller
+start` passes, so every launch runs the skill's start procedure. A claim step that fails exits Oh
+My Pi, and the daemon relaunches it. No operator token reaches the pod. Under `controller: daemon`
+the claim route registers the controller only from a launch of this claim: a token no launch
+resolves is refused as an invalid boot token, the operator's capability and the token of a launch
+the claim has since replaced among them, so a replaced pod never registers outside its claim's
+generation fence. `/legion-claim-controller` registers the boot token only in the controller's own
+session (`LEGION_CONTROLLER=1`); in a root architect's or phase worker's session it needs the
+operator's capability like any other takeover, and stops before any daemon call without one.
 
 **The pod.** Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace`, on the
 Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.pod`) and the providers
@@ -1516,14 +1520,18 @@ shim. Its one init container, `legion workspace-init controller --root /legion`,
 sessions directory; on a resume whose session file is gone it exits 3, which the daemon reads as a
 lost volume and answers with a fresh controller. The pod carries the project and role labels and no
 tree or issue label, so no tree pod's anti-affinity counts it as another tree's, and it is never
-enrolled with the secrets broker. Its agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`,
-`LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings and the launch
-secrets' `<NAME>_FILE` pointers, and nothing of a tree, an issue or a checkout. Its system prompt is
-the controller's role prompt, a part saying it runs headless in a pod, the daemon's `Design gate
-policy:` line and the deployment instructions. Both its containers carry
-`runtime.kubernetes.resources.controller`, the key a workflow role's pod is sized by; with none set
-the pod is BestEffort, the class the kubelet evicts first under node memory pressure, and each
-eviction is a relaunch whose ready costs the controller a start-procedure turn, so size it.
+enrolled with the secrets broker. It has no affinity of its own, so it lands on any Legion node,
+and like every Legion pod it is annotated `karpenter.sh/do-not-disrupt: "true"`: Karpenter never
+consolidates or replaces for drift the node it runs on while it runs, which is as long as the
+daemon keeps it, though tree pods can still be scheduled onto that node. Its agent is told
+`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy,
+NATS and Dispatch settings and the launch secrets' `<NAME>_FILE` pointers, and nothing of a tree,
+an issue or a checkout. Its system prompt is the controller's role prompt, a part saying it runs
+headless in a pod, the daemon's `Design gate policy:` line and the deployment instructions. Both
+its containers carry `runtime.kubernetes.resources.controller`, the key a workflow role's pod is
+sized by; with none set the pod is BestEffort, the class the kubelet evicts first under node memory
+pressure, and each eviction is a relaunch whose ready costs the controller a start-procedure turn,
+so size it.
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its
@@ -1532,17 +1540,24 @@ it as they reach the operator's controller: it subscribes to
 `notifications.legion.<project>.controller` once it holds the role.
 
 **Switching back.** To hand the controller back to a person, set `controller: operator` (or drop
-the key) and restart the daemon. At boot, before it re-adopts or relaunches anything, that daemon
+the key), drop `runtime.kubernetes.resources.controller`, which the daemon refuses at boot unless
+`controller: daemon`, and restart the daemon. At boot, before it re-adopts or relaunches anything,
+that daemon ends the controller record's registration, minting it a capability nobody holds, and
 stops the controller's claim the earlier boot left: its Sandbox is released and the claim retires
 (`legion claims list` shows it `retired`), logged as `controller: stopping the controller an earlier
-boot under controller: daemon launched; this daemon leaves the controller to its operator`. A
-daemon that cannot stop it refuses to boot, naming the claim. The claim route refuses a launch of
-that claim on such a daemon (409, `legion-<project>-controller is a launch of the daemon's own
-controller, and this daemon leaves the controller to its operator (controller: operator)`), so no
-pod of the daemon's can replace the operator's registration. Then start the controller with
-`legion controller start` ([Operator-launched controller](#operator-launched-controller)).
-Switching to `controller: daemon` again relaunches the retired claim's session, after the keeper's
-first one-minute wait, on fresh budgets.
+boot under controller: daemon launched, and ending its registration; this daemon leaves the
+controller to its operator`. A daemon that cannot do either refuses to boot, naming the claim. The
+claim route refuses a launch of that claim on such a daemon (409, `legion-<project>-controller is a
+launch of the daemon's own controller, and this daemon leaves the controller to its operator
+(controller: operator)`), and the token of an earlier launch is an invalid boot token, so no pod of
+the daemon's can replace the operator's registration. Then start the controller with `legion
+controller start` ([Operator-launched controller](#operator-launched-controller)). Releasing the
+Sandbox deletes the controller's volume with it, and the session on it, so switching to
+`controller: daemon` again starts a fresh controller after the keeper's first one-minute wait, on
+fresh budgets: a resume of the recorded session finds it gone (`workspace-init controller` exits 3)
+and the daemon relaunches the claim fresh. A `legion claims stop` of the controller under
+`controller: daemon` releases it the same way, so the keeper's retry after it starts a fresh
+controller too.
 
 ### Operator-launched controller
 

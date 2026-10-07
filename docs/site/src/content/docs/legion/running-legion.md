@@ -256,9 +256,11 @@ through Dispatch (a message to its session on the Agents page, a reply to an ask
 mention) and read its session with `kubectl logs` on its pod. `legion claims list` shows its claim.
 Size its pod under `runtime.kubernetes.resources.controller`: with no requests it is the first pod
 the kubelet evicts under memory pressure.
-To hand the controller back to a person, set `controller: operator` and restart the daemon: at boot
-it stops its own controller's claim and releases the pod, and you then start the controller on your
-machine as below.
+To hand the controller back to a person, set `controller: operator`, drop
+`runtime.kubernetes.resources.controller` (the daemon refuses that key unless `controller: daemon`)
+and restart the daemon: at boot it stops its own controller's claim and releases the pod, deleting
+the pod's volume and the session on it, and you then start the controller on your machine as below.
+Switching to `controller: daemon` again starts a fresh controller, not the old session.
 
 ### On your machine
 

@@ -840,7 +840,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"envoy_url", file.EnvoyURL == nil, "a pod cannot reach the loopback listener it defaults to"},
 		{"nats_urls", len(file.NatsURLs) == 0, "every pod's Envoy client connects to NATS"},
 		{"envoy_token_file", file.EnvoyTokenFile == nil, "every pod receives the Envoy bearer"},
-		{"operator_token_file", file.OperatorTokenFile == nil, "the daemon cannot launch the controller there; legion controller start presents this token"},
+		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
 		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},

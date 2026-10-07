@@ -514,7 +514,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "operator_token_file absent",
 			body: kubernetesWith("operator_token_file: /var/run/legion/OPERATOR_TOKEN\n", ""),
-			want: "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token",
+			want: "operator_token_file is required when runtime is kubernetes: legion claims presents this token, as legion controller start does under controller: operator",
 		},
 		{
 			name: "dispatch_url absent",
