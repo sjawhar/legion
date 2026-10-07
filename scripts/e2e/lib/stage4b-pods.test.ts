@@ -3,19 +3,17 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runJq } from "./run-jq";
+import { scriptFunctions } from "./script-functions";
 
-// The pod shape's --connect rule: Stage 4b's own shape_problems and record_stream, taken from the
-// script by name as stage4b-verdict.test.ts takes its functions, run on the runtime's golden root
-// pod, whose worker shim dials tcp://192.0.2.250:13371
+// Stage 4b's reads of a pod's addresses: the pod shape's --connect rule (shape_problems and
+// record_stream) and address-moved's judgement of every claim's pod after the move
+// (claims_on_new_addresses), taken from the script by name (script-functions.ts) and run on the
+// runtime's golden root pod, whose worker shim dials tcp://192.0.2.250:13371 and which is told
+// LEGION_DAEMON_URL http://192.0.2.250:13370
 // (packages/daemon/internal/runtime/sandbox/testdata/golden).
 const root = join(import.meta.dir, "..", "..", "..");
 const lib = join(root, "scripts", "e2e", "lib");
-const script = readFileSync(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?\\n\\}$`, "m").exec(script);
-  if (found === null) throw new Error(`stage4b-sandbox-tree.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"));
 const shapeProblems = fn("shape_problems");
 const dir = mkdtempSync(join(tmpdir(), "stage4b-pods-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -45,6 +43,7 @@ const moved = "2026-10-06T12:30:00Z";
 interface Container {
   name: string;
   command?: string[];
+  env?: { name: string; value?: string }[];
 }
 // withConnect is an argv edit that points the worker shim's --connect at STREAM.
 const withConnect = (stream: string) => (command: string[]) =>
@@ -215,6 +214,149 @@ for port_worker_stream in ${ports.join(" ")}; do date -u +%FT%TZ; record_stream;
     const { began, record } = recordStreams([13371, 13370]);
     expect(record.map((r) => r.stream)).toEqual([goldenStream, movedStream]);
     expect(record[1].since > began[1]).toBe(true);
+  });
+});
+
+describe("address-moved: every claim's pod on the new addresses", () => {
+  // The run after the move: its two ports swapped, so the worker stream is the API's old port and
+  // the API the stream's, and its services as they were (the golden pod's own, and Dispatch).
+  const movedDaemonURL = "http://192.0.2.250:13371";
+  const dispatch = "https://dispatch.internal.example";
+  type Env = NonNullable<Container["env"]>;
+  // withEnv is an env edit that sets each of VALUES, adding a variable the env lacks.
+  const withEnv = (values: Record<string, string>) => (env: Env) =>
+    Object.entries(values).reduce(
+      (edited, [name, value]) => [...edited.filter((v) => v.name !== name), { name, value }],
+      env
+    );
+  // movedPod is the golden pod as a claim relaunched after the move runs it, its shim dialling the
+  // moved stream and told the moved API and Dispatch, then edited by argv and env.
+  function movedPod(argv = withConnect(movedStream), env = (e: Env) => e) {
+    const moved = pod(argv);
+    moved.spec.containers = moved.spec.containers.map((container: Container) =>
+      container.name === "worker"
+        ? {
+            ...container,
+            env: env(
+              withEnv({ LEGION_DAEMON_URL: movedDaemonURL, DISPATCH_URL: dispatch })(
+                container.env ?? []
+              )
+            ),
+          }
+        : container
+    );
+    return moved;
+  }
+  // judge runs the script's claims_on_new_addresses over PODS, the operator's reads by pod name,
+  // and CLAIMS, what `legion claims` shows (or a read that fails), and returns its exit code, what
+  // it printed, and how many times it read `legion claims`.
+  function judge(pods: Record<string, object>, claims: { token: string; pod: string }[] | "fails") {
+    const run = join(dir, `run-${++runs}`);
+    mkdirSync(run);
+    writeFileSync(join(run, "pods.json"), JSON.stringify(pods));
+    writeFileSync(join(run, "claims.json"), JSON.stringify(claims === "fails" ? [] : claims));
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -Eeuo pipefail
+root=${JSON.stringify(root)} run=${JSON.stringify(run)} host=192.0.2.250 port_daemon=13371 port_worker_stream=13370
+new_stream=${movedStream} new_daemon_url=${movedDaemonURL}
+dispatch_base=${dispatch} envoy_url=http://192.0.2.250:9020 nats_url=nats://192.0.2.250:4222
+note() { echo "   $*"; }
+fail() { echo "FAIL: $*"; exit 1; }
+op() { [ "$1 $2 $4 $5" = "get pod -o json" ] && jq -e --arg p "$3" '.[$p]' "$run/pods.json"; }
+live_claims() { echo read >>"$run/reads"; ${claims === "fails" ? "return 1" : 'jq -c . "$run/claims.json"'}; }
+${fn("pod_connect")}
+${fn("pod_env")}
+${fn("pod_endpoint_mismatch")}
+${fn("on_new_addresses")}
+${fn("claims_on_new_addresses")}
+claims_on_new_addresses`,
+    ]);
+    let reads = 0;
+    try {
+      reads = readFileSync(join(run, "reads"), "utf8").trim().split("\n").length;
+    } catch {}
+    return { exitCode: result.exitCode, out: result.stdout.toString(), reads };
+  }
+  const claims = [
+    { token: "claim-a", pod: "pod-a" },
+    { token: "claim-b", pod: "pod-b" },
+  ];
+
+  test("pod_connect is one line, reading the shim's address through shim_connect", () => {
+    expect(fn("pod_connect").split("\n")).toHaveLength(1);
+    const pods = { connected: pod(), unconnected: pod((c) => c.filter((w) => w !== "--connect")) };
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -Eeuo pipefail
+root=${JSON.stringify(root)}
+op() { jq -e --arg p "$3" '.[$p]' <<<${JSON.stringify(JSON.stringify(pods))}; }
+${fn("pod_connect")}
+printf '%s|%s\\n' "$(pod_connect connected)" "$(pod_connect unconnected)"`,
+    ]);
+    expect(result.stdout.toString()).toBe(`${goldenStream}|\n`);
+  });
+
+  test("every claim's pod on the new addresses passes, judged from one read of legion claims", () => {
+    const { exitCode, out, reads } = judge({ "pod-a": movedPod(), "pod-b": movedPod() }, claims);
+    expect(exitCode).toBe(0);
+    expect(reads).toBe(1);
+    expect(out).toContain(
+      `claim-b: pod pod-b dials ${movedStream}, told LEGION_DAEMON_URL ${movedDaemonURL} and the run's services`
+    );
+    expect(out).toContain("all 2 claims that run a process are on the new addresses");
+  });
+
+  test("a claim whose pod keeps the old --connect fails, naming it", () => {
+    const { exitCode, out } = judge(
+      { "pod-a": movedPod(), "pod-b": movedPod((command) => command) },
+      claims
+    );
+    expect(exitCode).toBe(1);
+    expect(out).toEndWith(`FAIL: claim-b's pod pod-b dials ${goldenStream}, not ${movedStream}\n`);
+  });
+
+  test("a claim whose pod is told the old API fails, naming it", () => {
+    const oldAPI = withEnv({ LEGION_DAEMON_URL: "http://192.0.2.250:13370" });
+    const { exitCode, out } = judge(
+      { "pod-a": movedPod(), "pod-b": movedPod(undefined, oldAPI) },
+      claims
+    );
+    expect(exitCode).toBe(1);
+    expect(out).toEndWith(
+      `FAIL: claim-b's pod pod-b has LEGION_DAEMON_URL=http://192.0.2.250:13370, want ${movedDaemonURL}\n`
+    );
+  });
+
+  test("a claim whose pod is told another Envoy fails, naming the run's input, not the address", () => {
+    const otherEnvoy = withEnv({ ENVOY_URL: "http://192.0.2.9:9020" });
+    const { exitCode, out } = judge(
+      { "pod-a": movedPod(undefined, otherEnvoy), "pod-b": movedPod() },
+      claims
+    );
+    expect(exitCode).toBe(1);
+    expect(out).toBe("FAIL: claim-a's pod pod-a has ENVOY_URL differs from LEGION_E2E_ENVOY_URL\n");
+  });
+
+  test("a claim whose pod the operator cannot read fails, naming the pod", () => {
+    const { exitCode, out } = judge({ "pod-a": movedPod() }, claims);
+    expect(exitCode).toBe(1);
+    expect(out).toEndWith("FAIL: the operator could not read pod pod-b\n");
+  });
+
+  test("a legion claims read that fails fails the check, judging nothing", () => {
+    const { exitCode, out, reads } = judge({ "pod-a": movedPod(), "pod-b": movedPod() }, "fails");
+    expect(exitCode).toBe(1);
+    expect(reads).toBe(1);
+    expect(out).toBe("FAIL: legion claims could not be read\n");
+  });
+
+  test("a read that shows no claim running a process fails rather than passing empty", () => {
+    const { exitCode, out } = judge({}, []);
+    expect(exitCode).toBe(1);
+    expect(out).toBe("FAIL: legion claims shows no claim that runs a process\n");
   });
 });
 

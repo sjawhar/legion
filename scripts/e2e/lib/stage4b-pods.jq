@@ -23,7 +23,8 @@ def shim_connect:
 # served_stream(streams) is the worker stream the daemon served when the pod was created: the
 # stream of the last of STREAMS (record_stream's {since, stream} records, one per daemon start, in
 # order) that started at or before the pod's creationTimestamp, or null with none. Both times are
-# whole-second UTC RFC 3339 strings, which order as text.
+# whole-second UTC RFC 3339 strings, which order as text, from two clocks: the devbox's dates each
+# record and the API server's each pod (record_stream states what comparing them assumes).
 def served_stream($streams):
   .metadata.creationTimestamp as $created
   | [$streams[] | select(.since <= $created)] | last | .stream;

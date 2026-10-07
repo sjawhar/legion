@@ -249,13 +249,12 @@ live_claims() {
   claims_cli list --json | jq -ce '[.claims[] | select(.locator != null)
     | {token, tree, generation, pod: .locator.sandbox.name, incarnation: .locator.incarnation, sessionFile, state, budgets}] | sort_by(.token)'
 }
-# pod_connect POD and pod_resume POD print the worker container's --connect value and its
-# --resume=<session file> word, and pod_daemon_url POD the LEGION_DAEMON_URL it is told, each empty
-# when it has none, as the operator reads pod POD.
+# pod_connect POD prints the address its worker shim dials (stage4b-pods.jq's shim_connect), and
+# pod_resume POD its worker container's --resume=<session file> word, each empty when it has none,
+# as the operator reads pod POD.
 pod_command() { op get pod "$1" -o json | jq -c '[.spec.containers[] | select(.name == "worker") | .command[]?]'; }
-pod_connect() { pod_command "$1" | jq -r '(index("--connect")) as $i | if $i == null then "" else .[$i + 1] end'; }
+pod_connect() { op get pod "$1" -o json | jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; shim_connect // ""'; }
 pod_resume() { pod_command "$1" | jq -r 'map(select(startswith("--resume="))) | first // ""'; }
-pod_daemon_url() { pod_env "$1" | sed -n 's/^LEGION_DAEMON_URL=//p'; }
 # take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
 # bearer, and waits for Dispatch to show it and for the tree's pods to be gone.
 take_out() {
@@ -587,7 +586,10 @@ ports_ours() {
 # line {since, stream} in $evidence/worker-streams.jsonl, from which the pod shape holds each pod to
 # the stream served when the pod was created (shape_problems). A pod's creationTimestamp counts
 # whole seconds, so a stream that moved waits out the second the stopped daemon may have created a
-# pod in before it starts.
+# pod in before it starts. That bound rests on two assumptions the run does not check: the devbox's
+# clock, which dates `since`, and the API server's, which dates creationTimestamp, agree to within
+# that second; and the pod of every Sandbox the stopped daemon wrote exists by then, though the
+# Agent Sandbox controller, not the daemon, creates each pod after the daemon writes its Sandbox.
 record_stream() {
   local stream=tcp://$host:$port_worker_stream last=
   [ ! -s "$evidence/worker-streams.jsonl" ] || last=$(tail -n 1 "$evidence/worker-streams.jsonl" | jq -r .stream)
@@ -2348,6 +2350,30 @@ claim_moved() {
     | .generation == $was.generation + 1 and .locator != null and .locator.incarnation != $was.incarnation
       and (.state | IN("ready", "idle", "working"))' >/dev/null
 }
+# on_new_addresses POD WHO: pod POD's worker shim dials the new stream (pod_connect), and the pod is
+# told the run's services and the daemon's API at the addresses the daemon hands now
+# (pod_endpoint_mismatch, whose LEGION_DAEMON_URL follows the swapped port), or the check fails
+# naming WHO.
+on_new_addresses() {
+  local connect mismatch
+  connect=$(pod_connect "$1") || fail "the operator could not read pod $1"
+  [ "$connect" = "$new_stream" ] || fail "$2 dials ${connect:-nothing}, not $new_stream"
+  if mismatch=$(pod_endpoint_mismatch "$1"); then fail "$2 has $mismatch"; fi
+}
+# claims_on_new_addresses: from one read of `legion claims`, every claim of the run that runs a
+# process runs it on the new addresses (on_new_addresses). A read that fails, or shows no such
+# claim, fails the check rather than passing with nothing judged.
+claims_on_new_addresses() {
+  local claims token pod
+  claims=$(live_claims) || fail "legion claims could not be read"
+  [ "$(jq length <<<"$claims")" -gt 0 ] || fail "legion claims shows no claim that runs a process"
+  for token in $(jq -r '.[].token' <<<"$claims"); do
+    pod=$(jq -r --arg t "$token" '.[] | select(.token == $t) | .pod' <<<"$claims")
+    on_new_addresses "$pod" "$token's pod $pod"
+    note "$token: pod $pod dials $new_stream, told LEGION_DAEMON_URL $new_daemon_url and the run's services"
+  done
+  note "all $(jq length <<<"$claims") claims that run a process are on the new addresses"
+}
 # Tree 1's claims are the driver's to hold still, so each is judged in full.
 for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$live_before"); do
   was=$(jq -c --arg t "$token" '.[] | select(.token == $t)' <<<"$live_before")
@@ -2356,10 +2382,7 @@ for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$
   pod=$(jq -r .locator.sandbox.name <<<"$claim")
   uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
   [ "$uid" = "$(jq -r .locator.incarnation <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .locator.incarnation <<<"$claim")"
-  connect=$(pod_connect "$pod")
-  [ "$connect" = "$new_stream" ] || fail "$token's new pod $pod dials ${connect:-nothing}, not $new_stream"
-  daemon_url=$(pod_daemon_url "$pod")
-  [ "$daemon_url" = "$new_daemon_url" ] || fail "$token's new pod $pod is told LEGION_DAEMON_URL ${daemon_url:-<unset>}, not $new_daemon_url"
+  on_new_addresses "$pod" "$token's new pod $pod"
   session_file=$(jq -r .sessionFile <<<"$was")
   [ "$(jq -r .sessionFile <<<"$claim")" = "$session_file" ] || fail "$token's session file moved: $session_file → $(jq -r .sessionFile <<<"$claim")"
   resume=$(pod_resume "$pod")
@@ -2374,24 +2397,17 @@ for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$
     fail "$token's stale-address replacement names other moves than --connect and LEGION_DAEMON_URL from $old_stream and $old_daemon_url"
   refused=$(log_lines "supervise: launch failed" | tail -n "+$((failed_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)] | length')
   [ "$refused" = 0 ] || fail "the daemon logged $refused failed launches of $token since the restart"
-  note "$token: pod $pod uid $(jq -r .incarnation <<<"$was") → $uid at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$claim"), $(jq -r .state <<<"$claim"); --connect $connect; LEGION_DAEMON_URL $daemon_url; ${resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$claim"); one stale-address replacement logged, naming --connect and LEGION_DAEMON_URL alone"
+  note "$token: pod $pod uid $(jq -r .incarnation <<<"$was") → $uid at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$claim"), $(jq -r .state <<<"$claim"); --connect $new_stream; LEGION_DAEMON_URL $new_daemon_url and the run's services; ${resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$claim"); one stale-address replacement logged, naming --connect and LEGION_DAEMON_URL alone"
 done
 # Every other tree's claims move too, though their own workflow may end a phase meanwhile: once
-# each has left its old pod, no pod of the run dials the old stream or is told the old API.
+# each has left its old pod, every pod of the run is on the new addresses.
 off_old() {
   local claims
   claims=$(live_claims) || return 1
   jq -e --argjson b "$live_before" '[$b[] as $c | .[] | select(.token == $c.token and .incarnation == $c.incarnation)] | length == 0' <<<"$claims" >/dev/null
 }
 until_true 900 "every claim of the run to leave the pod it ran before the move" off_old
-for token in $(live_claims | jq -r '.[].token'); do
-  pod=$(live_claims | jq -r --arg t "$token" '.[] | select(.token == $t) | .pod')
-  connect=$(pod_connect "$pod")
-  [ "$connect" = "$new_stream" ] || fail "$token's pod $pod dials ${connect:-nothing}, not $new_stream"
-  daemon_url=$(pod_daemon_url "$pod")
-  [ "$daemon_url" = "$new_daemon_url" ] || fail "$token's pod $pod is told LEGION_DAEMON_URL ${daemon_url:-<unset>}, not $new_daemon_url"
-  note "$token: pod $pod dials $connect, told LEGION_DAEMON_URL $daemon_url"
-done
+claims_on_new_addresses
 # The pod shape follows the move (shape_problems): record_stream noted the new stream as the daemon
 # started, the shape watcher, forked on the old port, checks each pod the move launched against it
 # (a departure there would abort this wait), and every pod the watch has seen ready, before the
@@ -2407,7 +2423,7 @@ shape_checked() {
 until_true 300 "the shape watcher to check every pod the run's claims run on since the move" shape_checked
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
-note "the shape watcher checked the $(live_claims | jq length) pods the claims run on now, each dialing $new_stream, and each of the $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l) pods seen ready so far dials the stream served when it was created"
+note "the shape watcher checked every pod the run's claims run on since the move, and each of the $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l) pods seen ready so far dials the stream served when it was created"
 pass
 
 # launch_failure_limit is the daemon's default (3), which the run's legion.yaml leaves unset; it
