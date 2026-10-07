@@ -298,6 +298,9 @@ func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 				}
 				_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 				if promptStopSignal(sig) {
+					// signal.Ignore clears Go's handlingSig bit; the following Notify must then
+					// reinstall the runtime handler that SIG_DFL temporarily replaced.
+					signal.Ignore(sig)
 					// SIGCONT from fg resumes at the next statement.
 					signal.Notify(signals, sig)
 					if err := rehide(); err != nil {

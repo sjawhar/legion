@@ -152,6 +152,21 @@ func shown(t *testing.T, controller *os.File) []byte {
 	}
 }
 
+// awaitOutput drains pty output until it contains want, failing after ten seconds.
+func awaitOutput(t *testing.T, controller *os.File, want string) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		out.Write(shown(t, controller))
+		if bytes.Contains(out.Bytes(), []byte(want)) {
+			return out.Bytes()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the terminal did not show %q; got %q", want, out.String())
+		}
+	}
+}
+
 // TestPromptReadsOneTypedLineWithEchoOff: Enter ends the value, which is never echoed; the reader
 // asks the terminal to bracket pastes while it reads and to stop once it is done, and leaves it as
 // it was, echo on.
