@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import path from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path, { join } from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
 import type { ZodNumberProperty } from "../src/pi-types";
 
@@ -74,16 +75,22 @@ const originalEnvironment = {
   HOME: process.env.HOME,
   DISPATCH_URL: process.env.DISPATCH_URL,
   DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
+  DISPATCH_STATE_DIR: process.env.DISPATCH_STATE_DIR,
 } as const;
 // The envoy extension registers the dispatch tools whenever the developer's own
 // ~/.config/opencode/envoy.json enables dispatch; this file's zod stub is not a real schema
-// builder, so the resolution must see no user config and no DISPATCH_* override.
+// builder, so the resolution must see no user config and no DISPATCH_* override. The `dispatch`
+// command's state (the session title file legion.ts writes) goes to a scratch directory.
+let dispatchState = "";
 beforeEach(() => {
   process.env.HOME = "/nonexistent-home-for-legion-tests";
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
+  dispatchState = mkdtempSync(join(tmpdir(), "legion-role-claim-dispatch-"));
+  process.env.DISPATCH_STATE_DIR = dispatchState;
 });
 afterEach(() => {
+  rmSync(dispatchState, { recursive: true, force: true });
   globalThis.fetch = originalFetch;
   for (const [key, value] of Object.entries(originalEnvironment)) {
     if (value === undefined) delete process.env[key];

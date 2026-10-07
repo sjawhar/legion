@@ -308,13 +308,10 @@ subscription is the model's explicit `envoy_subscribe`, and every write result n
 the topic to pass it. What a write does give the session is a *follow* on the ask it
 opened or replied to (`details.follows.ask`): the ask's answer and replies then reach
 the session's own agent topic directly, server-side, with no NATS subscription to
-manage. The `tool_result` hook turns the first `details.follows` for each ask id into
-one steer notice (`pi.sendMessage` with `deliverAs: "steer"`, the same channel
-`deliver` uses for inbound envelopes, since the host does not let a `tool_result`
-handler amend what the model already saw) via `createFollowAnnouncer` from
-`@legion/envoy-client/dispatch-subscribe`, the once-per-ask policy over
-`dispatchFollowNotice` both hosts share; a later write on the same ask stays quiet, and
-reads (`dispatch_read`, `dispatch_doc_read`) return only
+manage. The `dispatch` command prints the first `details.follows` for each ask id as one
+notice after the call's result (the session's `state.json` remembers which asks it already
+announced, the once-per-ask policy over `dispatchFollowNotice` every host shares); a later
+write on the same ask stays quiet, and reads (`dispatch_read`, `dispatch_doc_read`) return only
 owner details. `dispatch_follow` leaves or rejoins an ask. A `subscription.removed`
 notice (a human unsubscribed a session from the dashboard) reaches both the issue's
 own topic and the removed session's agent topic directly; only the session the payload
@@ -407,26 +404,30 @@ its verdict. A failure is logged once per session (`logger.warn`), never notifie
 
 The check is owed and spent like the host's todo reminder rather than once per period: the arming
 turn owes one, running it spends it whatever came back, the agent opening the ask itself spends it
-too (`dispatch_ask`, `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose
+too (`dispatch ask`, `dispatch request-approval`, a `dispatch issue` or `dispatch artifact` whose
 result counts a decision block in the stored document (`advice.decision_blocks`), or a
-`dispatch_doc_edit` whose result counts a decision block the edit added
+`dispatch doc-edit` whose result counts a decision block the edit added
 (`advice.decision_blocks_added`): `opensAsk` in `src/opens-ask.ts`), and the agent's next real
-work — a successful `tool_result` whose tool is not a `dispatch_*` one — owes another. Both counts
-are the Dispatch server's reading of the document, so the extension parses no markdown: an opener
-quoted in code counts nothing and one in a blockquote or a list item counts, as the server stores
-them, and an edit result from a server that reports no count spends nothing. The server counts
-answered blocks in a stored document too, so re-uploading a document whose blocks are all answered
-spends the check with nothing new in the Inbox: that stop goes without a reminder. An edit that
-writes an answered or person-retracted block's id back reports it added, though settlement leaves
-that row closed, so it has the same gap. A tool-device
-call (a `write` to `xd://<tool>`, named by its result's `details.xdev.tool`: `deviceTool`) never
-opens an ask by its `write`, and counts as work by the tool it names: a write to a `dispatch_*`
-device is no work, and a write to any other device is work, as before. A device backed by a
-registered tool is reported twice, the tool Oh My Pi ran under its own name, input and details and
-then the `write`, so the tool's own report is what opens an ask; Oh My Pi's own devices (`resolve`,
-`reject`, `propose`, `report_issue`) report only the `write`. A help write (`?`, `help` or empty
-content) runs nothing and has only the `write`. A settled turn that only replies calls no tool, so
-the nudge's continuation cannot re-arm itself; work is bounded by `ASK_CHECKS_PER_PERIOD` (5).
+work — a successful `tool_result` that ran anything but `dispatch` commands — owes another. The
+extension learns what a `dispatch` command did from the CLI's ledger (`results.jsonl` in the
+session's state directory, one line per call: the tool and its result's details), read on every
+`tool_result` from the offset it last reached, under the id in `DISPATCH_SESSION_ID`; the offset
+starts at the ledger's end on `session_start`, `session_switch`, `session_branch` and the
+heartbeat's drift heal, so an earlier run's calls never count. A `bash` result whose command is one
+`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`), or an `eval` result, during
+which the ledger grew owes nothing; a `bash` command that ran `dispatch` beside anything else
+(`dispatch … && make`) is work. A `task` subagent's `dispatch` calls land in the parent's ledger (it
+carries the parent's id), so an `eval` that runs while a subagent writes to Dispatch can count as
+dispatch-only and skip one owed check. Both counts are the Dispatch server's reading of the
+document, so the extension parses no markdown: an opener quoted in code counts nothing and one in a
+blockquote or a list item counts, as the server stores them, and an edit result from a server that
+reports no count spends nothing. The server counts answered blocks in a stored document too, so
+re-uploading a document whose blocks are all answered spends the check with nothing new in the
+Inbox: that stop goes without a reminder. An edit that writes an answered or person-retracted
+block's id back reports it added, though settlement leaves that row closed, so it has the same gap.
+`dispatch <command> --help` calls nothing and writes no ledger line. A settled turn that only
+replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
+`ASK_CHECKS_PER_PERIOD` (5).
 
 Each completed check carries `baseline_as_of` to its snapshot's `as_of`, keeping the next open-asks
 read current. One stop-time check runs at a time: `agent_end` handlers are not awaited by the host,
@@ -457,17 +458,17 @@ state never nudges.
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
-| Legion lifecycle modules | `src/legion/` | Classification, the daemon client (`daemon-client.ts`) and the claim session (`claim-session.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — every `bash` command, the `github` tool, and any tool whose `path`/`paths` names a `pr://` or `issue://` URL, which Oh My Pi serves by running `gh` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the static gh environment and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`, `handoff-actions.ts`) |
+| Legion lifecycle modules | `src/legion/` | Classification, the daemon client (`daemon-client.ts`) and the claim session (`claim-session.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — every `bash` command but a `dispatch` one (`dispatchCommandHead`: the CLI authenticates with the pane's Dispatch token), the `github` tool, and any tool whose `path`/`paths` names a `pr://` or `issue://` URL, which Oh My Pi serves by running `gh` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the static gh environment and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`, `handoff-actions.ts`) |
 | Controller session | `src/legion/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the twenty-one native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))` — deliberately NOT strict: on installed OMP hosts a strict host schema makes the coercion pass delete an unknown key beside valid required fields and hand the executor silently narrowed args, while non-strict preserves unknown root fields so `executeDispatchTool`'s own always-strict parse names the invented field (the xd:// half is can1357/oh-my-pi#12871) — register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
+| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`bun build ../envoy-client/bin/dispatch.ts`, in `build` and `scripts/prepack.sh`), `extensions/envoy.ts`, `src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH` and sets `DISPATCH_HOST=omp`; `session_start`, `session_switch`, `session_branch` and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`, since no session event refreshes the shell's environment there); a main agent's `bash` or `eval` call rewrites the session's `title` file when the session's name changed, and `extensions/legion.ts`'s `titleSession` writes it after naming a pane. The run-end check reads the CLI's ledger (see the run-end nudge above). `dispatch-first` still reaches every session through the `context` hook when `resolveDispatchConfig` resolves URL and token. |
 | Real end-to-end delivery smoke | `smoke-delivery.sh`, `smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 
 ## Critical conventions
 
-- Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). The shared Dispatch contract exposes field shapes and cross-field validation through `dispatchToolSchema`; pass it `zodSchemaApi(pi.zod)`. `envoy.test.ts` proves every registered field came from the injected instance. |
+- Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). `envoy.test.ts` proves every registered field came from the injected instance. |
 - Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - The registration heartbeat (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 120 s) re-asserts the session's held role after every successful re-registration: it reads `GET /v1/roles/<role>` and issues a soft `POST /v1/roles/set` only when the listener does not name this session as the live holder — a healthy tick writes nothing and appends no `envoy-role-claim` transcript entry. A 409 (a different live holder) drops the local claim, warns once, and ends re-assertion for that role; the newer holder is correct. A regain — or the first healthy tick after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; the controller re-runs nothing, since the daemon holds nothing for it. `claim-session.ts` registers that listener on the `LEGION_ROLE_CLAIM_BRIDGE` slot only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.

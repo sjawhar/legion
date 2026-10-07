@@ -14,6 +14,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import { readSessionTitle, sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
@@ -152,6 +153,7 @@ const environmentKeys = [
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
   "LEGION_GRANT_FILE",
+  "DISPATCH_STATE_DIR",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
@@ -191,10 +193,14 @@ afterAll(async () => {
   await rm(jjTemplate, { force: true, recursive: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // A suite run from inside a Legion pane inherits that pane's LEGION_*/DISPATCH_* launch
-  // environment; every test starts from none and sets only what it declares.
+  // environment; every test starts from none and sets only what it declares. The `dispatch`
+  // command's state (the session title file `titleSession` writes) goes to a scratch directory.
   for (const key of environmentKeys) delete process.env[key];
+  const dispatchState = await mkdtemp(path.join(os.tmpdir(), "legion-dispatch-state-"));
+  temporaryPaths.push(dispatchState);
+  process.env.DISPATCH_STATE_DIR = dispatchState;
 });
 
 afterEach(async () => {
@@ -1123,9 +1129,8 @@ describe("Legion OMP extension", () => {
     expect(pane.tools.slice(toolsBeforeBoot).map((tool) => tool.name)).toEqual(["legion"]);
     expect(pane.activeTools).toContain("legion");
   });
-  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining, other commands, and `legion handoff complete`", async () => {
-    const { toolCall, context } = await bootPane({ role: "architect" });
-    const denied = "the architect delegates all code work to phase workers";
+  test("allows an architect worker one `legion` or `dispatch` bash command but blocks chaining, other commands, and `legion handoff complete`", async () => {
+    const { toolCall, context, requests } = await bootPane({ role: "architect" });
     const isAllowed = async (command: string): Promise<boolean> => {
       const result = await toolCall(
         { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
@@ -1136,24 +1141,35 @@ describe("Legion OMP extension", () => {
 
     expect(await isAllowed("legion gh -- pr view 1")).toBe(true);
     expect(await isAllowed("legion state")).toBe(true);
+    for (const command of [
+      "dispatch issue-update --issue LEGION-2 --status todo",
+      "dispatch search --query 'what (and why)'",
+      "dispatch message --issue LEGION-2 --body-file - <<'EOF'\na body\nEOF",
+    ]) {
+      expect({ command, allowed: await isAllowed(command) }).toEqual({ command, allowed: true });
+    }
     // A sub-architect's handoffs are the legion tool's actions, never a bash command.
     expect(await isAllowed("legion handoff complete --summary x")).toBe(false);
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "call-chained",
-          input: { command: "echo hi && legion gh" },
-        },
-        context
-      )
-    ).resolves.toEqual({ block: true, reason: denied });
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-non-legion", input: { command: "rm -rf x" } },
-        context
-      )
-    ).resolves.toEqual({ block: true, reason: denied });
+    const grantsBefore = grantRequests(requests).length;
+    for (const command of [
+      "echo hi && legion gh",
+      "rm -rf x",
+      "dispatch x; rm -rf /",
+      'dispatch x "$(id)"',
+      "dispatch x <<EOF\na\nEOF",
+    ]) {
+      // The refusal names the form that is accepted, so a multi-line command can be rewritten.
+      await expect(
+        toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context)
+      ).resolves.toEqual({
+        block: true,
+        reason: expect.stringContaining(
+          "one line, optionally followed by one here-document opened with a quoted delimiter " +
+            "(`<<'EOF'`); no backslash continuations, comments or escapes"
+        ),
+      });
+    }
+    expect(grantRequests(requests)).toHaveLength(grantsBefore);
   });
   test("leaves the repository-scoped jj config untouched at worker boot: identity is the pane's environment, not config", async () => {
     // Every issue workspace is a workspace of one shared clone, and `--repo` config is one file
@@ -1347,6 +1363,32 @@ describe("Legion OMP extension", () => {
     ]) {
       expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
+  });
+  test("a dispatch command's quoted here-document is data: the pane rules read only its head line", async () => {
+    const { toolCall, context } = await bootPane({
+      role: "implementer",
+      sessionId: "ses_implementer_dispatch_body",
+    });
+    const blocked = async (command: string): Promise<boolean> => {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
+        context
+      );
+      return typeof result === "object" && result !== null && "block" in result && !!result.block;
+    };
+
+    // A message whose body names a refused command is a message, not the command.
+    expect(
+      await blocked(
+        "dispatch message --issue X --body-file - <<'EOF'\nPlease don't jj abandon @-.\nlegion handoff complete is the tool's.\nEOF"
+      )
+    ).toBe(false);
+    expect(await blocked("jj abandon")).toBe(true);
+    // A comment before the opener, or a CR that makes bash's delimiter `EOF\r` (its here-document
+    // ends at `EOF\r` and the line after runs), leave the shell running what reads as the body:
+    // those are no dispatch head, so the whole command is held to the pane rules.
+    expect(await blocked("dispatch search --query x # <<'EOF'\njj abandon\nEOF")).toBe(true);
+    expect(await blocked("dispatch x <<'EOF'\r\na\r\nEOF\r\njj abandon")).toBe(true);
   });
   test("leaves file-level jj restore, jj op log, jj op show, and quoted message words alone", async () => {
     const { toolCall, context, requests } = await bootPane({
@@ -1617,6 +1659,25 @@ describe("Legion OMP extension", () => {
     }
     expect(grantRequests(requests)).toHaveLength(served.length);
   });
+  test("a dispatch command mints no grant, and a git push still does", async () => {
+    const { toolCall, context, requests } = await bootPane({ role: "implementer" });
+
+    for (const command of [
+      "dispatch search --query 'saved carts'",
+      "dispatch message --issue X --body-file - <<'EOF'\na body\nEOF",
+    ]) {
+      await expect(
+        toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context)
+      ).resolves.toBeUndefined();
+    }
+    expect(grantRequests(requests)).toHaveLength(0);
+
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-push", input: { command: "git push" } },
+      context
+    );
+    expect(grantRequests(requests)).toHaveLength(1);
+  });
   /**
    * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
    * last non-undefined result, mirroring the host's `emitToolCall`, which also never chains one
@@ -1810,7 +1871,7 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: "the architect delegates all code work to phase workers",
+      reason: expect.stringContaining("the architect delegates all code work to phase workers"),
     });
     // LEGION-45: the root architect's pane carries the operation-log guard too (judged ahead of
     // every role gate), so `jj undo` is refused by the shared-log reason, not the architect's
@@ -2105,21 +2166,21 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("the Envoy extension's own notice (a dispatch_ask's follow notice) does not re-arm a quiet stall", async () => {
+    test("the Envoy extension's own notice (its session-id-changed notice) does not re-arm a quiet stall", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
 
-      // The worker answers the follow-up by opening a dispatch_ask, and the Envoy extension steers
-      // its follow notice into the session: the worker's own doing, not an event from outside.
+      // A branch re-mints the worker's session id, and the Envoy extension steers its notice into
+      // the session: the session's own doing, not an event from outside.
       await worker.arrives({
         message: {
           ...envoyEvent.message,
-          content: "Following ask ask-1 on REPO-43: its answer and replies reach you directly.",
+          content: "envoy:\n  notice: session id changed",
           details: LOCAL_ENVOY_NOTICE,
         },
       });
-      expect(await worker.settles("Asked the human which schema to use.")).toBeUndefined();
+      expect(await worker.settles("Noted the new session id.")).toBeUndefined();
 
       await worker.arrives(envoyEvent);
       expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));
@@ -3653,6 +3714,15 @@ describe("a Legion session's title", () => {
     expect(registrationBeforeClaim(worker.requests, worker.claimToken)).toMatchObject({
       title: "Legion implementer · REPO-43",
     });
+  });
+
+  test("the session's title file holds the Legion title for the pane's first dispatch command", async () => {
+    const worker = await bootPane({ role: "implementer", sessionId: "ses_title_file" });
+
+    expect(worker.title.set).toEqual(["Legion implementer · REPO-43"]);
+    expect(readSessionTitle(sessionDirectory(process.env, "ses_title_file"))).toBe(
+      "Legion implementer · REPO-43"
+    );
   });
 
   test("a root architect is titled by its tree's issue", async () => {

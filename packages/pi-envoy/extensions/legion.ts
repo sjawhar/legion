@@ -5,6 +5,10 @@ import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import {
+  sessionDirectory as dispatchSessionDirectory,
+  writeSessionTitle,
+} from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
 import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
@@ -35,6 +39,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
+import { dispatchCommandHead, isSingleArchitectCommand } from "../src/shell-command";
 import { subagentSessionCheck } from "../src/subagent-session";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
@@ -56,9 +61,13 @@ const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
  * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
  * that runs `legion gh`. A grant lives its ttl (60 seconds, or pushTTL for a `legion push`
  * invocation), so a call that reaches `gh` long after the
- * pane's last bash command needs its own. */
+ * pane's last bash command needs its own. A `dispatch` command (`dispatchCommandHead`) redeems
+ * none: the CLI authenticates with the pane's Dispatch token, so it neither waits on the daemon
+ * nor fails when minting does. */
 function needsGrant({ toolName, input }: ToolCallEvent): boolean {
-  if (toolName === "bash") return typeof input.command === "string";
+  if (toolName === "bash") {
+    return typeof input.command === "string" && dispatchCommandHead(input.command) === undefined;
+  }
   if (toolName === "github") return true;
   const paths = Array.isArray(input.paths) ? input.paths : [input.path];
   return paths.some((entry) => typeof entry === "string" && GH_RESOLVED_URL.test(entry));
@@ -86,34 +95,6 @@ async function persistedTranscript(
   const agentId = path.basename(sessionFile, ".jsonl");
   if (!agentId) throw new Error("Legion session transcript has no agent id");
   return { sessionFile, agentId };
-}
-
-// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; a
-// sub-architect completes its phase through the `legion` tool, never bash: `legion handoff
-// complete` is refused ahead of this gate by the pane rules (PANE_RULES), in a sub-architect's pane
-// and a root architect's alike.
-// Allow bash only for a single `legion ...` invocation: no chaining outside a
-// quoted argument. This is a conservative character scan, not a shell parser --
-// it rejects some legitimate quoting it can't reason about (nested quotes,
-// escapes) rather than risk letting a chained command through.
-function isSingleLegionCommand(command: unknown): boolean {
-  if (typeof command !== "string") return false;
-  const trimmed = command.trim();
-  if (trimmed.length === 0) return false;
-  let quote: '"' | "'" | undefined;
-  for (const char of trimmed) {
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === "\n" || char === ";" || char === "&" || char === "|") return false;
-  }
-  if (quote !== undefined) return false;
-  return trimmed.split(/\s+/, 1)[0] === "legion";
 }
 
 // Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
@@ -347,7 +328,7 @@ function refusedCommand(
 }
 
 /** The `write` targets that are not files, each scheme in any case, as Oh My Pi routes it: a tool
- * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Dispatch tools), a
+ * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Envoy tools), a
  * message to an agent of this process (`agent://<id>`), or job and service control (`proc://<id>`:
  * `content` goes to a supervised service's stdin; `/kill` stops a job, `/mode` sets its lifetime). */
 const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
@@ -430,14 +411,22 @@ const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
  * deliberately absent: every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 
+const ARCHITECT_REFUSAL = "the architect delegates all code work to phase workers";
+
 /** Why each gated role is refused a code-mutation tool. A role absent here mutates code freely;
- * `architect` covers a root architect and a sub-architect alike, and is the one role whose `bash`
- * is held to the same refusal (every command but a single `legion` one). */
+ * `architect` covers a root architect and a sub-architect alike. */
 export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = {
-  architect: "the architect delegates all code work to phase workers",
+  architect: ARCHITECT_REFUSAL,
   reviewer: "the reviewer edits no code; its only commits are its review handoffs, made via bash",
   merger: "the merger only verifies and reports",
 };
+
+/** Why an architect's `bash` command is refused: it runs one `legion` or `dispatch` command
+ * (`isSingleArchitectCommand`), so a multi-line command is told the form that is accepted. */
+const ARCHITECT_BASH_REFUSAL =
+  `${ARCHITECT_REFUSAL}; its bash runs one \`legion\` or \`dispatch\` command: one line, ` +
+  "optionally followed by one here-document opened with a quoted delimiter (`<<'EOF'`); no " +
+  "backslash continuations, comments or escapes";
 
 export default function legionExtension(pi: PiApi): void {
   // One instance per session (a `task` subagent gets its own). The id ties every hook log line
@@ -496,11 +485,20 @@ export default function legionExtension(pi: PiApi): void {
    * Names the session by its Legion identity (`src/legion/session-title.ts`), so every Dispatch
    * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
    * session claims its Envoy role: that claim registers the session, and the registration carries
-   * the title then rather than at the next heartbeat.
+   * the title then rather than at the next heartbeat. The `dispatch` command reads the title from
+   * the session's `title` file, which envoy.ts rewrites only before a shell command whose session
+   * name changed, so it is written here too, and the pane's first command already carries it.
    */
   const titleSession = async (context: SessionContext): Promise<void> => {
     const title = legionSessionTitle(classifySession(process.env), process.env.LEGION_PROJECT);
-    if (title !== undefined) await applySessionTitle(pi, context, title);
+    if (title === undefined) return;
+    await applySessionTitle(pi, context, title);
+    const sessionID = context.sessionManager.getSessionId();
+    if (sessionID === "") return;
+    writeSessionTitle(
+      dispatchSessionDirectory(process.env, sessionID),
+      context.sessionManager.getSessionName?.() ?? title
+    );
   };
 
   pi.on("session_start", async (_event, context) => {
@@ -553,9 +551,11 @@ export default function legionExtension(pi: PiApi): void {
     // instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the handler,
     // never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
+    // A `dispatch` command's quoted here-document is data on its stdin, never a command, so the
+    // pane rules read only its head line: a message body that names `jj abandon` is not refused.
     const commands =
       toolCall.toolName === "bash" && typeof toolCall.input.command === "string"
-        ? splitShellCommands(toolCall.input.command)
+        ? splitShellCommands(dispatchCommandHead(toolCall.input.command) ?? toolCall.input.command)
         : undefined;
     const refusal = paneRuleRefusal(toolCall, paneRules, commands);
     if (refusal !== undefined) return { block: true, reason: refusal };
@@ -565,18 +565,20 @@ export default function legionExtension(pi: PiApi): void {
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
+    if (
+      active?.role === "architect" &&
+      toolCall.toolName === "bash" &&
+      !isSingleArchitectCommand(toolCall.input.command)
+    ) {
+      return { block: true, reason: ARCHITECT_BASH_REFUSAL };
+    }
     const codeToolRefusal = active === undefined ? undefined : CODE_TOOL_REFUSAL[active.role];
-    const mutatesCode =
-      CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
-      (active?.role === "architect" &&
-        toolCall.toolName === "bash" &&
-        !isSingleLegionCommand(toolCall.input.command));
     // A `write` into Oh My Pi (a tool device, an agent message, job control) is not a file
     // mutation. Short-circuit it out of the mutation gate so the architect/reviewer/merger role
     // checks apply only to real file writes.
     if (
       codeToolRefusal !== undefined &&
-      mutatesCode &&
+      CODE_MUTATION_TOOLS.includes(toolCall.toolName) &&
       nonFileWriteScheme(toolCall) === undefined
     ) {
       return { block: true, reason: codeToolRefusal };

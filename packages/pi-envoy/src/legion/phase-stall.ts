@@ -32,9 +32,9 @@ export interface PhaseStallStep {
  * the daemon relaunches with `--resume` restores it from its branch. */
 export const PHASE_STALL_ENTRY = "legion-phase-stall";
 
-/** The `details` of an `envoy-message` the Envoy extension writes into its own session (the follow
- * notice after a Dispatch write, the session-id-changed notice): the session's own doing, never an
- * event from outside, so it does not re-arm a quiet stall. */
+/** The `details` of an `envoy-message` the Envoy extension writes into its own session (the
+ * session-id-changed notice): the session's own doing, never an event from outside, so it does not
+ * re-arm a quiet stall. */
 export const LOCAL_ENVOY_NOTICE = { localNotice: true } as const;
 
 /** A line of the final message that starts with WAITING (after any markdown emphasis or quoting). */

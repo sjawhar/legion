@@ -9,6 +9,7 @@ import {
   loadSessionMemory,
   pruneSessions,
   readResultsSince,
+  resultsEnd,
   saveSessionMemory,
   sessionDirectory,
   writePicture,
@@ -44,6 +45,15 @@ describe("per-session state", () => {
     const second = readResultsSince(dir, first.offset);
     expect(first.entries.map((e) => e.tool)).toEqual(["dispatch_search"]);
     expect(second.entries.map((e) => e.tool)).toEqual(["dispatch_ask"]);
+  });
+
+  test("a reader that starts at the ledger's end reads only what is appended after it", () => {
+    const dir = sessionDirectory({ DISPATCH_STATE_DIR: root() }, "s4");
+    expect(resultsEnd(dir)).toBe(0);
+    appendResult(dir, { tool: "dispatch_search", details: {} });
+    const end = resultsEnd(dir);
+    appendResult(dir, { tool: "dispatch_ask", details: { ask: "a" } });
+    expect(readResultsSince(dir, end).entries.map((e) => e.tool)).toEqual(["dispatch_ask"]);
   });
 
   test("a picture is written once under its hash", () => {

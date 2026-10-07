@@ -21,10 +21,11 @@
   },
   "files": [
     "dist",
-    "agents"
+    "agents",
+    "bin"
   ],
   "scripts": {
-    "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
+    "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils && bun build ../envoy-client/bin/dispatch.ts --outfile dist/dispatch.js --target bun --format esm",
     "prepack": "./scripts/prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
@@ -35,8 +36,8 @@
     "@biomejs/biome": "^2.3.14",
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
-    "@oh-my-pi/pi-tui": "^18.1.15",
-    "@oh-my-pi/pi-utils": "^18.1.15",
+    "@oh-my-pi/pi-tui": "^18.6.0",
+    "@oh-my-pi/pi-utils": "^18.6.0",
     "@toon-format/toon": "^4.1.1",
     "@types/bun": "latest",
     "nats": "^2.29.2",

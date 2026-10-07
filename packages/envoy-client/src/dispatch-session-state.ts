@@ -160,6 +160,12 @@ export function readResultsSince(
   return { entries, offset: offset + complete };
 }
 
+/** The ledger's size in bytes, 0 when there is none: a reader starting there sees only later calls. */
+export function resultsEnd(dir: string): number {
+  const path = join(dir, "results.jsonl");
+  return existsSync(path) ? statSync(path).size : 0;
+}
+
 /** Writes a picture under `pictures/<sha256 first 16 hex>.<ext>`, once; returns its path and size. */
 export function writePicture(dir: string, image: ToolImage): { path: string; bytes: number } {
   const bytes = Buffer.from(image.data, "base64");

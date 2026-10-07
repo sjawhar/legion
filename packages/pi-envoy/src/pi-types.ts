@@ -22,6 +22,8 @@ export interface SessionContext {
    */
   readonly hasUI: boolean;
   readonly taskDepth?: number;
+  /** Which runner the event belongs to: the top-level session's is `main`, a `task` subagent's `sub`. */
+  readonly agent?: { readonly kind: "main" | "sub" };
   readonly sessionManager: {
     readonly getSessionId: () => string;
     /**
