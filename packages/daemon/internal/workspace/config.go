@@ -42,9 +42,10 @@ type Command struct {
 	Dir     string
 	Timeout time.Duration
 	// Clone is the shared clone whose workspace Dir is, for a jj command run in a workspace's own
-	// directory (RunCheckedIn): the runner refuses one whose `.jj/repo` names any other
-	// repository (disarmLegacyConfig). "" for a command that opens the shared clone itself (-R,
-	// onClone) or no repository.
+	// directory (RunCheckedIn, which also names Dir with -R): the runner refuses one whose `.jj`
+	// is missing or not a real directory, or whose `.jj/repo` names any other repository
+	// (disarmLegacyConfig). "" for a command that opens the shared clone itself (-R, onClone) or
+	// no repository.
 	Clone string
 }
 
@@ -200,8 +201,18 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 // after it; a pod's config home is also the one the agent's own jj reads, so a migration during
 // workspace-init would hand the planted file to the agent too. The repository's file is removed
 // only in the shared clone's own `.jj/repo` (sharedRepository), never in a directory a workspace's
-// rewritten pointer names. A root with no `.jj` directory is left for jj to refuse, and a legacy
-// file that cannot be removed fails the command, since jj would read it.
+// rewritten pointer names.
+//
+// The `.jj` at root must be a real directory, never a symlink or a file, or the command is
+// refused: a symlinked `.jj` would make jj open, and this function disarm, a directory outside
+// the volume's layout. A root with no `.jj` at all is refused when the command runs in a workspace
+// of a shared clone (clone set, RunCheckedIn): that workspace was provisioned with one, and without
+// it jj with no -R walks up to the nearest ancestor holding a `.jj` (cli_util.rs,
+// find_workspace_dir) and opens whatever repository a tree agent made there. RunCheckedIn also
+// names the workspace with -R, under which jj never walks up; the refusal names the missing `.jj`
+// before jj runs at all. With no clone (a command that opens the clone itself with -R, or `jj git
+// clone`, which opens none) a missing `.jj` is left for jj. A legacy file that cannot be removed
+// fails the command, since jj would read it.
 //
 // This holds against a file written at any time before the command runs. A tree agent writing
 // one in the instant between this check and jj's own read is outside what it closes, the trust
@@ -212,8 +223,14 @@ func disarmLegacyConfig(root, clone string) error {
 		return nil
 	}
 	jjDir := filepath.Join(root, ".jj")
-	if info, err := os.Stat(jjDir); err != nil || !info.IsDir() {
+	info, err := os.Lstat(jjDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && clone == "":
 		return nil
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("refusing to run jj in %s: it has no .jj of its own, which a workspace of the shared clone %s always has", root, clone)
+	case err != nil || !info.IsDir():
+		return fmt.Errorf("refusing to run jj in %s: its .jj is not a real directory (%v)", root, describeEntry(info, err))
 	}
 	repo, err := sharedRepository(jjDir, clone)
 	if err != nil {
@@ -237,17 +254,21 @@ func disarmLegacyConfig(root, clone string) error {
 
 // sharedRepository is the repository directory jj opens for the workspace whose `.jj` is jjDir,
 // held to the shared clone's own `.jj/repo`: clone's when the command names one (a workspace of
-// it), else the root's own (the command opens the clone itself). That directory must be a real
-// directory, not a symlink or a file. A workspace names its repository in its `.jj/repo` file,
-// which a tree agent can rewrite. The path that file names is built as jj builds it
-// (workspaceRepository, never cleaned) and stat'ed by the kernel, which resolves it physically as
-// jj's canonicalize does; it must be the same directory as the clone's own (os.SameFile), or the
-// command is refused, naming both, before jj opens a repository Legion did not provision and
-// before anything there is removed.
+// it), else the root's own (the command opens the clone itself). The clone's `.jj` and its
+// `.jj/repo` must each be a real directory, not a symlink or a file. A workspace names its
+// repository in its `.jj/repo` file, which a tree agent can rewrite. The path that file names is
+// built as jj builds it (workspaceRepository, never cleaned) and stat'ed by the kernel, which
+// resolves it physically as jj's canonicalize does; it must be the same directory as the clone's
+// own (os.SameFile), or the command is refused, naming both, before jj opens a repository Legion
+// did not provision and before anything there is removed.
 func sharedRepository(jjDir, clone string) (string, error) {
 	own := filepath.Join(jjDir, "repo")
 	if clone != "" {
-		own = filepath.Join(clone, ".jj", "repo")
+		cloneJJ := filepath.Join(clone, ".jj")
+		if info, err := os.Lstat(cloneJJ); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("refusing to run jj in %s: %s is not the shared clone's own .jj directory (%v)", filepath.Dir(jjDir), cloneJJ, describeEntry(info, err))
+		}
+		own = filepath.Join(cloneJJ, "repo")
 	}
 	ownInfo, err := os.Lstat(own)
 	if err != nil || !ownInfo.IsDir() {
@@ -420,12 +441,15 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 	return checkedResult(argv, result, err)
 }
 
-// RunCheckedIn is RunChecked for a command run in ws's own directory, naming ws's shared clone so
-// the runner can hold the workspace's `.jj/repo` to it (Command.Clone).
+// RunCheckedIn is RunChecked for a jj command run in ws's own workspace. It names the workspace
+// with -R, so jj opens ws.Dir itself and never searches its parent directories for a `.jj`, and
+// names ws's shared clone so the runner can hold the workspace's `.jj` and `.jj/repo` to it
+// (Command.Clone, disarmLegacyConfig).
 func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
 	}
+	argv = append(slices.Clip(argv), "-R", ws.Dir)
 	result, err := run.Run(ctx, Command{Argv: argv, Dir: ws.Dir, Clone: ws.Clone, Timeout: run.Timeout()})
 	return checkedResult(argv, result, err)
 }

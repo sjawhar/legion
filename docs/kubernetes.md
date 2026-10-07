@@ -1214,21 +1214,25 @@ candidate that still has a live, non-terminal pod of its own tree, a second guar
 different evidence — it cannot tell a claim whose `fail` persisted `StateFailed` despite its own
 `suspendProcess` erroring from one truly gone, so that pod, not the daemon's own claim store, is
 checked directly for this one question. `workspace-init` is the process that judges and removes
-each candidate. No jj configuration a tree agent writes reaches its jj commands: jj 0.38 and later
-keep a repository's and a workspace's configuration in the config home (the pod's own), and the
-one way a file on the tree volume becomes jj configuration, jj migrating a legacy
-`.jj/workspace-config.toml` or `.jj/repo/config.toml` that has no id file beside it, is closed by
-removing that file before each jj command provisioning and removal run (`disarmLegacyConfig`,
-`internal/workspace/config.go`), the repository's only in the shared clone's own `.jj/repo`: a jj
-command in a workspace whose `.jj/repo` names any other directory, followed through symlinks and
-`..` as jj itself follows it, or is neither a directory nor a regular file, is refused. The
-worker image's jj is 0.45; on the tmux runtime, which runs the host's jj through the same code,
-the daemon refuses to start with a jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`),
-since before 0.38 `.jj/repo/config.toml` is the repository's live configuration. It snapshots the
-candidate's own working copy with `--config` overrides that hold the snapshot's working-copy filter
-and signing programs off even so (`snapshotOverrides`, `internal/workspace/removal.go`), keeps the
-workspace whenever that snapshot leaves anything unaccounted for — an untracked path, anything on
-stderr, or a nested repository the snapshot cannot see at all — and otherwise removes it only once every
+each candidate. No jj configuration a tree agent writes ahead of a command reaches its jj commands:
+jj 0.38 and later keep a repository's and a workspace's configuration in the config home (the
+pod's own), and the one way a file on the tree volume becomes jj configuration, jj migrating a
+legacy `.jj/workspace-config.toml` or `.jj/repo/config.toml` that has no id file beside it, is
+closed by removing that file before each jj command provisioning and removal run
+(`disarmLegacyConfig`, `internal/workspace/config.go`), the repository's only in the shared
+clone's own `.jj/repo`. Every jj command run in a workspace names it with `-R`, so jj never walks
+up to an ancestor's `.jj`. A jj command is refused when the `.jj` it would open, or the shared
+clone's `.jj` or `.jj/repo`, is a symlink or anything but a real directory; when it runs in a
+workspace that has no `.jj`; and when the workspace's `.jj/repo` names any other directory,
+followed through symlinks and `..` as jj itself follows it, or is neither a directory nor a
+regular file. The worker image's jj is 0.45; on the tmux runtime,
+which runs the host's jj through the same code, the daemon refuses to start with a jj older than
+0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38 `.jj/repo/config.toml` is the
+repository's live configuration. It snapshots the candidate's own working copy with `--config`
+overrides that hold the snapshot's working-copy filter and signing programs off even so
+(`snapshotOverrides`, `internal/workspace/removal.go`), keeps the workspace whenever that snapshot
+leaves anything unaccounted for — an untracked path, anything on stderr, or a nested repository the
+snapshot cannot see at all — and otherwise removes it only once every
 commit it holds is reachable from a remote bookmark or the recorded merged pull-request head,
 renaming its directory aside before the slower recursive delete so a kill mid-delete is finished, not
 re-judged, on the next pass. A removed workspace's gitignored content is deleted with it: nothing

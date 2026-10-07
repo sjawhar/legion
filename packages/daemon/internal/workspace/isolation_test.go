@@ -584,6 +584,140 @@ func TestTheRunnerRefusesASharedCloneWhoseRepositoryIsASymlink(t *testing.T) {
 	}
 }
 
+// A workspace with no .jj of its own is refused, never run in: jj with no -R walks up to the
+// nearest ancestor holding a .jj and opens that repository instead. Here a tree agent removed a
+// pushed workspace's .jj and made its parent a repository: a jj command in the workspace is refused
+// and never reads the parent's planted legacy configuration, and RemoveFinished keeps the
+// workspace and the edit no jj command snapshotted, where a snapshot run against the parent's
+// repository would have hidden the edit and let the workspace be removed.
+func TestTheRunnerRefusesAWorkspaceWithNoJJOfItsOwn(t *testing.T) {
+	run := newLocalRunner(t)
+	ws, err := Provision(context.Background(), run, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, ws.Dir, "jj", "status")
+	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+	if err := os.RemoveAll(filepath.Join(ws.Dir, ".jj")); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(ws.Dir)
+	runSetup(t, parent, "jj", "git", "init", "--no-colocate", ".")
+	planted := filepath.Join(parent, ".jj", "workspace-config.toml")
+	if err := os.Remove(filepath.Join(parent, ".jj", "workspace-config-id")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planted, []byte("[revset-aliases]\n\"empty()\" = \"all()\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(ws.Dir, "pending.txt")
+	if err := os.WriteFile(pending, []byte("never snapshotted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := RunCheckedIn(context.Background(), run, ws, []string{"jj", "config", "list", "--include-defaults", "revset-aliases", "--ignore-working-copy", "--color=never"})
+	if err == nil || !strings.Contains(err.Error(), "it has no .jj") {
+		t.Errorf("jj in a workspace with no .jj below a repository = %v, want a refusal naming the missing .jj", err)
+	}
+	if strings.Contains(listed.Stdout, "all()") {
+		t.Errorf("jj read the alias planted in the parent's repository:\n%s", listed.Stdout)
+	}
+	if _, err := os.Stat(planted); err != nil {
+		t.Errorf("the parent's planted %s was touched: %v", planted, err)
+	}
+
+	var logged []string
+	err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
+	if _, statErr := os.Stat(pending); statErr != nil {
+		t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
+	}
+	for _, line := range logged {
+		if strings.Contains(line, "removed WIDGETS-42's workspace") {
+			t.Errorf("logged %q, want the workspace kept", line)
+		}
+	}
+}
+
+// A .jj that is a symlink, the shared clone's or a workspace's, is refused, never followed: jj
+// would open, and the runner disarm, a directory outside the volume's layout. Each points to a copy
+// of the original holding a legacy configuration file with no id beside it, and neither file is
+// touched.
+func TestTheRunnerRefusesASymlinkedJJ(t *testing.T) {
+	log := []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"}
+	// symlinkJJ moves dir's .jj aside, copies it outside the volume and links dir/.jj to the copy,
+	// whose legacy file (relative to the copied .jj) it plants with its id removed.
+	symlinkJJ := func(t *testing.T, dir, id, legacy string) string {
+		t.Helper()
+		original := filepath.Join(dir, ".jj")
+		copied := filepath.Join(t.TempDir(), "copied-jj")
+		runSetup(t, "", "cp", "-a", original, copied)
+		if err := os.Rename(original, original+"-moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(copied, original); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(copied, id)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		file := filepath.Join(copied, legacy)
+		if err := os.WriteFile(file, []byte("[user]\nname = \"not the volume's\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return file
+	}
+
+	t.Run("the shared clone's .jj", func(t *testing.T) {
+		run := newLocalRunner(t)
+		ws, err := Provision(context.Background(), run, provisionRequest(t))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		untouched := symlinkJJ(t, ws.Clone, filepath.Join("repo", "config-id"), filepath.Join("repo", "config.toml"))
+		for name, command := range map[string]func() error{
+			"a command on the clone": func() error {
+				_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, "")
+				return err
+			},
+			"a command in a workspace of it": func() error {
+				_, err := RunCheckedIn(context.Background(), run, ws, log)
+				return err
+			},
+		} {
+			if err := command(); err == nil || !strings.Contains(err.Error(), "(a symlink)") {
+				t.Errorf("%s with the clone's .jj a symlink = %v, want a refusal naming the symlink", name, err)
+			}
+		}
+		if _, err := os.Stat(untouched); err != nil {
+			t.Errorf("%s, outside the volume, was touched: %v", untouched, err)
+		}
+	})
+
+	t.Run("a workspace's .jj", func(t *testing.T) {
+		run := newLocalRunner(t)
+		ws, err := Provision(context.Background(), run, provisionRequest(t))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		untouched := symlinkJJ(t, ws.Dir, "workspace-config-id", "workspace-config.toml")
+		// The copy names the shared clone's repository by absolute path, so the pointer itself
+		// holds: only the symlinked .jj is wrong.
+		if err := os.WriteFile(filepath.Join(filepath.Dir(untouched), "repo"), []byte(filepath.Join(ws.Clone, ".jj", "repo")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err = RunCheckedIn(context.Background(), run, ws, log)
+		if err == nil || !strings.Contains(err.Error(), "its .jj is not a real directory (a symlink)") {
+			t.Errorf("jj in a workspace whose .jj is a symlink = %v, want a refusal naming the symlink", err)
+		}
+		if _, err := os.Stat(untouched); err != nil {
+			t.Errorf("%s, outside the volume, was touched: %v", untouched, err)
+		}
+	})
+}
+
 // A workspace's .jj/repo that is neither a directory nor a regular file is refused before anything
 // reads it: a FIFO there would otherwise block the runner, which reads .jj/repo before the
 // command's deadline starts.
