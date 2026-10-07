@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,15 +48,16 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // relaunch ensures the claim's pod once, then starts only this role's worker-shim through its
 // authenticated launcher. An existing healthy pod is never suspended or reinitialized when another
 // role starts or one role recovers. A pod is not healthy when it cannot run the role as a pod
-// created now would: its launchers dial a stream other than the one a pod created now is handed,
-// and they never redial (dialsStaleStream), or it lacks the agent-secrets volumes a role that
-// enrolls now is started against (lacksEnrollment). The first role relaunched after either moved
-// replaces it, and its siblings resume into the new pod. Before each start the Sandbox records the
-// addresses the generation is handed (recordAddresses). A new pod is readied by its kind
-// (podKind.readyNewPod): an issue pod waits its turn among its tree's pods and has its workspace's
-// provisioning token minted, the controller's pod needs nothing. A workflow claim passed its tree's
-// lifecycle check before the call (supervise's checkLaunch), so the tree's cleanup, which waits for
-// every claim of the tree to retire, lists whatever Sandbox this creates.
+// created now would: it holds, for one of its roles, something fixed for its life that a pod created
+// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): its
+// launchers dial a stream other than the one a pod created now is handed, and they never redial, or
+// it lacks the agent-secrets volumes a role that enrolls now is started against. The first role
+// relaunched after either moved replaces it, and its siblings resume into the new pod. Before each
+// start the Sandbox records the addresses the generation is handed (recordAddresses). A new pod is
+// readied by its kind (podKind.readyNewPod): an issue pod waits its turn among its tree's pods and
+// has its workspace's provisioning token minted, the controller's pod needs nothing. A workflow
+// claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
+// cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -76,8 +78,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
-	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || r.dialsStaleStream(pod) ||
-		r.lacksEnrollment(pod, l.roles) || !r.launcherBound(ctx, s, pod, l.roles) {
+	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil ||
+		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
+		!r.launcherBound(ctx, s, pod, l.roles) {
 		if s.mode() != modeSuspended {
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)

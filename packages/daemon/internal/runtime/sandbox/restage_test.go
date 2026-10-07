@@ -271,8 +271,8 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 		t.Fatalf("Resume kept the pod %s, which has no agent-secrets volume for the enrolled tester's shim", testerLoc.Sandbox.PodUID)
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
-	if r2.lacksEnrollment(pod, claim.Roles) {
-		t.Fatalf("the replaced pod's volumes %+v lack the enrollment the runtime has now", pod.Spec.Volumes)
+	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
+		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
 	}
 	for _, role := range claim.Roles {
 		mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, string(role)).VolumeMounts, func(m corev1.VolumeMount) bool {
@@ -385,8 +385,8 @@ func TestChangingTheBrokersAudienceMovesEveryRoleOfThePodTogether(t *testing.T) 
 	if pods[0] != pods[1] || pods[0] == testerLoc.Sandbox.PodUID {
 		t.Fatalf("the roles relaunched into pods %v, want one new pod in place of %s", pods, testerLoc.Sandbox.PodUID)
 	}
-	if pod := g.pod(name); r2.lacksEnrollment(pod, claim.Roles) {
-		t.Fatalf("the new pod lacks the enrollment the runtime has now: %+v", pod.Spec.Volumes)
+	if held := heldInPod(r2, g.pod(name), claim.Roles); len(held) > 0 {
+		t.Fatalf("the new pod holds %+v, which a pod created now is not handed", held)
 	}
 	stop()
 	mu.Lock()
@@ -455,8 +455,87 @@ func TestARelaunchReplacesAPodEnrolledOtherwiseThanTheRuntimeIsNow(t *testing.T)
 			if replaced := newLoc.Sandbox.PodUID != loc.Sandbox.PodUID; replaced != tc.replaced {
 				t.Fatalf("Resume replaced the pod: %t, want %t (pod %s, then %s)", replaced, tc.replaced, loc.Sandbox.PodUID, newLoc.Sandbox.PodUID)
 			}
-			if pod := g.pod(loc.Sandbox.Name); r2.lacksEnrollment(pod, claim.Roles) {
-				t.Fatalf("the pod the tester runs in lacks the enrollment the runtime has now: %+v", pod.Spec.Volumes)
+			if held := heldInPod(r2, g.pod(loc.Sandbox.Name), claim.Roles); len(held) > 0 {
+				t.Fatalf("the pod the tester runs in holds %+v, which a pod created now is not handed", held)
+			}
+		})
+	}
+}
+
+// heldInPod is everything pod holds, for any role of roles, that a pod created now is not handed
+// (movedInPod, the one rule evaluate and relaunch read it by).
+func heldInPod(r *Runtime, pod *corev1.Pod, roles []claim.Role) []movedAddress {
+	var held []movedAddress
+	for _, role := range roles {
+		held = append(held, r.movedInPod(pod, role)...)
+	}
+	return held
+}
+
+// One rule decides both whether evaluate reads a role's pod as stale and whether relaunch replaces
+// that pod (movedInPod): for each kind of moved address, a role that holds one is reported
+// StaleAddress naming it, and the role's relaunch replaces its pod exactly when what moved is fixed
+// for the pod's life — the stream its launchers dial, or the secrets broker's enrollment (its
+// projection's audience or expiry, or enrollment configured only now). An address carried in the
+// generation's environment alone (the daemon's API, the broker's URL with its enrollment unchanged)
+// is stale too, but its relaunch starts a new generation in the same pod; a role holding nothing
+// moved is alive and its pod kept.
+func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
+	broker := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	enrolled := func(edit func(*AgentSecrets)) func(*Options) {
+		return func(o *Options) {
+			a := broker
+			edit(&a)
+			o.AgentSecrets = &a
+		}
+	}
+	unchanged := func(*AgentSecrets) {}
+	for name, tc := range map[string]struct {
+		before, now func(*Options)
+		// where is where the moved address is carried, as the detail names it; "" for nothing moved.
+		where    string
+		replaced bool
+	}{
+		"nothing moved":                 {before: func(*Options) {}, now: func(*Options) {}},
+		"the worker stream moved":       {before: func(*Options) {}, now: moveStream, where: connectFlag, replaced: true},
+		"the daemon's API moved":        {before: func(*Options) {}, now: func(o *Options) { o.DaemonURL = movedDaemonURL }, where: "LEGION_DAEMON_URL"},
+		"the broker enrolled only now":  {before: func(*Options) {}, now: enrolled(unchanged), where: agentSecretsTokenVolume, replaced: true},
+		"the broker's audience changed": {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.Audience = "agent-secrets-next" }), where: agentSecretsTokenVolume, replaced: true},
+		"the broker's expiry changed":   {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.TokenExpiry = 30 * time.Minute }), where: agentSecretsTokenVolume, replaced: true},
+		"the broker's URL moved alone":  {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.URL = "https://secrets-next.internal.example" }), where: "AGENT_SECRETS_URL"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil, withOptions(tc.before))
+			tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
+			testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
+			r2 := secondRuntime(t, g, tc.now)()
+			for _, loc := range []runtime.Locator{testerLoc, reviewerLoc} {
+				g.connectRunning(loc.Claim, loc.Sandbox.Generation)
+				g.eventually("the "+string(loc.Claim)+" launcher to report its child to the restarted daemon", func() bool {
+					state, connected := r2.launchers.state(loc.Claim, loc.Sandbox.PodUID)
+					return connected && state.Child != nil
+				})
+			}
+			seen := readopt(t, g.ctx, r2, testerLoc, reviewerLoc)
+			for _, loc := range []runtime.Locator{testerLoc, reviewerLoc} {
+				obs := observationOf(t, seen, loc)
+				switch {
+				case tc.where == "" && obs.Kind != runtime.Alive:
+					t.Fatalf("%s: %s (%s), want alive: nothing moved", loc.Claim, obs.Kind, obs.Detail)
+				case tc.where != "" && (obs.Kind != runtime.StaleAddress || !strings.Contains(obs.Detail, tc.where+" ")):
+					t.Fatalf("%s: %s (%s), want StaleAddress naming %s", loc.Claim, obs.Kind, obs.Detail, tc.where)
+				}
+			}
+			fromPod := len(heldInPod(r2, g.pod(testerLoc.Sandbox.Name), claim.Roles)) > 0
+
+			tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+			newLoc, err := r2.Resume(g.ctx, &testerLoc, tester)
+			if err != nil {
+				t.Fatalf("Resume: %v", err)
+			}
+			replaced := newLoc.Sandbox.PodUID != testerLoc.Sandbox.PodUID
+			if replaced != fromPod || replaced != tc.replaced {
+				t.Fatalf("Resume replaced the pod: %t; the pod held a move fixed for its life: %t; want both %t", replaced, fromPod, tc.replaced)
 			}
 		})
 	}

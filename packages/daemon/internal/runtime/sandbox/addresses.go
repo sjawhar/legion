@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -108,14 +109,14 @@ func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Ro
 }
 
 // movedAddress is one thing a role process holds that one launched now is not handed: where it
-// carries it (connectFlag, one of the variables mainEnvironment sets, or agentSecretsTokenVolume),
-// what it holds there and what a process launched now is handed, each named so it carries no
-// credential (namedURL, enrollmentName).
-type movedAddress struct{ variable, held, handed string }
+// carries it (connectFlag, one of the variables mainEnvironment sets, or the agentSecretsTokenVolume
+// volume), what it holds there and what a process launched now is handed, each named so it carries
+// no credential (namedURL, enrollmentName).
+type movedAddress struct{ where, held, handed string }
 
-// String is the one way an observation's detail names a moved address: `<variable> <held>, now
+// String is the one way an observation's detail names a moved address: `<where> <held>, now
 // <handed>`.
-func (m movedAddress) String() string { return m.variable + " " + m.held + ", now " + m.handed }
+func (m movedAddress) String() string { return m.where + " " + m.held + ", now " + m.handed }
 
 // describeMoved is moved as an observation's detail names them, one after another.
 func describeMoved(moved []movedAddress) string {
@@ -177,19 +178,74 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 	return movedAddress{}, false
 }
 
-// dialsStaleStream is whether any role launcher of pod dials a stream other than the one a pod
-// created now is handed: a launcher never redials elsewhere, so the pod must be replaced.
-func (r *Runtime) dialsStaleStream(pod *corev1.Pod) bool {
-	return slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool {
-		_, moved := r.movedStream(pod, c.Name)
-		return moved
-	})
+// movedEnrollment compares the agent-secrets volumes a generation of role started now runs against
+// (agentSecretsVolumes) with what pod carries; ok is whether pod lacks them. Such a role is started
+// with the shim's agent-secrets flags (launcherCommand), which name its key directory and the
+// broker's token file, and the shim refuses to start without its token file; a pod's volumes are
+// fixed when it is created. So a pod made before the runtime enrolled, or under another audience or
+// expiry, cannot run a role that enrolls now, and must be replaced, as a pod whose launchers dial a
+// moved stream must. The role's key directory is compared by name, and the token's projection by
+// the three fields the shim's token file depends on: its audience, expiry and path. Nothing else of
+// a stored volume is compared: a field the API server's defaulting or an admission webhook adds, or
+// another projection source beside the token's, changes nothing the shim reads, and reading it as a
+// lack would rebuild the pod and re-provision its workspace at every relaunch. A role that does not
+// enroll (enrolledWith) lacks nothing.
+func (r *Runtime) movedEnrollment(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
+	broker := r.enrolledWith(role)
+	if broker == nil {
+		return movedAddress{}, false
+	}
+	want, keyDir := brokerTokenProjection(broker), roleVolume(agentSecretsKeyVolume, role)
+	var held *corev1.ServiceAccountTokenProjection
+	hasKeyDir := false
+	for _, volume := range pod.Spec.Volumes {
+		switch {
+		case volume.Name == agentSecretsTokenVolume && volume.Projected != nil:
+			for _, source := range volume.Projected.Sources {
+				if token := source.ServiceAccountToken; token != nil && (held == nil || sameTokenProjection(token, want)) {
+					held = token
+				}
+			}
+		case volume.Name == keyDir:
+			hasKeyDir = true
+		}
+	}
+	if sameTokenProjection(held, want) && hasKeyDir {
+		return movedAddress{}, false
+	}
+	heldName := enrollmentName(held)
+	if held != nil && !hasKeyDir {
+		heldName += " without " + keyDir
+	}
+	return movedAddress{agentSecretsTokenVolume, heldName, enrollmentName(want)}, true
+}
+
+// enrollmentName names a broker token projection by the fields movedEnrollment compares, "(unset)"
+// for none; none of them is a credential.
+func enrollmentName(token *corev1.ServiceAccountTokenProjection) string {
+	if token == nil {
+		return "(unset)"
+	}
+	expiry := "(unset)"
+	if token.ExpirationSeconds != nil {
+		expiry = strconv.FormatInt(*token.ExpirationSeconds, 10) + "s"
+	}
+	return "audience=" + token.Audience + " expiry=" + expiry + " path=" + token.Path
+}
+
+// sameTokenProjection is whether held projects the token want does: the same audience, expiry and
+// path.
+func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool {
+	return held != nil && held.Audience == want.Audience && held.Path == want.Path &&
+		held.ExpirationSeconds != nil && *held.ExpirationSeconds == *want.ExpirationSeconds
 }
 
 // movedInPod is what pod holds, for role, that a pod created now is not handed: the stream its
 // launcher dials (movedStream) and the secrets broker's enrollment its next generation is started
 // against (movedEnrollment). Both are fixed for the pod's life, so either moved means the pod must
-// be replaced before role can run as one launched now.
+// be replaced before role can run as one launched now. It is the one rule for both: evaluate reads
+// a role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one for any
+// of its roles.
 func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
 	if stream, ok := r.movedStream(pod, string(role)); ok {
