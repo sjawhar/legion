@@ -646,18 +646,19 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // a failed listing leaves it queued and uncertain until the bounded retry succeeds. Only then are
 // hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
 // A daemon that leaves the controller to its operator first stops the controller's claim an
-// earlier boot under `controller: daemon` left (stopLaunchedController).
+// earlier boot under `controller: daemon` left (stopLaunchedController), and never launches it:
+// its token leaves the unrecorded launches, where a launch of it a crash cut short would be.
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
 		return err
 	}
 	if s.cfg.ControllerLaunch != config.ControllerLaunchDaemon {
-		stopped, err := s.stopLaunchedController(boot)
-		if err != nil {
+		if err := s.stopLaunchedController(boot); err != nil {
 			return err
 		}
-		unfinished = slices.DeleteFunc(unfinished, func(token claim.Token) bool { return token == stopped })
+		controller := claim.ControllerToken(s.plan.project)
+		unfinished = slices.DeleteFunc(unfinished, func(token claim.Token) bool { return token == controller })
 	}
 	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
 	if s.reconcileBootOrphans(boot) {

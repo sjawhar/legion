@@ -440,3 +440,77 @@ func TestASwitchedBackDaemonEndsOnlyItsStoppedControllersRegistration(t *testing
 		t.Errorf("controllerLocator = %+v after another boot, want the operator's controller ses_operator", locator)
 	}
 }
+
+// A daemon switched back to `controller: operator` never replaces a capability the operator minted
+// and has not registered yet. A controller claim whose agent never registered retires with no
+// session, and the switch back reads it at every boot; a record whose capability `legion controller
+// start` minted has no session either until its controller registers. The two empty sessions must
+// not match, or a restart between the mint and the registration would replace the operator's
+// capability and refuse its controller.
+func TestASwitchedBackDaemonLeavesAnOperatorsUnregisteredCapability(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	controllerLaunched(t, rt, token)
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	cfg.ControllerLaunch = config.ControllerLaunchOperator
+	d = startDaemon(t, cfg, o)
+	if c := d.claim(token); c.State != string(supervise.StateRetired) || c.Session != "" {
+		t.Fatalf("the never-registered controller's claim is %s with session %q, want retired with none", c.State, c.Session)
+	}
+	status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion}, true)
+	if status != http.StatusOK {
+		t.Fatalf("the operator's controller secret = %d %s, want 200", status, body)
+	}
+	var secret api.ControllerSecretResponse
+	if err := json.Unmarshal(body, &secret); err != nil {
+		t.Fatal(err)
+	}
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	d = startDaemon(t, cfg, o)
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: secret.Secret, SessionID: "ses_operator", OmpSessionFile: "/sessions/operator.jsonl",
+		AgentID: "ses_operator", PluginContract: api.DaemonAPIVersion,
+	}, false); status != http.StatusOK {
+		t.Fatalf("the operator's controller registering with the capability minted before the restart = %d %s, want 200", status, body)
+	}
+}
+
+// A launch of the controller a crash cut short, its claim stored launching with no process
+// recorded, is one of boot's unrecorded launches. A daemon that leaves the controller to its
+// operator stops that claim and never launches it again.
+func TestASwitchedBackDaemonNeverLaunchesAControllerLaunchACrashCutShort(t *testing.T) {
+	cfg := testConfig(t)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	putClaim(t, cfg, supervise.Claim{
+		Token: token, Project: project, Role: claim.RoleController, Generation: 1,
+		State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("cut-short-" + randomSuffix(t)),
+	})
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	if state := d.claim(token).State; state != string(supervise.StateRetired) {
+		t.Fatalf("the controller launch a crash cut short is %s once the operator's daemon booted, want retired", state)
+	}
+	time.Sleep(5 * o.orphanSweep)
+	if spawns := controllerSpawns(rt, token); spawns != 0 {
+		t.Fatalf("the operator's daemon spawned the controller %d times, want none", spawns)
+	}
+}

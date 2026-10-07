@@ -1550,7 +1550,12 @@ retired, it ends the controller record's registration while the record still nam
 session, minting it a capability nobody holds, logged as `controller: ending the registration of the
 controller an earlier boot under controller: daemon launched; this daemon leaves the controller to
 its operator`; a record naming another session, the operator's controller's once it has
-registered, or none, is left as it is. A daemon that cannot stop the claim refuses to boot, naming
+registered, or none, is left as it is. One known residual: a controller whose session a lost volume
+ended after it registered, switched back before its fresh launch registers, leaves the record naming
+that dead session, which the switch back does not end. Nobody holds its secret, which lived only in
+the dead agent, so it shows as a stale `controllerLocator` with admission wakes queued for nobody
+until the operator's `legion controller start` replaces it. A daemon that cannot stop the claim
+refuses to boot, naming
 it (`stop legion-<project>-controller, …`), with the record untouched; one that stopped it but
 cannot end its registration refuses naming it too (`end the registration of
 legion-<project>-controller, …`), and the next boot, finding the claim retired, ends it. The

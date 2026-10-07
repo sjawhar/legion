@@ -145,52 +145,55 @@ func (k *controllerKeeper) ready(c supervise.Claim) {
 }
 
 // stopLaunchedController ends the daemon's own controller on a daemon that leaves the controller to
-// its operator (`controller: operator`), and returns its claim's token when it stopped the claim. A
-// claim an earlier boot under `controller: daemon` stored would otherwise be re-adopted and
-// relaunched at every death, its pod contending with the operator's `legion controller start` for
-// the one controller record, which the register route refuses it on this daemon. First it stops
-// the claim, unless it is retired already: the stop releases its process (its Sandbox, under the
-// Sandbox runtime) and retires it before anything relaunches it. Then it ends the claim's
-// registration (endLaunchedRegistration), for a claim retired before this boot too. The stop comes
-// first: a stop that fails refuses the boot with the record untouched, so a daemon switched to
-// `controller: daemon` again re-adopts a controller whose registration, grants and wakes still
-// work, where a record ended ahead of a pod that kept running would leave that pod unable to act
-// until it died. A registration ending that fails after the stop is retried at the next boot,
-// since the retired claim still names its session. Either failure refuses the boot, naming the
-// claim, rather than leave this daemon supervising a controller it does not run.
-func (s *supervision) stopLaunchedController(ctx context.Context) (claim.Token, error) {
+// its operator (`controller: operator`). A claim an earlier boot under `controller: daemon` stored
+// would otherwise be re-adopted and relaunched at every death, its pod contending with the
+// operator's `legion controller start` for the one controller record, which the register route
+// refuses it on this daemon. First it stops the claim, unless it is retired already: the stop
+// releases its process (its Sandbox, under the Sandbox runtime) and retires it before anything
+// relaunches it. Then it ends the claim's registration (endLaunchedRegistration), for a claim
+// retired before this boot too. The stop comes first: a stop that fails refuses the boot with the
+// record untouched, so a daemon switched to `controller: daemon` again re-adopts a controller whose
+// registration, grants and wakes still work, where a record ended ahead of a pod that kept running
+// would leave that pod unable to act until it died. Each step reads the state it repairs at every
+// boot, so a boot that fails partway leaves nothing the next one does not finish: a registration
+// ending that fails after the stop is retried, since the retired claim still names its session.
+// Either failure refuses the boot, naming the claim, rather than leave this daemon supervising a
+// controller it does not run. When it returns nil the controller's claim is absent or retired.
+func (s *supervision) stopLaunchedController(ctx context.Context) error {
 	token := claim.ControllerToken(s.plan.project)
 	m, ok := s.supervisor.Machine(token)
 	if !ok {
-		return "", nil
+		return nil
 	}
-	var stopped claim.Token
 	if state := m.Claim().State; state != supervise.StateRetired {
 		s.log.Warn("controller: stopping the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator",
 			"claim", token, "state", state)
 		if err := m.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
-			return "", fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
+			return fmt.Errorf("stop %s, the controller an earlier boot under controller: daemon launched, since this daemon leaves the controller to its operator (controller: operator): %w", token, err)
 		}
-		stopped = token
 	}
-	if err := s.endLaunchedRegistration(ctx, m.Claim()); err != nil {
-		return "", err
-	}
-	return stopped, nil
+	return s.endLaunchedRegistration(ctx, m.Claim())
 }
 
 // endLaunchedRegistration mints the controller record controller.UnheldCapability while the record
 // still names c's session, the stopped controller's registration: the state's controllerLocator
 // then names no dead pod's session, no grant mints for it, and no capability a launch registered
 // under survives the switch. A record naming any other session, the operator's controller's after a
-// `legion controller start`, or none, is left as it is. It runs at boot, before the API serves, so
-// no registration can come between the read and the mint.
+// `legion controller start`, or none, is left as it is. A record with no registration is left as it
+// is even though a claim whose agent never registered, or whose session a lost volume ended, has no
+// session either: that record can hold the capability `legion controller start` minted for an
+// operator's controller that has not registered yet, and matching the two empty sessions would
+// replace it, so that controller's registration would then be refused. The guard on the record's
+// registration is correct only beside the session comparison, in one condition: alone it would let
+// a claim with no session through against a record naming one, which the comparison refuses, and
+// alone the comparison would let the two empty sessions through, which the guard refuses. It runs
+// at boot, before the API serves, so no registration can come between the read and the mint.
 func (s *supervision) endLaunchedRegistration(ctx context.Context, c supervise.Claim) error {
 	record, found, err := s.supervisor.store.Controller(ctx, s.plan.project)
 	if err != nil {
 		return fmt.Errorf("read the controller record to end the registration of %s, the controller an earlier boot under controller: daemon launched: %w", c.Token, err)
 	}
-	if !found || c.Session == "" || record.Session != c.Session {
+	if !found || !record.Registered() || record.Session != c.Session {
 		return nil
 	}
 	s.log.Warn("controller: ending the registration of the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator",

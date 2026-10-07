@@ -83,9 +83,11 @@ legion start --config legion.yaml --check-config
   operator (controller: operator): …` (or `read the controller record to end the registration of
   …`).** The daemon stopped its controller's pod but could not write the controller record; the end
   of the line is the store's error. Start the daemon again once Postgres answers: the next boot finds
-  the claim retired and ends the registration then. Until it does, the state's `controllerLocator`
-  names the stopped pod's session, which nothing can use, since the pod's Secret went with its
-  Sandbox.
+  the claim retired and ends the registration before it serves anything. The record names the
+  stopped pod's session until then, but no refused boot serves the state; it shows as the state's
+  `controllerLocator` only if you set `controller: daemon` back before an operator boot succeeds.
+  Nothing can act as that session, since the process that held its registration secret ended with
+  the pod; the pod's Secret held only its boot token, which an operator's daemon refuses (409).
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.
