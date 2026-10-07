@@ -245,7 +245,7 @@ function isPushInvocation(words: readonly string[]): boolean {
  * judged not a push: the ordinary grant is the safe default, since missing a genuine push here
  * costs only the grant expiring before it, which `legion push` already fails loudly on. */
 function commandsRunPush(commands: string[][] | undefined): boolean {
-  return commands !== undefined && commands.some(isPushInvocation);
+  return commands?.some(isPushInvocation) ?? false;
 }
 
 /** A rule the tool_call hook holds a pane's shell-running tool calls to. */
