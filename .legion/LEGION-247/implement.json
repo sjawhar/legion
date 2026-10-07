@@ -1,11 +1,12 @@
 {
-  "completed": "2026-10-07T07:54:39.192384084Z",
+  "completed": "2026-10-07T10:20:43.346150273Z",
   "deviations": [
     "Pod envoyAbsent sentence says 'the other explicit extension a pod passes' rather than the plan's 'the second', since argv passes the Envoy root first; the pod notLoaded/elsewhere/installInto sentences say 'one of Oh My Pi's two explicit extensions' / 'an explicit extension beside the Envoy plugin root …'; a pod-lane sentence for an Envoy loaded from another copy than the root was added; a probe answer whose interface lines the gate cannot parse is refused as unreadable rather than passed.",
     "The name check's allowlist is exact paths or directory prefixes; beyond the plan's list it names packages/pi-legion/extensions/legion.ts and legion.test.ts (the refusal naming the old package as the thing to uninstall), packages/pi-legion/AGENTS.md (which quotes it), the Go tests planting the legacy marker, .github/workflows/release.yaml (the first-release seed), .legion/, docs/superpowers/, and the four CHANGELOGs that name the old package; interface.test.ts is not on it (it names only the symbol string).",
     "Not in the plan but required for correctness: packages/envoy/docker/Dockerfile and release-envoy-listener.yaml copy/trigger on the two new workspace manifests (check-bun-workspace-manifests.sh and check-image-trigger-paths.sh); .dockerignore drops skills/AGENTS.md from the image context (no plugin stages it); worker-image.yaml's paths add scripts/third-party-notices.ts; pr-and-main.yaml's gofmt step points at packages/pi-legion/scripts/grant-rig/daemon-pane.go; scripts/e2e/dispatch-user-turns.sh and stage3-4b13b-acceptance.sh migrated to install-plugin-profile.sh --package; scripts/e2e/controller-start-tmux.sh reads want_contract from pi-legion; packages/pi-legion drops the nats devDependency nothing imports.",
     "The pi-envoy test files that were never typechecked before (envoy.test.ts, legion-role-claim.test.ts's ?query imports) stay out of the tsconfig include lists, as before.",
-    "The plan's `legion.daemonApiVersion` stays-at-12 statement is overtaken by main: LEGION-583 bumped the contract to 13 before this branch merged, so the Legion manifest declares 13 (the split itself bumps nothing)."
+    "The plan's `legion.daemonApiVersion` stays-at-12 statement is overtaken by main: LEGION-583 bumped the contract to 13 before this branch merged, so the Legion manifest declares 13 (the split itself bumps nothing).",
+    "Round 1: the walkthrough recorder docs/site/media/walkthroughs/legion-operator/record-casts.sh was an install-plugin-profile.sh caller the first round's sweep missed (its search excluded docs/); the census found it and it now installs both plugins."
   ],
   "discoveredComplexity": [
     "Main moved 101 commits during the implementing round, including a .omp-pin bump (18.2.9 → 18.6.0) that changed probe.mjs's Oh My Pi settings API, so the forward merge carried main's probe.mjs and the real-binary suites run on the new pin.",
@@ -21,9 +22,10 @@
     ".github/workflows/{release.yaml,envoy-and-contracts.yaml,worker-image.yaml,pr-and-main.yaml,release-envoy-listener.yaml}; .github/scripts/check-plugin-names.sh (+test); .github/scripts/check-zod-version.test.sh",
     "packages/daemon/docker/worker.Dockerfile, packages/envoy/docker/Dockerfile, .dockerignore",
     "scripts/e2e/lib/{pack-plugin,install-plugin-profile}.sh, scripts/e2e/{stage1-skeleton,stage2-tmux-supervision,stage3-devbox-workflow,stage3-4b13b-acceptance,stage4b-sandbox-tree,controller-start-tmux,dispatch-user-turns}.sh, scripts/e2e/README.md",
-    "AGENTS.md, README.md, docs/kubernetes.md, docs/site/src/content/docs/legion/running-legion.md, packages/claude-envoy/{AGENTS,README}.md, .dispatch/architecture/{pi-envoy,pi-legion,pi-shared}.md, biome.json, package.json, bun.lock"
+    "AGENTS.md, README.md, docs/kubernetes.md, docs/site/src/content/docs/legion/running-legion.md, packages/claude-envoy/{AGENTS,README}.md, .dispatch/architecture/{pi-envoy,pi-legion,pi-shared}.md, biome.json, package.json, bun.lock",
+    "round 1: skills/dispatch-first/SKILL.md (line 53), packages/pi-shared/test/skills-guard.ts (agentDispatches, bundledAgents, shippedAgents, unresolvedAgentDispatches), packages/pi-envoy/src/skills-guard.test.ts, skills/AGENTS.md, packages/pi-shared/AGENTS.md, .github/workflows/envoy-and-contracts.yaml (pi_legion filter), docs/site/media/walkthroughs/legion-operator/record-casts.sh"
   ],
-  "headSha": "aee59ebb4c8523e669b4452454bb53a618ce78b3",
+  "headSha": "8962eb69fd39759b766a5fe05cd58f8192502073",
   "issue": "LEGION-247",
   "learningsHelpful": [],
   "learningsInjected": [],
@@ -47,9 +49,29 @@
       "negativeControl": "packages/pi-legion/extensions/legion.test.ts: a Legion worker session whose process holds the interface at version 2 (mismatch) gets one logger.error line naming @sjawhar/pi-envoy and both versions and the exit hook is called with [1]; with the interface absent the line says `found none` and the process exits; a not-legion session is untouched; /legion-claim-controller with the interface absent rejects with the sentence and does not exit (all PASS in the suite run above).",
       "observed": "pi-envoy alone installed: the probe printed LEGION_PLUGIN_LOADED=no and LEGION_ENVOY_INTERFACE=1 and the gate refused naming the @sjawhar/pi-legion release; both installed: LEGION_PLUGIN_LOADED=yes, LEGION_PLUGIN_ENVOY_INTERFACE=1, LEGION_ENVOY_INTERFACE=1 and the gate passed on the skills and agents the two packages ship (--- PASS: TestTheRealPluginsOnTheRealOhMyPi; the shipped-prompt and agent-model cases PASS); legion-phase-stall-omp 4 pass, legion-role-claim 1 pass (Legion-first order), dispatch-first-omp 2 pass, all on the real binary. CI at a93d2c845b43, the head before the second forward merge of main: Tests run 37583508814 (lint, typecheck, test success), Legion Envoy and Contracts run 37583508796 (every job success; artifacts pi-envoy-pr, pi-legion-pr), Worker Image run 37583508798 (build success), PR Title run 37583508806 success; the runs at this head are the ones the PR body's CI line names.",
       "surface": "The real pinned Oh My Pi (18.6.0) with the two packed plugins installed into a scratch profile through `omp plugin install`, probed as the daemon's pane gate probes it (packages/daemon/internal/daemon/promptreferences_omp_test.go TestTheRealPluginsOnTheRealOhMyPi), plus the two entries on the real binary through packages/pi-shared's harness (packages/pi-legion/extensions/legion-phase-stall-omp.test.ts, packages/pi-envoy/extensions/dispatch-first-omp.test.ts)"
+    },
+    {
+      "command": "cd packages/pi-envoy \u0026\u0026 LEGION_TEST_OMP=$LEGION_OMP_PATH bun test extensions/dispatch-first-omp.test.ts src/skills-guard.test.ts; bash scripts/e2e/lib/pack-plugin.sh pi-envoy $out/e \u0026\u0026 tar xzf $out/e/*.tgz -C $out/pi-envoy --strip-components=1 \u0026\u0026 grep -o 'task(agent=\"[a-z-]*\")' $out/pi-envoy/dist/skills/dispatch-first/SKILL.md \u0026\u0026 tar tzf $out/e/*.tgz | grep -c agents/",
+      "criterion": "A session without LEGION_ROLE loads the Envoy plugin only, and what that plugin injects names nothing that install cannot resolve (round 1, finding 1)",
+      "headSha": "8962eb69fd39759b766a5fe05cd58f8192502073",
+      "negativeControl": "With skills/dispatch-first/SKILL.md:53 reverted to the pre-fix text, the guard fails: `\u003cstaged\u003e/skills/dispatch-first/SKILL.md dispatches plan-gap-analyst, which neither this plugin nor Oh My Pi ships` (1 fail); restored afterwards.",
+      "observed": "10 pass, 0 fail (the injected text reaches the request; the guard resolved every task(agent=…) in the four Envoy skills against the plugin's agents (none) plus the binary's bundled reviewer, scout, security-reviewer, sonic, task); the packed skill carries one dispatch, task(agent=\"scout\"), the name plan-gap-analyst once in prose, and the tarball carries no agents/.",
+      "surface": "The pinned Oh My Pi (18.6.0) running the Envoy entry alone with the dispatch-first skill injected into the model's request (packages/pi-envoy/extensions/dispatch-first-omp.test.ts through packages/pi-shared's harness), the Envoy partition's guard reading the binary's bundled agents with `omp agents unpack`, and the release's exact pack of @sjawhar/pi-envoy"
     }
   ],
   "pullRequest": "https://github.com/sjawhar/legion/pull/1831",
+  "reviewRounds": [
+    {
+      "findings": [
+        "Finding 1 (scripts/pi-plugin-prepack.sh:38; thread 4205510843): the Envoy-injected dispatch-first text named task(agent=\"plan-gap-analyst\"), an agent only @sjawhar/pi-legion ships. Decided by the architect as remedy (b) with NO spec change (Envoy message a64e4e704a5949d6ab1cd8b2c517601f): the partition stands; skills/dispatch-first/SKILL.md:53 names the bundled scout for every session and plan-gap-analyst only for a Legion architect's spec, in prose; packages/pi-envoy/src/skills-guard.test.ts fails on a task(agent=…) in the Envoy skills naming an agent neither the plugin nor the pinned Oh My Pi ships (bundled list read with `omp agents unpack`); skill://legion-* mentions in the Envoy skills stay as role-conditioned sentences, written beside the test. The reviewer's round 2 looks for no spec version.",
+        "Finding 2 (.github/workflows/envoy-and-contracts.yaml:251; thread 4205510851): skills/dispatch/** added to the pi_legion filter so the Legion guard runs on a change to the skill its anchored links target.",
+        "Finding 3 (PR body): the ## Contract change census written from searches at the head: the Legion entry's refusals, the gate's three refusals per lane, the required --envoy-plugin-root, the package/probe-wire rename, and the required package arguments of pack-plugin.sh and install-plugin-profile.sh, each with its search, hits, disposition and an immediate-refusal rollout line. The census found one more unmigrated caller, docs/site/media/walkthroughs/legion-operator/record-casts.sh:112 (install-plugin-profile.sh without --package), fixed in the same commit to install both plugins."
+      ],
+      "fixHead": "8962eb69fd39759b766a5fe05cd58f8192502073",
+      "reviewedHead": "536e915caa5af1363d79b05caece94a5bf1da009",
+      "round": 1
+    }
+  ],
   "schemaVersion": 1,
   "trickyParts": [
     "Nothing guarantees Envoy's factory runs before Legion's, so every consumer resolves the interface lazily (envoyPluginInterface() get-or-create) and publishEnvoyPluginInterface at another version warns once and does not join (first wins), which keeps this repository's own dev checkout usable where two Envoy copies load at different interface versions.",
