@@ -80,6 +80,7 @@ const (
 	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
 	exitNotFound    = 127 // the command `register --exec` was given was not found
 	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
+	exitQuit        = 131 // `secret create` or `secret set` quit (Ctrl-\) at the value prompt: the process ends by SIGQUIT, which a shell's $? reads as 131; nothing was written
 	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
 )
 
@@ -165,8 +166,8 @@ environment:
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
-secret create and set end by the signal when interrupted (Ctrl-C) or terminated at the value
-prompt, which a shell's $? reads as 130 or 143
+secret create and set end by the signal when interrupted (Ctrl-C), quit (Ctrl-\) or terminated at
+the value prompt, which a shell's $? reads as 130, 131 or 143
 `
 
 func main() {

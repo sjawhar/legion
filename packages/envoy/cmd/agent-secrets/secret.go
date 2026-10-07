@@ -166,6 +166,20 @@ var errMoreThanOneLine = errors.New("more than one line was entered at the promp
 // before its closing mark: what was read is not the whole value, so none of it is.
 var errPasteCutShort = errors.New("the terminal hung up before the paste ended")
 
+// errValueCutShort is readHidden's answer when the terminal hung up outside a paste, before the
+// person ended the value: what was typed is not necessarily all they meant to enter.
+var errValueCutShort = errors.New("the terminal hung up before the value ended")
+
+// promptControlByteError is an unhandled control byte typed at the prompt. Its byte lets the form
+// turn the reader error into a usage error that names the invisible input.
+type promptControlByteError byte
+
+func (e promptControlByteError) Error() string {
+	return fmt.Sprintf("the control byte 0x%02x cannot be typed at the prompt", byte(e))
+}
+
+func (e promptControlByteError) ControlByte() byte { return byte(e) }
+
 // shellUnsafe is any character outside the set a POSIX shell reads literally in a bare word.
 var shellUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./:@-]`)
 
@@ -205,6 +219,10 @@ func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 		fmt.Fprintln(stderr)
 		if errors.Is(err, errMoreThanOneLine) {
 			return "", usageErr{fmt.Errorf("a value of more than one line must be piped in: %s < FILE", pipeTo)}
+		}
+		var control interface{ ControlByte() byte }
+		if errors.As(err, &control) {
+			return "", usageErr{fmt.Errorf("the control byte 0x%02x cannot be typed at the prompt; pipe the value in: %s < FILE", control.ControlByte(), pipeTo)}
 		}
 		if err != nil {
 			return "", fmt.Errorf("read the value at the terminal: %w", err)

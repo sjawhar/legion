@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -54,23 +55,29 @@ func readHiddenAtTerminal(fd int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	restore := func() {
-		_, _ = unix.Write(fd, bracketedPasteOff)
-		_ = unix.IoctlSetTermios(fd, ioctlSetTermiosFlush, saved)
-	}
-	stop := restoreOnSignal(restore)
-	defer stop()
 	hidden := *saved
 	hidden.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON
 	hidden.Lflag |= unix.ISIG
 	hidden.Cc[unix.VMIN], hidden.Cc[unix.VTIME] = 1, 0
-	if err := unix.IoctlSetTermios(fd, ioctlSetTermios, &hidden); err != nil {
+	rehide := func() error {
+		if err := unix.IoctlSetTermios(fd, ioctlSetTermios, &hidden); err != nil {
+			return err
+		}
+		// A terminal opened for reading alone (`< /dev/tty`) takes no write, and then brackets no
+		// paste, which the quiet window after the line covers.
+		_, _ = unix.Write(fd, bracketedPasteOn)
+		return nil
+	}
+	restore := func() error {
+		_, _ = unix.Write(fd, bracketedPasteOff)
+		return unix.IoctlSetTermios(fd, ioctlSetTermiosFlush, saved)
+	}
+	stop := restoreOnSignal(restore, rehide)
+	defer stop()
+	if err := rehide(); err != nil {
 		return nil, err
 	}
-	defer restore()
-	// Best effort: a terminal opened for reading alone (`< /dev/tty`) takes no write, and then
-	// brackets no paste, which the quiet window after the line covers.
-	_, _ = unix.Write(fd, bracketedPasteOn)
+	defer func() { _ = restore() }()
 	r := promptReader{special: func(c byte, index int) bool {
 		// A control character set to 0 (Linux) or 0xff (macOS) is disabled.
 		v := saved.Cc[index]
@@ -90,9 +97,12 @@ func readHiddenAtTerminal(fd int) ([]byte, error) {
 			case r.inPaste:
 				return nil, errPasteCutShort
 			}
-			return r.line, nil
+			return nil, errValueCutShort
 		}
 		if r.feed(buf[:n]) {
+			if r.err != nil {
+				return nil, r.err
+			}
 			break
 		}
 	}
@@ -118,6 +128,7 @@ type promptReader struct {
 	ended   bool                         // the line has ended; only line endings may follow
 	more    bool                         // something but line endings followed the line
 	pasted  bool                         // the line was ended inside a bracketed paste
+	err     error                        // a control byte the prompt cannot safely accept
 }
 
 // feed takes one read's bytes and reports whether the read is over: the line ended outside a paste,
@@ -168,13 +179,38 @@ func (r *promptReader) feed(b []byte) bool {
 				_, size := utf8.DecodeLastRune(r.line)
 				r.line = r.line[:len(r.line)-size]
 			}
+		case !r.inPaste && r.special(c, unix.VWERASE):
+			r.line = eraseWord(r.line)
 		case !r.inPaste && r.special(c, unix.VKILL):
 			r.line = r.line[:0]
+		case !r.inPaste && c < 0x20:
+			r.err = promptControlByteError(c)
+			return true
 		default:
 			r.line = append(r.line, c)
 		}
 	}
 	return false
+}
+
+// eraseWord removes trailing blanks, then the preceding word, by rune as canonical terminal
+// VWERASE does. The separating blank stays for the word that follows.
+func eraseWord(b []byte) []byte {
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRune(b)
+		if !unicode.IsSpace(r) {
+			break
+		}
+		b = b[:len(b)-size]
+	}
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRune(b)
+		if unicode.IsSpace(r) {
+			break
+		}
+		b = b[:len(b)-size]
+	}
+	return b
 }
 
 // moreAfterTheLine reports whether anything but line endings follows the line on a terminal that
@@ -220,15 +256,20 @@ var readTerminal = func(fd int, buf []byte) (int, error) {
 	}
 }
 
-// restoreOnSignal makes an interrupt (Ctrl-C) or a termination while the prompt reads put the
-// terminal back with restore and then end the process by that signal, as the default action would,
-// until stop is called: a calling shell reads $? as 130 or 143, and stops its list or loop for
-// SIGINT. Should the signal not end the process, it exits 130 or 143. A signal the process
-// inherited as ignored, as from a script that traps SIGINT with an empty action, stays ignored, so
-// the read goes on with echo off.
-func restoreOnSignal(restore func()) (stop func()) {
+// restoreOnSignal restores the terminal and re-raises a signal that interrupts, quits or stops the
+// prompt. A stop resumes at the call to Kill: then the watcher re-arms that signal, reapplies
+// hidden and turns bracketed paste on before the reader keeps going. A signal inherited as ignored,
+// as from a script that traps it with an empty action, stays ignored.
+func restoreOnSignal(restore func() error, rehide func() error) (stop func()) {
 	var watched []os.Signal
-	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+	for _, sig := range []os.Signal{
+		os.Interrupt,
+		syscall.SIGTERM,
+		syscall.SIGQUIT,
+		syscall.SIGTSTP,
+		syscall.SIGTTIN,
+		syscall.SIGTTOU,
+	} {
 		if !signal.Ignored(sig) {
 			watched = append(watched, sig)
 		}
@@ -240,22 +281,55 @@ func restoreOnSignal(restore func()) (stop func()) {
 	signal.Notify(signals, watched...)
 	done := make(chan struct{})
 	go func() {
-		select {
-		case sig := <-signals:
-			restore()
-			fmt.Fprintln(os.Stderr)
-			signal.Reset(sig)
-			_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
-			time.Sleep(time.Second)
-			if sig == syscall.SIGTERM {
-				os.Exit(exitTerminated)
+		for {
+			select {
+			case sig := <-signals:
+				if err := restore(); err != nil {
+					fmt.Fprintf(os.Stderr, "agent-secrets: restore the value prompt: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Fprintln(os.Stderr)
+				signal.Reset(sig)
+				_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
+				if promptStopSignal(sig) {
+					// Go's default action for job-control signals is ignore, even after Reset. The
+					// re-sent signal preserves its disposition; SIGSTOP supplies the real stop.
+					_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+					// SIGCONT from fg resumes at the next statement.
+					signal.Notify(signals, sig)
+					if err := rehide(); err != nil {
+						_ = restore()
+						fmt.Fprintf(os.Stderr, "agent-secrets: re-hide the value prompt: %v\n", err)
+						os.Exit(1)
+					}
+					continue
+				}
+				time.Sleep(time.Second)
+				switch sig {
+				case syscall.SIGTERM:
+					os.Exit(exitTerminated)
+				case syscall.SIGQUIT:
+					os.Exit(exitQuit)
+				default:
+					os.Exit(exitInterrupted)
+				}
+			case <-done:
+				return
 			}
-			os.Exit(exitInterrupted)
-		case <-done:
 		}
 	}()
 	return func() {
 		signal.Stop(signals)
 		close(done)
+	}
+}
+
+// promptStopSignal is a job-control signal that resumes at the statement after it is re-raised.
+func promptStopSignal(sig os.Signal) bool {
+	switch sig {
+	case syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU:
+		return true
+	default:
+		return false
 	}
 }

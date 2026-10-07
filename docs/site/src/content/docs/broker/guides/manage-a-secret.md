@@ -53,9 +53,11 @@ broker: serving DEMO_DEPLOY_TOKEN
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
 - **The value.** At a terminal the CLI prompts for it and reads one line with echo off, so the
-  value never shows on the screen; Enter or Ctrl-D ends it. Anywhere else it reads standard input
-  to its end, less one trailing newline, so a pipe or a file works too. An empty value (Enter or
-  Ctrl-D alone at the prompt, or empty standard input) is refused (exit 2) and writes nothing.
+  value never shows on the screen; Enter or Ctrl-D ends it. Ctrl-W removes the previous word. Any
+  other control byte is refused and names the command to pipe the value in. Anywhere else the CLI
+  reads standard input to its end, less one trailing newline, so a pipe or a file works too. An
+  empty value (Enter or Ctrl-D alone at the prompt, or empty standard input) is refused (exit 2)
+  and writes nothing.
 
 The CLI checks your sign-in before it asks for the value, so a refused sign-in never has you type a
 secret for nothing. The secret is created on the broker's key with both tags, and the broker serves
@@ -80,10 +82,11 @@ $ agent-secrets secret set DEMO_DEPLOY_TOKEN < key.pem
 set a new value of DEMO_DEPLOY_TOKEN
 broker: serving DEMO_DEPLOY_TOKEN
 ```
-
 Ctrl-C or a termination signal (`SIGTERM`) at the prompt puts your terminal back as it was, echo
 on, and writes nothing. Ctrl-C ends the CLI by SIGINT, so a script or a `;` list running it stops
-there too; a termination signal (SIGTERM) ends it by that signal, which a shell reports as 143.
+there too; a termination signal (SIGTERM) ends it by that signal, which a shell reports as 143. A
+job-control stop (Ctrl-Z) restores the shell terminal while the prompt is stopped; `fg` hides the
+value and turns bracketed paste back on before it resumes reading.
 
 ## Which sign-in may do what
 

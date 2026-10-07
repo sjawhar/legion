@@ -1985,17 +1985,21 @@ so a machine's role writes nothing. `--owner me` is that session name lowercased
 Identity Center user name. `create` and `set` check the sign-in before they read the value: at a
 terminal they prompt on stderr and read one line with echo off (`readHidden`,
 `secret_prompt_unix.go`: byte by byte with canonical mode off, so no line limit cuts it; Enter or
-the terminal's end-of-file character ends it; it turns bracketed paste on and reads a bracketed
-paste through its end however far apart its writes arrive, and on a terminal that does not bracket
-pastes takes input within 200 ms after the line as the paste's rest; any but line endings after the
-line is a paste of more than one line, refused with exit 2; a hang-up inside a bracketed paste
-returns an error (`errMoreThanOneLine`, else `errPasteCutShort`), never what was read; every
-return, and SIGINT or SIGTERM unless inherited as ignored, turns bracketed paste off and puts the
-terminal back with the flushing set call, so nothing typed at the prompt reaches the shell, and a
-signal then re-raises itself, so the process dies by it and a shell reads $? as 130 or 143, an exit
-130 or 143 only if that fails; `TestPromptCtrlCEndsTheProcessBySIGINT` runs the prompt as a
-session leader on a pty and holds that), elsewhere all of stdin less one trailing newline, and an
-empty value is a usage error. `create` writes on the settings' key with both tags
+the terminal's end-of-file character ends it; VWERASE drops the preceding word, and every other
+control byte below 0x20 outside a paste is a usage error naming the byte and the pipe command; it
+turns bracketed paste on and reads a bracketed paste through its end however far apart its writes
+arrive, and on a terminal that does not bracket pastes takes input within 200 ms after the line as
+the paste's rest; any but line endings after the line is a paste of more than one line, refused
+with exit 2; a hang-up outside a paste returns `errValueCutShort`, and one inside a bracketed paste
+returns `errMoreThanOneLine`, else `errPasteCutShort`, never what was read; every return, and
+SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGTTIN or SIGTTOU unless inherited as ignored, turns bracketed
+paste off and puts the terminal back with the flushing set call, so nothing typed at the prompt
+reaches the shell. SIGINT/SIGQUIT/SIGTERM then re-raise themselves, so the process dies by the
+signal and a shell reads $? as 130, 131 or 143, an exit only if that fails. A job-control signal
+stops with SIGSTOP because Go's default ignores those signals, then on SIGCONT re-notifies it,
+rehides the terminal and turns bracketed paste back on. `TestPromptRehidesAfterJobControlStop`
+holds that), elsewhere all of stdin less one trailing newline, and an empty value is a usage error.
+`create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
 secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are

@@ -68,7 +68,11 @@ func LocalARN(name string) string {
 
 // NewLocal holds secrets.
 func NewLocal(secrets ...LocalSecret) *Local {
-	l := &Local{secrets: map[string]LocalSecret{}, aliases: map[string][]string{}, now: time.Now}
+	l := &Local{
+		secrets: map[string]LocalSecret{},
+		aliases: map[string][]string{},
+		now:     func() time.Time { return time.Now().UTC() },
+	}
 	for _, s := range secrets {
 		l.secrets[s.Name] = s
 	}

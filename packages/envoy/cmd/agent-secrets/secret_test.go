@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -570,6 +571,62 @@ func TestSecretAPasteCutShortAtATerminalWritesNothing(t *testing.T) {
 	}
 }
 
+// testControlByteError is a reader error that names a control byte the prompt refused. It has the
+// interface the form uses, so the form test proves that the byte becomes a usage error rather than
+// a generic terminal failure.
+type testControlByteError byte
+
+func (e testControlByteError) Error() string {
+	return fmt.Sprintf("the control byte 0x%02x cannot be typed at the prompt", byte(e))
+}
+
+func (e testControlByteError) ControlByte() byte { return byte(e) }
+
+// TestSecretAControlByteAtATerminalIsAUsageError: an unhandled terminal control byte is a usage
+// error naming the byte and the command that pipes the value in, never a stored byte.
+func TestSecretAControlByteAtATerminalIsAUsageError(t *testing.T) {
+	for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		useTerminal(t)
+		readHidden = func(int) ([]byte, error) { return nil, testControlByteError(0x01) }
+		_, stderr, code := runSecret(args...)
+		want := "the control byte 0x01 cannot be typed at the prompt; pipe the value in"
+		if code != exitUsageError || !strings.Contains(stderr, want) {
+			t.Fatalf("%v: exit %d, stderr %q; want %d naming %q", args, code, stderr, exitUsageError, want)
+		}
+		if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", args, v)
+		}
+		if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+			t.Fatalf("%v created NEW_KEY", args)
+		}
+	}
+}
+
+// TestSecretAValueCutShortAtATerminalWritesNothing: a terminal hang-up while a person still types
+// a value is a failure, never an implicit Enter that writes their partial text.
+func TestSecretAValueCutShortAtATerminalWritesNothing(t *testing.T) {
+	for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		useTerminal(t)
+		readHidden = func(int) ([]byte, error) { return nil, errValueCutShort }
+		_, stderr, code := runSecret(args...)
+		if code != 1 || !strings.Contains(stderr, errValueCutShort.Error()) {
+			t.Fatalf("%v: exit %d, stderr %q; want 1 naming %q", args, code, stderr, errValueCutShort)
+		}
+		if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", args, v)
+		}
+		if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+			t.Fatalf("%v created NEW_KEY", args)
+		}
+	}
+}
+
 // TestStdinIsATerminalOnlyAtATerminal: stdinTerminal answers false for a pipe and for a reader that
 // is no file, so a value piped in is read to its end, with no prompt.
 func TestStdinIsATerminalOnlyAtATerminal(t *testing.T) {
@@ -742,8 +799,9 @@ func TestSecretShowNeverPrintsTheValue(t *testing.T) {
 // rereads once, in order.
 func TestSecretDeleteThenRestoreRereads(t *testing.T) {
 	local := secrets.NewLocal(policytest.Secret("DOOMED_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	sent := &recordingDeletes{Local: local}
 	broker := startSecretBroker(t, servedBy(local))
-	useAWS(t, local, testAccount, adaSignIn)
+	useAWS(t, sent, testAccount, adaSignIn)
 	stdout, stderr, code := runSecret("delete", "DOOMED_KEY")
 	if code != 0 {
 		t.Fatalf("delete: exit %d, stderr %q; want 0", code, stderr)
@@ -752,9 +810,16 @@ func TestSecretDeleteThenRestoreRereads(t *testing.T) {
 	if held.DeletedDate == nil {
 		t.Fatal("DOOMED_KEY is not scheduled for deletion")
 	}
-	// delete prints DeleteSecret's own DeletionDate, the exact end of the 30-day window it
-	// scheduled, which a later read back cannot know.
-	want := "broker: DOOMED_KEY is deleted (restorable until " + formatTime(aws.Time(held.DeletedDate.AddDate(0, 0, recoveryWindowDays))) + ")"
+	if len(sent.outputs) != 1 || sent.outputs[0].DeletionDate == nil {
+		t.Fatalf("DeleteSecret outputs = %+v, want one with DeletionDate", sent.outputs)
+	}
+	// delete prints DeleteSecret's own UTC DeletionDate, the exact end of the 30-day duration it
+	// scheduled. DescribeSecret can only answer its DeletedDate, which is the UTC instant delete ran.
+	deadline := aws.ToTime(sent.outputs[0].DeletionDate)
+	if want := aws.ToTime(held.DeletedDate).Add(recoveryWindowDays * 24 * time.Hour); !deadline.Equal(want) {
+		t.Fatalf("DeletionDate = %s, want DeletedDate plus 30*24h = %s", deadline, want)
+	}
+	want := "broker: DOOMED_KEY is deleted (restorable until " + formatTime(sent.outputs[0].DeletionDate) + ")"
 	if !strings.Contains(stdout, want) {
 		t.Fatalf("delete stdout %q must contain %q", stdout, want)
 	}
@@ -789,15 +854,20 @@ func TestSecretDeleteNeverForces(t *testing.T) {
 	}
 }
 
-// recordingDeletes is a secrets.Local that records every DeleteSecret request it is sent.
+// recordingDeletes is a secrets.Local that records every DeleteSecret request and output it sends.
 type recordingDeletes struct {
 	*secrets.Local
 	requests []*secretsmanager.DeleteSecretInput
+	outputs  []*secretsmanager.DeleteSecretOutput
 }
 
 func (r *recordingDeletes) DeleteSecret(ctx context.Context, in *secretsmanager.DeleteSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error) {
 	r.requests = append(r.requests, in)
-	return r.Local.DeleteSecret(ctx, in, o...)
+	out, err := r.Local.DeleteSecret(ctx, in, o...)
+	if out != nil {
+		r.outputs = append(r.outputs, out)
+	}
+	return out, err
 }
 
 // TestSecretWriteExitsOneWhenTheBrokerRefuses: a write the broker's reread contradicts exits 1

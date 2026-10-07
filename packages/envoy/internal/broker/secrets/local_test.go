@@ -32,6 +32,14 @@ var (
 	_ secretsManager = (*Local)(nil)
 )
 
+// TestNewLocalClockIsUTC: AWS SDK date fields are UTC, so the fake's deletion clock must not take
+// the developer machine's local daylight-saving rules into a recovery deadline.
+func TestNewLocalClockIsUTC(t *testing.T) {
+	if got := NewLocal().now().Location(); got != time.UTC {
+		t.Fatalf("Local.now location = %s, want UTC", got)
+	}
+}
+
 // TestLocalWriteLifecycle pins Local as a fake Secrets Manager the agent-secrets CLI writes to. A
 // create holds the secret with its key, tags and value, and a second create of its name is refused.
 // A put replaces its value, by name or by ARN. Tags merge. A delete schedules it for deletion at the
