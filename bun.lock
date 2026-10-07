@@ -164,7 +164,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-envoy",
-      "version": "7.11.1",
+      "version": "7.11.2",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -181,7 +181,7 @@
     },
     "packages/pi-legion": {
       "name": "@sjawhar/pi-legion",
-      "version": "7.11.1",
+      "version": "7.11.2",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",

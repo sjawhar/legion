@@ -671,6 +671,79 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	}
 }
 
+// LEGION_GENERATION reaches workspace-init's init container too, not only the main container
+// (mainEnvironment's own): workspace-init provision's own candidate-rotation seed
+// (cmd/legion/workspace_init.go's rotateCandidates) reads it from its own container's
+// environment, and a value only the main container carries would never reach it. The fetch
+// container, which never rotates anything, carries neither.
+func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	spec.Generation = 7
+	pod := podOf(t, r, spec, false)
+	for _, name := range []string{initContainer, mainContainer} {
+		got, set := envOf(containerNamed(t, pod, name))["LEGION_GENERATION"]
+		if !set || got != "7" {
+			t.Errorf("%s's LEGION_GENERATION = %q (set: %t), want \"7\"", name, got, set)
+		}
+	}
+	if _, set := envOf(containerNamed(t, pod, fetchContainer))["LEGION_GENERATION"]; set {
+		t.Errorf("%s carries LEGION_GENERATION", fetchContainer)
+	}
+}
+
+// The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
+// container alone, as one JSON object carrying both the list and its notAfter together, never
+// the agent; a launch with none names none. relaunch is what calls setRemovable in production,
+// after the tree's launch turn is held; this reaches directly for podTemplate's own contract,
+// that it reads removableWorkspacesJSON off the launch, not spec.
+func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	notAfter := time.Now().Add(time.Hour)
+	wantCandidates, err := json.Marshal(runtime.RemovableWorkspacesPayload{
+		NotAfter:   notAfter,
+		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		candidates []runtime.RemovableWorkspace
+		want       string
+	}{
+		"candidates": {[]runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}}, string(wantCandidates)},
+		"none":       {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l, err := r.prepare(workerSpec(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
+				t.Fatal(err)
+			}
+			pod := r.podTemplate(l, false).Spec
+			env := envOf(containerNamed(t, pod, initContainer))
+			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
+			if got != tc.want || set != (tc.want != "") {
+				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
+			}
+			for _, name := range []string{fetchContainer, mainContainer} {
+				env := envOf(containerNamed(t, pod, name))
+				if _, set := env["LEGION_REMOVABLE_WORKSPACES"]; set {
+					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", name)
+				}
+			}
+		})
+	}
+}
+
 // Without agent_secrets a pod carries no projected token of Legion's (the one token a pod carries,
 // if any, is the operator's own); with it, exactly one — alone in its volume, for the configured
 // audience and lifetime, mounted read-only in the worker container alone — beside a memory-backed

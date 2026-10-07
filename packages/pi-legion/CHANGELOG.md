@@ -12,9 +12,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `dist/legion.js`), the Legion lifecycle modules (`src/`, the former `src/legion/`), the task agents
   in `agents/`, the eight Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`,
   `legion-retro`, `legion-worker`, `ce-simplify-code`, `thermonuclear-code-quality`,
-  `thermonuclear-deep-review`) at `dist/skills`, and `legion.daemonApiVersion` 12, which did not
-  move: no request, response or pane variable changed. The Envoy messaging and Dispatch tools every
-  session loads are `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
+  `thermonuclear-deep-review`) at `dist/skills`, and `legion.daemonApiVersion`, which the split
+  itself did not move (no request, response or pane variable changed) and which is 13 as the
+  pre-split package's last release left it (LEGION-583: the `push` grant for `legion push` and the
+  worker image's `LEGION_REMOVABLE_WORKSPACES` payload, described in
+  `packages/pi-envoy/CHANGELOG.md`). The Envoy messaging and Dispatch tools every session loads are
+  `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
   through the in-process interface the Envoy entry publishes (`@legion/pi-shared/interface`, version
   1), and in a Legion session refuses to run, naming the remedy, when no `@sjawhar/pi-envoy` is

@@ -454,7 +454,10 @@ func (rig *initRig) holdsNoCanary(what, dir string) {
 }
 
 // plantWorkspaceConfig writes a legacy .jj/workspace-config.toml into a working copy on the tree
-// volume: jj migrates such a file into the configuration it reads.
+// volume: jj migrates such a file into the configuration it reads while the workspace has no
+// workspace-config-id. Provisioning's runner removes it before any jj command of its own reads it
+// (internal/workspace, disarmLegacyConfig), so a vector planting one plants it again before its
+// live check: the tree agent's own command then shows the plant is configuration jj obeys.
 func plantWorkspaceConfig(t *testing.T, dir, toml string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, ".jj", "workspace-config.toml"), []byte(toml), 0o644); err != nil {
@@ -473,6 +476,18 @@ func (rig *initRig) plantFilter(dir, what string) {
 			rig.t.Fatal(err)
 		}
 	}
+}
+
+// plantGit names, in the clone's legacy workspace config, a git that runs probe("git") before
+// the real one.
+func (rig *initRig) plantGit() {
+	rig.t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		rig.t.Fatal(err)
+	}
+	planted := rig.script("git", "exec "+shellprefix.Literal(git)+` "$@"`)
+	plantWorkspaceConfig(rig.t, rig.clone(), "[git]\nexecutable-path = '"+planted+"'\n")
 }
 
 // gitHooks is every hook githooks(5) names.
@@ -540,21 +555,20 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 			live: func(rig *initRig) { rig.git(rig.clone(), "update-ref", "refs/legion/live", "HEAD") },
 		},
 		{
-			name: "git.executable-path in the clone's legacy workspace config",
-			plant: func(rig *initRig) {
-				git, err := exec.LookPath("git")
-				if err != nil {
-					rig.t.Fatal(err)
-				}
-				planted := rig.script("git", "exec "+shellprefix.Literal(git)+` "$@"`)
-				plantWorkspaceConfig(rig.t, rig.clone(), "[git]\nexecutable-path = '"+planted+"'\n")
+			name:  "git.executable-path in the clone's legacy workspace config",
+			plant: func(rig *initRig) { rig.plantGit() },
+			live: func(rig *initRig) {
+				rig.plantGit()
+				rig.jj(rig.clone(), "git", "fetch", "-R", rig.clone())
 			},
-			live: func(rig *initRig) { rig.jj(rig.clone(), "git", "fetch", "-R", rig.clone()) },
 		},
 		{
 			name:  "a working-copy filter in the clone",
 			plant: func(rig *initRig) { rig.plantFilter(rig.clone(), "clone filter") },
-			live:  func(rig *initRig) { rig.jj(rig.clone(), "status", "-R", rig.clone()) },
+			live: func(rig *initRig) {
+				rig.plantFilter(rig.clone(), "clone filter")
+				rig.jj(rig.clone(), "status", "-R", rig.clone())
+			},
 		},
 		{
 			name: "url.<ext::command>.insteadOf",
@@ -592,7 +606,10 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 			name:      "a working-copy filter in the issue workspace's legacy config, which update-stale runs",
 			sameIssue: true,
 			plant:     func(rig *initRig) { rig.plantFilter(rig.workspace(testTree), "workspace filter") },
-			live:      func(rig *initRig) { rig.jj(rig.workspace(testTree), "status") },
+			live: func(rig *initRig) {
+				rig.plantFilter(rig.workspace(testTree), "workspace filter")
+				rig.jj(rig.workspace(testTree), "status")
+			},
 		},
 	}
 	for _, v := range vectors {

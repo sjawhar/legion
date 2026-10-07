@@ -62,7 +62,7 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/claim-session.ts`) or, for the controller, the controller session
 (`src/controller-session.ts`). `package.json` declares the contract it was built against as
-`legion.daemonApiVersion` (currently 12): the claim, credential, workflow, controller, and state
+`legion.daemonApiVersion` (currently 13): the claim, credential, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
 `src/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
@@ -71,7 +71,9 @@ actions run, `src/handoff-actions.ts`), `LEGION_GENERATION` (set by the daemon, 
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
-when the daemon has `dispatch_url` configured. A change to either surface bumps the field and the
+when the daemon has `dispatch_url` configured — and, beside the pane, `LEGION_REMOVABLE_WORKSPACES`
+on a pod's `workspace-init provision` container, which the image's own `legion`, built from the same
+commit as this plugin, decodes strictly. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
 daemon's golden test, is what `src/daemon-api-version.test.ts` pins the field to, so neither
@@ -79,8 +81,9 @@ side bumps alone, and the number is re-read against `main` at every rebase. Cont
 field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-daemon client
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
-(LEGION-247) moved no request, response or pane variable, so the number stayed at 12; the Envoy
-plugin's manifest carries no `legion` key, and the gate reads only this package's.
+(LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
+number is 13 for contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583);
+the Envoy plugin's manifest carries no `legion` key, and the gate reads only this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves

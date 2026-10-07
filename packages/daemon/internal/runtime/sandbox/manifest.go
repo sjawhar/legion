@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -124,6 +125,29 @@ type launch struct {
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
 	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
+	// removableWorkspacesJSON is the tree's removable-workspace candidates (Options.Removable),
+	// JSON-encoded together with their expiry, one object; "" when there are none. Not set by
+	// prepare: relaunch calls setRemovable with what Options.Removable returns, last, under the
+	// tree's launch turn — prepare runs long before that turn is even requested, so a list this
+	// early could already be stale by the time a pod's manifest is actually written.
+	removableWorkspacesJSON string
+}
+
+// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON as
+// runtime.RemovableWorkspacesPayload, called from relaunch with Options.Removable's result and
+// the launch time plus initWaitSeconds, once the tree's launch turn is held. The encoding cannot
+// fail (plain strings and a time.Time), but initEnvironment has no error to return, so a refusal
+// here is relaunch's own to surface before it ever patches the Sandbox.
+func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
+	if err != nil {
+		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
+	}
+	l.removableWorkspacesJSON = string(encoded)
+	return nil
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -583,17 +607,34 @@ func fetchEnvironment() []corev1.EnvVar {
 // PATH are never ones an agent put there; it carries no tool-path variables, and it is never
 // pointed at the provisioning token. A resume names the recorded session the command must find on
 // the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
-// recovered from; both are workspace-init's alone, never the agent's.
+// recovered from; both are workspace-init's alone, never the agent's. LEGION_ROLE and
+// LEGION_GENERATION are l.spec.Role and l.spec.Generation, read together by workspace-init
+// provision's own candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates): a
+// generation alone does not distinguish each role's own first launch of one issue, all at
+// generation 1 — mainEnvironment's copies of both are the worker container's, a different
+// container, so workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is
+// l.removableWorkspacesJSON, set by setRemovable (called from relaunch, after the daemon's
+// candidate list is read, last, under the tree's launch turn), one JSON object carrying both the
+// list and notAfter (RFC 3339: the launch time plus initWaitSeconds) together, so
+// the two can never arrive apart; absent when the daemon found none. notAfter is what bounds how
+// long a pod the Sandbox controller recreates on its own may still trust this same list, read by
+// its own fresh workspace-fetch's start time rather than wall-clock time at removal
+// (dispatch://LEGION-583, cmd/legion/workspace_init.go's removableWorkspacesEnv doc comment).
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
+		{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
+		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
 	}
 	if l.initResumeFile != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
+	}
+	if l.removableWorkspacesJSON != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
 	}
 	return append(env, xdgEnvironment()...)
 }
