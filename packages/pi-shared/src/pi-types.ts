@@ -27,7 +27,8 @@ export interface SessionContext {
     /**
      * Live display title: what `pi.setSessionName`, a rename, or OMP's title model last stored.
      * OMP titles a session (`auto`) from the first message typed at its terminal or given on its
-     * command line; a Legion session sets its own at session_start (`src/legion/session-title.ts`).
+     * command line; a Legion session sets its own at session_start
+     * (`packages/pi-legion/src/session-title.ts`).
      */
     readonly getSessionName?: () => string | undefined;
     /**

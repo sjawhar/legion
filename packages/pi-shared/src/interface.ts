@@ -84,7 +84,8 @@ export function envoyPluginInterface(): EnvoyPluginInterface {
 /**
  * Records the Envoy entry at `from` as a publisher of the interface and returns the object it
  * should push its instance onto. A second entry at the same version joins (a subagent's re-bound
- * instance, or a second copy of the plugin). An entry at another version than the object already
+ * instance, or a second copy of the plugin); an entry is recorded once however many times Oh My Pi
+ * re-binds it. An entry at another version than the object already
  * holds publishes nothing: the first publisher wins, this one warns once and gets `undefined`,
  * which keeps a dev checkout usable where the root manifest's source entry loads beside the
  * installed bundle.
@@ -106,7 +107,7 @@ export function publishEnvoyPluginInterface(from: string): EnvoyPluginInterface 
     }
     return undefined;
   }
-  iface.publishers.push(from);
+  if (!iface.publishers.includes(from)) iface.publishers.push(from);
   return iface;
 }
 

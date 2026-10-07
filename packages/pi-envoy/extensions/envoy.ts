@@ -1670,7 +1670,7 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
     // A person's direct message not yet seen as a user message by the end of the run is not
-    // looked for again (`src/dispatch-user-turn.ts`). The record is kept under this instance's own
+    // looked for again (`@legion/pi-shared/injected-user-turns`). The record is kept under this instance's own
     // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
     // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
     endInjectedUserTurns(sessionID);

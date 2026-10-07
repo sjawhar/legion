@@ -186,7 +186,6 @@
         "@legion/pi-shared": "workspace:*",
         "@oh-my-pi/pi-utils": "^18.1.15",
         "@types/bun": "latest",
-        "nats": "^2.29.2",
         "typescript": "^5.3.0",
         "zod": "4.3.6",
       },

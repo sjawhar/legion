@@ -82,13 +82,13 @@ if ! jq -e --arg bundle "dist/$entry.js" '.omp.extensions == [$bundle]' package.
   refuse "refusing to pack $name with omp.extensions=$(jq -c '.omp.extensions' package.json); rewrite it to $required first (the release, the worker image and the e2e pack step do, then restore the committed manifest)"
 fi
 
-# dist/THIRD_PARTY_NOTICES carries the license of every package the bundle inlines, read from the
-# build's metafile; it fails the pack when one has none.
+# The manifest's own `build` script is the one statement of the bundle's entry, target and
+# externals; bun forwards the extra argument to it. dist/THIRD_PARTY_NOTICES carries the license of
+# every package the bundle inlines, read from the build's metafile; it fails the pack when one has
+# none.
 metafile=$(mktemp)
 trap 'rm -f "$metafile"' EXIT
-bun build "extensions/$entry.ts" --outdir dist --target bun --format esm \
-  --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils \
-  --metafile="$metafile"
+bun run build --metafile="$metafile"
 bun "$root/scripts/third-party-notices.ts" "$metafile" dist/THIRD_PARTY_NOTICES
 rm -rf dist/skills
 stage_skills dist/skills

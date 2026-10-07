@@ -63,11 +63,11 @@ const (
 	notLoadedMarker  = "LEGION_PLUGIN_LOADED=no"
 	loadedFromMarker = "LEGION_PLUGIN_LOADED_FROM="
 	// speaksMarker begins the Envoy plugin interface version the loaded pi-legion speaks;
-	// envoyMarker the version the loaded pi-envoy publishes, or envoyAbsent when none loaded, and
+	// envoyMarker the version the loaded pi-envoy publishes, or envoyNone when none loaded, and
 	// envoyFromMarker where it loaded from; legacyFromMarker where the pre-split package loaded from.
 	speaksMarker     = "LEGION_PLUGIN_ENVOY_INTERFACE="
 	envoyMarker      = "LEGION_ENVOY_INTERFACE="
-	envoyAbsent      = "none"
+	envoyNone        = "none"
 	envoyFromMarker  = "LEGION_ENVOY_LOADED_FROM="
 	legacyFromMarker = "LEGION_LEGACY_PLUGIN_LOADED_FROM="
 	agentsMarker     = "LEGION_OMP_AGENTS=available"
@@ -601,13 +601,13 @@ func (l pluginLane) verifyEnvoyLoadedFrom(location string) error {
 // loadedManifest is the manifest named pkg of the file the load probe reported a plugin loaded
 // from (a `file:` URL, as import.meta.url renders it), links resolved.
 func loadedManifest(location, pkg string) (string, error) {
-	loaded, err := url.Parse(location)
-	if err != nil || loaded.Scheme != "file" || loaded.Path == "" {
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme != "file" || parsed.Path == "" {
 		return "", fmt.Errorf("the load probe reported %s loaded from %q, which is not a file the gate can hold to a manifest", pkg, location)
 	}
-	owner, err := owningManifest(loaded.Path, pkg)
+	owner, err := owningManifest(parsed.Path, pkg)
 	if err != nil {
-		return "", fmt.Errorf("%s loads from %s, and the gate cannot hold it to a manifest: %w", pkg, loaded.Path, err)
+		return "", fmt.Errorf("%s loads from %s, and the gate cannot hold it to a manifest: %w", pkg, parsed.Path, err)
 	}
 	return owner, nil
 }
@@ -712,7 +712,7 @@ func (l pluginLane) judgeLoaded(answer loadAnswer, version string) (loaded, erro
 	if answer.legacyFrom != "" {
 		return loaded{}, l.legacyLoaded(answer.legacyFrom)
 	}
-	if answer.envoy == envoyAbsent {
+	if answer.envoy == envoyNone {
 		return loaded{}, l.envoyAbsent(version)
 	}
 	expected, err := strconv.Atoi(answer.speaks)

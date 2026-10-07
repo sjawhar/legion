@@ -118,8 +118,9 @@ trap 'exit 143' TERM
 
 tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" "$package" "$work/pack")
 # The package's npm name and the checkout's version, as the packed manifest carries them.
-name=$(tar xzOf "$tarball" package/package.json | jq -r .name)
-version=$(tar xzOf "$tarball" package/package.json | jq -r .version)
+packed=$(tar xzOf "$tarball" package/package.json)
+name=$(jq -r .name <<<"$packed")
+version=$(jq -r .version <<<"$packed")
 
 mkdir -p "$dest"
 tar xzf "$tarball" -C "$dest" --strip-components=1
