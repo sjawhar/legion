@@ -634,15 +634,12 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, tc := range map[string]struct {
-		spec       runtime.SpawnSpec
-		controller bool
-	}{
-		"a worker":       {workerSpec(t), false},
-		"the controller": {controllerSpec(t), true},
+	for name, spec := range map[string]runtime.SpawnSpec{
+		"a worker":       workerSpec(t),
+		"the controller": controllerSpec(t),
 	} {
 		t.Run(name, func(t *testing.T) {
-			main := podOf(t, r, tc.spec, false).Containers[0]
+			main := podOf(t, r, spec, false).Containers[0]
 			carried := map[string]string{}
 			shim := main.Command[:slices.Index(main.Command, "--")]
 			for i := 1; i < len(shim); i++ {
@@ -656,7 +653,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 				}
 			}
 			handed := map[string]string{}
-			for _, a := range r.handedAddresses(tc.controller) {
+			for _, a := range r.handedAddresses(spec.Role) {
 				if a.value != "" {
 					handed[a.name] = a.value
 				}
