@@ -204,9 +204,11 @@ func namedNATSURLs(urls []string) string {
 
 // namedNATSPodValue names the ENVOY_NATS_URL an existing pod holds, which can be from the same
 // older grammar namedURL handles. mainEnvironment comma-joined the old daemon's list, but this
-// formatter never splits it: url.Parse reads the whole string, and namedURL allowlists only its
-// scheme, host and port. A path holding a later URL or a credential-shaped value never prints. A
-// parse failure is the one case whose components are unknown, so it is xxxxx whole.
+// formatter never splits it: raw commas are valid in userinfo, so splitting
+// nats://user:pa,ss@host:4222 at the comma puts `user:pa` in a fragment's host position, which an
+// allowlist would print. url.Parse reads the whole string, and namedURL allowlists only its scheme,
+// host and port. A path holding a later URL or a credential-shaped value never prints. A parse
+// failure is the one case whose components are unknown, so it is xxxxx whole.
 func namedNATSPodValue(address string) string {
 	if address == "" {
 		return "(unset)"

@@ -632,8 +632,10 @@ address that moved, with the value the pod holds and the one a new pod is handed
 that detail, so it constructs every printed endpoint from only its scheme, host and port, adding
 `xxxxx@` when userinfo is present. Path, query and fragment never appear, which also protects a pod
 an earlier daemon launched before the current endpoint grammar refused queries and fragments. A
-pod's `ENVOY_NATS_URL` is its old daemon's comma-joined list; it is parsed whole, never split, so
-later URLs and their paths never appear either. A malformed field is named only `xxxxx`. A pod this
+pod's `ENVOY_NATS_URL` is its old daemon's comma-joined list; it is parsed whole, never split.
+Raw commas are valid in userinfo: splitting `nats://user:pa,ss@host:4222` would promote `user:pa`
+to a fragment's host, which the endpoint allowlist would print. Whole parsing keeps later URLs and
+their paths out of the detail. A malformed field is named only `xxxxx`. A pod this
 runtime launched always compares equal, so only the pods a daemon under another configuration
 launched are ever
 reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
