@@ -10,9 +10,11 @@ import {
   credentialSessionLines,
 } from "./session";
 
+// Only the enrollment line carries a preamble: when both ids are shown, it says which one the
+// broker verified. The request's line is the request's session as written, with no preamble.
 const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
   enrollment: "The session that enrolled: ",
-  request: "The session the request says it came from: ",
+  request: "",
 };
 
 function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
