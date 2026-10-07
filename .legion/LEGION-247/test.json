@@ -1,5 +1,5 @@
 {
-  "completed": "2026-10-07T16:03:10.117110006Z",
+  "completed": "2026-10-07T16:04:43.259561212Z",
   "failed": 0,
   "failures": [],
   "implementerProof": {
@@ -18,7 +18,7 @@
     "The PR body now carries a `## Contract change census` (five entries); every entry a person invokes was driven here: entries 3 and 5 at this head, entries 1, 2 and 4 in round 0 on the real binary, the controller lane and the name check (and the name check again here).",
     "Round 2 (review round 2, changes_requested): the fix adc58ad2c606 changes one string in packages/envoy-client/src/dispatch-execute.ts, repins three assertions and rebuilds the two claude-envoy bundles; no plugin entry, Go code, manifest, skill or workflow changed, so rounds 0 and 1's lane proofs stand for that code. dispatch_request_approval's copy of the reminder is covered by the repinned test (the same constant); the dispatch_issue copy was driven on the installed plugin.",
     "Round 3: GitHub reported the pull request CONFLICTING twice after the approval (retro's docs/solutions commit, then main's #1824 contract 14 and the daemon-launched controller goldens); the implementer merged main forward twice (61a99564, 013b1415). Fingerprint at 8383d5b6 (round 2's verified head) b219493e67… → at 84d0a35c 1932febd55…: changed, so this was a full round rather than the bare gates; the delta is main's content in the branch's diff (7.12.0, contract 14, the controller pod goldens, controller-session edits carried into the moved files), not a change to what this pull request adds.",
-    "GitHub has not synchronised the pull request to the branch tip: at 16:01Z the branch ref legion/LEGION-247 is 84d0a35c (the implementer's handoff commit, committed 15:10Z) while the pull request's headRefOid is 013b1415 (27 commits; no `synchronize` event, no check run and no workflow run exists for 84d0a35c; the PR Title runs at 15:17Z and 15:44Z are `edited` events at 013b1415). mergeStateStatus CLEAN at that head. The tester's handoff push moves the ref again; whether GitHub then catches up is checked after the push and reported to the architect either way."
+    "GitHub has not synchronised the pull request to the branch tip: at 16:01Z the branch ref legion/LEGION-247 is 84d0a35c (the implementer's handoff commit, committed 15:10Z) while the pull request's headRefOid is 013b1415 (27 commits; no `synchronize` event, no check run and no workflow run exists for 84d0a35c; the PR Title runs at 15:17Z and 15:44Z are `edited` events at 013b1415). mergeStateStatus CLEAN at that head. The tester's handoff push moves the ref again; whether GitHub then catches up is checked after the push and reported to the architect either way. After the tester's handoff push (branch tip d3495d09f804, skip-checks: true), GitHub synchronised the pull request: headRefOid d3495d09f804, 29 commits (84d0a35c now among them), mergeStateStatus BLOCKED (the usual state awaiting the required approval at the new head); the code head whose verdict the daemon carries is 013b1415a4b9, every workflow green there."
   ],
   "passed": 31,
   "phase": "test",
