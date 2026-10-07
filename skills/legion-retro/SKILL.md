@@ -119,8 +119,8 @@ head whose required check failed, so the tree stops at the merger.
    request template of the repository you are working in, derive from the changed paths. When
    they derive nothing, skip steps 2 to 4 and go on to the push.
 2. Compute it the way they say, for the paths the pull request changes at your commit, the files
-   GitHub lists on it: after `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch`,
-   `jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <commit>)' --to <commit> --name-only`
+   GitHub lists on it:
+   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <commit>)' --to <commit> --name-only`
    lists them, `<base>` the pull request's base branch and `<commit>` your docs commit. Where a
    line affirms work, such as a checklist completed for a class of path, do that work for the
    paths your commit adds before you write the line: the line is a claim. That work may change
@@ -128,8 +128,10 @@ head whose required check failed, so the tree stops at the merger.
    anything else above the approved head voids the approval.
 3. In a fresh `mktemp -d` directory outside `$LEGION_WORKSPACE` (the one place you write outside
    it: jj snapshots a file inside it, and a fixed name in a shared `/tmp` can hold another
-   session's body), save the live body twice:
-   `cd -- "$LEGION_WORKSPACE" && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md`.
+   session's body), save the live body twice, and stop unless the read succeeded and is not
+   empty (`pipefail` makes a failed read fail the line; without it the line exits with `tee`'s
+   status and leaves two empty files):
+   `cd -- "$LEGION_WORKSPACE" && set -o pipefail && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md && test -s <dir>/before.md`.
    In `<dir>/body.md`, change the lines it carries for that content and add any it lacks where
    the instructions place them; other phases' lines stay as they wrote them.
 4. Write it back before the push:
@@ -139,8 +141,9 @@ head whose required check failed, so the tree stops at the merger.
    head, on a diff without your commit, and may fail there; READY reads the head your push makes.
 
 When you cannot compute that content, cannot do the work a line affirms within
-`docs/solutions/`, or GitHub refuses the body, push nothing and do not complete: tell the
-architect with `envoy_publish` to its role topic, naming what failed.
+`docs/solutions/`, the body read fails or comes back empty, or GitHub refuses the body, push
+nothing and do not complete: tell the architect with `envoy_publish` to its role topic, naming
+what failed.
 
 Then push the commit with `legion push`. When the push is refused after step 4 wrote the body,
 write `<dir>/before.md` back the same way before you report the refusal to the architect, so the

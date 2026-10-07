@@ -172,8 +172,9 @@
   computes that content the way the repository's instructions say, for the files the pull request
   changes at its commit, does the work any line of it affirms (inside `docs/solutions/` only, so
   the approval stands), and writes only those lines into the live body before `legion push`, so
-  the push's checks read it. When it cannot, it pushes nothing and tells the architect, whose
-  skill says how to answer; a push refused after the body edit puts the body back. The
+  the push's checks read it. When it cannot, or its read of the body fails or comes back empty, it
+  pushes nothing and tells the architect, whose skill says how to answer; a push refused after the
+  body edit puts the body back. The
   implementer's daemon prompt names `skill://legion-retro` for `Phase: retro`, and the merge-gate
   reference, the architect skill, `skills/AGENTS.md` and the docs site name the body edit among
   retro's outputs. The retro skill's opening no longer says its `docs/...` paths are in
