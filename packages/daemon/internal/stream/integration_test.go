@@ -174,14 +174,14 @@ type gate struct {
 	hellos int
 }
 
-func (g *gate) resolve(bootToken string) (claim.Token, uint64, bool, bool) {
+func (g *gate) resolve(bootToken string) (claim.Token, uint64, bool, bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if bootToken != integrationToken {
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	}
 	g.hellos++
-	return integrationClaim, integrationGeneration, false, g.open
+	return integrationClaim, integrationGeneration, false, g.open, nil
 }
 
 func (g *gate) state() (open bool, hellos int) {
@@ -203,11 +203,11 @@ type daemonEnd struct {
 	log      *lockedBuffer
 }
 
-func listen(t *testing.T, addr string, g *gate) *daemonEnd {
+func listen(t *testing.T, addr string, resolve stream.HelloResolver) *daemonEnd {
 	t.Helper()
 	log := &lockedBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
-	listener, err := stream.Listen(ctx, addr, g.resolve, stream.Options{
+	listener, err := stream.Listen(ctx, addr, resolve, stream.Options{
 		RPCTimeout: integrationWait,
 		Log:        slog.New(slog.NewTextHandler(log, nil)),
 	})
@@ -342,7 +342,7 @@ func bridge(t *testing.T, legion, addr string) {
 	}
 
 	g := &gate{}
-	first := listen(t, addr, g)
+	first := listen(t, addr, g.resolve)
 	// The address the shim is told, and the one the restarted daemon binds again: under TCP it is
 	// the port the kernel chose for the first listener.
 	addr = first.listener.Addr()
@@ -455,7 +455,7 @@ func bridge(t *testing.T, legion, addr string) {
 
 	// The daemon is back on the same address: the shim redials, says hello again, and the turns
 	// from the gap arrive in the order OMP reported them, ahead of anything newer.
-	second := listen(t, addr, g)
+	second := listen(t, addr, g.resolve)
 	second.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
 	if _, hellos := g.state(); hellos <= hellosBefore {
 		t.Fatalf("the restarted listener resolved no new hello (%d before, %d after)", hellosBefore, hellos)
@@ -504,5 +504,105 @@ func bridge(t *testing.T, legion, addr string) {
 	}
 	if lines := second.warnings(); len(lines) != 0 {
 		t.Fatalf("the restarted listener logged %q", lines)
+	}
+}
+
+// A hello the daemon could not resolve — its store did not answer — is no refusal: the real shim,
+// whose hello closed unacked, redials with its backoff, and the redial is acked and spawns OMP. The
+// listener logs the failed read once and refuses nothing.
+func TestTheRealShimRedialsAHelloTheDaemonCouldNotResolve(t *testing.T) {
+	legion := buildLegion(t)
+	work := t.TempDir()
+	tokenFile := filepath.Join(work, "boot-token")
+	if err := os.WriteFile(tokenFile, []byte(integrationToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(work, "omp.pid")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	hellos := 0
+	d := listen(t, "tcp://127.0.0.1:0", func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if bootToken != integrationToken {
+			return "", 0, false, false, nil
+		}
+		hellos++
+		if hellos == 1 {
+			return "", 0, false, false, errors.New("read claim: context deadline exceeded")
+		}
+		return integrationClaim, integrationGeneration, false, true, nil
+	})
+
+	shimOut := &lockedBuffer{}
+	shim := exec.Command(legion, "worker-shim", "--connect", d.listener.Addr(), "--boot-token-file", tokenFile, "--", self)
+	shim.Env = append(os.Environ(), fakeOMPEnv+"=1", "FAKE_OMP_STDIN="+filepath.Join(work, "omp-stdin.ndjson"), "FAKE_OMP_PID="+pidFile)
+	shim.Stdout = shimOut
+	shim.Stderr = shimOut
+	shim.WaitDelay = time.Second
+	if err := shim.Start(); err != nil {
+		t.Fatalf("start the shim: %v", err)
+	}
+	// exited is closed once the shim has been reaped, so the test and its cleanup can both wait on it.
+	exited := make(chan struct{})
+	go func() {
+		_ = shim.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-exited:
+		default:
+			_ = shim.Process.Kill()
+			if pid, err := os.ReadFile(pidFile); err == nil {
+				if childPid, err := strconv.Atoi(string(pid)); err == nil {
+					_ = syscall.Kill(childPid, syscall.SIGKILL)
+				}
+			}
+			<-exited
+		}
+		if t.Failed() {
+			t.Logf("the shim's output:\n%s", shimOut.String())
+		}
+	})
+
+	d.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
+	testwait.Eventually(t, "the shim to spawn OMP after the redial's ack", func() bool {
+		_, err := os.Stat(pidFile)
+		return err == nil
+	})
+	mu.Lock()
+	resolved := hellos
+	mu.Unlock()
+	if resolved != 2 {
+		t.Fatalf("the listener resolved %d hellos, want the unresolved one and the redial", resolved)
+	}
+	if !strings.Contains(shimOut.String(), "stream closed before hello_ack") {
+		t.Fatalf("the shim never reported the unacked hello it redialled:\n%s", shimOut.String())
+	}
+
+	await, cancelAwait := context.WithTimeout(context.Background(), integrationWait)
+	defer cancelAwait()
+	conn, err := d.listener.Await(await, integrationClaim)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	if err := conn.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	d.expect(t, stream.Closed{Claim: integrationClaim})
+	select {
+	case <-exited:
+	case <-time.After(integrationWait):
+		t.Fatal("the shim did not exit after the daemon's shutdown")
+	}
+
+	lines := d.log.lines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "worker-stream: could not resolve a hello's boot token; the shim redials") ||
+		!strings.Contains(lines[0], "read claim: context deadline exceeded") {
+		t.Fatalf("the listener logged %q, want only the failed read", lines)
 	}
 }
