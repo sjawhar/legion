@@ -750,9 +750,10 @@ then an `admission_cap` above 16 admits trees whose pods cannot schedule.
 
 The provisioning token, the implement App's installation token, is a credential for the whole
 repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
-and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
-`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
-filters and `ext::` transports, and send credentials through the proxy the configuration names —
+and jj configuration (a legacy `.jj/workspace-config.toml`, which jj would migrate into what it
+reads, included), its remote URL, its `http.proxy`. git and jj obey all of it — they run hooks, the
+git jj is told to run, working-copy filters and `ext::` transports, and send credentials through
+the proxy the configuration names —
 so no process that can read the token may touch the tree volume. The Go coordinator's pods
 (`packages/daemon`) keep to that with two init containers:
 
@@ -1244,6 +1245,66 @@ its cleanup delete failed too — is not the sweep's to find (no pod names it, a
 lists Secrets); the next spawn of that `(issue, role)` reclaims it: once `retirePreviousPods` has
 proven no pod of the role exists, the spawn deletes the same-name Secret by name (a 404 is nothing to
 reclaim) before creating its own, exactly as it treats a same-name pod.
+
+### Finished siblings' workspaces
+
+The tree volume otherwise only grows: every issue's jj workspace stays on it even once that issue
+is done. On every `workspace-init provision`, the Go daemon computes which of the tree's other
+issues are safe to remove and passes that list as JSON in `LEGION_REMOVABLE_WORKSPACES` on the
+`provision` init container alone (never `workspace-fetch`, never the main `worker` container).
+`removableWorkspaces` (`packages/daemon/internal/daemon/removable.go`) states the candidate rule
+from the daemon's own claim store; `relaunch` (`internal/runtime/sandbox`) also drops any
+candidate that still has a live, non-terminal pod of its own tree, a second guarantee on
+different evidence — it cannot tell a claim whose `fail` persisted `StateFailed` despite its own
+`suspendProcess` erroring from one truly gone, so that pod, not the daemon's own claim store, is
+checked directly for this one question. `workspace-init` is the process that judges and removes
+each candidate. No jj configuration a tree agent writes ahead of a command reaches its jj commands:
+jj 0.38 and later keep a repository's and a workspace's configuration in the config home (the
+pod's own), and the one way a file on the tree volume becomes jj configuration, jj migrating a
+legacy `.jj/workspace-config.toml` or `.jj/repo/config.toml` that has no id file beside it, is
+closed by removing that file before each jj command provisioning and removal run
+(`disarmLegacyConfig`, `internal/workspace/config.go`), the repository's only in the shared
+clone's own `.jj/repo`. Every jj command run in a workspace names it with `-R`, so jj never walks
+up to an ancestor's `.jj`. A jj command is refused when the `.jj` it would open, or the shared
+clone's `.jj` or `.jj/repo`, is a symlink or anything but a real directory; when any directory of
+the layout between the state directory and a workspace or the shared clone (`repos/<host>/<owner>/
+<name>`, `workspaces/<owner>/<name>/<issue>`) is a symlink, which the refusal names (the state
+directory itself may be one); when it runs in a workspace that has no `.jj`; and when the
+workspace's `.jj/repo` names any other directory, followed through symlinks and `..` as jj itself
+follows it, or is neither a directory nor a regular file. The worker image's jj is 0.45; on the
+tmux runtime, which runs the host's jj through the same code, the daemon refuses to start with a
+jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38
+`.jj/repo/config.toml` is the repository's live configuration. It snapshots the candidate's own
+working copy with `--config` overrides that hold the snapshot's working-copy filter and signing
+programs off even so (`snapshotOverrides`, `internal/workspace/removal.go`), keeps the workspace
+whenever that snapshot leaves anything unaccounted for — an untracked path, anything on stderr, or
+a nested repository the snapshot cannot see at all — and otherwise removes it only once every
+commit it holds is reachable from a remote bookmark or the recorded merged pull-request head,
+renaming its directory aside before the slower recursive delete so a kill mid-delete is finished, not
+re-judged, on the next pass. A removed workspace's gitignored content is deleted with it: nothing
+but a pushed commit protects anything on this volume, and gitignored content is never pushed. The
+pass runs inside a 90 s budget, deferring the rest of the list to the tree's next launch once
+spent, and rotates the candidate order by the pod's own issue, role, and launch generation
+together (issue alone never changes across relaunches of the same issue, and generation alone
+does not distinguish one issue's own phase workers' first launches, all at generation 1) so one
+expensive candidate does not starve the same candidates on every launch. The daemon's own list is
+stamped with the launch time plus the init-wait window (`initWaitSeconds`); `workspace-init`
+removes nothing at all once its own `workspace-fetch` started later than that — comparing the
+fetch's own start, not wall-clock time at removal, is what keeps this bound independent of how
+long the clone itself then takes (`workspace.FetchTimeout`, up to 30 minutes) — so a pod the
+Sandbox controller recreates on its own long after the daemon last computed the list (an
+eviction, a node drain, a hand deletion) cannot act on one gone stale. A list the pod's own
+`legion` cannot read in full (a field it does not know, anything after the JSON object, no
+`notAfter`, no candidates) likewise removes nothing, and the pass logs why; the payload is part of
+`DaemonAPIVersion`'s contract, so a change to its shape bumps that number and the daemon's image
+probe refuses an image whose `legion` would read it the old way.
+
+The worker's own jj working-copy snapshot before `legion push`'s network push can take 63-100 s
+on a near-full volume (`removalBudget`'s own doc comment, `cmd/legion/workspace_init.go`, names
+the measured range), so that push gets `credential.pushTTL` (5 minutes) in place of the usual 60
+seconds, minted whenever a bash call invokes it — alone, as one segment of a compound command, or
+a pipeline's last stage (`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics
+and the LEGION-17 case this closes).
 
 ### RBAC the daemon needs
 

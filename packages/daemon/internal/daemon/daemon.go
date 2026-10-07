@@ -373,9 +373,12 @@ type plan struct {
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
-// conns the stream listener, stream the address every agent's shim dials, and tokens the
-// workflow's App tokens, nil without a workflow.
-type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
+// conns the stream listener, stream the address every agent's shim dials, tokens the workflow's
+// App tokens, nil without a workflow, and removable the tree's candidate function
+// (removableWorkspaces), which needs sup — created before this is called (openSupervision) — so
+// it cannot be built inside the factory itself; a runtime that does not provision workspaces in
+// its own pods ignores it.
+type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -481,7 +484,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens) (runtime.Runtime, error) {
+	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
 		opts.StreamAddress, opts.Conns = streamAddress, conns
 		rt, err := tmux.New(opts)
@@ -586,7 +589,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps)
+	rt, err := p.newRuntime(supervising, listener, dial, apps, removableWorkspaces(st.Pool(), record.NewStore(), sup))
 	if err != nil {
 		cancel()
 		cancelStream()

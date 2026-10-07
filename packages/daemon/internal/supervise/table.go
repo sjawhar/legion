@@ -353,6 +353,15 @@ func LiveStates() []ClaimState {
 	return slices.Clone(live)
 }
 
+// GoneStates are the states of a claim whose process is not coming back on its own: suspended,
+// failed, or retired. It is a copy, so no caller changes the table's own set. Exported so a caller
+// outside this package (internal/daemon's removableWorkspaces) names this table's own terminal
+// states instead of re-declaring the same three-state literal independently, where a future
+// terminal state added here would not propagate to it.
+func GoneStates() []ClaimState {
+	return slices.Clone(gone)
+}
+
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"

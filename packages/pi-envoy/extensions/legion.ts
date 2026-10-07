@@ -54,7 +54,8 @@ const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
  * `jj git push`, the `gh` shim), Oh My Pi's `github` tool, and any tool whose `path` or `paths`
  * names a `pr://` or `issue://` URL (`read`, `grep`, `glob`, `ast_grep`, `ast_edit` all resolve
  * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
- * that runs `legion gh`. A grant lives 60 seconds, so a call that reaches `gh` long after the
+ * that runs `legion gh`. A grant lives its ttl (60 seconds, or pushTTL for a `legion push`
+ * invocation), so a call that reaches `gh` long after the
  * pane's last bash command needs its own. */
 function needsGrant({ toolName, input }: ToolCallEvent): boolean {
   if (toolName === "bash") return typeof input.command === "string";
@@ -210,6 +211,43 @@ function splitShellCommands(command: string): string[][] | undefined {
   return commands;
 }
 
+/** The index of the first word that is name itself or ends `/name` (an absolute-path shim, e.g.
+ * the worker-bin `jj` or `legion`) and whose immediately following words equal, in order, every
+ * word of sequence ([] means no required follow-up: the bare first-mention search
+ * jjLogRewriteInvocation uses, which then scans the rest of the words itself). A later mention
+ * is tried when an earlier one's sequence does not match (`legion gh -- legion push`: the first
+ * `legion` is not followed by `push`, the second is), and neither looks only at words[0], so a
+ * prefix before the command name (`time`, `timeout 600`, an env assignment such as `FOO=1`, a
+ * leading `!` or `if`, which splitShellCommands's naive split leaves attached ahead of a `;`)
+ * never hides it. Shared by jjLogRewriteInvocation, isPushInvocation, and the handoff-complete
+ * rule's own invocation matcher. */
+function commandMatch(words: readonly string[], name: string, sequence: readonly string[]): number {
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    if (word !== name && !word?.endsWith(`/${name}`)) continue;
+    if (sequence.every((expected, offset) => words[index + 1 + offset] === expected)) return index;
+  }
+  return -1;
+}
+
+/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: a
+ * `legion` (or `.../legion`) mention immediately followed by `push`. */
+function isPushInvocation(words: readonly string[]): boolean {
+  return commandMatch(words, "legion", ["push"]) !== -1;
+}
+
+/** Whether tokenised simple commands (splitShellCommands' result, shared with paneRuleRefusal's
+ * own tokenisation of the same bash command rather than retokenising it) include a `legion push`
+ * invocation -- `legion push`, `cd … && legion push`, a pipeline's last segment -- so the
+ * tool_call hook mints its grant with the longer pushTTL (dispatch://LEGION-583): jj's own
+ * working-copy snapshot before the network push can outrun the ordinary sixty seconds on a
+ * near-full tree volume. undefined (a tool call that is not `bash`, or an unterminated quote) is
+ * judged not a push: the ordinary grant is the safe default, since missing a genuine push here
+ * costs only the grant expiring before it, which `legion push` already fails loudly on. */
+function commandsRunPush(commands: string[][] | undefined): boolean {
+  return commands?.some(isPushInvocation) ?? false;
+}
+
 /** A rule the tool_call hook holds a pane's shell-running tool calls to. */
 interface PaneRule {
   /** The plain-text rule: what `text` names that the rule refuses, or undefined. */
@@ -228,7 +266,7 @@ interface PaneRule {
  * with them (the spec's tradeoff: one rephrase), while `-m "undo this"` is a different word and
  * stays allowed. `undo`/`abandon` count anywhere; `restore`/`revert` only beside `op`/`operation`. */
 function jjLogRewriteInvocation(words: readonly string[]): string | undefined {
-  const jj = words.findIndex((word) => word === "jj" || word.endsWith("/jj"));
+  const jj = commandMatch(words, "jj", []);
   if (jj === -1) return undefined;
   const args = words.slice(jj + 1);
   const rewritesLog =
@@ -264,12 +302,7 @@ const LEGION_HANDOFF_COMPLETE: PaneRule = {
     LEGION_HANDOFF_COMPLETE_MENTION.test(text) ? "legion handoff complete" : undefined,
   // Both CLIs take `handoff` straight after the program and `complete` straight after `handoff`.
   invocation: (words) => {
-    const legion = words.findIndex(
-      (word, index) =>
-        (word === "legion" || word.endsWith("/legion")) &&
-        words[index + 1] === "handoff" &&
-        words[index + 2] === "complete"
-    );
+    const legion = commandMatch(words, "legion", ["handoff", "complete"]);
     return legion === -1 ? undefined : words.slice(legion).join(" ");
   },
   refusal: (attempt) =>
@@ -352,16 +385,21 @@ function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
   return NON_FILE_WRITE_URL.exec(writeTarget(toolCall.input.path))?.[1]?.toLowerCase();
 }
 
-/** The refusal for the first of `rules` a tool call breaks, or undefined. A `bash` command is
- * tokenised, a supervised service's start included (a `bash` call with a `name`); `eval` code and
- * the content a `write` sends to a `proc://` target (stdin for a supervised service) are held to
- * the plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
-function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): string | undefined {
+/** The refusal for the first of `rules` a tool call breaks, or undefined. commands is bash's own
+ * tokenisation (splitShellCommands(input.command)), computed once by the caller and shared with
+ * the push-grant check later in the same hook, rather than tokenised twice for the same command.
+ * A supervised service's start is included (a `bash` call with a `name`); `eval` code and the
+ * content a `write` sends to a `proc://` target (stdin for a supervised service) are held to the
+ * plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
+function paneRuleRefusal(
+  toolCall: ToolCallEvent,
+  rules: readonly PaneRule[],
+  commands: string[][] | undefined
+): string | undefined {
   if (rules.length === 0) return undefined;
   const { toolName, input } = toolCall;
   if (toolName === "bash") {
     if (typeof input.command !== "string") return undefined;
-    const commands = splitShellCommands(input.command);
     for (const rule of rules) {
       const attempt = refusedCommand(input.command, commands, rule);
       if (attempt !== undefined) return rule.refusal(attempt);
@@ -515,7 +553,11 @@ export default function legionExtension(pi: PiApi): void {
     // instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the handler,
     // never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
-    const refusal = paneRuleRefusal(toolCall, paneRules);
+    const commands =
+      toolCall.toolName === "bash" && typeof toolCall.input.command === "string"
+        ? splitShellCommands(toolCall.input.command)
+        : undefined;
+    const refusal = paneRuleRefusal(toolCall, paneRules, commands);
     if (refusal !== undefined) return { block: true, reason: refusal };
     // No other gate applies to a subagent's own tool calls: the role gates below bind the session
     // that holds the claim, and a subagent shares its parent's identity and claims no role (see
@@ -573,6 +615,7 @@ export default function legionExtension(pi: PiApi): void {
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
+        push: commandsRunPush(commands),
       })
     );
   });

@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +41,12 @@ type Command struct {
 	Env     []string
 	Dir     string
 	Timeout time.Duration
+	// Clone is the shared clone whose workspace Dir is, for a jj command run in a workspace's own
+	// directory (RunCheckedIn, which also names Dir with -R): the runner refuses one whose `.jj`
+	// is missing or not a real directory, or whose `.jj/repo` names any other repository
+	// (disarmLegacyConfig). "" for a command that opens the shared clone itself (-R, onClone) or
+	// no repository.
+	Clone string
 }
 
 // Result is the process result. A non-zero ExitCode, or TimedOut, is a process failure; a
@@ -133,9 +141,17 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	args := command.Argv[1:]
 	if command.Argv[0] == "jj" {
-		// jj starts the git its configuration names, and a tree agent can set that: jj migrates a
-		// .jj/workspace-config.toml it finds in a working copy into the configuration it reads. A
-		// --config flag outranks every configuration file, so jj starts the git boot resolved.
+		guarded, err := guardWorkspace(jjWorkspaceRoot(command), command.Clone, true)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := disarmLegacyConfig(guarded.jjDir, guarded.repo); err != nil {
+			return Result{}, err
+		}
+		// jj starts the git its configuration names, and a tree agent can still set that where
+		// disarmLegacyConfig does not reach: on the tmux runtime a pane shares the config home jj
+		// keeps a repository's configuration in. A --config flag outranks every configuration
+		// file, so jj starts the git boot resolved.
 		git, ok := r.tools["git"]
 		if !ok {
 			return Result{}, errors.New("workspace command jj needs the git the daemon resolved at boot")
@@ -170,6 +186,217 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
 	}
 	return result, nil
+}
+
+// guardedWorkspace is what a jj command has opened after guardWorkspace held each untrusted path
+// to the Location layout. disarmLegacyConfig only removes the legacy files jj would migrate.
+type guardedWorkspace struct {
+	jjDir string
+	repo  string
+}
+
+// guardWorkspace holds every refusal a jj command can reach, in order: the workspace and clone
+// layout components; the .jj a workspace command opens; the shared clone's .jj and .jj/repo; and
+// the workspace's .jj/repo pointer. Callers that will write a workspace path but not yet open jj
+// (Provision, Remove and RemoveFinished) pass requireJJ false: the same layout guard refuses a
+// symlinked target before it creates, renames or removes anything outside the layout.
+//
+// jj 0.38 and later keep a repository's and a workspace's own configuration in the config home,
+// under the id an id file inside `.jj` names. While that id is missing, jj migrates the legacy file
+// beside it into the config home and reads it (lib/src/secure_config.rs, maybe_load_config and
+// maybe_migrate_legacy_config; automatic until jj 0.49). Those are a workspace's
+// `.jj/workspace-config.toml` beside `.jj/workspace-config-id`, and its repository's
+// `config.toml` beside `config-id`. Removing the legacy file leaves jj to open an empty
+// configuration of its own, never one a tree agent wrote. The worker image's jj is 0.45; the tmux
+// daemon refuses a host jj older than 0.38 (internal/daemon's resolveTools).
+//
+// A workspace with no `.jj` is refused when requireJJ and clone are set: it was provisioned with
+// one, and without it a jj command lacking -R walks up to an ancestor holding a `.jj`
+// (cli_util.rs, find_workspace_dir). RunCheckedIn names its workspace with -R, under which jj
+// never walks up; the refusal names the missing `.jj` before jj runs at all. A missing `.jj` with
+// no clone (a command that opens the clone itself with -R, or `jj git clone`, which opens none) is
+// left for jj.
+//
+// This holds against a tree-written path present before the command begins. A write in the instant
+// between this guard and jj's own read is outside it: a hostile role already has every sibling
+// workspace on the volume to delete directly.
+func guardWorkspace(root, clone string, requireJJ bool) (guardedWorkspace, error) {
+	if root == "" {
+		return guardedWorkspace{}, nil
+	}
+	for _, dir := range []string{root, clone} {
+		if err := refuseSymlinkedLayout(root, dir); err != nil {
+			return guardedWorkspace{}, err
+		}
+	}
+	if !requireJJ {
+		return guardedWorkspace{}, nil
+	}
+	jjDir := filepath.Join(root, ".jj")
+	info, err := os.Lstat(jjDir)
+	if errors.Is(err, fs.ErrNotExist) && clone == "" {
+		return guardedWorkspace{}, nil
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return guardedWorkspace{}, fmt.Errorf("refusing to run jj in %s: it has no .jj of its own, which a workspace of the shared clone %s always has", root, clone)
+	case err != nil || !info.IsDir():
+		return guardedWorkspace{}, fmt.Errorf("refusing to run jj in %s: its .jj is not a real directory (%v)", root, describeEntry(info, err))
+	}
+	repo, err := sharedRepository(jjDir, clone)
+	if err != nil {
+		return guardedWorkspace{}, err
+	}
+	return guardedWorkspace{jjDir: jjDir, repo: repo}, nil
+}
+
+// disarmLegacyConfig removes each legacy configuration file jj would migrate. guardWorkspace has
+// already held jjDir and repo to a real workspace and the shared clone, respectively. An empty
+// jjDir is a command that opens no workspace yet (jj git clone): it is an invariant that disarming
+// only operates on a path the guard actually resolved, never a relative path that falls through to
+// the daemon's current working directory.
+func disarmLegacyConfig(jjDir, repo string) error {
+	if jjDir == "" {
+		return nil
+	}
+	legacy := map[string][2]string{
+		jjDir: {"workspace-config-id", "workspace-config.toml"},
+		repo:  {"config-id", "config.toml"},
+	}
+	for dir, names := range legacy {
+		if _, err := os.Stat(filepath.Join(dir, names[0])); !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		file := filepath.Join(dir, names[1])
+		if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove %s, which jj would migrate into the configuration it reads: %w", file, err)
+		}
+	}
+	return nil
+}
+
+// refuseSymlinkedLayout refuses an operation at root when dir, or any of the directories above it
+// up to the state directory (layoutDepth of them in all), is a symlink, naming it. Provisioning
+// creates every one as a real directory; a symlink there would make jj open, and workspace
+// creation, removal or the legacy-file disarm write into, a copy outside the workspace layout
+// below the state directory. The state directory itself is not checked: an operator may reach it
+// through a symlink. A component that does not exist is no symlink, so it is passed over.
+func refuseSymlinkedLayout(root, dir string) error {
+	for range layoutDepth {
+		if dir == "" || dir == filepath.Dir(dir) {
+			return nil
+		}
+		info, err := os.Lstat(dir)
+		switch {
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return fmt.Errorf("refusing workspace operation in %s: %s is a symlink, and no directory of the workspace layout below the state directory is one", root, dir)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("refusing workspace operation in %s: %w", root, err)
+		}
+		dir = filepath.Dir(dir)
+	}
+	return nil
+}
+
+// sharedRepository is the repository directory jj opens for the workspace whose `.jj` is jjDir,
+// held to the shared clone's own `.jj/repo`: clone's when the command names one (a workspace of
+// it), else the root's own (the command opens the clone itself). The clone's `.jj` and its
+// `.jj/repo` must each be a real directory, not a symlink or a file. A workspace names its
+// repository in its `.jj/repo` file, which a tree agent can rewrite. The path that file names is
+// built as jj builds it (workspaceRepository, never cleaned) and stat'ed by the kernel, which
+// resolves it physically as jj's canonicalize does; it must be the same directory as the clone's
+// own (os.SameFile), or the command is refused, naming both, before jj opens a repository Legion
+// did not provision and before anything there is removed.
+func sharedRepository(jjDir, clone string) (string, error) {
+	own := filepath.Join(jjDir, "repo")
+	if clone != "" {
+		cloneJJ := filepath.Join(clone, ".jj")
+		if info, err := os.Lstat(cloneJJ); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("refusing to run jj in %s: %s is not the shared clone's own .jj directory (%v)", filepath.Dir(jjDir), cloneJJ, describeEntry(info, err))
+		}
+		own = filepath.Join(cloneJJ, "repo")
+	}
+	ownInfo, err := os.Lstat(own)
+	if err != nil || !ownInfo.IsDir() {
+		return "", fmt.Errorf("refusing to run jj in %s: %s is not the shared clone's own repository directory (%v)", filepath.Dir(jjDir), own, describeEntry(ownInfo, err))
+	}
+	if clone == "" {
+		return own, nil
+	}
+	expected, err := filepath.EvalSymlinks(own)
+	if err != nil {
+		return "", fmt.Errorf("refusing to run jj in %s: resolve the shared clone's %s: %w", filepath.Dir(jjDir), own, err)
+	}
+	target, err := workspaceRepository(jjDir)
+	if err != nil {
+		return "", fmt.Errorf("refusing to run jj in %s: read its .jj/repo: %w", filepath.Dir(jjDir), err)
+	}
+	if opened, err := os.Stat(target); err != nil || !os.SameFile(opened, ownInfo) {
+		named := target
+		if resolved, err := filepath.EvalSymlinks(target); err == nil {
+			named = resolved
+		}
+		return "", fmt.Errorf("refusing to run jj in %s: its .jj/repo names %s, not the shared clone's %s", filepath.Dir(jjDir), named, expected)
+	}
+	return expected, nil
+}
+
+// workspaceRepository is the path jj opens as the repository of the workspace whose `.jj` is
+// jjDir, built as jj 0.45's DefaultWorkspaceLoader builds it (lib/src/workspace.rs): `.jj/repo`
+// itself unless it is a regular file, else the path that file holds, appended to `.jj` unless it
+// is absolute. It is never cleaned: jj canonicalizes it physically, each symlink resolved before a
+// `..` after it, and filepath.Join would cancel `link/..` before anything resolved `link`, naming
+// a different directory than the one jj opens. A `.jj/repo` that is neither a directory nor a
+// regular file (a FIFO, a socket, a device) is refused before anything reads it: reading a FIFO
+// blocks, and nothing here runs under the command's deadline.
+func workspaceRepository(jjDir string) (string, error) {
+	repo := filepath.Join(jjDir, "repo")
+	info, err := os.Stat(repo)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return repo, nil
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is neither a directory nor a regular file (mode %s)", repo, info.Mode().Type())
+	}
+	pointer, err := os.ReadFile(repo)
+	if err != nil {
+		return "", err
+	}
+	if target := string(pointer); filepath.IsAbs(target) {
+		return target, nil
+	}
+	return jjDir + string(filepath.Separator) + string(pointer), nil
+}
+
+// describeEntry says what a path that should be a directory is instead.
+func describeEntry(info fs.FileInfo, err error) string {
+	switch {
+	case err != nil:
+		return err.Error()
+	case info.Mode()&fs.ModeSymlink != 0:
+		return "a symlink"
+	default:
+		return "not a directory"
+	}
+}
+
+// jjWorkspaceRoot is the workspace a jj command opens: the value of its last -R (or
+// --repository) flag, else the directory it runs in, which every caller in this package names as
+// the workspace root itself.
+func jjWorkspaceRoot(command Command) string {
+	root := command.Dir
+	for i, arg := range command.Argv {
+		switch {
+		case (arg == "-R" || arg == "--repository") && i+1 < len(command.Argv):
+			root = command.Argv[i+1]
+		case strings.HasPrefix(arg, "--repository="):
+			root = strings.TrimPrefix(arg, "--repository=")
+		}
+	}
+	return root
 }
 
 // merge is base with each override entry replacing the entry of the same name, or appended.
@@ -260,6 +487,26 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 	return checkedResult(argv, result, err)
 }
 
+// RunCheckedIn is RunChecked for a jj command run in ws's own workspace. It names the workspace
+// with -R, so jj opens ws.Dir itself and never searches its parent directories for a `.jj`, and
+// names ws's shared clone so the runner can hold the workspace's `.jj` and `.jj/repo` to it
+// (Command.Clone, guardWorkspace). Both Location paths must be non-empty: otherwise -R "" is
+// exactly the rootless command an empty guard cannot bind to a workspace.
+func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
+	if run == nil {
+		return Result{}, errors.New("workspace runner is required")
+	}
+	if ws.Dir == "" {
+		return Result{}, errors.New("workspace directory is required")
+	}
+	if ws.Clone == "" {
+		return Result{}, errors.New("workspace clone directory is required")
+	}
+	argv = append(slices.Clip(argv), "-R", ws.Dir)
+	result, err := run.Run(ctx, Command{Argv: argv, Dir: ws.Dir, Clone: ws.Clone, Timeout: run.Timeout()})
+	return checkedResult(argv, result, err)
+}
+
 // runCheckedTimeout is RunChecked, but for timeout instead of the runner's own slow-command
 // budget (see FetchTimeout).
 func runCheckedTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
@@ -293,18 +540,31 @@ func commandFailure(argv []string, result Result) error {
 // onClone is a jj command against the shared clone: never a snapshot of its working copy, which
 // would run the working-copy filter, fsmonitor and signing programs a tree agent can configure,
 // and never colored, so every read parses. `jj workspace add` is the one command on the clone jj
-// refuses --ignore-working-copy on (createWorkspace).
-func onClone(cloneDir string, args ...string) []string {
-	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir)
+// refuses --ignore-working-copy on (createWorkspace). cloneDir must be non-empty, so it never
+// builds -R "" — jjWorkspaceRoot treats that exactly as no -R.
+func onClone(cloneDir string, args ...string) ([]string, error) {
+	if cloneDir == "" {
+		return nil, errors.New("workspace clone directory is required")
+	}
+	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir), nil
+}
+
+// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal.
+func runCheckedOnClone(ctx context.Context, run Runner, cloneDir string, args ...string) (Result, error) {
+	argv, err := onClone(cloneDir, args...)
+	if err != nil {
+		return Result{}, err
+	}
+	return RunChecked(ctx, run, argv, nil, "")
 }
 
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
-	setting, err := RunChecked(ctx, run, onClone(cloneDir, "config", "get", "git.abandon-unreachable-commits"), nil, "")
+	setting, err := runCheckedOnClone(ctx, run, cloneDir, "config", "get", "git.abandon-unreachable-commits")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(setting.Stdout) != "false" {
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "config", "set", "--repo", "git.abandon-unreachable-commits", "false"), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "config", "set", "--repo", "git.abandon-unreachable-commits", "false"); err != nil {
 			return err
 		}
 	}
@@ -315,7 +575,11 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", "exact:"+branch)
 	}
-	_, err = RunChecked(ctx, run, onClone(cloneDir, fetch...), source.env, "")
+	argv, err := onClone(cloneDir, fetch...)
+	if err != nil {
+		return err
+	}
+	_, err = RunChecked(ctx, run, argv, source.env, "")
 	return err
 }
 
@@ -343,7 +607,10 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 // through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
+		probe, err := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
+		if err != nil {
+			return err
+		}
 		present, err := RunChecked(ctx, run, probe, nil, "")
 		if err != nil {
 			return err
@@ -351,7 +618,10 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if strings.TrimSpace(present.Stdout) == "" {
 			continue
 		}
-		unset := onClone(cloneDir, "config", "unset", "--repo", key)
+		unset, err := onClone(cloneDir, "config", "unset", "--repo", key)
+		if err != nil {
+			return err
+		}
 		removed, err := runCommand(ctx, run, unset, nil, "")
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)

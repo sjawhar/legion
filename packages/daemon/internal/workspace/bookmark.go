@@ -17,6 +17,11 @@ var (
 	commitID            = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
+// IsCommitID reports whether s is the shape of a jj/git commit id: 40 hex characters, a plain
+// SHA-1. Exported for cmd/legion, which validates a daemon-recorded merged head against it before
+// that value ever reaches a revset.
+func IsCommitID(s string) bool { return commitID.MatchString(s) }
+
 // createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before deleting a
 // stale git worktree entry or adding a workspace: a conflicted bookmark must not leave a registered
 // working copy behind.
@@ -101,7 +106,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			wayOut(cloneDir, "bookmark", "forget", workspace.Bookmark),
 			deleteOnGitHub(workspace))
 	case origin.present:
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "track", remote), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "bookmark", "track", remote); err != nil {
 			return err
 		}
 		revision = origin.added[0]
@@ -122,7 +127,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		// After main resolves, so the one line naming the set-aside commits is never a start that
 		// did not happen.
 		if len(setAside) > 0 {
-			if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "delete", workspace.Bookmark), nil, ""); err != nil {
+			if _, err := runCheckedOnClone(ctx, run, cloneDir, "bookmark", "delete", workspace.Bookmark); err != nil {
 				return err
 			}
 			log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
@@ -160,7 +165,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			return commandFailure(add, result)
 		}
 		// The add failed before creating a git worktree, and the stale entry went above.
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "forget", workspaceName); err != nil {
 			return err
 		}
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
@@ -170,7 +175,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	if !fromMain {
 		return nil
 	}
-	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
+	_, err = RunCheckedIn(ctx, run, workspace, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"})
 	return err
 }
 
@@ -181,7 +186,10 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 // refusal.
 func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
+	read, err := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
+	if err != nil {
+		return nil, err
+	}
 	result, err := RunChecked(ctx, run, read, nil, "")
 	if err != nil {
 		return nil, err
@@ -254,9 +262,14 @@ func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, e
 
 // wayOut is a command a refusal prints for an operator to run from a shell: the jj command on the
 // shared clone that onClone builds, so it takes no snapshot of the clone's working copy, in
-// backticks.
+// backticks. A zero clone has no runnable command; the operational callers reject it before a
+// refusal reaches this formatter.
 func wayOut(cloneDir string, args ...string) string {
-	return "`" + shellprefix.Command(onClone(cloneDir, args...)) + "`"
+	argv, err := onClone(cloneDir, args...)
+	if err != nil {
+		return "`<invalid workspace clone directory>`"
+	}
+	return "`" + shellprefix.Command(argv) + "`"
 }
 
 // deleteOnGitHub is the printed command that deletes the issue's branch on GitHub.
@@ -305,7 +318,10 @@ const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "
 // conflicted and at least one on a conflicted row, and one row per place: a commit jj cannot load
 // prints an error value where its id goes, which a workspace add would take as a revision.
 func readBookmark(ctx context.Context, run Runner, workspace Workspace, name string) (bookmarkRows, error) {
-	list := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
+	list, err := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
+	if err != nil {
+		return bookmarkRows{}, err
+	}
 	result, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
@@ -394,14 +410,33 @@ func ownCommitsRevset(workspaceName string) string {
 	return "::" + workspaceName + "@ ~ ::(working_copies() ~ " + workspaceName + "@) ~ ::(bookmarks() | remote_bookmarks() | tags())"
 }
 
-// Remove ports workspace.ts's removeIssueWorkspace. The workspace directory goes first so a crash
-// leaves the registered-but-missing state that Provision repairs with forget and add. jj's forget
-// leaves the colocated worktree of a directory already gone, so Remove deletes that entry itself,
-// also when the workspace is neither registered nor present (a crash after the forget).
-// workspace is Location's, which names the clone; any other is refused before anything is removed.
+// removingSuffix marks a workspace directory Remove has renamed aside, about to delete: a sibling
+// name in the same parent directory, so the rename is one atomic same-filesystem operation
+// regardless of how large the directory is, unlike the `os.RemoveAll` that follows it, which a
+// kill can interrupt partway through a large tree. RemoveFinished recognizes the name on its next
+// run and finishes the delete rather than re-judging (or mis-judging, against a half-deleted
+// tree) a workspace already found safe to remove.
+const removingSuffix = ".removing"
+
+// removingPath is where Remove renames workspace.Dir to before deleting it.
+func removingPath(dir string) string { return dir + removingSuffix }
+
+// Remove ports workspace.ts's removeIssueWorkspace, with one addition: the workspace directory is
+// renamed aside (removingSuffix) before the slower recursive delete that actually frees the
+// space, so a kill partway through that delete leaves the renamed-aside name rather than a
+// half-deleted tree at the original one; RemoveFinished recognizes that name on its next run and
+// finishes the delete rather than re-judging a workspace already found safe to remove. The
+// rename goes first so a crash leaves the registered-but-missing state that Provision repairs
+// with forget and add. jj's forget leaves the colocated worktree of a directory already gone, so
+// Remove deletes that entry itself, also when the workspace is neither registered nor present (a
+// crash after the forget). workspace is Location's, which names the clone; any other is refused
+// before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)
+	}
+	if _, err := guardWorkspace(workspace.Dir, workspace.Clone, false); err != nil {
+		return err
 	}
 	cloneDir, workspaceName := workspace.Clone, filepath.Base(workspace.Dir)
 	cloneExists, err := pathExists(filepath.Join(cloneDir, ".jj"))
@@ -411,7 +446,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	registered := false
 	var commits []string
 	if cloneExists {
-		listed, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "list", "-T", `name ++ "\n"`), nil, "")
+		listed, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "list", "-T", `name ++ "\n"`)
 		if err != nil {
 			return err
 		}
@@ -423,22 +458,36 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	if registered {
-		own, err := RunChecked(ctx, run, onClone(cloneDir, "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`), nil, "")
+		own, err := runCheckedOnClone(ctx, run, cloneDir, "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`)
 		if err != nil {
 			return err
 		}
 		commits = nonEmptyLines(own.Stdout)
 	}
-	if err := os.RemoveAll(workspace.Dir); err != nil {
+	aside := removingPath(workspace.Dir)
+	if present, err := pathExists(workspace.Dir); err != nil {
+		return err
+	} else if present {
+		// A stale aside from an interrupted removal of this same directory name, never cleared
+		// (named again later, or a previous pass's finish step itself never ran): cleared before
+		// the rename so it never refuses with "already exists".
+		if err := os.RemoveAll(aside); err != nil {
+			return fmt.Errorf("clear a stale removal-in-progress directory: %w", err)
+		}
+		if err := os.Rename(workspace.Dir, aside); err != nil {
+			return fmt.Errorf("rename workspace directory aside before removing it: %w", err)
+		}
+	}
+	if err := os.RemoveAll(aside); err != nil {
 		return fmt.Errorf("remove workspace directory: %w", err)
 	}
 	if registered {
 		if len(commits) > 0 {
-			if _, err := RunChecked(ctx, run, onClone(cloneDir, "abandon", "-r", strings.Join(commits, " | ")), nil, ""); err != nil {
+			if _, err := runCheckedOnClone(ctx, run, cloneDir, "abandon", "-r", strings.Join(commits, " | ")); err != nil {
 				return err
 			}
 		}
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
+		if _, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "forget", workspaceName); err != nil {
 			return err
 		}
 	}
