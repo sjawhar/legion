@@ -269,12 +269,19 @@ rolling back the image. If you must roll back, do it in this order:
 
 1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the
    earlier release refuses both as unknown keys, and without them this release runs
-   `controller: operator`. Restart this release once with that file: it retires the controller's
-   claim and releases its pod and volume.
+   `controller: operator`. Restart this release once with that file. Do not skip this boot: only
+   this release ends the stopped controller's registration and stops its pod gracefully. It is done
+   when `legion claims list` shows `legion-<project>-controller` `retired`. If the boot is refused,
+   stop and follow the refusal's entry in [Troubleshooting](/legion/legion/troubleshooting/).
 2. Stop that daemon. A running daemon writes the claim's row back, so a delete made while it runs
    does nothing.
-3. Delete that project's row: `delete from claims where token = 'legion-<project>-controller'`.
-   Other projects' daemons may share the database, so never delete by role.
+3. `<project>` is your `project` lowercased with every character outside `a-z0-9` dropped
+   (`project: LEGION` gives `legion-legion-controller`). Run
+   `select token, state from claims where token = 'legion-<project>-controller';`, which must
+   return exactly one row, `retired`; then
+   `delete from claims where token = 'legion-<project>-controller';`, which must answer
+   `DELETE 1`. Never delete by role: other projects' daemons may share the database. If either
+   answer is anything else, do not start the earlier release.
 4. Start the earlier release.
 
 `docs/kubernetes.md` in the repository ("Daemon-launched controller") explains why.

@@ -1581,15 +1581,26 @@ this release, never the previous image. A revert that cannot be avoided goes in 
 
 1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the earlier
    release refuses both as unknown keys, and without them this release runs `controller: operator`.
-   Restart this release with that file and let it boot once: the claim retires and its Sandbox and
-   volume are released. Deleting the row while the Sandbox is still there would leave it to the
-   earlier release's orphan sweep, which deletes at its first boot any Sandbox of the project that
-   no claim names.
+   Restart this release with that file and let it boot once. Do not skip this boot: only this
+   release ends the stopped controller's registration, and it stops the pod gracefully, with a
+   shutdown frame and the termination grace, before it releases the Sandbox and volume. The earlier
+   release's orphan sweep would instead delete that Sandbox at its first boot, with no shutdown,
+   since no claim names it once the row is gone. The boot is done when `legion claims list` shows
+   `legion-<project>-controller` `retired`, and, if that controller had registered, the daemon has
+   logged `controller: ending the registration of the controller an earlier boot under controller:
+   daemon launched`. If the boot is refused, stop here and follow the refusal's entry in
+   troubleshooting.
 2. Stop that daemon. A running daemon holds the claim and writes its row back, so a delete made
    while it runs does nothing.
-3. Delete that project's row alone: `delete from claims where token = 'legion-<project>-controller'`.
-   Several projects' daemons can share the database, so never delete by role. Its pending delivery,
-   if any, goes with it (`on delete cascade`).
+3. Read the row, then delete it. `<project>` is the project's token: `project` in `legion.yaml`
+   lowercased, with every character outside `a-z0-9` dropped, so `project: LEGION` gives
+   `legion-legion-controller`; `legion claims list` shows it. Run
+   `select token, state from claims where token = 'legion-<project>-controller';` and check it
+   returns exactly one row, in state `retired`. Then run
+   `delete from claims where token = 'legion-<project>-controller';` and check it answers
+   `DELETE 1`; its pending delivery, if any, goes with it (`on delete cascade`). Delete by token,
+   never by role: several projects' daemons can share the database. If either check shows
+   anything else, do not start the earlier release.
 4. Start the earlier release.
 
 ### Operator-launched controller
