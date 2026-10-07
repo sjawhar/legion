@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
@@ -876,20 +878,26 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
 // daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
+// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses it
+// rather than read a key that sizes nothing.
 func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 	cfg.ControllerLaunch = ControllerLaunchOperator
-	if file.Controller == nil {
-		return nil
-	}
-	switch launch := ControllerLaunch(*file.Controller); launch {
-	case ControllerLaunchOperator:
-	case ControllerLaunchDaemon:
-		if cfg.Runtime.Name != "kubernetes" {
-			return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+	if file.Controller != nil {
+		switch launch := ControllerLaunch(*file.Controller); launch {
+		case ControllerLaunchOperator:
+		case ControllerLaunchDaemon:
+			if cfg.Runtime.Name != "kubernetes" {
+				return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+			}
+			cfg.ControllerLaunch = launch
+		default:
+			return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
 		}
-		cfg.ControllerLaunch = launch
-	default:
-		return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
+	}
+	if k := cfg.Runtime.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon {
+		if _, sized := k.Resources[claim.RoleController]; sized {
+			return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+		}
 	}
 	return nil
 }

@@ -344,7 +344,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			// The TypeScript daemon's resource profiles are not roles.
 			name: "resources keyed by a profile",
 			body: kubernetesFile + "    resources: {small: {requests: {cpu: 500m}}}\n",
-			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger)`,
+			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger, controller)`,
 		},
 		{
 			name: "a role named twice",

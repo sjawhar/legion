@@ -397,6 +397,7 @@ runtime:
       priority_class: legion
     resources:                  # optional; a role absent here gets no requests or limits
       tester: { limits: { memory: 8Gi } }
+      controller: { requests: { cpu: 250m, memory: 1Gi }, limits: { memory: 2Gi } }   # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
@@ -411,6 +412,8 @@ daemon_url: http://<the address pods reach the daemon at>:13370
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
 - anything it does not model: `role_profiles`, since each role's requests and limits go under
   `resources`;
+- a `resources` key that is neither a workflow role nor `controller`, and `resources.controller`
+  unless `controller: daemon`, the one setting under which the daemon launches the controller's pod;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - an image that is not pinned by digest;
 - `session_store: postgres` until Stage 6, since a pod's session lives on the tree volume, and a
@@ -1517,7 +1520,10 @@ enrolled with the secrets broker. Its agent is told `LEGION_CONTROLLER=1`, `LEGI
 `LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings and the launch
 secrets' `<NAME>_FILE` pointers, and nothing of a tree, an issue or a checkout. Its system prompt is
 the controller's role prompt, a part saying it runs headless in a pod, the daemon's `Design gate
-policy:` line and the deployment instructions.
+policy:` line and the deployment instructions. Both its containers carry
+`runtime.kubernetes.resources.controller`, the key a workflow role's pod is sized by; with none set
+the pod is BestEffort, the class the kubelet evicts first under node memory pressure, and each
+eviction is a relaunch whose ready costs the controller a start-procedure turn, so size it.
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its

@@ -3,10 +3,14 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -135,6 +139,28 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	for _, key := range []string{bootTokenKey, "ENVOY_TOKEN"} {
 		if len(secret.Data[key]) == 0 {
 			t.Errorf("the controller's Secret lacks %s", key)
+		}
+	}
+}
+
+// The controller's pod is sized by its own entry under runtime.kubernetes.resources, as a workflow
+// role's pod is by that role's: both its containers carry it, so an operator who sizes it moves it
+// out of the BestEffort class the kubelet evicts first.
+func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
+	opts := goldenOptions()
+	sized := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+	}
+	opts.Resources = map[claim.Role]corev1.ResourceRequirements{claim.RoleController: sized}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := podOf(t, r, controllerSpec(t), false)
+	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+		if !reflect.DeepEqual(c.Resources, sized) {
+			t.Errorf("container %s carries resources %+v, want the controller's %+v", c.Name, c.Resources, sized)
 		}
 	}
 }

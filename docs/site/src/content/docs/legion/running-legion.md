@@ -254,6 +254,8 @@ dies, and resumes the same session. You start nothing, and `legion controller st
 daemon is refused: one controller runs per project. Nobody types into the pod: reach the controller
 through Dispatch (a message to its session on the Agents page, a reply to an ask it opened, a
 mention) and read its session with `kubectl logs` on its pod. `legion claims list` shows its claim.
+Size its pod under `runtime.kubernetes.resources.controller`: with no requests it is the first pod
+the kubelet evicts under memory pressure.
 To hand the controller back to a person, set `controller: operator` and restart the daemon: at boot
 it stops its own controller's claim and releases the pod, and you then start the controller on your
 machine as below.
