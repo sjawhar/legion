@@ -897,6 +897,12 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateReady
 	m.claim.Budgets.LaunchFailures = 0
 	m.disarm(TimerRegistration)
+	return finishReady(m, ctx)
+}
+
+// finishReady persists the current claim before publishing ready or delivering work. reready may
+// reach it while the claim is idle or working, so it must not rewrite the state to ready.
+func finishReady(m *Machine, ctx context.Context) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
@@ -907,13 +913,7 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 // reready persists the in-memory ready state before answering an agent retry: a prior ready's
 // claim write may have failed after the machine made the transition, and a restart must not restore
 // the older registered row and treat a ready agent as one that never became ready.
-func reready(m *Machine, ctx context.Context, _ Event) error {
-	if err := m.persist(ctx); err != nil {
-		return err
-	}
-	m.terminal(StateReady)
-	return m.sendPending(ctx)
-}
+func reready(m *Machine, ctx context.Context, _ Event) error { return finishReady(m, ctx) }
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 
