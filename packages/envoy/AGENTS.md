@@ -1988,11 +1988,14 @@ terminal they prompt on stderr and read one line with echo off (`readHidden`,
 the terminal's end-of-file character ends it; it turns bracketed paste on and reads a bracketed
 paste through its end however far apart its writes arrive, and on a terminal that does not bracket
 pastes takes input within 200 ms after the line as the paste's rest; any but line endings after the
-line is a paste of more than one line, refused with exit 2; every return, and SIGINT or SIGTERM
-unless inherited as ignored, turns bracketed paste off and puts the terminal back with the flushing
-set call, so nothing typed at the prompt reaches the shell, and a signal then re-raises itself so
-the calling shell sees the process die by it, 130 or 143 only if that fails), elsewhere all of stdin less one trailing
-newline, and an empty value is a usage error. `create` writes on the settings' key with both tags
+line is a paste of more than one line, refused with exit 2; a hang-up inside a bracketed paste
+returns an error (`errMoreThanOneLine`, else `errPasteCutShort`), never what was read; every
+return, and SIGINT or SIGTERM unless inherited as ignored, turns bracketed paste off and puts the
+terminal back with the flushing set call, so nothing typed at the prompt reaches the shell, and a
+signal then re-raises itself, so the process dies by it and a shell reads $? as 130 or 143, an exit
+130 or 143 only if that fails; `TestPromptCtrlCEndsTheProcessBySIGINT` runs the prompt as a
+session leader on a pty and holds that), elsewhere all of stdin less one trailing newline, and an
+empty value is a usage error. `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
 secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are

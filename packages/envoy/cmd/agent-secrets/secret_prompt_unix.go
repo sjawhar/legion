@@ -44,9 +44,11 @@ var (
 // ending. On a terminal that does not bracket pastes the reader reads, after the line, what follows
 // until the terminal has been quiet for pasteGapDeciseconds. Anything but line endings after the
 // line, in either, answers errMoreThanOneLine: a paste of a value of more than one line, which the
-// prompt cannot take whole. However the read ends, a signal included (restoreOnSignal), it puts the
-// terminal back as it was, bracketed paste off, and discards every byte of input it has not read, so
-// nothing typed or pasted at the prompt reaches the shell.
+// prompt cannot take whole. A hang-up inside a bracketed paste answers errMoreThanOneLine when
+// more than line endings followed the line, else errPasteCutShort, never what was read. However
+// the read ends, a signal included (restoreOnSignal), it puts the terminal back as it was,
+// bracketed paste off, and discards every byte of input it has not read, so nothing typed or
+// pasted at the prompt reaches the shell.
 func readHiddenAtTerminal(fd int) ([]byte, error) {
 	saved, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
 	if err != nil {
@@ -82,6 +84,12 @@ func readHiddenAtTerminal(fd int) ([]byte, error) {
 		}
 		if n == 0 {
 			// With VMIN 1 a read answers nothing only at end of input: the terminal hung up.
+			switch {
+			case r.more:
+				return nil, errMoreThanOneLine
+			case r.inPaste:
+				return nil, errPasteCutShort
+			}
 			return r.line, nil
 		}
 		if r.feed(buf[:n]) {
@@ -140,11 +148,9 @@ func (r *promptReader) feed(b []byte) bool {
 		}
 		c := b[i]
 		if r.ended {
+			// The line ended inside a paste: outside one, feed returned as it ended.
 			if c != '\r' && c != '\n' {
 				r.more = true
-			}
-			if !r.inPaste {
-				return true
 			}
 			continue
 		}
@@ -204,8 +210,8 @@ func onlyLineEndings(b []byte) bool {
 	return true
 }
 
-// readTerminal is one read of the terminal, retried when a signal interrupts it.
-func readTerminal(fd int, buf []byte) (int, error) {
+// readTerminal is one read of the terminal, retried when a signal interrupts it; tests replace it.
+var readTerminal = func(fd int, buf []byte) (int, error) {
 	for {
 		n, err := unix.Read(fd, buf)
 		if !errors.Is(err, unix.EINTR) {
@@ -216,9 +222,10 @@ func readTerminal(fd int, buf []byte) (int, error) {
 
 // restoreOnSignal makes an interrupt (Ctrl-C) or a termination while the prompt reads put the
 // terminal back with restore and then end the process by that signal, as the default action would,
-// so a calling shell stops its list or loop; until stop is called. Should the signal not end the
-// process, it exits 130 or 143. A signal the process inherited as ignored, as from a script that
-// traps SIGINT with an empty action, stays ignored, so the read goes on with echo off.
+// until stop is called: a calling shell reads $? as 130 or 143, and stops its list or loop for
+// SIGINT. Should the signal not end the process, it exits 130 or 143. A signal the process
+// inherited as ignored, as from a script that traps SIGINT with an empty action, stays ignored, so
+// the read goes on with echo off.
 func restoreOnSignal(restore func()) (stop func()) {
 	var watched []os.Signal
 	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {

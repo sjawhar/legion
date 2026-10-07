@@ -162,6 +162,10 @@ var readHidden = readHiddenAtTerminal
 // reach the shell once the form exits.
 var errMoreThanOneLine = errors.New("more than one line was entered at the prompt")
 
+// errPasteCutShort is readHidden's answer when the terminal hung up inside a bracketed paste,
+// before its closing mark: what was read is not the whole value, so none of it is.
+var errPasteCutShort = errors.New("the terminal hung up before the paste ended")
+
 // shellUnsafe is any character outside the set a POSIX shell reads literally in a bare word.
 var shellUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./:@-]`)
 

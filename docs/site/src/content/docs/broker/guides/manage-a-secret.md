@@ -67,9 +67,10 @@ The prompt takes one line. A value of more than one line pasted there, such as a
 your shell. That holds whole on a terminal that marks pastes (bracketed paste, which most terminal
 emulators and tmux support): the CLI reads such a paste through its end however slowly it
 arrives. On a terminal without it, the CLI waits for 200 ms of quiet after the line, so a paste
-delivered slowly over a bad link can be split, and its later lines reach your shell; pipe a
-value of more than one line in rather than pasting it. The refusal names the command that pipes
-the value in; put the value in a file and run that:
+delivered slowly over a bad link can be split after a line ending: the CLI then stores the first
+line as the value with no refusal, and the later lines reach your shell. `secret set NAME < FILE`
+replaces that value; pipe a value of more than one line in rather than pasting it. The refusal
+names the command that pipes the value in; put the value in a file and run that:
 
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN
@@ -81,8 +82,8 @@ broker: serving DEMO_DEPLOY_TOKEN
 ```
 
 Ctrl-C or a termination signal (`SIGTERM`) at the prompt puts your terminal back as it was, echo
-on, writes nothing, and ends the CLI by that signal, so a script or a `;` list running it stops
-there too.
+on, and writes nothing. Ctrl-C ends the CLI by SIGINT, so a script or a `;` list running it stops
+there too; a termination signal (SIGTERM) ends it by that signal, which a shell reports as 143.
 
 ## Which sign-in may do what
 

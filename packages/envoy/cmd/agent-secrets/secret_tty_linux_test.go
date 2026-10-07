@@ -11,6 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -82,11 +85,7 @@ func typeAtPromptInWrites(t *testing.T, gap time.Duration, writes ...string) (*o
 		line, err := readHidden(terminal)
 		answer <- promptRead{line, err}
 	}()
-	for deadline := time.Now().Add(2 * time.Second); lflag(t, terminal)&unix.ECHO != 0; time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the reader never turned echo off")
-		}
-	}
+	awaitEchoOff(t, terminal)
 	for i, w := range writes {
 		if i > 0 {
 			time.Sleep(gap)
@@ -101,6 +100,17 @@ func typeAtPromptInWrites(t *testing.T, gap time.Duration, writes ...string) (*o
 	case <-time.After(2 * time.Second):
 		t.Fatalf("the reader did not return within 2s of %q being typed", writes)
 		return nil, 0, promptRead{}
+	}
+}
+
+// awaitEchoOff waits until the prompt has turned the terminal's echo off, failing t after ten
+// seconds: a prompt in a process of its own may take a while to start on a loaded machine.
+func awaitEchoOff(t *testing.T, terminal int) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); lflag(t, terminal)&unix.ECHO != 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the reader never turned echo off")
+		}
 	}
 }
 
@@ -231,5 +241,132 @@ func TestPromptAcceptsABracketedPasteOfOneLine(t *testing.T) {
 		if n := unread(t, terminal); n != 0 {
 			t.Fatalf("%q: the terminal holds %d bytes unread, want none", writes, n)
 		}
+	}
+}
+
+// TestPromptRefusesAPasteCutShortByAHangUp: when the terminal hangs up inside a bracketed paste, as
+// when its window or ssh session closes mid-paste, the reader answers an error rather than what it
+// has read, so nothing is stored. The hang-up lands while the reader is between reads, where its
+// next read of the hung-up terminal answers end of input.
+func TestPromptRefusesAPasteCutShortByAHangUp(t *testing.T) {
+	for _, tc := range []struct {
+		paste string
+		want  error
+	}{
+		{"\x1b[200~-----BEGIN KEY-----\nline2", errMoreThanOneLine},
+		{"\x1b[200~value\n", errPasteCutShort},
+		{"\x1b[200~val", errPasteCutShort},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.paste), func(t *testing.T) {
+			controller, terminal := openPTY(t)
+			real := readTerminal
+			t.Cleanup(func() { readTerminal = real })
+			consumed, hungUp := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			read := 0
+			readTerminal = func(fd int, buf []byte) (int, error) {
+				if read >= len(tc.paste) {
+					once.Do(func() { close(consumed) })
+					<-hungUp
+				}
+				n, err := real(fd, buf)
+				read += n
+				return n, err
+			}
+			answer := make(chan promptRead, 1)
+			go func() {
+				line, err := readHidden(terminal)
+				answer <- promptRead{line, err}
+			}()
+			awaitEchoOff(t, terminal)
+			if _, err := controller.Write([]byte(tc.paste)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-consumed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the reader did not read the paste within 2s")
+			}
+			if err := controller.Close(); err != nil {
+				t.Fatal(err)
+			}
+			close(hungUp)
+			select {
+			case got := <-answer:
+				if !errors.Is(got.err, tc.want) || got.line != nil {
+					t.Fatalf("readHidden = %q, %v; want no value and %v", got.line, got.err, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the reader did not return within 2s of the hang-up")
+			}
+		})
+	}
+}
+
+// TestPromptSignalHelper is the process the signal tests start: the value prompt's reader on its
+// standard input, its controlling terminal. It prints what the reader answered should it return.
+func TestPromptSignalHelper(t *testing.T) {
+	if os.Getenv("AGENT_SECRETS_PROMPT_HELPER") == "" {
+		t.Skip("subprocess helper")
+	}
+	line, err := readHidden(0)
+	fmt.Printf("RETURNED %q %v\n", line, err)
+}
+
+// TestPromptCtrlCEndsTheProcessBySIGINT: Ctrl-C at the prompt ends the process by SIGINT, echo back
+// on, so a calling shell stops its list rather than running the next command. The prompt runs in a
+// process of its own, the session leader whose controlling terminal sends the Ctrl-C, started by
+// `env --default-signal`, so it does not inherit a SIGINT this test process ignores (as a job run in
+// the background of a script does), at which the prompt rightly goes on reading.
+func TestPromptCtrlCEndsTheProcessBySIGINT(t *testing.T) {
+	reset := []string{"env", "--default-signal=INT,TERM"}
+	helper := shellWord(os.Args[0]) + " -test.run=^TestPromptSignalHelper$"
+	for _, tc := range []struct {
+		name    string
+		command *exec.Cmd
+	}{
+		{"the prompt alone", exec.Command(reset[0], reset[1], os.Args[0], "-test.run=^TestPromptSignalHelper$")},
+		{"a bash list", exec.Command(reset[0], reset[1], "bash", "-c", helper+"; echo SECOND")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, terminal := openPTY(t)
+			fd, err := unix.Dup(terminal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tty := os.NewFile(uintptr(fd), "terminal")
+			cmd := tc.command
+			cmd.Env = append(os.Environ(), "AGENT_SECRETS_PROMPT_HELPER=1")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+			err = cmd.Start()
+			tty.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			awaitEchoOff(t, terminal)
+			if _, err := controller.Write([]byte{0x03}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				_ = cmd.Process.Kill()
+				t.Fatalf("the process did not end within 10s of Ctrl-C; the terminal showed %q", shown(t, controller))
+			}
+			status := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			out := shown(t, controller)
+			if tc.name == "the prompt alone" && (!status.Signaled() || status.Signal() != syscall.SIGINT) {
+				t.Fatalf("wait status %v (%s); want ended by SIGINT. The terminal showed %q", status, cmd.ProcessState, out)
+			}
+			if bytes.Contains(out, []byte("SECOND")) || bytes.Contains(out, []byte("RETURNED")) {
+				t.Fatalf("the terminal showed %q (%s): the list went on past the Ctrl-C", out, cmd.ProcessState)
+			}
+			if lflag(t, terminal)&unix.ECHO == 0 {
+				t.Fatal("echo is off after the process ended")
+			}
+		})
 	}
 }

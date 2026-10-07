@@ -79,8 +79,8 @@ const (
 	exitDenied      = 77  // the request was denied; nothing was run
 	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
 	exitNotFound    = 127 // the command `register --exec` was given was not found
-	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt; nothing was written
-	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt; nothing was written
+	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
+	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
@@ -163,7 +163,8 @@ environment:
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
-secret create and set exit 130 when interrupted at the value prompt and 143 when terminated there
+secret create and set end by the signal when interrupted (Ctrl-C) or terminated at the value
+prompt, which a shell's $? reads as 130 or 143
 `
 
 func main() {

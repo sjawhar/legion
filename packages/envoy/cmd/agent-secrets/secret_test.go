@@ -547,6 +547,29 @@ func TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused(t *testing.T) {
 	}
 }
 
+// TestSecretAPasteCutShortAtATerminalWritesNothing: when the reader answers that the terminal hung
+// up inside a paste (TestPromptRefusesAPasteCutShortByAHangUp), create and set fail and write
+// nothing.
+func TestSecretAPasteCutShortAtATerminalWritesNothing(t *testing.T) {
+	for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		useTerminal(t)
+		readHidden = func(int) ([]byte, error) { return nil, errPasteCutShort }
+		_, stderr, code := runSecret(args...)
+		if code != 1 || !strings.Contains(stderr, errPasteCutShort.Error()) {
+			t.Fatalf("%v: exit %d, stderr %q; want 1 naming %q", args, code, stderr, errPasteCutShort)
+		}
+		if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", args, v)
+		}
+		if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+			t.Fatalf("%v created NEW_KEY", args)
+		}
+	}
+}
+
 // TestStdinIsATerminalOnlyAtATerminal: stdinTerminal answers false for a pipe and for a reader that
 // is no file, so a value piped in is read to its end, with no prompt.
 func TestStdinIsATerminalOnlyAtATerminal(t *testing.T) {
