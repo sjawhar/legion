@@ -1,43 +1,31 @@
 {
-  "census": "Re-ran the body's five census searches at 42a9100a: (1) launchers load both plugins (Sandbox argv manifest.go:266, worker.Dockerfile, every rig's two --package installs); (2) gate-sentence consumers scripts/e2e/stage2-tmux-supervision.sh:349-418 and README.md:188 match; (3) no probe-image call lacks --envoy-plugin-root outside the usage sentence and tests; (4) check-plugin-names clean over 3609 files, no singular LEGION_PROMPT_ROOT outside the handoff ledger, no /opt/legion/pi-legion-envoy outside history, legion.pi-envoy.legion-loaded only in interface.ts, its test, probe.mjs, bootgate.go and the two AGENTS.md; (5) every pack-plugin.sh and install-plugin-profile.sh call names a package. Dispositions and immediate-refusal rollout lines present for each.",
-  "codeHead": "8962eb69fd39759b766a5fe05cd58f8192502073",
-  "completed": "2026-10-07T10:52:41.948605582Z",
+  "codeHead": "adc58ad2c606cdc0136ac6b6af76d47dad448c73",
+  "completed": "2026-10-07T11:24:21.618447697Z",
   "critical": 0,
-  "forgeFacts": "At 07bb0d48 (the implementer's handoff head, the code head 8962eb69 plus implement.json): required checks lint, typecheck, test (Tests run 37606787388) and pr-title (37606787393) success; Legion Envoy and Contracts 37606787538 pi-envoy (job 112744502716: `every task agent the staged skills dispatch is one this plugin ships or Oh My Pi bundles` pass; 245 pass 0 fail), pi-legion, pi-shared success; Worker Image 37606787453 and Docs 37606787356 success. The tester's head 42a9100a skipped CI (skip-checks trailer), so the verdict carried is 07bb0d48's. Threads: the two round-1 threads carry the implementer's `Fixed in 8962eb69…` and now the reviewer's `Accepted: fixed in 8962eb69…` as newest (replies 4205902182, 4205902465); no other thread. Both E2E lines present; the tester's round-1 proof at 07bb0d48 adds the real-binary run of the new guard and its negative control.",
-  "important": 1,
+  "forgeFacts": "At 8383d5b6 (the code head adc58ad2 plus implement.json): required checks lint, typecheck, test (Tests run 37611244154) and pr-title success; Legion Envoy and Contracts 37611244360: envoy-client, claude-envoy (check-dist: the rebuilt bundles match a fresh build), pi-envoy, pi-legion, pi-shared, envoy-plugin, contracts success; Worker Image 37611244180 and Docs 37611244209 success. The tester's head d30f4083 skipped CI (skip-checks trailer). Threads: the two round-1 threads resolved on the reviewer's Accepted:; the round-2 thread's newest comment is the reviewer's `Accepted: fixed in adc58ad2…` (reply 4206229639). Both E2E lines present; the tester's round-2 proof at 8383d5b6 drove the dispatch_issue result on the pinned Oh My Pi with @sjawhar/pi-envoy installed alone and reproduced the negative control (the old string fails the repinned tests and check-dist).",
+  "important": 0,
   "issue": "LEGION-247",
   "keyFindings": [
     {
-      "description": "SPEC_CHECK_REMINDER, appended to the dispatch_issue result when a spec is given (:2180) and to dispatch_request_approval's (:2974), tells every session to have `plan-gap-analyst` on Oh My Pi check the spec. The Dispatch tools are the Envoy plugin's (envoy.ts:1617 executeDispatchTool), so the sentence reaches a session with @sjawhar/pi-envoy alone, which no longer ships that agent (round 1 finding 1, one channel over), and it now contradicts skills/dispatch-first/SKILL.md:53, which names `scout` for Oh My Pi and reserves plan-gap-analyst for a Legion session. The new guard reads skills only and matches task(agent=…), so it cannot see prose in a tool result. Fix: reword the reminder as the skill is worded (or defer to the skill without naming an agent), update the three assertions (dispatch-advice.test.ts:253, dispatch-execute.test.ts:3840, :3905, :3958), and rebuild packages/claude-envoy/dist in the same commit (check-dist compares a fresh build; dist/envoy-channel.js and dist/session-hook.js carry the string).",
+      "description": "[Unreleased] LEGION-577 entry says the reminder names `plan-gap-analyst` on Oh My Pi; the shipped sentence names `task(agent=\"scout\")` there and plan-gap-analyst only for a Legion architect's spec. Hand-maintained document, not read by the release job (notes come from --generate-notes). Fast-follow.",
+      "file": "packages/envoy-client/CHANGELOG.md:39",
+      "severity": "minor"
+    },
+    {
+      "description": "[Unreleased] LEGION-577 entry says dispatch-first tells every session to have plan-gap-analyst check a spec; since 8962eb69 that is scoped to a Legion architect, and the agent ships in @sjawhar/pi-legion. Fast-follow.",
+      "file": "packages/pi-envoy/CHANGELOG.md:29",
+      "severity": "minor"
+    },
+    {
+      "description": "The reminder now carries the skill's Legion clause in full rather than pointing to it; the negative pins at dispatch-execute.test.ts:3906 and :3959 (`not.toContain(\"plan-gap-analyst\")`) would pass vacuously if that clause were cut; exporting SPEC_CHECK_REMINDER and asserting on it makes the four pins one predicate. Fast-follow.",
       "file": "packages/envoy-client/src/dispatch-execute.ts:191",
-      "severity": "important"
-    },
-    {
-      "description": "bundledAgents harvests *.md from the whole scratch .omp tree (natives hardlinked beside it) rather than .omp/agent/agents or `omp agents unpack --dir`; the set is exact today and could only widen. Fast-follow.",
-      "file": "packages/pi-shared/test/skills-guard.ts:242",
-      "severity": "minor"
-    },
-    {
-      "description": "unresolvedAgentDispatches and agentDispatches run only with the binary; a fixture-based assertion would cover the pure rule on a plain bun test. Fast-follow.",
-      "file": "packages/pi-envoy/src/skills-guard.test.ts:84",
-      "severity": "minor"
-    },
-    {
-      "description": "60 s timeout where the package's other real-binary tests allow 120-180 s for a cold natives fill. Fast-follow.",
-      "file": "packages/pi-envoy/src/skills-guard.test.ts:91",
-      "severity": "minor"
-    },
-    {
-      "description": "The finding sentence hardcodes `neither this plugin nor Oh My Pi ships` while `available` is the caller's; shippedAgents reads agents/ rather than the manifest's files. Fast-follow.",
-      "file": "packages/pi-shared/test/skills-guard.ts:271",
       "severity": "minor"
     }
   ],
-  "minor": 15,
+  "minor": 18,
   "notProven": [
     "Stage 2 and Stage 3 (devbox only) were not run; the spec's open decision block dispatch://LEGION-247/ask/c736bf45-5564-47d3-88f8-1a0c3acb45c3 decides what replaces them.",
     "The first npm publish of @sjawhar/pi-envoy and @sjawhar/pi-legion depends on trusted publishing being configured for each new name (the ask the architect opens before READY); not verifiable from CI.",
-    "The Dispatch tool result SPEC_CHECK_REMINDER still sends a session with @sjawhar/pi-envoy alone to plan-gap-analyst (review round 2, finding 1).",
     "Consumers of the reworded boot-gate pass line outside this repository (a deployment's alert or smoke check, if any) cannot be verified from here.",
     "The pane lane was proven on the real binary through an installed profile and the controller lane, not under a live daemon."
   ],
@@ -45,20 +33,29 @@
   "previousRounds": [
     {
       "findings": [
-        "Envoy-injected dispatch-first text dispatched plan-gap-analyst (fixed in 8962eb69; thread 4205510843 accepted)",
-        "pi_legion filter lacked skills/dispatch/** (fixed in 8962eb69; thread 4205510851 accepted)",
-        "no Contract change census (written at 8962eb69; its five entries' searches re-run at the head and their hits match)"
+        "Envoy-injected dispatch-first text dispatched plan-gap-analyst (fixed in 8962eb69; thread 4205510843 accepted and resolved)",
+        "pi_legion filter lacked skills/dispatch/** (fixed in 8962eb69; thread 4205510851 accepted and resolved)",
+        "no Contract change census (written at 8962eb69; its five searches re-run at the head, hits match)"
       ],
       "review": "https://github.com/sjawhar/legion/pull/1831#pullrequestreview-5440623101",
       "reviewedHead": "536e915caa5af1363d79b05caece94a5bf1da009",
       "round": 1,
       "verdict": "changes_requested"
+    },
+    {
+      "findings": [
+        "SPEC_CHECK_REMINDER in packages/envoy-client/src/dispatch-execute.ts:191 named plan-gap-analyst for every session (fixed in adc58ad2; thread 4206015406 accepted)"
+      ],
+      "review": "https://github.com/sjawhar/legion/pull/1831#pullrequestreview-5441237261",
+      "reviewedHead": "42a9100a7c8f7946cadec7288db1ab6ff3d5fe59",
+      "round": 2,
+      "verdict": "changes_requested"
     }
   ],
-  "reviewedHead": "42a9100a7c8f7946cadec7288db1ab6ff3d5fe59",
-  "round": 2,
+  "reviewedHead": "d30f4083909d8f79ae9aac7377f7a5d633b1f56f",
+  "round": 3,
   "schemaVersion": 1,
-  "securityLine": "Security: agent-def — skills/dispatch-first/SKILL.md:53 is injected into every Dispatch session, a reviewer's included; the edit narrows agency (a Legion-only agent name becomes the bundled read-only scout, the Legion name moves behind a role condition), touches no skills/thermonuclear-* or packages/pi-legion/agents/ file, and packages/pi-envoy/src/skills-guard.test.ts:84-92 now constrains what these skills may tell a session to dispatch, so the diff cannot steer its reviewers; the pair ran from this pane's installed plugin, not the branch. untrusted-input — packages/pi-shared/test/skills-guard.ts:234-236 adds a subprocess with a fixed argv, no shell, the environment replaced by a scratch HOME and a literal PATH, consuming a directory listing (ASVS v5.0.0-2.3.1). supply-chain — .github/workflows/envoy-and-contracts.yaml:263 adds a path filter only; no action pin moves, permissions stay contents: read; the binary the new test runs is the existing .omp-pin tag. authz, secret, sandbox, transport, prompt — not touched by the delta; round 1's answers for the whole diff stand (bootgate.go:711-733, legion.ts:545-554, release.yaml:666-676, manifest.go:266, probe.go:533).",
-  "thermonuclear": "Pair run once at 42a9100a over the corrective delta and its effect on the whole. Deep review: one blocking (SPEC_CHECK_REMINDER, below); bundledAgents reads every *.md under the scratch .omp rather than .omp/agent/agents (today exact: 5 names, verified on the pin); the delta's Security line: agent-def narrows agency, supply-chain unchanged, untrusted-input a fixed argv with a sealed environment. Code quality: no blocking; bundledAgents should read the directory `omp agents unpack --dir` names; the pure half of the new rule has no binary-free unit test; the 60 s timeout is the package's thinnest real-binary budget; the finding sentence asserts a set the caller owns; shippedAgents reads agents/ not the manifest's files.",
-  "verdict": "changes_requested"
+  "securityLine": "Security: agent-def — the delta edits one static instruction string appended to dispatch_issue and dispatch_request_approval results (packages/envoy-client/src/dispatch-execute.ts:191, mirrored byte-for-byte at packages/claude-envoy/dist/envoy-channel.js:39675 and dist/session-hook.js:15845); it interpolates no untrusted text, directs a session to a read-only subagent, and never reaches review input, so it cannot steer this diff's reviewers; the pair ran from this pane's installed plugin. authz, secret, untrusted-input, supply-chain, sandbox, transport, prompt — untouched by the delta; rounds 1 and 2's answers for the whole diff stand (bootgate.go:711-733, legion.ts:545-554, readLoadAnswer bootgate.go:642-659, release.yaml:666-676, manifest.go:266, probe.go:533, skills-guard.ts:234-236).",
+  "thermonuclear": "Pair run once at d30f4083 over the delta (one string, two pins, two rebuilt bundles). Deep review: no blocking; the dist lines decode byte-for-byte to the source literal, no result cap applies, no remaining text reaching a pi-envoy-only session names a Legion-only agent; should-fix: packages/envoy-client/CHANGELOG.md:37-41 ([Unreleased], LEGION-577) still describes the reminder as naming plan-gap-analyst on Oh My Pi (wording, Fast-follow). Code quality: no blocking; the reminder now paraphrases the skill's Legion clause rather than pointing to it, the negative pins at dispatch-execute.test.ts:3906/3959 depend on the trailing clause, packages/pi-envoy/CHANGELOG.md:25-32's LEGION-577 entry describes dispatch-first's old instruction (all wording, Fast-follow).",
+  "verdict": "approved"
 }
