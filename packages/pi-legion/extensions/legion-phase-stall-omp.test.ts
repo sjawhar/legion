@@ -78,6 +78,14 @@ function userText(request: Request): string {
   );
 }
 
+/** The names of the tools a Messages request offers the model. */
+function toolNames(request: Request): string[] {
+  const tools = Array.isArray(request.body.tools) ? request.body.tools : [];
+  return tools.map((tool: unknown) =>
+    typeof tool === "object" && tool !== null && "name" in tool ? String(tool.name) : ""
+  );
+}
+
 /** How one pane differs from the implementer pane the phase-stall cases run. */
 interface PaneOptions {
   /**
@@ -366,6 +374,8 @@ test.skipIf(omp === undefined && !onActions)(
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.
     expect(turns).toHaveLength(3);
+    // A Legion pane, both entries loaded: the host offers the model the `legion` tool.
+    expect(toolNames(turns[0] as Request)).toContain("legion");
     expect(userText(turns[0] as Request)).not.toContain("handoff_complete");
     expect(userText(turns[1] as Request)).toContain("written as text");
     expect(userText(turns[1] as Request)).toContain("WAITING");
@@ -427,6 +437,12 @@ test.skipIf(omp === undefined && !onActions)(
     // One turn, and the wait proves no second: the user's own. The agent said it is not waiting
     // on anyone, so the whole stop cost one hidden call the user never saw.
     expect(pane.turns()).toHaveLength(1);
+    // Both entries loaded but no LEGION_* in the environment: a person's own session gets no
+    // `legion` tool, and the Legion entry never speaks to the daemon.
+    expect(toolNames(pane.turns()[0] as Request)).not.toContain("legion");
+    expect(
+      pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
+    ).toEqual([]);
     const selfChecks = pane.selfChecks();
     expect(selfChecks).toHaveLength(1);
     expect(userText(selfChecks[0] as Request)).toContain("WAITING or PROCEEDING");
