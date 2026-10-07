@@ -82,8 +82,8 @@ type TimerKind string
 const (
 	// TimerBoot is the boot observation interval: an unregistered process is probed.
 	TimerBoot TimerKind = "boot"
-	// TimerRegistration is the registration deadline: a live process that never registered is
-	// retired.
+	// TimerRegistration is the registration deadline, which runs until the agent is ready: a live
+	// process whose agent never registered, or registered and never said it was ready, is retired.
 	TimerRegistration TimerKind = "registration"
 	// TimerTurn is the wait for the turn an acknowledged prompt should start.
 	TimerTurn TimerKind = "turn"
@@ -420,11 +420,12 @@ func fillTable(t *builder) {
 	// Timers.
 	t.row(onBootTimer, "the boot interval: probe the unregistered process", bootInterval,
 		[]ClaimState{StateLaunching, StateFailed}, booting...)
-	t.ignore(onBootTimer, "the agent registered, so the boot watch is over", StateRegistered, StateReady, StateWorking, StateIdle)
+	t.ignore(onBootTimer, "the agent registered, so its process is no longer probed each interval", StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onBootTimer, "no boot is being watched", processless...)
 
-	t.row(onDeadline, "the registration deadline", registrationDeadline, []ClaimState{StateLaunching, StateFailed}, booting...)
-	t.ignore(onDeadline, "the agent registered, so the boot watch is over", StateRegistered, StateReady, StateWorking, StateIdle)
+	t.row(onDeadline, "the registration deadline: the agent never registered, or never said it was ready", registrationDeadline,
+		[]ClaimState{StateLaunching, StateFailed}, StateLaunching, StateShimConnected, StateRegistered)
+	t.ignore(onDeadline, "the agent is ready, so the boot watch is over", StateReady, StateWorking, StateIdle)
 	t.ignore(onDeadline, "no boot is being watched", processless...)
 
 	t.row(onTurnTimer, "an acknowledged prompt started no turn", noTurn, []ClaimState{StateLaunching, StateFailed}, prompted...)
@@ -821,18 +822,23 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 	}, TimerBoot, m.deps.Timeouts.Boot)
 }
 
-// registrationDeadline is a process that has had its boot intervals and whose agent never
-// registered: alive, it is retired — suspended, since the claim is relaunched — and counted, the
-// third meaning of a missing worker; dead, it is counted. A suspension that fails leaves everything
-// and tries again at the next probe interval.
+// registrationDeadline is a process that has had its boot intervals and whose agent never became
+// ready — it never registered, or registered and never said it was ready: alive, it is retired —
+// suspended, since the claim is relaunched — and counted, the third meaning of a missing worker;
+// dead, it is counted. A suspension that fails leaves everything and tries again at the next probe
+// interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
+	never := "never registered"
+	if m.claim.State == StateRegistered {
+		never = "registered and never said it was ready"
+	}
 	return m.probe(ctx, func(ctx context.Context) error {
 		incarnation := m.claim.Locator.Incarnation
 		if err := m.suspendProcess(ctx); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
-			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
+			return fmt.Errorf("retire %s, whose agent %s: suspend: %w", m.claim.Token, never, err)
 		}
-		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", incarnation)
+		m.log.Warn("supervise: the agent "+never+"; retired its process", "incarnation", incarnation)
 		return m.relaunchAfterFailure(ctx)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
@@ -860,20 +866,26 @@ func sessionLost(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // register records the session the agent became; a claim whose workspace was lost has its fresh
-// agent now, whose session is on the recreated volume, so the loss is over.
+// agent now, whose session is on the recreated volume, so the loss is over. The boot intervals end
+// with the registration, but not the deadline: it is armed again at its base bound, and only the
+// agent's ready ends it. A registration whose answer never reached its agent leaves a claim no
+// ready will ever come for, and from here that looks exactly like an agent slow to boot.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
-	m.disarm(TimerRegistration)
+	m.armRegistration()
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
 	return m.ensureEnrolled(ctx)
 }
 
+// reregister is the recorded session registering again: it is issued a new secret, and the
+// deadline stays where the first registration set it, so an agent that keeps registering and never
+// says it is ready is still relaunched.
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.SessionFile = r.SessionFile
@@ -884,6 +896,7 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 func ready(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateReady
 	m.claim.Budgets.LaunchFailures = 0
+	m.disarm(TimerRegistration)
 	if err := m.persist(ctx); err != nil {
 		return err
 	}

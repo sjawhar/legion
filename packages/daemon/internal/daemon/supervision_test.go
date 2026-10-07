@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -364,6 +365,132 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	if resumed := rt.CallsOf("Resume")[0]; resumed.Spec.ResumeSessionFile != "/sessions/architect.jsonl" ||
 		!reflect.DeepEqual(resumed.Previous, loc) {
 		t.Errorf("resumed %+v, want the recorded session after the dead incarnation", resumed)
+	}
+}
+
+// heldClock is the machines' time held still until the test fires the timers armed for one wait,
+// so a daemon test sees the deadline it fires and nothing else.
+type heldClock struct {
+	mu     sync.Mutex
+	timers []*heldTimer
+}
+
+type heldTimer struct {
+	clock *heldClock
+	after time.Duration
+	f     func()
+	done  bool
+}
+
+func (c *heldClock) Now() time.Time { return time.Now() }
+
+func (c *heldClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	timer := &heldTimer{clock: c, after: d, f: f}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (t *heldTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	if t.done {
+		return false
+	}
+	t.done = true
+	return true
+}
+
+// fire runs, once each, every timer armed for after that has neither fired nor been stopped, and
+// reports how many it ran. A timer one of them arms waits for the next fire.
+func (c *heldClock) fire(after time.Duration) int {
+	c.mu.Lock()
+	var due []*heldTimer
+	for _, timer := range c.timers {
+		if !timer.done && timer.after == after {
+			timer.done = true
+			due = append(due, timer)
+		}
+	}
+	c.mu.Unlock()
+	for _, timer := range due {
+		timer.f()
+	}
+	return len(due)
+}
+
+// An agent registered over the API whose ready never comes — no stream ever connected, as for the
+// two workers LEGION-599 records — is relaunched at the deadline as the same session one
+// generation later, with one launch failure charged, through the daemon's own API, store, stream
+// and machines. The relaunched agent's shim says hello, the agent registers and says it is ready,
+// and it is sent the task the claim held.
+func TestRunRelaunchesAClaimWhoseAgentRegisteredAndNeverSaidReady(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	clock := &heldClock{}
+	o.clock = clock
+	d := startDaemon(t, cfg, o)
+	spawn := architect()
+	spawn.Task = "Say hello."
+	token := d.spawn(spawn)
+	first := lastLaunch(t, rt, token)
+
+	register := func(bootToken string) claim.RegisterResponse {
+		t.Helper()
+		status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+			BootToken: bootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
+			AgentID: "agent", PluginContract: 1,
+		}, false)
+		if status != http.StatusOK {
+			t.Fatalf("register = %d; body %s", status, body)
+		}
+		var registered claim.RegisterResponse
+		if err := json.Unmarshal(body, &registered); err != nil {
+			t.Fatalf("decode the registration: %v", err)
+		}
+		return registered
+	}
+	register(first.BootToken)
+	registered := d.claim(token)
+	if registered.State != string(supervise.StateRegistered) || registered.Locator == nil {
+		t.Fatalf("after the registration the claim is %+v, want registered with its process", registered)
+	}
+
+	deadline := cfg.WorkerBootTimeout * time.Duration(cfg.WorkerBootRegistrationDeadlineIntervals)
+	if fired := clock.fire(deadline); fired != 1 {
+		t.Fatalf("%d deadlines were armed for the registered claim, want the one its registration armed", fired)
+	}
+	relaunched := d.claim(token)
+	if relaunched.State != string(supervise.StateLaunching) || relaunched.Generation != 2 || relaunched.Budgets.LaunchFailures != 1 {
+		t.Fatalf("after the deadline the claim is %s at generation %d with %d launch failures, want launching at 2 with 1",
+			relaunched.State, relaunched.Generation, relaunched.Budgets.LaunchFailures)
+	}
+	if suspends := rt.CallsOf("Suspend"); len(suspends) != 1 || !reflect.DeepEqual(suspends[0].Locator, *registered.Locator) {
+		t.Fatalf("suspended %+v, want the registered agent's process once", suspends)
+	}
+	resumes := rt.CallsOf("Resume")
+	if len(resumes) != 1 || resumes[0].Spec.ResumeSessionFile != "/sessions/architect.jsonl" ||
+		resumes[0].Spec.Generation != 2 || !reflect.DeepEqual(resumes[0].Previous, registered.Locator) {
+		t.Fatalf("resumed %+v, want the registered session at generation 2 after its process", resumes)
+	}
+
+	second := lastLaunch(t, rt, token)
+	sh := dialShim(t, record.address, second.BootToken)
+	secret := register(second.BootToken).Secret
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_architect", Secret: secret, Generation: 2,
+	}, false); status != http.StatusNoContent {
+		t.Fatalf("ready = %d; body %s", status, body)
+	}
+	if prompt := sh.prompt(); prompt.Message != "Say hello." {
+		t.Fatalf("the relaunched agent was prompted %+v, want the task the claim held", prompt)
+	}
+	if c := d.claim(token); c.State != string(supervise.StateReady) || c.Budgets.LaunchFailures != 0 {
+		t.Fatalf("after the relaunched agent's ready the claim is %s with %d launch failures, want ready with 0",
+			c.State, c.Budgets.LaunchFailures)
 	}
 }
 

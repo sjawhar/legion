@@ -1242,8 +1242,11 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   re-arms the base deadline alone, the same one a tmux pane runs under throughout. A pod that
   never says hello is retired at launch plus the base deadline plus the full bound, armed as one
   (44 min at the defaults); one that says hello and never registers is retired at hello plus the
-  base deadline alone (6 min from the hello). A tmux pane carries no bound to begin with, since it
-  starts the agent at once with no init phase.
+  base deadline alone (6 min from the hello); and one whose agent registers and never says it is
+  ready is retired at its registration plus the base deadline alone (6 min from the registration,
+  again from a daemon restart that finds it registered), then resumed as the same session one
+  generation later and counted as a launch failure. A tmux pane carries no bound to begin with,
+  since it starts the agent at once with no init phase.
 
   The runtime's own wait for a tree's other pods to finish initializing before this one provisions
   (`awaitTreeInitialized`, bounded by `treeWaitBound`) is the sibling's own full pre-hello deadline
