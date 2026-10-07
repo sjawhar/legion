@@ -191,6 +191,16 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.
   Nothing to do.
+- **`worker-stream: could not resolve a hello's boot token; the shim redials`** means the daemon's
+  Postgres did not answer while a pod's shim said hello. The hello is not refused: the shim
+  redials, and the hello is accepted once the store answers. If the line keeps coming, look at the
+  database, not the pod.
+- **`supervise: the agent registered and never said it was ready; retired its process`** means an
+  agent registered and its ready never came within the registration deadline
+  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, 6 minutes at the
+  defaults), often because the registration's answer never reached it. The daemon resumes the same
+  session one generation later and counts a launch failure; after `launch_failure_limit` of them
+  the claim fails.
 
 ## The work loops or stops
 

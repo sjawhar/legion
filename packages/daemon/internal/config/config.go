@@ -84,8 +84,8 @@ type Config struct {
 
 	WorkerBootTimeout time.Duration
 	// WorkerBootRegistrationDeadlineIntervals × WorkerBootTimeout is the registration deadline: a
-	// pane whose process is alive but whose agent has not registered by then is retired and
-	// counted as a launch failure.
+	// pane whose process is alive but whose agent has not registered by then, or has not said it is
+	// ready that long after its registration, is retired and counted as a launch failure.
 	WorkerBootRegistrationDeadlineIntervals int
 	WorkerRPCTimeout                        time.Duration
 	WorkerStopTimeout                       time.Duration
