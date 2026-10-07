@@ -852,6 +852,66 @@ func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	}
 }
 
+// gitWorktreeEntries must resolve the clone's worktree admin directory before resolving a
+// relative gitdir: git >= 2.48 writes that gitdir between real paths. Here the clone is reached
+// through a symlink while the workspace is outside that symlink, so without the admin
+// EvalSymlinks a lexical join misses its own entry. This calls gitWorktreeEntries directly,
+// outside the jj runner, because refuseSymlinkedLayout deliberately refuses that clone before a
+// production jj command reaches git.
+func TestGitWorktreeEntriesResolveACloneSymlinkOutsideTheWorkspace(t *testing.T) {
+	root := t.TempDir()
+	realClone := filepath.Join(root, "real", "clone")
+	runSetup(t, root, "git", "init", "--initial-branch=main", realClone)
+	runSetup(t, realClone, "git", "config", "user.name", "Legion test")
+	runSetup(t, realClone, "git", "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(realClone, "README"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, realClone, "git", "add", "README")
+	runSetup(t, realClone, "git", "commit", "-m", "seed")
+
+	logicalClone := filepath.Join(root, "logical", "clone")
+	if err := os.MkdirAll(filepath.Dir(logicalClone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realClone, logicalClone); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "workspace", "widgets-42")
+	if err := os.MkdirAll(filepath.Dir(workspace), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, logicalClone, "git", "worktree", "add", "--detach", workspace, "HEAD")
+
+	admin := filepath.Join(realClone, ".git", "worktrees")
+	entries, err := os.ReadDir(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("git registered %d worktrees at %s, want 1", len(entries), admin)
+	}
+	entry := filepath.Join(admin, entries[0].Name())
+	// Git >= 2.48 writes this relative path itself. The devbox's git 2.43 writes an absolute
+	// path, so write the newer format over the real worktree entry to test the parser against the
+	// worker-image behavior without asking the test host to upgrade git.
+	relative, err := filepath.Rel(entry, filepath.Join(workspace, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(entry, "gitdir"), []byte(relative+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := gitWorktreeEntries(logicalClone, workspace)
+	if err != nil {
+		t.Fatalf("gitWorktreeEntries(%s, %s): %v", logicalClone, workspace, err)
+	}
+	if !slices.Equal(got, []string{entry}) {
+		t.Errorf("gitWorktreeEntries(%s, %s) = %q, want %q", logicalClone, workspace, got, []string{entry})
+	}
+}
+
 // A bare prune that could not see the workspace deleted its entry: git fails there while jj works.
 // The next provisioning restores the entry at the working copy's parent, with an index to match and
 // the working copy untouched, and locks it.
