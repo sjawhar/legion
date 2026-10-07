@@ -1125,3 +1125,29 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 		t.Errorf("the worker relaunched with %+v, want a fresh session recovering legion/LEGION-2", relaunched)
 	}
 }
+
+// A process the runtime reports at a stale address — alive, but holding an address the daemon no
+// longer hands its processes (LEGION-592: the daemon restarted with its worker stream, its API or a
+// service at another address and re-adopted the pod) — relaunches its recorded session at once, and
+// the observation charges nothing: the daemon's own configuration moved, not a fault of the agent's.
+func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	token := d.spawn(architect())
+	readyClaim(t, d, rt, token)
+	loc := d.claim(token).Locator
+
+	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.StaleAddress, Detail: "pod dials a stale address"})
+
+	testwait.Eventually(t, "the relaunch", func() bool {
+		c := d.claim(token)
+		return c.Generation == 2 && c.State == string(supervise.StateLaunching)
+	})
+	if relaunched := lastLaunch(t, rt, token); relaunched.ResumeSessionFile == "" {
+		t.Errorf("relaunched with %+v, want the recorded session resumed", relaunched)
+	}
+	if c := d.claim(token); c.Budgets.LaunchFailures != 0 {
+		t.Errorf("the stale address was charged: %+v", c.Budgets)
+	}
+}

@@ -606,6 +606,41 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	}
 }
 
+// handedAddresses is exactly the addresses a pod launched now carries, every optional address
+// configured: each address-valued argument of the shim (the words before `--`) by its flag, and each
+// address-valued variable the runtime itself sets in the worker container, an address being a value
+// with a scheme. An address added to the pod and not to handedAddresses is one the daemon could move
+// without any pod it re-adopts being replaced (evaluate, row 9).
+func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
+	opts := testOptions()
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := podOf(t, r, workerSpec(t), false).Containers[0]
+	carried := map[string]string{}
+	shim := main.Command[:slices.Index(main.Command, "--")]
+	for i := 1; i < len(shim); i++ {
+		if strings.Contains(shim[i], "://") {
+			carried[shim[i-1]] = shim[i]
+		}
+	}
+	for _, v := range main.Env {
+		if runtimeOwned[v.Name] && strings.Contains(v.Value, "://") {
+			carried[v.Name] = v.Value
+		}
+	}
+	handed := map[string]string{}
+	for _, a := range r.handedAddresses() {
+		handed[a.name] = a.value
+	}
+	if !maps.Equal(carried, handed) {
+		t.Errorf("a pod launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+	}
+}
+
 // The Dispatch bearer is the runtime's to carry, not the spec's: with Dispatch configured, every
 // claim's Secret holds it as DISPATCH_TOKEN and the worker container reads it through
 // DISPATCH_TOKEN_FILE; without it, neither exists.

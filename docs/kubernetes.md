@@ -432,6 +432,9 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
 worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+`envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
+or fragment. This is a breaking configuration change for a file that has either; put credentials in
+URL userinfo or in a Secret, never in a query.
 `advertise_host` is an IP address or a DNS name, the host alone, and only `runtime: kubernetes`
 accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
 `0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
@@ -442,11 +445,10 @@ listener bound only to loopback answers no Service and no pod. `legion start --c
 all of it without starting the daemon, writing a file or running a key command, and then every
 refusal boot makes from the files and the environment before its first write, in boot's words: the
 operator, Envoy and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the
-runtime's own
-reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
-where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
-what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
-image probe.
+runtime's own reads (the kubeconfig and every value's translation; under tmux, the OMP invocation,
+through `mise where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it
+does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin
+gate and the image probe.
 
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
@@ -649,6 +651,49 @@ Every pod runs:
 
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
 `shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+
+### A pod whose address moved
+
+A pod's addresses are fixed when the pod is created, and nothing changes a running pod's argv or
+environment. The daemon hands every pod six from its configuration: the worker stream listener the
+shim's `--connect` names, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>` (item
+3 of the anatomy list above), and, in the worker's environment, `LEGION_DAEMON_URL` (`daemon_url`),
+`ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL` (`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and
+`AGENT_SECRETS_URL` (`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts
+with its key changed, and with no `advertise_host` set the stream also moves when the daemon
+restarts on another host. A daemon that restarts re-adopts each live claim's pod by its recorded
+locator (the boot orphan sweep), and re-adoption alone would leave that pod holding the old
+addresses: a stale `--connect` never reaches the new daemon, and a stale `LEGION_DAEMON_URL` fails
+every call the agent makes to the daemon's API (its credential helper, `legion gh`, its phase
+completion) while its stream still works.
+
+So the runtime compares each of those six in a watched pod with what it hands a new pod now, on
+every evaluation of the pod (each watch event, the probe-interval sweep, each probe), a variable the
+pod lacks counting as unset. A pod holding any other value is reported `stale_address` rather than
+`alive` (`ObservationKind`, `internal/runtime/runtime.go`), and the observation's detail names each
+address that moved, with the value the pod holds and the one a new pod is handed
+(`LEGION_DAEMON_URL http://192.0.2.5:13370, now http://192.0.2.7:13370`). The supervisor logs
+that detail, so it constructs every printed endpoint from only its scheme, host and port, adding
+`xxxxx@` when userinfo is present. Path, query and fragment never appear, which also protects a pod
+an earlier daemon launched before the current endpoint grammar refused queries and fragments. A
+pod's `ENVOY_NATS_URL` is its old daemon's comma-joined list; it is parsed whole, never split.
+Raw commas are valid in userinfo: splitting `nats://user:pa,ss@host:4222` would promote `user:pa`
+to a fragment's host, which the endpoint allowlist would print. Whole parsing keeps later URLs and
+their paths out of the detail. A malformed field is named only `xxxxx`. A pod this
+runtime launched always compares equal, so only the pods a daemon under another configuration
+launched are ever
+reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
+variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods launched
+after it. The supervisor relaunches each reported claim at once, through the launch path a death
+uses: a `Resume` of its recorded session, or a `Spawn` over its existing Sandbox when it has not
+registered yet, onto a pod handed the current addresses. The stale observation is never charged,
+since the pod did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
+A turn the stale pod was in used the addresses it holds and ends with the relaunch, so the turn is
+lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
+recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
+instead, as it is when its process dies. Stage 4b's `address-moved` checkpoint drives this with real
+agents on the cluster, moving the worker stream and `daemon_url` at one restart
+([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh)).
 
 ### A shell on the tree volume
 

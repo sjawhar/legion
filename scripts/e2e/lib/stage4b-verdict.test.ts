@@ -1,19 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's own blocked, fail, pass, until_reached, cleanup, audit_verdict and audit_failure,
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
 // passed as a STAGE4B_UNTIL run's last checkpoint), with the teardown's cluster, NATS and GitHub
 // helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
 // LEGSMOKE, or none.
-const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage4b-sandbox-tree.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
@@ -38,7 +34,7 @@ root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
-tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
+tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
 mkdir -p "$work" "$evidence/model-gateway"
 # The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
 # would list it, and a failed checkpoint's do.

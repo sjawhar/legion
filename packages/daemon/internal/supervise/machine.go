@@ -808,6 +808,8 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 		return alive(ctx)
 	case runtime.Gone, runtime.NotRecordedProcess:
 		return m.died(ctx, observation)
+	case runtime.StaleAddress:
+		return m.repoint(ctx, observation)
 	case runtime.Uncertain:
 		m.claim.UncertainStreak++
 		m.log.Warn("supervise: process uncertain", "streak", m.claim.UncertainStreak, "detail", observation.Detail)

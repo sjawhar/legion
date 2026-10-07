@@ -206,6 +206,17 @@ const (
 	// is a fourth verdict precisely so that it is never read as either: the supervisor re-arms
 	// the probe and counts the streak, and changes no state on it.
 	Uncertain ObservationKind = "uncertain"
+	// StaleAddress: the process the locator recorded is running, but holds an address a process
+	// launched now is not handed — one of the addresses a runtime hands every new process from the
+	// daemon's configuration (the worker stream it dials, the daemon's API, NATS, Envoy, Dispatch,
+	// the secrets broker) moved since this one was launched, as each does when the daemon restarts
+	// with its key changed (the worker stream's: `advertise_host`, `bind` when no `advertise_host` is
+	// set, `worker_stream_port`). Only the Sandbox runtime reports it, since a pod's argv and
+	// environment are fixed at its launch. The detail names each address that moved. The
+	// supervisor's response is its own (supervise's repoint). Distinct from a "stale" event (Handle's
+	// own fence vocabulary, an observation of an incarnation the claim no longer holds): this one
+	// names the claim's current, live incarnation.
+	StaleAddress ObservationKind = "stale_address"
 )
 
 // Observation is one runtime fact about one process, with the moment it was observed and, for a

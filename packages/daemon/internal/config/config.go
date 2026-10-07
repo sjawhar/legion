@@ -542,8 +542,8 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 	}
 	urls := make([]string, 0, len(read))
 	for _, raw := range read {
-		if _, err := validURL(raw, key); err != nil {
-			return nil, fmt.Errorf("%s entry %q must be a valid URL", key, raw)
+		if _, err := endpointURL(raw, key); err != nil {
+			return nil, fmt.Errorf("%s entry %q%s", key, raw, strings.TrimPrefix(err.Error(), key))
 		}
 		if !slices.Contains(urls, raw) {
 			urls = append(urls, raw)
@@ -715,6 +715,27 @@ func validURL(value, key string) (*url.URL, error) {
 	return parsed, nil
 }
 
+// endpointURL is validURL for a URL that names an endpoint, never a request: NATS and Envoy
+// credentials belong in URL userinfo or a secret, not in a query that would reach a pod's
+// environment and any diagnostic that names it. An endpoint path remains valid.
+func endpointURL(value, key string) (*url.URL, error) {
+	parsed, err := validURL(value, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return nil, fmt.Errorf("%w; use URL userinfo or a secret for credentials", err)
+	}
+	return parsed, nil
+}
+
+func noQueryOrFragment(parsed *url.URL, key string) error {
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("%s must not include a query string or fragment", key)
+	}
+	return nil
+}
+
 // baseURL is the shipped `normalizeBaseUrl` (config.ts): a URL a path is appended to, so
 // a query or fragment is refused and trailing slashes are dropped.
 func baseURL(value, key string) (string, error) {
@@ -729,8 +750,8 @@ func baseURL(value, key string) (string, error) {
 // refused and trailing slashes are dropped. dispatchBase shares it after its own scheme check,
 // which must read the parsed URL's Scheme directly rather than re-parsing a normalized string.
 func trimmedBase(parsed *url.URL, key string) (string, error) {
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", fmt.Errorf("%s must not include a query string or fragment", key)
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
@@ -898,7 +919,7 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 		cfg.OperatorTokenFile = underConfig(*file.OperatorTokenFile, configDir)
 	}
 	if file.EnvoyURL != nil {
-		if _, err := validURL(*file.EnvoyURL, "envoy_url"); err != nil {
+		if _, err := endpointURL(*file.EnvoyURL, "envoy_url"); err != nil {
 			return err
 		}
 		cfg.EnvoyURL = *file.EnvoyURL

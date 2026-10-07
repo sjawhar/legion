@@ -328,7 +328,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
 	_, providersMounts := r.providers()
-	shim := []string{legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--pod-safety"}
+	shim := []string{legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--pod-safety"}
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
@@ -420,11 +420,16 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 // instructions included, as a tmux pane does.
 func kubeletLiteral(c *corev1.Container) {
 	for i := range c.Command {
-		c.Command[i] = strings.ReplaceAll(c.Command[i], "$", "$$")
+		c.Command[i] = kubeletEscape(c.Command[i])
 	}
 	for i := range c.Env {
-		c.Env[i].Value = strings.ReplaceAll(c.Env[i].Value, "$", "$$")
+		c.Env[i].Value = kubeletEscape(c.Env[i].Value)
 	}
+}
+
+// kubeletEscape is text as a container's command or env value carries it: every `$` doubled.
+func kubeletEscape(text string) string {
+	return strings.ReplaceAll(text, "$", "$$")
 }
 
 // volumes are every volume of the pod: the tree volume, the claim's Secret projected twice (its
@@ -718,6 +723,35 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add(name+"_FILE", BootDir+"/"+name)
 	}
 	return append(env, r.providersPointers()...)
+}
+
+// connectFlag is the shim's flag naming the worker stream listener it dials.
+const connectFlag = "--connect"
+
+// handedAddress is one address the runtime hands every pod it launches from the daemon's
+// configuration: name is where the pod's main container carries it, the shim's connectFlag or one
+// of mainEnvironment's variables, and value is what a pod launched now carries there, "" for a
+// variable the runtime leaves unset.
+type handedAddress struct{ name, value string }
+
+// handedAddresses are every address a pod launched now carries (podTemplate, mainEnvironment): the
+// worker stream listener the shim dials, then the daemon's API, NATS, Envoy, Dispatch and the
+// secrets broker as the agent's environment names them. A pod's are fixed at its creation, so a pod
+// a daemon launched under other addresses holds those until it is replaced (evaluate, row 9).
+// TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
+func (r *Runtime) handedAddresses() []handedAddress {
+	broker := ""
+	if r.agentSecrets != nil {
+		broker = r.agentSecrets.URL
+	}
+	return []handedAddress{
+		{connectFlag, r.streamURL},
+		{"LEGION_DAEMON_URL", r.daemonURL},
+		{"ENVOY_NATS_URL", strings.Join(r.natsURLs, ",")},
+		{"ENVOY_URL", r.envoyURL},
+		{"DISPATCH_URL", r.dispatchURL},
+		{"AGENT_SECRETS_URL", broker},
+	}
 }
 
 // podPath is a main container's PATH: worker-bin, then the directory of the `legion` every

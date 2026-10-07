@@ -102,9 +102,8 @@ directory. The repository's `deploy/kubernetes/daemon/legion.yaml.example`, rend
 deployment: copy it and replace every value that names your deployment (documentation addresses,
 made-up App ids, an all-zero image digest, the example's `advertise_host`). `bind: 0.0.0.0` is
 already real: a daemon whose own pod restarts onto a new IP binds every interface. As written, the
-file passes the
-[configuration check](#check-and-start-the-daemon) once the three token files and the kubeconfig it
-names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) names a Postgres.
+file passes the [configuration check](#check-and-start-the-daemon) once the three token files and
+the kubeconfig it names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) names a Postgres.
 
 What each part is for:
 

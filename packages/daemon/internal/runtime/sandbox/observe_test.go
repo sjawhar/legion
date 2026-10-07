@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,28 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			e(pod)
 		}
 		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
+	}
+	// launchedUnder is a pod whose containers are the ones a runtime with testOptions edited by
+	// edit launches, as a daemon under that configuration left it running.
+	launchedUnder := func(edit func(*Options)) func(*corev1.Pod) {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		containers := podOf(t, r, workerSpec(t), false).Containers
+		return func(p *corev1.Pod) { p.Spec.Containers = containers }
+	}
+	// withoutConnect drops the worker shim's --connect and its address from the main container, as
+	// no pod this runtime builds is.
+	withoutConnect := func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if c := &p.Spec.Containers[i]; c.Name == mainContainer {
+				flag := slices.Index(c.Command, connectFlag)
+				c.Command = slices.Delete(slices.Clone(c.Command), flag, flag+2)
+			}
+		}
 	}
 	running := corev1.PodStatus{Phase: corev1.PodRunning}
 	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
@@ -183,6 +206,43 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Alive,
 		},
 		{
+			row:     "8 a pod holding every address a pod launched now is handed is alive",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(*Options) {})),
+			want:    runtime.Alive,
+		},
+		{
+			row:     "8 a pod whose worker shim has no --connect is never read as stale for want of it",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(*Options) {}), withoutConnect),
+			want:    runtime.Alive,
+		},
+		{
+			row:     "9 a moved worker stream",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL},
+			absent:  []string{"LEGION_DAEMON_URL"},
+		},
+		{
+			row: "9 every moved address is named",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(o *Options) {
+				o.StreamURL, o.DaemonURL = movedStreamURL, movedDaemonURL
+			})),
+			want: runtime.StaleAddress,
+			detail: []string{
+				connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL,
+				"LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL,
+			},
+			absent: []string{"ENVOY_URL", "ENVOY_NATS_URL"},
+		},
+		{
+			row: "9 a pod without an address a pod launched now is handed",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(o *Options) {
+				o.DaemonURL = ""
+			})),
+			want:   runtime.StaleAddress,
+			detail: []string{"LEGION_DAEMON_URL (unset), now " + testOptions().DaemonURL},
+		},
+		{
 			row:     "a phase the mapping has no row for is uncertain",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodUnknown}),
 			want:    runtime.Uncertain, detail: []string{"phase Unknown"},
@@ -212,6 +272,255 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			for _, absent := range tc.absent {
 				if strings.Contains(obs.Detail, absent) {
 					t.Errorf("detail %q has %q", obs.Detail, absent)
+				}
+			}
+		})
+	}
+}
+
+// Each address the runtime hands a pod is compared on its own (row 9): a pod launched under a
+// configuration that differs in that one address alone, whether moved, configured only now or no
+// longer configured, is named for exactly that address, and a pod launched under the configuration
+// the runtime has now is named for none, a `$` the kubelet would expand included.
+func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
+	const (
+		dispatch = "https://dispatch.internal.example"
+		broker   = "https://secrets.internal.example"
+	)
+	for name, tc := range map[string]struct {
+		launched, now func(*Options)
+		want          string
+	}{
+		"nothing moved": {},
+		"the worker stream moved": {
+			launched: moveStream,
+			want:     connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL,
+		},
+		"the daemon's API moved": {
+			launched: func(o *Options) { o.DaemonURL = movedDaemonURL },
+			want:     "LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL,
+		},
+		"NATS moved": {
+			launched: func(o *Options) { o.NATSURLs = []string{"nats://192.0.2.9:4222", "nats://192.0.2.10:4222"} },
+			want:     "ENVOY_NATS_URL nats://192.0.2.9:4222,nats:, now nats://192.0.2.250:4222",
+		},
+		"Envoy moved": {
+			launched: func(o *Options) { o.EnvoyURL = "http://192.0.2.9:9020" },
+			want:     "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"Dispatch moved": {
+			launched: func(o *Options) { o.DispatchURL = "https://dispatch-old.internal.example" },
+			want:     "DISPATCH_URL https://dispatch-old.internal.example, now " + dispatch,
+		},
+		"the secrets broker moved": {
+			launched: func(o *Options) { o.AgentSecrets.URL = "https://secrets-old.internal.example" },
+			want:     "AGENT_SECRETS_URL https://secrets-old.internal.example, now " + broker,
+		},
+		"NATS moved, naming no user or password": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://legion:nats-password@192.0.2.9:4222", "nats://nats-token@192.0.2.10:4222"}
+			},
+			want: "ENVOY_NATS_URL nats://xxxxx@192.0.2.9:4222,nats:, now nats://192.0.2.250:4222",
+		},
+		"NATS moved, naming no userinfo with a raw comma in it": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{
+					"nats://user,more:password@192.0.2.9:4222",
+					"nats://user:password,more@192.0.2.10:4222",
+					"nats://user,more:password,more@192.0.2.11:4222",
+				}
+			},
+			want: "ENVOY_NATS_URL nats://xxxxx@192.0.2.9:4222,nats:, now nats://192.0.2.250:4222",
+		},
+		"NATS configured now names no raw-comma userinfo": {
+			now: func(o *Options) {
+				o.NATSURLs = []string{
+					"nats://user,more:password@192.0.2.9:4222",
+					"nats://user:password,more@192.0.2.10:4222",
+					"nats://user,more:password,more@192.0.2.11:4222",
+				}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://xxxxx@192.0.2.9:4222,nats://xxxxx@192.0.2.10:4222,nats://xxxxx@192.0.2.11:4222",
+		},
+		"NATS moved, naming no query token in an old pod": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222?token=nats-old-token"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
+		},
+		"NATS configured now names no query token": {
+			now: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222?token=nats-current-token"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://192.0.2.9:4222",
+		},
+		"Envoy moved to a URL with a query token": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020?access_token=envoy-old-token"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"Envoy configured now names no query token": {
+			now: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020?access_token=envoy-current-token"
+			},
+			want: "ENVOY_URL " + testOptions().EnvoyURL + ", now http://192.0.2.9:9020",
+		},
+		"NATS moved to a percent-encoded credential-shaped path": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222/tenant%2Fnats-old-credential"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
+		},
+		"NATS configured now names no percent-encoded credential-shaped path": {
+			now: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222/tenant%2Fnats-current-credential"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.250:4222, now nats://192.0.2.9:4222",
+		},
+		"Envoy moved to a percent-encoded credential-shaped path": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant%2Fenvoy-old-credential"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"Envoy configured now names no percent-encoded credential-shaped path": {
+			now: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant%2Fenvoy-current-credential"
+			},
+			want: "ENVOY_URL " + testOptions().EnvoyURL + ", now http://192.0.2.9:9020",
+		},
+		"Envoy path change is stale without naming either path": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant/old"
+			},
+			now: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020/tenant/new"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now http://192.0.2.9:9020",
+		},
+		"NATS moved, naming no fragment in an old pod": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222#token=nats-old-token"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
+		},
+		"Envoy moved to a URL with a fragment token": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://192.0.2.9:9020#access_token=envoy-old-token"
+			},
+			want: "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"NATS moved to a path containing an at sign": {
+			launched: func(o *Options) {
+				o.NATSURLs = []string{"nats://192.0.2.9:4222/route@blue"}
+			},
+			want: "ENVOY_NATS_URL nats://192.0.2.9:4222, now nats://192.0.2.250:4222",
+		},
+		"Envoy moved to a URL with raw commas in its userinfo": {
+			launched: func(o *Options) {
+				o.EnvoyURL = "http://user,more:password,more@192.0.2.9:9020"
+			},
+			want: "ENVOY_URL http://xxxxx@192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"the daemon's API moved to a URL with raw commas in its userinfo": {
+			now: func(o *Options) {
+				o.DaemonURL = "http://user,more:password,more@192.0.2.9:13370"
+			},
+			want: "LEGION_DAEMON_URL " + testOptions().DaemonURL + ", now http://xxxxx@192.0.2.9:13370",
+		},
+		"Dispatch moved to a URL with a user and password, naming neither": {
+			now:  func(o *Options) { o.DispatchURL = "https://legion:dispatch-password@dispatch.internal.example" },
+			want: "DISPATCH_URL " + dispatch + ", now https://xxxxx@dispatch.internal.example",
+		},
+		"Dispatch moved to a URL with raw commas in its userinfo": {
+			now:  func(o *Options) { o.DispatchURL = "https://user,more:password,more@dispatch.internal.example" },
+			want: "DISPATCH_URL " + dispatch + ", now https://xxxxx@dispatch.internal.example",
+		},
+		"Dispatch configured only now": {
+			launched: func(o *Options) { o.DispatchURL, o.DispatchToken = "", "" },
+			want:     "DISPATCH_URL (unset), now " + dispatch,
+		},
+		"the secrets broker no longer configured": {
+			now:  func(o *Options) { o.AgentSecrets = nil },
+			want: "AGENT_SECRETS_URL " + broker + ", now (unset)",
+		},
+		"an address the kubelet would expand, unmoved": {
+			launched: func(o *Options) { o.EnvoyURL = "http://192.0.2.250:9020/$(HOME)" },
+			now:      func(o *Options) { o.EnvoyURL = "http://192.0.2.250:9020/$(HOME)" },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runtimeWith := func(edit func(*Options)) *Runtime {
+				opts := testOptions()
+				opts.DispatchURL, opts.DispatchToken = dispatch, "dispatch-bearer"
+				opts.AgentSecrets = &AgentSecrets{URL: broker, Audience: "agent-secrets", TokenExpiry: time.Hour}
+				if edit != nil {
+					edit(&opts)
+				}
+				r, err := configure(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			pod := &corev1.Pod{Spec: podOf(t, runtimeWith(tc.launched), workerSpec(t), false)}
+			moved := runtimeWith(tc.now).movedAddresses(pod)
+			var want []string
+			if tc.want != "" {
+				want = []string{tc.want}
+			}
+			if !slices.Equal(moved, want) {
+				t.Fatalf("moved addresses %q, want %q", moved, want)
+			}
+		})
+	}
+}
+
+// An old ENVOY_NATS_URL is one comma-joined string. namedNATSPodValue must never split it: the
+// allowlist can safely show only one parse's scheme, host and port, not any other URL's path.
+func TestNamedNATSPodValueNeverLeaksTheJoinedField(t *testing.T) {
+	for name, tc := range map[string]struct {
+		value    string
+		contains []string
+		absent   []string
+	}{
+		"a raw comma in userinfo": {
+			value:    "nats://user:pa,ss@host.example:4222",
+			contains: []string{"nats://xxxxx@host.example:4222"},
+			absent:   []string{"user:pa", "pa,ss"},
+		},
+		"two endpoints": {
+			value:    "nats://a.example:4222,nats://b.example:4222",
+			contains: []string{"nats://a.example:4222,nats:"},
+			absent:   []string{"xxxxx"},
+		},
+		"a second endpoint's userinfo and path": {
+			value:    "nats://a.example:4222,nats://u:p@b.example:4222/tok",
+			contains: []string{"nats://a.example:4222,nats:"},
+			absent:   []string{"u:p", "tok"},
+		},
+		"an at sign in a path": {
+			value:    "nats://host.example:4222/route@blue",
+			contains: []string{"nats://host.example:4222"},
+			absent:   []string{"route@blue"},
+		},
+		"a percent-encoded path": {
+			value:    "nats://host.example:4222/tenant%2Ftoken",
+			contains: []string{"nats://host.example:4222"},
+			absent:   []string{"tenant", "%2F", "token"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := namedNATSPodValue(tc.value)
+			for _, want := range tc.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("namedNATSPodValue(%q) = %q, want it to contain %q", tc.value, got, want)
+				}
+			}
+			for _, forbidden := range tc.absent {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("namedNATSPodValue(%q) = %q, must not contain %q", tc.value, got, forbidden)
 				}
 			}
 		})
