@@ -48,6 +48,12 @@
 
 ### Changed
 
+- `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
+  pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
+  release registers it with the launch's boot token, where an earlier one reads it as the
+  operator's controller and never registers. Install this release with a Go `legion` built from
+  the same commit; the daemon's image probe refuses a worker image whose plugin declares 13.
+
 - `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
   claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
   it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's

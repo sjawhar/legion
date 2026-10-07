@@ -1,9 +1,10 @@
-// Package controller is the project's interactive controller as the daemon knows it: the
-// capability `legion controller start` fetched with the operator's bearer, and the session that
-// registered with it (LEGION-206 Requirement 11: "`legion controller start` on the operator's
-// machine, its external record on `controllerLocator`"). The daemon never launches this process
-// and has nothing of it to stop or resume: it holds the record, and Prober reads the session's
-// liveness from the Envoy role registry.
+// Package controller is the project's controller as the daemon's record holds it: the capability
+// it registered with — the one `legion controller start` fetched with the operator's bearer, or,
+// under `controller: daemon`, the boot token of the daemon's own launch — and the session that
+// registered with it, which `controllerLocator` reports. The operator's controller is no process
+// of the daemon's, which has nothing of it to stop or resume; Prober reads that session's liveness
+// from the Envoy role registry. The daemon's own controller is a claim it supervises
+// (internal/daemon's controllerKeeper).
 package controller
 
 import "time"

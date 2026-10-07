@@ -62,8 +62,8 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 	return code
 }
 
-// controllerStart is `legion controller start`, the operator's side of a controller the daemon
-// cannot launch itself (LEGION-206 Requirement 11). In order, and nothing is kept, and nothing
+// controllerStart is `legion controller start`, the operator's side of the controller under
+// `controller: operator`, where the daemon launches none. In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
 // file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
