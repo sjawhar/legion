@@ -10,17 +10,16 @@ export type CredentialSessionStatus =
   | { kind: "unknown"; id: string };
 
 /** Where a `CredentialSessionLine`'s id came from: the session that enrolled, or the session the
- *  request itself names. The broker verifies the enrollment line, not the request's; the request
- *  override is an unsigned claim any enrolled process may send. */
+ *  request itself names. The broker verifies the enrollment, not the request's override, which is
+ *  an unsigned claim any enrolled process may send; the renderer prefixes only the enrollment line,
+ *  and only when both lines show. */
 export type CredentialSessionSource = "enrollment" | "request";
 
 /** One line the Inbox row and the record page both render: one of a credential request's ids,
  *  resolved to a `CredentialSessionStatus`, and where it came from. `source` is null only when
- *  both ids agree (or only the enrollment's was ever set): the broker's own verified fact, naming
- *  no source because there is nothing to attribute. Every request-sourced line is labeled
- *  `"request"` - an unsigned claim, named as such whether or not an enrollment id is also
- *  present - except when it is equal to a present enrollment id, where the two collapse into one
- *  unlabeled line. */
+ *  both ids agree (or only the enrollment's was ever set); every request-sourced line is
+ *  `"request"`, except when it equals a present enrollment id, where the two collapse into one
+ *  line. */
 export interface CredentialSessionLine {
   source: CredentialSessionSource | null;
   status: CredentialSessionStatus;
@@ -53,15 +52,13 @@ export function credentialSessionNamesAnyone(session: CredentialSession | undefi
 
 /** Resolves a credential request's `session` field into the lines to render: empty when neither
  *  id was ever set (including an older broker's response, which carries no `session` field at
- *  all) - the caller then shows "No session named." One line, unlabeled, when the enrollment's id
- *  is the only one set or the two agree - the broker's own verified fact needs no attribution.
- *  One line, labeled `"request"`, when only the request names an id: that id is never verified by
- *  a signature, whether or not an enrollment id is also present, so it always says where it came
- *  from (LEGION-587's review: an unlabeled request-only line reads as verified when it is not).
- *  Two lines, each labeled, when both are set and differ. `unresolved` is true while the agents
- *  list hasn't answered yet or answered with an error (Envoy unavailable or not configured):
- *  every id that isn't a live agent then reads "couldn't check" rather than "not running", since
- *  a quiet agents list proves nothing when the list itself never loaded. */
+ *  all) - the caller then shows "No session named." One line, source null, when the enrollment's
+ *  id is the only one set or the two agree. One line, source `"request"`, when only the request
+ *  names an id. Two lines, one per source, when both are set and differ; the renderer prefixes
+ *  the enrollment's so a reader can tell which one the broker verified. `unresolved` is true
+ *  while the agents list hasn't answered yet or answered with an error (Envoy unavailable or not
+ *  configured): every id that isn't a live agent then reads "couldn't check" rather than "not
+ *  running", since a quiet agents list proves nothing when the list itself never loaded. */
 export function credentialSessionLines(
   session: CredentialSession | undefined,
   agents: readonly Agent[],

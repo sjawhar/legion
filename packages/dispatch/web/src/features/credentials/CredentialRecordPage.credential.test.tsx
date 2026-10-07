@@ -65,7 +65,7 @@ test("a record with no session set reads as no session named", async () => {
   }
 });
 
-test("a record whose two session ids differ shows both, naming where each came from", async () => {
+test("a record whose two session ids differ shows both, the enrollment's labeled and the request's bare", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([
     runningAgent({
       dir: "/home/sami/legion",
@@ -81,9 +81,8 @@ test("a record whose two session ids differ shows both, naming where each came f
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
     expect(link.getAttribute("href")).toBe("/agents/sess-enrollment/live");
     expect(screen.getByText(/The session that enrolled:/)).toBeDefined();
-    expect(
-      screen.getByText(/The session the request says it came from: sess-request isn't running\./)
-    ).toBeDefined();
+    expect(screen.getByText("sess-request isn't running.")).toBeDefined();
+    expect(screen.queryByText(/says it came from/)).toBeNull();
   } finally {
     cleanup();
     getRecord.mockRestore();
@@ -91,10 +90,10 @@ test("a record whose two session ids differ shows both, naming where each came f
   }
 });
 
-// LEGION-587's review (round 2): a request-only session id must still say where it came from,
-// even with no enrollment id present to disambiguate against - the record page shares this rule
-// with the Inbox row through the same `CredentialSessionLines` component.
-test("a record's request-only session id is labeled, even with no enrollment id to disambiguate against", async () => {
+// The request's session id is shown as written, with no preamble, whether or not an enrollment id
+// is present - the record page shares this rule with the Inbox row through the same
+// `CredentialSessionLines` component.
+test("a record's request-only session id is shown with no preamble", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([runningAgent()]);
   const { getRecord } = renderRecordPage({
     ...decidedSecretRecord(),
@@ -103,7 +102,8 @@ test("a record's request-only session id is labeled, even with no enrollment id 
   try {
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
     expect(link.getAttribute("href")).toBe("/agents/sess-1/live");
-    expect(screen.getByText(/The session the request says it came from:/)).toBeDefined();
+    expect(link.parentElement?.textContent?.startsWith("Reviewing LEGION-587")).toBe(true);
+    expect(screen.queryByText(/says it came from/)).toBeNull();
   } finally {
     cleanup();
     getRecord.mockRestore();
