@@ -87,7 +87,8 @@ legion start --config legion.yaml --check-config
   stopped pod's session until then, but no refused boot serves the state; it shows as the state's
   `controllerLocator` only if you set `controller: daemon` back before an operator boot succeeds.
   Nothing can act as that session, since the process that held its registration secret ended with
-  the pod; the pod's Secret held only its boot token, which an operator's daemon refuses (409).
+  the pod; the pod's Secret held no registration secret, only its boot token, which an operator's
+  daemon refuses (409), and the launch's Envoy and Dispatch bearers.
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.
