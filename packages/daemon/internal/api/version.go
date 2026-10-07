@@ -44,4 +44,9 @@ package api
 // this contract: `workspace-init` refuses a field it does not know and removes nothing, so a
 // payload change bumps this number and the image probe pairs the daemon with an image that reads
 // it, rather than removal stopping on every pod still running an older image.
-const DaemonAPIVersion = 13
+//
+// 14: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// its shell, which the plugin puts on the pane's PATH, rather than the `dispatch_*` tools it no
+// longer registers: a daemon and a plugin from either side of that change would hand agents
+// instructions for a surface they lack.
+const DaemonAPIVersion = 14
