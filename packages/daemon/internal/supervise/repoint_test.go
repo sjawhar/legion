@@ -2,10 +2,11 @@ package supervise
 
 // A process the runtime reports StaleAddress — alive, but holding an address a process launched now
 // is not handed (LEGION-592: an address the daemon hands its processes moved, as the worker stream
-// does when the daemon restarts on another host, bind or worker_stream_port) — is not a death: these
-// tests pin that the claim is relaunched at once through the launch path a death uses (a Resume of
-// its recorded session, or a Spawn when it has none), that the stale observation itself is never
-// charged though a relaunch the runtime refuses is, and that a held suspension ends in a suspension.
+// does when the daemon restarts with advertise_host, bind with no advertise_host, or
+// worker_stream_port changed) — is not a death: these tests pin that the claim is relaunched at once
+// through the launch path a death uses (a Resume of its recorded session, or a Spawn when it has
+// none), that the stale observation itself is never charged though a relaunch the runtime refuses
+// is, and that a held suspension ends in a suspension instead.
 
 import (
 	"errors"
@@ -15,21 +16,40 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
-// A ready claim found at a stale address relaunches the same session at once: a Resume, not a
-// Spawn, and no budget moves — unlike a death, which always charges a launch failure.
-func TestAStaleAddressRelaunchesTheSameSessionChargingNothing(t *testing.T) {
-	h := newHarness(t)
-	h.reach(StateReady)
+// A claim found at a stale address in any live state is relaunched at once, charged nothing — unlike
+// a death, which always charges a launch failure (TestAProcessFoundGoneIsRelaunchedAsTheSameSession).
+// One whose agent never registered (a first launch's launching, or shim_connected) has no session
+// to resume, so it is relaunched the way a death before registration is: a Spawn again (over its
+// existing Sandbox, under the Sandbox runtime). Every other is a Resume of its recorded session,
+// after the stale incarnation. Either way the relaunch is the next generation, and its agent
+// registers and is ready again.
+func TestAStaleAddressRelaunchesTheClaimChargingNothing(t *testing.T) {
+	for _, state := range liveStates {
+		t.Run(string(state), func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(state)
+			stale := h.locator()
 
-	h.observe(runtime.StaleAddress)
+			h.observe(runtime.StaleAddress)
 
-	h.wantState(StateLaunching)
-	h.wantBudgets(Budgets{})
-	if resumed := h.wantCalls("Resume", 1)[0]; resumed.Spec.ResumeSessionFile != sessionFile {
-		t.Fatalf("relaunched with %+v, want the recorded session resumed", resumed.Spec)
+			h.wantState(StateLaunching)
+			h.wantBudgets(Budgets{})
+			if registered := state != StateLaunching && state != StateShimConnected; registered {
+				resume := h.wantCalls("Resume", 1)[0]
+				if resume.Previous == nil || *resume.Previous != stale || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
+					t.Fatalf("resumed %+v from %+v, want the recorded session after the stale incarnation, at generation 2", resume.Spec, resume.Previous)
+				}
+			} else {
+				spawned := h.wantCalls("Spawn", 2)[1]
+				if spawned.Spec.ResumeSessionFile != "" || spawned.Spec.Generation != 2 {
+					t.Fatalf("relaunched with %+v, want a fresh spawn at generation 2: the claim recorded no session", spawned.Spec)
+				}
+				h.wantCalls("Resume", 0)
+			}
+			h.relaunched()
+			h.wantState(StateReady)
+		})
 	}
-	h.relaunched()
-	h.wantState(StateReady)
 }
 
 // A claim mid-launch — relaunching already, its shim not yet connected to this daemon at all —
@@ -53,23 +73,6 @@ func TestAStaleAddressWhileLaunchingRelaunchesAgainChargingNothing(t *testing.T)
 	}
 	h.relaunched()
 	h.wantState(StateReady)
-}
-
-// A claim found at a stale address before its agent registered has no session to resume, so it is
-// relaunched the way a death before registration is: a Spawn again (over its existing Sandbox,
-// under the Sandbox runtime), charged nothing.
-func TestAStaleAddressBeforeRegistrationSpawnsAgainChargingNothing(t *testing.T) {
-	h := newHarness(t)
-	h.reach(StateShimConnected)
-
-	h.observe(runtime.StaleAddress)
-
-	h.wantState(StateLaunching)
-	h.wantBudgets(Budgets{})
-	if spawned := h.wantCalls("Spawn", 2)[1]; spawned.Spec.ResumeSessionFile != "" {
-		t.Fatalf("relaunched with %+v, want a fresh spawn: the claim recorded no session", spawned.Spec)
-	}
-	h.wantCalls("Resume", 0)
 }
 
 // The stale observation is free, but the relaunch it starts is a launch like any other: one the
