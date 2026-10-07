@@ -238,10 +238,10 @@ Wait for the implementer to report its durable retro result. Retro output is
 `docs/solutions/`, the PR body content the repository's instructions derive from the pull
 request's changed paths at that commit, and one `dispatch_message` on the issue; it must not create
 a `.legion` file or rewrite the reviewer-approved head. When the implementer reports that it cannot
-compute that body content or do the work a line of it affirms, or that GitHub refused the body,
-it has pushed nothing and is still in its phase. Answer it with `envoy_publish` to its role topic,
-saying how from the deployment instructions; when they do not say, open a `dispatch_ask` naming
-the missing instruction.
+compute that body content or do the work a line of it affirms, that its read of the body failed or
+came back empty, or that GitHub refused the body, it has pushed nothing and is still in its phase.
+Answer it with `envoy_publish` to its role topic, saying how from the deployment instructions;
+when they do not say, open a `dispatch_ask` naming the missing instruction.
 
 ## 6. Architect sign-off and merge
 

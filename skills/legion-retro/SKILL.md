@@ -129,9 +129,10 @@ head whose required check failed, so the tree stops at the merger.
 3. In a fresh `mktemp -d` directory outside `$LEGION_WORKSPACE` (the one place you write outside
    it: jj snapshots a file inside it, and a fixed name in a shared `/tmp` can hold another
    session's body), save the live body twice, and stop unless the read succeeded and is not
-   empty (`pipefail` makes a failed read fail the line; without it the line exits with `tee`'s
-   status and leaves two empty files):
-   `cd -- "$LEGION_WORKSPACE" && set -o pipefail && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md && test -s <dir>/before.md`.
+   empty. `pipefail` makes a failed read fail the line (without it the line exits with `tee`'s
+   status and leaves two empty files), and the parentheses keep it to that line, since your
+   session's shell persists and a later `cmd | head` would exit 141 under it:
+   `cd -- "$LEGION_WORKSPACE" && ( set -o pipefail && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md ) && test -s <dir>/before.md`.
    In `<dir>/body.md`, change the lines it carries for that content and add any it lacks where
    the instructions place them; other phases' lines stay as they wrote them.
 4. Write it back before the push:
