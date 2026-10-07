@@ -31,7 +31,7 @@ only the evidence each decision needs and what the human decides, each as a deci
 end of the section that discusses it; your decomposition, its waves, how each outcome is proven
 and the integration test go in the child issues and the planner's `.legion/<issue>/plan.json`, not the root
 spec. Once its decision blocks are settled (`skill://dispatch`, "Approval of a spec"), request
-approval with `dispatch_request_approval` and a `summary` that says only what the human is
+approval with `dispatch request-approval` and a `--summary` that says only what the human is
 approving. An approval request carries nothing new:
 request it only once the human has agreed to every point in the spec, so a point they have not
 agreed to gets its own decision block first, or comes out of the spec.
@@ -47,7 +47,7 @@ deferral is a new child issue you create and own. Re-file, capacity, and cross-t
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or
 one a worker escalated, is a decision block you write in the root spec; after approval its new
 version closes the gate, so request approval again once the answer is folded in. A to-do only a
-human can do is a `dispatch_ask`.
+human can do is a `dispatch ask`.
 
 The merge is not the close: after a human merges a pull request, the daemon starts the implementer
 on the production check, and you sign off only once its record exists on the pull request and the

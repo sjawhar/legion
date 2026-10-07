@@ -32,13 +32,13 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
 optional directory and title filters.
 
-## Dispatch native tools
+## Dispatch
 
 `dispatch-http.ts` sends the native Dispatch JSON API with the configured bearer
-token. `dispatch-execute.ts` validates the shared `dispatch_*` schema, derives
+token. `dispatch-execute.ts` validates a call against its shared spec, derives
 the caller's session origin and Legion issue reference, executes the operation,
-and returns typed tool-result details. No result carries a subscription topic:
-`dispatch_ask` and an ask reply through `dispatch_comment` return
+and returns its text and typed details. No result carries a subscription topic:
+`dispatch ask` and an ask reply through `dispatch comment` return
 `details.follows = { ask }` (the session follows that ask server-side), and every
 write's text names the `envoy_subscribe notifications.dispatch.issue.<KEY>.>`
 line an agent passes to subscribe to the whole issue itself.
@@ -63,7 +63,7 @@ may a write answered 408 or 429, the gateway's own timeout or rate limit, which 
 forwards anything (`mayHaveReachedDispatch` false); a write answered 5xx may or may not have reached
 Dispatch, so the advice is to check whether it took effect before retrying. The error's `answer`,
 `advice`, `transient` and `mayHaveReachedDispatch` let a caller that knows more about its own
-request, such as `dispatch_issue_update`'s close path, give its own advice instead. The executor
+request, such as `dispatch issue-update`'s close path, give its own advice instead. The executor
 reads a status as Dispatch's meaning (a 404 as no linked issue, no such document, or a server
 without the route) only when `fromDispatch` is true.
 
@@ -95,8 +95,9 @@ empty tokens leave Dispatch disabled and name the failing source in `error`.
 
 Agents reach Dispatch through one command, `dispatch <command> [flags]`, which each host plugin
 bundles from `bin/dispatch.ts` into its `dist/dispatch.js` and puts on its agents' shell `PATH`
-through a `bin/dispatch` shim. `dispatch-command.ts` derives the commands and flags from the tool
-specs: one command per spec (`dispatch_issue_update` → `issue-update`), one flag per field
+through a `bin/dispatch` shim. `dispatch-command.ts` derives the commands and flags from the
+specs: one command per spec, named by the spec's name without its `dispatch_` prefix and with
+hyphens for underscores (`issue-update`), one flag per field
 (`reply_to_ask` → `--reply-to-ask`), `--<field>-file <path>` for every string (`-` reads stdin),
 `--no-<field>` for a boolean, `--clear-<field>` for a nullable field or a list, a repeated
 singular flag for a list (`--label a --label b`, `--option "Label: what it costs"`), and
@@ -125,16 +126,13 @@ removed, at most once a day.
 `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on `--port` (ephemeral by default) and
 prints its URL, for proving what a command shows when a gateway, not Dispatch, answers.
 
-## Tool contract
+## Command specs
 
 `@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-one
-native Dispatch tool names, descriptions, schemas, and subscription behavior:
-`dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
-`dispatch_resolve_comment`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`,
-`dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
-`dispatch_search`, `dispatch_issues`, `dispatch_architecture_sync`, `dispatch_open_asks`, and `dispatch_whoami`. Hosts build their schema
-from those specifications and do not add aliases or host-specific descriptions.
-`dispatch_issue_update` reads the issue first and sends `PATCH /api/v1/issues/{key}` as the
+Dispatch specs behind the `dispatch` command: each one's name, description, field schemas
+and example. `dispatch-command.ts` derives the command and its flags from them, and no host
+adds aliases or descriptions of its own.
+`dispatch issue-update` reads the issue first and sends `PATCH /api/v1/issues/{key}` as the
 session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacing the set),
 `priority` (`0` for P0 down to `3` for P3, or `null` to clear it), `route`,
 and `external_links`, which it merges into the issue's existing links by URL rather than replacing
@@ -145,7 +143,7 @@ posted message. The result is one line —
 `KEY: status a -> b; priority -> P1; linked <url> (N links)`, with `priority cleared` on a clear
 and `reason posted as message <id> (<ref>)` ahead of a close — and a server refusal keeps its
 `code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the head of the thrown message.
-`dispatch_request_approval` refuses, before it sends anything, while the version the request would
+`dispatch request-approval` refuses, before it sends anything, while the version the request would
 name (the document's latest, `approval.latest_version`) holds a decision block open. It reads the
 live document's `ask` blocks (`GET /api/v1/artifacts/{id}/blocks`), then that version's markdown
 and the owner's asks (the issue's for an issue document, since the artifact route refuses those),
@@ -155,7 +153,7 @@ once but reaches a version only when the document settles or the next edit is wr
 version does not hold yet, or one with no ask yet, counts as open. A request over an open block
 would be retracted by the version its answer writes. The refusal names each block and its ask and
 tells the agent to ask the human to answer or waive it. A document already approved at its latest
-version skips the reads and gets the server's answer. `dispatch_doc_edit` refuses, before it sends
+version skips the reads and gets the server's answer. `dispatch doc-edit` refuses, before it sends
 anything, a `delete` or `retype` by block id that would take an `ask` block out of the document
 (the block itself, or one inside a deleted block) while its ask is open: the edit would write its
 version at once and settlement would retract the ask without writing another, so the question

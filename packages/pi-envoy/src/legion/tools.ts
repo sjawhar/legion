@@ -74,7 +74,7 @@ function toolSchema(pi: PiApi): unknown {
     artifactId: z
       .string()
       .describe(
-        "register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it"
+        "register_gate's root spec document: its artifact id, slug, or filename, as a dispatch command's --artifact takes it"
       )
       .optional(),
     version: z.number().optional(),
@@ -134,8 +134,8 @@ export function createLegionTool(deps: {
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
-   * looked up in Dispatch as the Dispatch tools do; throws naming the reference when none matches,
-   * or when it names two documents. */
+   * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
+   * when none matches, or when it names two documents. */
   readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
   const { pi, daemon, session, onPhaseCompleted, resolveDocument } = deps;
@@ -192,8 +192,8 @@ export function createLegionTool(deps: {
               );
             }
             // The daemon takes the document's id alone; `spec`, a slug or a filename, the
-            // references the Dispatch tools accept, is looked up first, so the architect's first
-            // call names the document however it knows it.
+            // references a `dispatch` command's --artifact accepts, is looked up first, so the
+            // architect's first call names the document however it knows it.
             const reference = requiredString(parameters, operation, "artifactId");
             const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);

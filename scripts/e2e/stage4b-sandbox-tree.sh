@@ -1085,9 +1085,9 @@ EOF
   note "pushed the repository-configuration fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD))"
 }
 # assistant_said ISSUE ROLE TEXT: one of the claim's assistant turns carries TEXT, in its reply text
-# or in a tool call's arguments: an agent answers a Dispatch message with dispatch_message, so the
-# answer is a call's body. The instruction that asks for TEXT is a delivered message, not an
-# assistant turn, so a plain search of the session would match it.
+# or in a tool call's arguments: an agent answers a Dispatch message with a `dispatch message`
+# command, so the answer is in a bash call's command. The instruction that asks for TEXT is a
+# delivered message, not an assistant turn, so a plain search of the session would match it.
 assistant_said() {
   local text
   text=$(claim_session_text "$1" "$2") || return 1
@@ -1689,7 +1689,7 @@ The controller's daily report is the one controller action that waits for no tar
 Post it as \`skill://legion-controller\`'s "Daily report" says, on the first turn a \`tick on $project\`
 wake starts after your start turn has ended: never in your start turn, where a tick that arrives
 while that turn still runs does not count, and once in this run. Its issue is titled
-\`$report_title\`: find it with \`dispatch_search\`, and when there is none, create it once with
+\`$report_title\`: find it with \`dispatch search\`, and when there is none, create it once with
 that title and park it in icebox, as the skill says for the default report issue.
 EOF
 write_legion_config
@@ -2660,7 +2660,10 @@ report_after_tick() {
     jq -R -s -e --arg tick "summary: tick on $project" '
       [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
       | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
-      | ([$lines[] | select(.raw | test("xd://dispatch_message|\"name\":\"dispatch_message\"")) | .i] | first) as $call
+      | ([$lines[] | select(.m | objects | .type == "message" and .message.role == "assistant"
+          and any(.message.content[]?; .type? == "toolCall" and .name == "bash"
+            and ((.arguments.command // "") | test("^\\s*dispatch\\s+message(\\s|$)"))))
+        | .i] | first) as $call
       | $call != null and any($lines[]; .i < $call and (.raw | contains($tick))
           and (.i as $t | ([$msgs[] | select(.i < $t)] | last) as $before
             | $before != null and $before.m.message.role == "assistant" and $before.m.message.stopReason == "stop"))

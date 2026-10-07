@@ -92,7 +92,7 @@ review posted without a completion leaves the issue in reviewing until you finis
   `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
   head (or one line saying the body carries no brief — the packet still goes out), then the
   `--summary` output and the PR body's gate facts. The merger sends it as the `summary` of its
-  `handoff_complete` with `ready: true`; the daemon posts it as a `dispatch_message` on the issue,
+  `handoff_complete` with `ready: true`; the daemon posts it as a `dispatch message` on the issue,
   publishes it to the project's merge queue role when one is set, and says on the issue when that
   role has no live holder. The READY packet names both the implementer's and tester's `E2E` lines;
   a missing one is reported to the architect instead of completing. Legion never merges.
@@ -107,10 +107,10 @@ review posted without a completion leaves the issue in reviewing until you finis
   this, since a staging gate does not run every resource production does. If the slot fails on
   the change, the implementer owns the fix and the next slot.
   The record has three places: the PR body's `Production:` line, one pull-request comment
-  carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
+  carrying the Legion footer, and a `dispatch message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch_ask` that starts with the
+  the previous commit, a slot nobody has run), open a `dispatch ask` that starts with the
   production gap and why it matters, then names the required install or restart step, its risk,
   and outcome-named options. Keep the `Production:` line at `pending <what is missing>`, and
   complete the check once the human answers. Never record a staging pass as the production check,

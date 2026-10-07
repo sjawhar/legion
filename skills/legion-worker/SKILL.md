@@ -66,7 +66,7 @@ above), carrying the verified facts and the decision needed. A `write` to `agent
 agents inside your own process, not the architect's separate one. Never write a decision block
 into a spec yourself: the architect decides whether the human must answer it and writes the block,
 since a new version of an approved root spec closes the tree's design gate. A standalone to-do
-only a human can do is a `dispatch_ask`, and its replies return to your own session.
+only a human can do is a `dispatch ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
 assignment across your lifetime: once the daemon ends your phase it suspends you, and when a later
@@ -225,7 +225,7 @@ subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `u
 `lock`, `unlock`, and `develop`, and any raw `gh api` call to an `/issues` path whose method is not
 GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
 comments live on that path too, so edit them with `gh pr comment`) — printing
-`Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`:
+``Legion issues live on Dispatch; use `dispatch message` or `dispatch comment` on <your LEGION_ISSUE>``:
 Legion never reads or writes a GitHub issue. `pr comment`, `pr review`,
 `api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
 through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
@@ -477,6 +477,6 @@ decision required.
 
 Never yield while blocked on a decision someone else owns. Before you stop, make the block visible
 where its owner will see it: a product, scope, design, lifecycle, or cross-phase decision goes to
-the owning architect as above, and a standalone human to-do goes in `dispatch_ask`. Otherwise
+the owning architect as above, and a standalone human to-do goes in `dispatch ask`. Otherwise
 proceed: proceeding is the default, and a phase that stops silently holds its issue until someone
 notices.

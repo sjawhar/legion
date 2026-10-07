@@ -1,16 +1,19 @@
 # Editing a document
 
-Every document a Dispatch tool writes — an issue's spec, a project document — is edited in place
-with `dispatch_doc_edit`, never re-uploaded. "The Spec" in `skill://dispatch` sends you here for
-the tool's shape, how to target the text you mean, what each operation costs a block, and how to
+Every document Dispatch holds — an issue's spec, a project document — is edited in place
+with `dispatch doc-edit`, never re-uploaded. "The Spec" in `skill://dispatch` sends you here for
+the command's shape, how to target the text you mean, what each operation costs a block, and how to
 reject a stale edit.
 
-```ts
-dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
+```bash
+dispatch doc-edit --issue <KEY> --artifact spec --summary '<names the version>' --ops-json-file - <<'EOF'
+[{"op": "replace", "find": "old sentence", "with": "new sentence"}]
+EOF
 ```
-It returns issue or project-document owner details plus `applied`, optional `version`, `changed`,
-`unchanged_ops`, `lost_ops`, and the document token this edit produced, rendered as a
-`Document token: <token>` line. `ops` is an array of this exact `EditOp` shape:
+`--project` replaces `--issue` for a project document, and `--precondition-json` guards against a
+stale edit (below). It prints whether the edit applied, the version it wrote, which operations
+changed nothing (`unchanged_ops`) or were lost to a concurrent change (`lost_ops`), and the document
+token this edit produced, as a `Document token: <token>` line. The ops are a JSON array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -28,8 +31,8 @@ type EditOp = {
 };
 ```
 
-An operation takes only these keys. A key it does not declare is refused before the call leaves
-your process, naming the operation and its keys, because every key but `op` is optional: a
+An operation takes only these keys. A key it does not declare is refused before the command sends
+anything, naming the operation and its keys, because every key but `op` is optional: a
 misspelled `with` would otherwise be dropped and the `replace` would delete the text you meant to
 rewrite.
 
@@ -93,7 +96,7 @@ paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the
 `***`). A CR LF or a lone carriage return in any text you write - an insert's markdown, a `with` in text or in code,
 a suggestion, an upload or a spec - is stored as a line feed, as the browser editor reads both. Use zero-based
 `occurrence` for a
-repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
+repeated target; re-read a missing or ambiguous target before retrying. Pass `--summary` to name the version when recording a decision.
 
 **Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
 each `with` is the new text of one paragraph, and outside a code block a `with` that forms two paragraphs is
@@ -131,17 +134,17 @@ the old block's place is it a `delete` of the old block and then an `insert` of 
 block before or after it. The delete is what costs the id (below); a typed block keeps its id when the insert
 carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
 The tools refuse a `delete` or `retype` that would take out an `ask` block whose ask is still open, delete-then-insert included:
-reword it with `replace`, relocate it with `move`, or change its question, options, urgency or `multiple` with `dispatch_edit_ask` if you asked it. A single
+reword it with `replace`, relocate it with `move`, or change its question, options, urgency or `multiple` with `dispatch edit-ask` if you asked it. A single
 batch that moves an open block out of a container and then deletes the container is refused; make them two calls (the check reads
 the document as it stood before the batch).
 Then read the document back with
-`dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
+`dispatch doc-read` and read the passage and its neighbours, not a grep for the words you added: an empty
 `with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill
 empties that paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
 comment or ask anchor still mints its version — mints no version, named or not: the response carries
-`changed: false` with `unchanged_ops` naming each operation that did nothing, and the tool result says nothing changed. A `summary`
+`changed: false` with `unchanged_ops` naming each operation that did nothing, and the output says nothing changed. A `--summary`
 does not force a version for such a batch; `POST /api/v1/artifacts/<id>/versions`, which names the current state on purpose, still does.
 
 A `delete` whose `find` is a block's entire text removes the block itself — the bullet, paragraph, or heading, not just its words — and
@@ -165,11 +168,11 @@ whose anchor lies inside the moved block, or a delete that would leave a typed b
 `INVALID_OP` naming the field and the rule.
 
 `GET /api/v1/artifacts/<artifact UUID>/blocks` includes a full-state `token` on every block, including
-inline marks. To reject a stale edit, pass `precondition` with exactly one of
-`{ document: "<document token>" }` or
-`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. A document token comes from
-`dispatch_doc_read` or from the previous `dispatch_doc_edit`, whose result carries the token its
-own edit produced: a run of guarded edits passes each result's token to the next one and reads the
+inline marks. To reject a stale edit, pass `--precondition-json` with exactly one of
+`{"document": "<document token>"}` or
+`{"blocks": [{"id": "<block id>", "token": "<block token>"}]}`. A document token comes from
+`dispatch doc-read` or from the previous `dispatch doc-edit`, whose output carries the token its
+own edit produced: a run of guarded edits passes each output's token to the next one and reads the
 document once, not once per edit. The server resolves the whole batch before
 mutation: a block guard must cover every content block it changes, or Dispatch returns
 `400 INVALID_PRECONDITION` without applying anything. Use a document token for insert and move because they
@@ -197,6 +200,6 @@ an existing paragraph is the question that should become a decision.
 
 An ask block has two ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and
 taken bare by `move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after`
-anchors), and the ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read`
-and `dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
+anchors), and the ask id, which `dispatch open-asks`, the dashboard's `?ask=` link, `dispatch read`
+and `dispatch comment --reply-to-ask` use. They differ; `dispatch://KEY/ask/<block-id>` answers
 `not found`.

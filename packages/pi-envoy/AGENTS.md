@@ -21,7 +21,7 @@ posts its body or error to the correlated delivery attempt; **Aside** and **Stee
 reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
 A card or a person's turn whose text embeds Dispatch pictures (`RenderInboundResult.pictures`, the
 turn's body) carries them as image blocks after the text (`src/delivery-pictures.ts`, the same
-bounds as `dispatch_read`); the host's custom-message and `sendUserMessage` content takes those
+bounds as `dispatch read`); the host's custom-message and `sendUserMessage` content takes those
 blocks.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
@@ -283,16 +283,24 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`).
 
-## Native Dispatch tools
+## The `dispatch` command
 
-The twenty-one native Dispatch tools — `dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
-`dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
-`dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, `dispatch_search`,
-`dispatch_issues`, `dispatch_architecture_sync`, `dispatch_open_asks`, and `dispatch_whoami` — register only when the shared configuration resolves a URL and bearer token at load; the URL
-and token themselves are re-read
-on every call, so a Dispatch that moved (a new `dispatch.serverUrl` in `envoy.json`, or a changed
-`DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`, and a file that has since
-broken fails the call with its own error rather than using the stale endpoint. Set
+The extension registers no Dispatch tool: agents run the `dispatch` command in their shell
+(`dispatch --help`, `dispatch <command> --help`), one command per spec of `@legion/contracts`'s
+`dispatchToolSpecs`. `bin/dispatch` is a shim that runs the bundled `dist/dispatch.js` with `bun`,
+and exits 2 naming the file when the plugin was not built. At module load `extensions/envoy.ts`
+puts the plugin's `bin/` (one directory above the module in both layouts) first on `PATH` and sets
+`DISPATCH_HOST=omp`; Oh My Pi snapshots `process.env` for its shell when it first runs one, after
+every extension has loaded, so both reach every shell command. `bindDispatchSession` sets
+`DISPATCH_SESSION_ID` to the session's id at `session_start`, `session_switch`, `session_branch`
+and the heartbeat's drift heal (and deletes it while the session has no id), and the command acts
+as that session; the session's title reaches it through the `title` file in the session's state
+directory (the `dispatch` CLI row under "Where to look"). The command resolves Dispatch's URL and
+bearer token on every call, so a Dispatch that moved (a new `dispatch.serverUrl` in `envoy.json`,
+or a changed `DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`, and a file
+that has since broken fails the call with its own error rather than using the stale endpoint. The
+extension resolves the same configuration once at load, for the `dispatch-first` context below and
+the warning `session_start` shows when it is invalid. Set
 `dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
 `~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`. A repository
 `dispatch.serverUrl` can use only `dispatch.token` from that same repository
@@ -311,43 +319,43 @@ the session's own agent topic directly, server-side, with no NATS subscription t
 manage. The `dispatch` command prints the first `details.follows` for each ask id as one
 notice after the call's result (the session's `state.json` remembers which asks it already
 announced, the once-per-ask policy over `dispatchFollowNotice` every host shares); a later
-write on the same ask stays quiet, and reads (`dispatch_read`, `dispatch_doc_read`) return only
-owner details. `dispatch_follow` leaves or rejoins an ask. A `subscription.removed`
+write on the same ask stays quiet, and reads (`dispatch read`, `dispatch doc-read`) return only
+owner details. `dispatch follow` leaves or rejoins an ask. A `subscription.removed`
 notice (a human unsubscribed a session from the dashboard) reaches both the issue's
 own topic and the removed session's agent topic directly; only the session the payload
 names renders it and drops the matching local NATS subscription (so the
 dead-connection recovery path does not resurrect it) — every other subscriber ignores
 it. `ask.follower_added` / `ask.follower_removed` likewise render only for the session
 they name.
-`dispatch_issue` accepts optional initial labels and an optional `components` attachment (below); project-document arguments resolve the document's artifact id, slug, or filename.
-`dispatch_issue_update` moves an issue's lifecycle `status` (closing it, `status: "done"`, requires a `reason`, which the executor posts as an issue message before the PATCH because a closed issue takes no messages, comments, or artifacts; `reason` goes only with `done`, a failed message post sends no PATCH, and a PATCH that fails after the message landed names that message in its error), retitles it, replaces `labels`, sets its coarse `priority` (`0` is P0, the highest, through `3`, P3, the lowest; `null` clears it — agents set priority, `dispatch://LEGION/artifact/issue-status-conventions-md`), sets `route`, sets or clears its `parent` (a key in the same project; `""` clears, and the executor sends JSON `null`), attaches it to architecture `components` (`{mode: "inherit" | "explicit" | "none", ids?, reason?}`: `explicit` names bare component ids of the project's imported model, `none` needs a reason, `inherit` returns to the nearest ancestor's attachment; allowed on a closed issue; the result line reads `components -> explicit [a, b]` / `components -> none (reason)` / `components -> inherit`, and `400 COMPONENTS_INPUT` names an unknown, retired, or external id), or links URLs through `external_links` (merged into the existing links by URL, so linking the pull request just opened keeps earlier links); at least one field besides `issue` is required and `rank`, the board's own order, is not exposed. Its one-line result reads `KEY: status a -> b; priority -> P1; linked <url> (N links); parent -> KEY` (`priority cleared` / `parent cleared` on a clear), and a server refusal (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`, `PARENT_INPUT`, `COMPONENTS_INPUT`) keeps its code at the head of the thrown message. `dispatch_read` of an issue renders a `Components:` line — `a, b (inherited from KEY)`, `none — <reason>`, or `unassigned`, plus `(retired: c)` for ids a re-import retired — and component nodes render like every other reference node at `dispatch://<PROJECT>/component/<id>`.
-`dispatch_claim` claims the issue for this session before it starts implementing, and `{issue, release: true}` releases it. A live holder's claim answers `409 ISSUE_CLAIMED` naming that session, so the second agent talks to it instead of working the same issue; a human holder is named by login instead, with nothing said about a session running, since there is none to message. `409 CLAIM_CONTENDED` is the other refusal: the holder changed twice while the call ran, so nothing was applied and nobody's liveness was checked — read the issue and decide again. A claim whose session the Envoy listener no longer lists is taken automatically, and the session that lost it hears about the takeover on its own agent topic. The claim never moves the issue's status, so an agent that starts work claims the issue *and* moves it to `in_progress` with `dispatch_issue_update` — two explicit actions, because the status is also how humans track work. Closing an issue releases its claim.
-`dispatch_ask` takes no `kind`: every ask it opens is a question whose options the asker chooses; no label is special to the server (a human to-do is the to-do phrased as the question, with whatever options fit it). `approval` asks are opened only through `dispatch_request_approval`.
-`dispatch_comment` accepts `turn: "agent" | "human"` only with `reply_to_ask` (the shared cross-field validation rejects it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`) and `details.ask_waiting_on` carries it.
+`dispatch issue` accepts optional initial labels and an optional `--components-json` attachment (below); project-document arguments resolve the document's artifact id, slug, or filename.
+`dispatch issue-update` moves an issue's lifecycle `--status` (closing it, `--status done`, requires a `--reason`, which the executor posts as an issue message before the PATCH because a closed issue takes no messages, comments, or artifacts; `--reason` goes only with `done`, a failed message post sends no PATCH, and a PATCH that fails after the message landed names that message in its error), retitles it, replaces its labels (`--label`, repeated), sets its coarse `--priority` (`0` is P0, the highest, through `3`, P3, the lowest; `--clear-priority` clears it — agents set priority, `dispatch://LEGION/artifact/issue-status-conventions-md`), sets `--route`, sets or clears its `--parent` (a key in the same project; `--parent ''` clears, and the executor sends JSON `null`), attaches it to architecture components (`--components-json` with `{mode: "inherit" | "explicit" | "none", ids?, reason?}`: `explicit` names bare component ids of the project's imported model, `none` needs a reason, `inherit` returns to the nearest ancestor's attachment; allowed on a closed issue; the result line reads `components -> explicit [a, b]` / `components -> none (reason)` / `components -> inherit`, and `400 COMPONENTS_INPUT` names an unknown, retired, or external id), or links URLs (`--external-link`, repeated, merged into the existing links by URL, so linking the pull request just opened keeps earlier links); at least one flag besides `--issue` is required and `rank`, the board's own order, is not exposed. Its one-line result reads `KEY: status a -> b; priority -> P1; linked <url> (N links); parent -> KEY` (`priority cleared` / `parent cleared` on a clear), and a server refusal (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`, `PARENT_INPUT`, `COMPONENTS_INPUT`) keeps its code at the head of the printed refusal. `dispatch read` of an issue renders a `Components:` line — `a, b (inherited from KEY)`, `none — <reason>`, or `unassigned`, plus `(retired: c)` for ids a re-import retired — and component nodes render like every other reference node at `dispatch://<PROJECT>/component/<id>`.
+`dispatch claim` claims the issue for this session before it starts implementing, and `--release` releases it. A live holder's claim answers `409 ISSUE_CLAIMED` naming that session, so the second agent talks to it instead of working the same issue; a human holder is named by login instead, with nothing said about a session running, since there is none to message. `409 CLAIM_CONTENDED` is the other refusal: the holder changed twice while the call ran, so nothing was applied and nobody's liveness was checked — read the issue and decide again. A claim whose session the Envoy listener no longer lists is taken automatically, and the session that lost it hears about the takeover on its own agent topic. The claim never moves the issue's status, so an agent that starts work claims the issue *and* moves it to `in_progress` with `dispatch issue-update` — two explicit actions, because the status is also how humans track work. Closing an issue releases its claim.
+`dispatch ask` takes no `kind`: every ask it opens is a question whose options the asker chooses; no label is special to the server (a human to-do is the to-do phrased as the question, with whatever options fit it). `approval` asks are opened only through `dispatch request-approval`.
+`dispatch comment` accepts `--turn agent|human` only with `--reply-to-ask` (the shared cross-field validation refuses it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`), and the ledger line's `details.ask_waiting_on` carries it.
 Quote anchors returned from Dispatch include nullable `block_id`: new anchors are pinned to the
 lowest block containing their complete quote, while top-level cross-block and legacy anchors remain
 unpinned.
 `GET /comments/{id}` and `GET /asks/{id}` add `anchor_block`, where that block stands (path; in a
-table the row, column, header and cells), and `dispatch_read` prints it as `Position:` after the
+table the row, column, header and cells), and `dispatch read` prints it as `Position:` after the
 quote. When Dispatch could not read the document, the read carries `anchor_block_error` instead
-and `dispatch_read` prints `Position: unavailable (<code>)`, the code the API answers that error
+and `dispatch read` prints `Position: unavailable (<code>)`, the code the API answers that error
 with elsewhere (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or `INTERNAL`); the read itself, and
-`dispatch_follow`, which reads the ask first, still succeed.
+`dispatch follow`, which reads the ask first, still succeed.
 
-`dispatch_doc_edit` may retype an identified paragraph or typed block into any schema-declared typed block with
-`{ op: "retype", block, type, attributes }`, delete or move a whole block by id with
-`{ op: "delete", block }` and `{ op: "move", block, after | before }`, and delete a table row or column in place
-with `{ op: "delete_row" | "delete_column", block, index }`. Table `index` is zero-based and its table `block` id
+`dispatch doc-edit` may retype an identified paragraph or typed block into any schema-declared typed block with
+the `--ops-json` entry `{ "op": "retype", block, type, attributes }`, delete or move a whole block by id with
+`{ "op": "delete", block }` and `{ "op": "move", block, after | before }`, and delete a table row or column in place
+with `{ "op": "delete_row" | "delete_column", block, index }`. Table `index` is zero-based and its table `block` id
 comes from the artifact-UUID `GET /api/v1/artifacts/{id}/blocks` route; that route returns each block's
-full-state token, including inline marks. `dispatch_doc_read` returns the whole-document token. Supply an
-optional `precondition` with exactly one document token or one-or-more block `{id, token}` entries; a block
+full-state token, including inline marks. `dispatch doc-read` returns the whole-document token. Supply an
+optional `--precondition-json` with exactly one document token or one-or-more block `{id, token}` entries; a block
 guard must cover every content block the resolved batch changes, while unrelated sections stay independent.
 Insert and move require the document token because their meaning depends on document order. A stale
 precondition returns `PRECONDITION_FAILED` with current tokens and applies no operation; an uncovered block
 returns `INVALID_PRECONDITION`. The server refuses a deletion that would remove an open ask or unresolved
-comment anchor. A question about a document is written as an `ask` block through that tool or a `:::ask`
-directive, not as an issue-level `dispatch_ask`. The extension passes the host tool AbortSignal to every
-Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
+comment anchor. A question about a document is written as an `ask` block through that command or a `:::ask`
+directive, not as an issue-level `dispatch ask`. Every request a command sends has the shared client's
+60-second HTTP deadline (`DISPATCH_TOOL_DEADLINE_MS`).
 
 With Dispatch configured, a `context` handler (`src/dispatch-first.ts`) puts the `dispatch-first`
 skill into every provider request as a user message after any leading `compactionSummary`
@@ -381,9 +389,9 @@ PROCEEDING. An open ask or `opened_since` never suppresses this check.
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
 `triggerTurn`: it says the agent is waiting on a human for something no open ask covers, and tells
-it to open one now: a decision block in the document the wait concerns (`dispatch_doc_edit` with an
-ask block), or `dispatch_ask` for a to-do only a human can do, naming exactly what it needs and from
-whom. It never offers `dispatch_request_approval`: an approval request is for a settled spec, not a
+it to open one now: a decision block in the document the wait concerns (`dispatch doc-edit` with an
+ask block), or `dispatch ask` for a to-do only a human can do, naming exactly what it needs and from
+whom. It never offers `dispatch request-approval`: an approval request is for a settled spec, not a
 way to wait on a human. The parse is case-sensitive and first-word-only because a false
 WAITING is the expensive error — its steer tells an agent to page a human with a question it does
 not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, a side-turn

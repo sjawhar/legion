@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
+import { dispatchToolSpecs } from "@legion/contracts";
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
@@ -133,6 +134,26 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   // characters; 6,000 leaves room for a longer install path and a later edit.
   expect(readDispatchFirstContext(file).length).toBeLessThan(6_000);
   expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
+});
+
+// Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
+// to call a native tool it no longer has: each names the command (`dispatch ask`) instead.
+test("no skill or daemon prompt names a native Dispatch tool", () => {
+  const toolName = new RegExp(`\\b(${dispatchToolSpecs.map((spec) => spec.name).join("|")})\\b`);
+  const named = linkingRoots
+    .flatMap(files)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) =>
+      readFileSync(file, "utf8")
+        .split("\n")
+        .flatMap((line, index) => {
+          const match = toolName.exec(line);
+          return match === null
+            ? []
+            : [`${path.relative(repoRoot, file)}:${index + 1}: ${match[0]}`];
+        })
+    );
+  expect(named).toEqual([]);
 });
 
 test("every skill://<name>/<path> link names a file that exists, and its #anchor a heading in it", () => {

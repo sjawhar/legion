@@ -613,7 +613,7 @@ export function getMessage(
   );
 }
 
-/** A session answers a targeted message's delivery. `followUp` is `dispatch_message`'s
+/** A session answers a targeted message's delivery. `followUp` is `dispatch message`'s
  *  `?follow_up=true`: once the attempt is answered, other text posts as a follow-up instead of
  *  handing back the stored reply. */
 export function replyToMessageDelivery(
