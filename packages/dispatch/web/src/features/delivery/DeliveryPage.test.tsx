@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -23,6 +23,11 @@ const emptyTimeline: DeliveryTimelineResponse = {
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };
 
+const notConfigured = new ApiError(404, {
+  code: "DELIVERY_NOT_CONFIGURED",
+  error: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
+});
+
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -32,6 +37,7 @@ function renderPage() {
       </QueryClientProvider>
     </MemoryRouter>
   );
+  return queryClient;
 }
 
 test("an unconfigured timeline shows the setup form in its place, reading no settings, and a save brings the timeline", async () => {
@@ -49,13 +55,7 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     updated_by: { id: "alice@example.com", kind: "user" },
   };
   const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
-    .mockRejectedValueOnce(
-      new ApiError(404, {
-        code: "DELIVERY_NOT_CONFIGURED",
-        error:
-          "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
-      })
-    )
+    .mockRejectedValueOnce(notConfigured)
     .mockResolvedValue(emptyTimeline);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(saved);
@@ -104,25 +104,13 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
 });
 
 test("a refetch of the unconfigured timeline, as tab focus starts, keeps the setup form and its unsaved draft", async () => {
-  const notConfigured = () =>
-    new ApiError(404, {
-      code: "DELIVERY_NOT_CONFIGURED",
-      error:
-        "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
-    });
   const refetch = Promise.withResolvers<DeliveryTimelineResponse>();
   const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
-    .mockRejectedValueOnce(notConfigured())
+    .mockRejectedValueOnce(notConfigured)
     .mockReturnValueOnce(refetch.promise);
-  const settle = () =>
-    act(async () => {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setTimeout(resolve, 50);
-      await promise;
-    });
 
   try {
-    renderPage();
+    const queryClient = renderPage();
     await screen.findByRole("heading", { name: "Set up the delivery timeline" });
     fireEvent.change(screen.getByLabelText("Deploy repository"), {
       target: { value: "acme/widgets" },
@@ -132,21 +120,42 @@ test("a refetch of the unconfigured timeline, as tab focus starts, keeps the set
     // and while that refetch runs the query holds no error at all. Any render of the timeline's
     // body in between would unmount the form, so the draft surviving says none happened.
     window.dispatchEvent(new Event("visibilitychange"));
-    await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(2));
-    await settle();
+    await waitFor(() => expect(queryClient.isFetching()).toBe(1));
+    expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
       "acme/widgets"
     );
     expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
     expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
 
-    refetch.reject(notConfigured());
-    await settle();
+    refetch.reject(notConfigured);
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     expect(screen.getByRole("heading", { name: "Set up the delivery timeline" })).toBeDefined();
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
       "acme/widgets"
     );
     expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("a refetch of the unconfigured timeline that fails otherwise shows that failure and Retry, not the setup form", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
+    .mockRejectedValueOnce(notConfigured)
+    .mockRejectedValueOnce(new ApiError(500, { code: "INTERNAL", error: "database unavailable" }));
+
+  try {
+    renderPage();
+    await screen.findByRole("heading", { name: "Set up the delivery timeline" });
+
+    window.dispatchEvent(new Event("visibilitychange"));
+
+    expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+    expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
+    expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();

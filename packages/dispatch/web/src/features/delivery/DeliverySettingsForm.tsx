@@ -14,12 +14,16 @@ import {
   settingsSubmitButton,
 } from "../settings/classes";
 
-/** What separates the entries of a list field: line breaks, and commas or spaces too, since
- *  neither a GitHub login nor an `owner/repo` can hold one. */
-const LIST_SEPARATOR = /[\s,]+/;
+/** The characters that separate the entries of a list field, as a character class's body: line
+ *  breaks, and commas or spaces too, since neither a GitHub login nor an `owner/repo` can hold
+ *  one. */
+const SEPARATOR_CHARACTERS = String.raw`\s,`;
 
-/** Any one character of a list entry: anything `LIST_SEPARATOR` does not match. */
-const LIST_ENTRY_CHARACTER = /[^\s,]/;
+/** A run of separators between two entries. */
+const LIST_SEPARATOR = new RegExp(`[${SEPARATOR_CHARACTERS}]+`);
+
+/** Any one character of a list entry: anything but a separator. */
+const LIST_ENTRY_CHARACTER = new RegExp(`[^${SEPARATOR_CHARACTERS}]`);
 
 /** The entries a list field's text holds. */
 function listEntries(text: string): string[] {
