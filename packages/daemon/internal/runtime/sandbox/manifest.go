@@ -295,14 +295,14 @@ func (r *Runtime) labels(l launch) map[string]string { return l.kind.labels(r.pr
 // before the claim's Secret is written, with the claim template of the volume its pod mounts, the
 // Sandbox's own: an issue's Sandbox owns the issue's volume, the controller's its own. Its pod
 // template never runs: the relaunch's Running patch replaces it with the template the launch
-// computes, affinity and all, before the controller creates a pod.
+// computes before the controller creates a pod.
 func (r *Runtime) sandboxManifest(l launch) sandbox {
 	storageClass := r.storageClass
 	return sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l)},
 		Spec: sandboxSpec{
-			PodTemplate: r.podTemplate(l, false), OperatingMode: modeSuspended,
+			PodTemplate: r.podTemplate(l), OperatingMode: modeSuspended,
 			VolumeClaimTemplates: []volumeClaimTemplate{{
 				Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.labels(l)},
 				Spec: corev1.PersistentVolumeClaimSpec{
@@ -324,12 +324,11 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 // namespace's default when the operator names none), and its launcher containers mount the
 // providers Secret's configured keys and the operator's mounts, are told the operator's variables,
 // and start Oh My Pi on the pod's baseline (`--pod-safety`, internal/podsafety). Its init
-// containers, the volumes only they mount, and its placement are its kind's (podKind).
-//
-// colocate is whether the pod must share a node with another pod scheduled right now
-// (podKind.colocate), which decides its affinity. The controller applies a template only to the
-// next pod it creates, so the template is rebuilt for every relaunch.
-func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
+// containers and the volumes only they mount are its kind's (podKind). Beyond the Legion pool's
+// selector and tolerations it asks nothing of its placement: every pod owns its volume and shares
+// nothing with another pod, so the scheduler puts it wherever the pool has room. The controller
+// applies a template only to the next pod it creates, so the template is rebuilt for every relaunch.
+func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -343,7 +342,6 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 		RuntimeClassName:  new(gvisor),
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
-		Affinity:          l.kind.affinity(r, l, colocate),
 		PriorityClassName: r.scheduling.PriorityClass,
 		Volumes:           r.volumes(l),
 		InitContainers:    l.kind.initContainers(r, l),

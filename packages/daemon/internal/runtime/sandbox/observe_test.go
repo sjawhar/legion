@@ -92,7 +92,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		containers := podOf(t, r, workerSpec(t), false).Containers
+		containers := podOf(t, r, workerSpec(t)).Containers
 		return func(p *corev1.Pod) { p.Spec.Containers = containers }
 	}
 	unmoved := func(*Options) {}

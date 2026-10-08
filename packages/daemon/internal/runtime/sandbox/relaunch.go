@@ -124,7 +124,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err := r.writeLauncherSecrets(ctx, s, l); err != nil {
 			return fail("write its launcher secrets", err)
 		}
-		template := r.podTemplate(l, l.kind.colocate(r, l))
+		template := r.podTemplate(l)
 		running, err := r.patch(ctx, s,
 			jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 			jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
@@ -535,18 +535,6 @@ func (r *Runtime) withoutLiveTreePods(l launch, candidates []runtime.RemovableWo
 	return filtered
 }
 
-// treePodScheduled is whether another pod of l's tree is scheduled now: placed on a node, not
-// finished, and not being deleted. A scheduled pod holds the tree volume's attachment from the
-// moment it is placed, before any container runs, so readiness would be too late a signal.
-func (r *Runtime) treePodScheduled(l launch) bool {
-	for _, pod := range r.treePods(l) {
-		if pod.Spec.NodeName != "" && !terminal(pod) && pod.DeletionTimestamp == nil {
-			return true
-		}
-	}
-	return false
-}
-
 // lockTree takes the tree's launch turn: one relaunch of a tree's pods at a time holds it, from
 // the check that no other pod of the tree is initializing until its own new pod is in the store,
 // where the next relaunch's check sees it.
@@ -637,7 +625,7 @@ func labelPatchPath(key string) string {
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's
 // uid, so a Sandbox deleted and recreated in between is never written. A JSON patch, not a merge
 // patch: `add` replaces the pod template whole, where a merge patch would keep every key of the
-// previous template the new one leaves out — an affinity among them.
+// previous template the new one leaves out.
 func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) (*sandbox, error) {
 	body, err := json.Marshal(append([]jsonPatchOp{{Op: "test", Path: "/metadata/uid", Value: string(s.UID)}}, ops...))
 	if err != nil {

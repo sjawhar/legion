@@ -78,7 +78,7 @@ var liveChecks = []liveCheck{
 	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
-	{"worker-colocated", (*liveRig).checkWorkerColocated, nil},
+	{"worker-shares-issue-pod", (*liveRig).checkWorkerSharesIssuePod, nil},
 	{"secrets-two-roles-enrolled", (*liveRig).checkSecretsTwoRolesEnrolled, secretsBlocked},
 	{"secrets-automatic-grant", (*liveRig).checkSecretsAutomaticGrant, secretsBlocked},
 	{"secrets-cross-pod-negative", (*liveRig).checkSecretsCrossPodNegative, secretsBlocked},
@@ -115,11 +115,11 @@ const (
 	liveSettle = 2*liveProbeInterval + 5*time.Second
 )
 
-// liveTreeVolume is the tree volume's size, the daemon configuration's default. The run sets no
-// scheduling beyond the Legion pool the runtime selects: every pod of a tree requires the node of
-// the tree's first scheduled pod (the tree volume attaches to one node), and the `legion`
-// NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (set in the deployment repository), is what makes that
-// node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
+// liveTreeVolume is the issue volume's size, the daemon configuration's default. The run sets no
+// scheduling beyond the Legion pool the runtime selects: no pod asks for another pod's node or
+// keeps off one (every issue pod owns its volume, LEGION-632), and the `legion` NodePool's own
+// floor, karpenter.k8s.aws/instance-cpu Gt 3 (set in the deployment repository), is what makes a
+// node a 4-vCPU one with room for a pod while no pod requests anything.
 var liveTreeVolume = resource.MustParse("20Gi")
 
 // The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers

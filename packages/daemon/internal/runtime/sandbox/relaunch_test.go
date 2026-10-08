@@ -619,50 +619,6 @@ func TestTheTreeWaitBoundIsTheRegistrationDeadlinePlusOneIntervalExactly(t *test
 	}
 }
 
-// Every issue pod of a tree, the root's included, gets the tree's pod affinity exactly when
-// another pod of the tree is scheduled at its launch: the tree volume attaches to one node (P2, R1).
-func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {
-	g := newRig(t, nil)
-	hasAffinity := func(token claim.Token) bool {
-		pod := g.pod(SandboxName(token))
-		if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAffinity == nil {
-			return false
-		}
-		term := pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-		return len(term) == 1 && term[0].TopologyKey == corev1.LabelHostname && term[0].LabelSelector.MatchLabels[labelTree] == testTree
-	}
-	g.spawn(rootSpec(t))
-	if hasAffinity(rootToken) {
-		t.Fatal("the first pod of a tree carries an affinity")
-	}
-	g.spawn(childSpec(t))
-	if !hasAffinity(childToken) {
-		t.Fatal("a child issue's pod launched beside the scheduled root carries no affinity")
-	}
-	// Neither pod scheduled any longer: both issue Sandboxes suspended and their pods gone.
-	for _, token := range []claim.Token{rootToken, childToken} {
-		s, err := g.r.storedSandbox(SandboxName(token))
-		if err != nil || s == nil {
-			t.Fatalf("%s's sandbox: %v", token, err)
-		}
-		if err := g.r.setMode(g.ctx, s, modeSuspended); err != nil {
-			t.Fatal(err)
-		}
-		g.eventually("the pod to leave the store treePodScheduled reads", func() bool { return g.r.storedPod(SandboxName(token)) == nil })
-	}
-	third := claim.Token("legion-legion-legion-210-reviewer")
-	g.spawn(testSpec(t, third, claim.RoleReviewer, "LEGION-210"))
-	if hasAffinity(third) {
-		t.Fatal("a pod spawned with no other tree pod scheduled carries an affinity")
-	}
-	spec := rootSpec(t)
-	spec.Generation = 2
-	g.spawn(spec)
-	if !hasAffinity(rootToken) {
-		t.Fatal("the root relaunched beside a scheduled issue pod carries no affinity")
-	}
-}
-
 // A launch whose Sandbox was replaced between reading it and writing it is refused rather than
 // written: every Sandbox patch tests the uid it was read at.
 func TestAPatchIsFencedToTheSandboxItRead(t *testing.T) {
@@ -755,7 +711,7 @@ func TestALaunchThatFailsAfterRunningLeavesItsSandboxSuspended(t *testing.T) {
 func TestALaunchThatWaitsOutItsPodSaysWhatTheSandboxReports(t *testing.T) {
 	blocked := metav1.Condition{
 		Type: conditionReady, Status: metav1.ConditionFalse, Reason: "PodSchedulingBlocked",
-		Message: "no node satisfies the tree's required anti-affinity",
+		Message: "0/3 nodes are available: 3 Insufficient cpu.",
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond }))
 	g.hold.Store(true)
@@ -790,7 +746,7 @@ func TestALaunchThatWaitsOutItsPodSaysWhatTheSandboxReports(t *testing.T) {
 	if err == nil {
 		t.Fatal("Spawn returned no error though its pod never came")
 	}
-	for _, want := range []string{"wait for its new pod", "PodSchedulingBlocked", "no node satisfies the tree's required anti-affinity"} {
+	for _, want := range []string{"wait for its new pod", "PodSchedulingBlocked", "0/3 nodes are available: 3 Insufficient cpu."} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Spawn error = %q, want it to name %q", err, want)
 		}

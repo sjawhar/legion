@@ -8,7 +8,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -42,10 +41,6 @@ type podKind interface {
 	initVolumes(l launch) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(r *Runtime, l launch, credentialHelper string) []corev1.EnvVar
-	// colocate is whether a new pod must share a node with another pod scheduled now, and affinity
-	// the placement that follows.
-	colocate(r *Runtime, l launch) bool
-	affinity(r *Runtime, l launch, colocate bool) *corev1.Affinity
 	// readyNewPod readies what a new pod needs before relaunch writes its launcher Secrets and sets
 	// its Sandbox, s, running, and returns the release of what it holds meanwhile, which relaunch
 	// calls once it is done with the new pod. On an error it holds nothing: it has given back
@@ -69,8 +64,7 @@ func podKindOf(labels map[string]string) (podKind, error) {
 
 // issuePod is an issue's pod: every workflow role of the issue, one launcher each, working in the
 // issue's workspace on the issue's own volume, which its Sandbox owns. Two init containers
-// provision that workspace from the issue's repository, and the pod is placed beside its tree's
-// other pods and off every other tree's node.
+// provision that workspace from the issue's repository.
 type issuePod struct{}
 
 func (issuePod) roles() []claim.Role { return claim.Roles }
@@ -182,38 +176,6 @@ func (issuePod) agentEnv(r *Runtime, l launch, credentialHelper string) []corev1
 	}
 }
 
-// colocate is whether another pod of the tree is scheduled now (treePodScheduled).
-func (issuePod) colocate(r *Runtime, l launch) bool { return r.treePodScheduled(l) }
-
-// affinity refuses a node that holds a pod of another tree (Stage 4b decision 2): the pool's floor
-// sizes a node for one tree, and pods carry no requests, since under required colocation the first
-// pod placed decides the node and a request on a later one would strand it. The selector is the
-// tree label present and not this tree's, so a pod with no tree label, the image probe's or the
-// controller's, never counts. With colocate it also requires the scheduled pod's node: the tree
-// volume is a single-node EBS volume every tree pod mounts, so a pod placed on another node would
-// fail to attach it; with no other pod scheduled, any node will do.
-func (issuePod) affinity(r *Runtime, l launch, colocate bool) *corev1.Affinity {
-	tree := labelValue(l.spec.Tree)
-	affinity := &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
-		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-			LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-				{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
-				{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{tree}},
-			}},
-			TopologyKey: corev1.LabelHostname,
-		}},
-	}}
-	if colocate {
-		affinity.PodAffinity = &corev1.PodAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelProject: r.project, labelTree: tree}},
-				TopologyKey:   corev1.LabelHostname,
-			}},
-		}
-	}
-	return affinity
-}
-
 // readyNewPod takes the tree's launch turn and readies the pod under it (provision), then hands the
 // turn's release back, so relaunch holds the turn until its new pod is in the store, where the next
 // relaunch's wait sees it. A launch that cannot be readied gives the turn back itself and returns
@@ -295,8 +257,8 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 // controllerPod is the project controller's pod (`controller: daemon`): the controller's launcher
 // alone, working in the root of a volume of its own, which its Sandbox owns, so a relaunch resumes
 // its session. It belongs to no tree and holds no repository credential: it provisions no
-// workspace, takes no tree's launch turn, is placed on any Legion node, and its one init container
-// makes its sessions directory and holds a resume to its session.
+// workspace, takes no tree's launch turn, and its one init container makes its sessions directory
+// and holds a resume to its session.
 type controllerPod struct{}
 
 func (controllerPod) roles() []claim.Role { return []claim.Role{claim.RoleController} }
@@ -311,8 +273,8 @@ func (controllerPod) prepare(l *launch) error {
 	return nil
 }
 
-// labels carry the controller role and no tree or issue: a tree pod's anti-affinity refuses a node
-// holding a pod with any other tree label, and the controller belongs to no tree.
+// labels carry the controller role and no tree or issue: the controller belongs to no tree, so no
+// tree's cleanup lists its Sandbox (CleanupTree), and the labels name its kind (podKindOf).
 func (controllerPod) labels(project string, _ launch) map[string]string {
 	return map[string]string{labelProject: project, labelRole: string(claim.RoleController)}
 }
@@ -352,12 +314,6 @@ func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 func (controllerPod) agentEnv(*Runtime, launch, string) []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
 }
-
-// colocate is never: the controller shares no volume with any other pod.
-func (controllerPod) colocate(*Runtime, launch) bool { return false }
-
-// affinity is none: any Legion node will do.
-func (controllerPod) affinity(*Runtime, launch, bool) *corev1.Affinity { return nil }
 
 // readyNewPod readies nothing: the controller's pod belongs to no tree and provisions nothing.
 func (controllerPod) readyNewPod(context.Context, *Runtime, *launch, *sandbox) (func(), error) {

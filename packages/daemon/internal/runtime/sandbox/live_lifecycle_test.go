@@ -122,22 +122,10 @@ func (r *liveRig) checkAdoptWorkingCopy() error {
 	return nil
 }
 
-// treeAffinity reports whether the pod requires the node of another pod of its tree.
-func treeAffinity(p *corev1.Pod, tree string) bool {
-	if p.Spec.Affinity == nil || p.Spec.Affinity.PodAffinity == nil {
-		return false
-	}
-	for _, term := range p.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
-		if term.TopologyKey == corev1.LabelHostname && term.LabelSelector != nil && term.LabelSelector.MatchLabels[labelTree] == tree {
-			return true
-		}
-	}
-	return false
-}
-
-// worker-colocated: another role of the same issue starts in the root's existing issue pod. Its
-// process locator has the same pod UID but its own role container, and no init container runs again.
-func (r *liveRig) checkWorkerColocated() error {
+// worker-shares-issue-pod: another role of the same issue starts in the root's existing issue pod.
+// Its process locator has the same pod UID but its own role container, and no init container runs
+// again.
+func (r *liveRig) checkWorkerSharesIssuePod() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
 		return err
@@ -532,7 +520,10 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 }
 
 // concurrent-provision: two claims of a new tree launched at once each provision their
-// workspace, one after the other, from one clone, on a node the running tree has no pod on.
+// workspace, one after the other, from one clone. Which node each pod lands on is not checked: no
+// pod keeps off another tree's node any more (LEGION-632). What a pod asks of its node is the
+// `resources` check's, and `independent-provision` takes this check's place once no two pods share
+// a clone.
 func (r *liveRig) checkConcurrentProvision() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -577,20 +568,6 @@ func (r *liveRig) checkConcurrentProvision() error {
 		}
 		w := windows[c.name]
 		note("runtime", "%s: init log %q; workspace-init ran %s → %s", c.name, want, w.start.UTC().Format(time.TimeOnly), w.end.UTC().Format(time.TimeOnly))
-	}
-	rootPod, err := r.getPod(SandboxName(root.token))
-	if err != nil {
-		return err
-	}
-	for _, c := range []*liveClaim{root2, child} {
-		pod, err := r.getPod(SandboxName(c.token))
-		if err != nil {
-			return err
-		}
-		if pod.Spec.NodeName == rootPod.Spec.NodeName {
-			return fmt.Errorf("tree %s's %s runs on node %s beside tree %s's root", c.tree, c.name, pod.Spec.NodeName, root.tree)
-		}
-		note("runtime", "tree %s's %s on node %s; tree %s's root on %s", c.tree, c.name, pod.Spec.NodeName, root.tree, rootPod.Spec.NodeName)
 	}
 	a, b := windows["root2"], windows["child2"]
 	if a.start.IsZero() || b.start.IsZero() {

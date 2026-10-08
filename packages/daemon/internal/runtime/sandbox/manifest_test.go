@@ -15,7 +15,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -45,17 +44,14 @@ func goldenOptions() Options {
 // resumeSession is a session file Oh My Pi recorded in a pod.
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
-// manifestCases are the Sandboxes the goldens pin: the root; a worker placed beside a scheduled
-// pod of its tree, and one placed with none; a resume; a relaunch whose workspace is recovered
-// after its volume was lost; the root enrolled with the secrets broker; and the project
-// controller's pod, launched fresh and resuming. Every one owns its volume. colocate is whether
-// another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
-// root-enrolled alone, is the runtime's enrollment for that one case (TestManifestGoldens,
-// TestManifestMatchesTheSandboxCRD apply it to the shared runtime before building that case's
-// manifest, and restore nil after — every other case runs unenrolled).
+// manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; a relaunch whose
+// workspace is recovered after its volume was lost; the root enrolled with the secrets broker; and
+// the project controller's pod, launched fresh and resuming. Every one owns its volume.
+// agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
+// (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
+// building that case's manifest, and restore nil after — every other case runs unenrolled).
 func manifestCases(t *testing.T) map[string]struct {
 	spec         runtime.SpawnSpec
-	colocate     bool
 	agentSecrets *AgentSecrets
 } {
 	resume := workerSpec(t)
@@ -67,33 +63,31 @@ func manifestCases(t *testing.T) map[string]struct {
 	controllerResume.ResumeSessionFile = controllerSession
 	return map[string]struct {
 		spec         runtime.SpawnSpec
-		colocate     bool
 		agentSecrets *AgentSecrets
 	}{
-		"root":               {rootSpec(t), false, nil},
-		"worker-affinity":    {workerSpec(t), true, nil},
-		"worker-no-affinity": {workerSpec(t), false, nil},
-		"resume":             {resume, true, nil},
-		"recovered":          {recovered, true, nil},
-		"controller":         {controllerSpec(t), false, nil},
-		"controller-resume":  {controllerResume, false, nil},
-		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
+		"root":              {rootSpec(t), nil},
+		"worker":            {workerSpec(t), nil},
+		"resume":            {resume, nil},
+		"recovered":         {recovered, nil},
+		"controller":        {controllerSpec(t), nil},
+		"controller-resume": {controllerResume, nil},
+		"root-enrolled": {rootSpec(t), &AgentSecrets{
 			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
 	}
 }
 
 // manifestOf is the Sandbox a launch of spec leaves running, as the API server holds it: the one
-// the runtime creates, with the relaunch's Running patch applied — the pod template for colocate,
-// and the Running mode.
-func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, colocate bool) any {
+// the runtime creates, with the relaunch's Running patch applied — the launch's pod template, and
+// the Running mode.
+func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) any {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := r.sandboxManifest(l)
-	s.Spec.PodTemplate, s.Spec.OperatingMode = r.podTemplate(l, colocate), modeRunning
+	s.Spec.PodTemplate, s.Spec.OperatingMode = r.podTemplate(l), modeRunning
 	u, err := encodeSandbox(s)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +109,7 @@ func TestManifestGoldens(t *testing.T) {
 			encoder := json.NewEncoder(&buffer)
 			encoder.SetEscapeHTML(false)
 			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(manifestOf(t, r, tc.spec, tc.colocate)); err != nil {
+			if err := encoder.Encode(manifestOf(t, r, tc.spec)); err != nil {
 				t.Fatal(err)
 			}
 			encoded := buffer.Bytes()
@@ -152,7 +146,7 @@ func TestManifestMatchesTheSandboxCRD(t *testing.T) {
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
 			r.agentSecrets = tc.agentSecrets
-			if found := schemaViolations(manifestOf(t, r, tc.spec, tc.colocate), schema, ""); len(found) > 0 {
+			if found := schemaViolations(manifestOf(t, r, tc.spec), schema, ""); len(found) > 0 {
 				t.Fatalf("the manifest has fields the CRD does not declare as sent:\n%s", strings.Join(found, "\n"))
 			}
 		})
@@ -175,7 +169,7 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 		t.Fatal(err)
 	}
 	schema := sandboxSchema(t)
-	for name, manifest := range map[string]any{"worker": manifestOf(t, r, workerSpec(t), true), "probe": wire(t, probe.Object)} {
+	for name, manifest := range map[string]any{"worker": manifestOf(t, r, workerSpec(t)), "probe": wire(t, probe.Object)} {
 		if found := schemaViolations(manifest, schema, ""); len(found) > 0 {
 			t.Errorf("the %s manifest has fields the CRD does not declare as sent:\n%s", name, strings.Join(found, "\n"))
 		}
@@ -183,13 +177,13 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 }
 
 // podOf is the pod template a launch of spec runs.
-func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.PodSpec {
+func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.PodSpec {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return r.podTemplate(l, affinity).Spec
+	return r.podTemplate(l).Spec
 }
 
 // workerContainer is the role container of workerSpec, the tester.
@@ -199,13 +193,13 @@ const workerContainer = string(claim.RoleTester)
 // it (mounts, kubelet-resolved environment), with the launcher start command's argv as Command and
 // its plain environment appended. That is the process's whole environment: the launcher passes its
 // own on, then the start command's.
-func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.Container {
+func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.Container {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := containerNamed(t, r.podTemplate(l, affinity).Spec, string(spec.Role))
+	c := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
 	start := launcherCommand(l, r)
 	c.Command = start.Argv
 	for _, entry := range start.Env {
@@ -255,7 +249,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := envOf(workerOf(t, r, workerSpec(t), false))
+	env := envOf(workerOf(t, r, workerSpec(t)))
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
 	want := shellprefix.For("/legion/worker-bin", "/opt/legion/bin")
 	if got != want {
@@ -272,7 +266,7 @@ func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, init := range podOf(t, r, workerSpec(t), false).InitContainers {
+	for _, init := range podOf(t, r, workerSpec(t)).InitContainers {
 		env := envOf(init)
 		path, ok := env["PATH"]
 		if !ok {
@@ -300,8 +294,8 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, workerSpec(t), false)
-	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t), false)
+	pod := podOf(t, r, workerSpec(t))
+	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t))
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
 			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
@@ -345,7 +339,7 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := workerOf(t, r, workerSpec(t), false)
+	main := workerOf(t, r, workerSpec(t))
 	cacheHome := envOf(main)["XDG_CACHE_HOME"]
 	if cacheHome == "" {
 		t.Fatal("the main container carries no XDG_CACHE_HOME")
@@ -375,7 +369,7 @@ func TestUvKeepsItsPythonsAndCacheOnTheIssueVolume(t *testing.T) {
 	}
 	var envs []map[string]string
 	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t), testSpec(t, child, claim.RoleImplementer, "LEGION-209")} {
-		main := workerOf(t, r, spec, false)
+		main := workerOf(t, r, spec)
 		env := envOf(main)
 		for _, name := range []string{"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
 			dir := env[name]
@@ -412,8 +406,8 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := workerSpec(t)
-	pod := podOf(t, r, spec, false)
-	main := workerOf(t, r, spec, false)
+	pod := podOf(t, r, spec)
+	main := workerOf(t, r, spec)
 	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
 	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
 		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
@@ -448,12 +442,12 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range podOf(t, r, workerSpec(t), false).Containers {
+	for _, c := range podOf(t, r, workerSpec(t)).Containers {
 		if !slices.Contains(c.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
 			t.Errorf("the %s launcher's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", c.Name, c.Command)
 		}
 	}
-	worker := workerOf(t, r, workerSpec(t), false)
+	worker := workerOf(t, r, workerSpec(t))
 	if !slices.Contains(worker.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
 		t.Errorf("the shim's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", worker.Command)
 	}
@@ -481,7 +475,7 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			template := r.podTemplate(l, tc.colocate)
+			template := r.podTemplate(l)
 			pod := template.Spec
 			claimSecret := secretName(l.name)
 			volumes := map[string]corev1.Volume{}
@@ -643,7 +637,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	told := map[string]bool{}
 	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
 		spec.Env, spec.Secrets = nil, nil
-		for name := range envOf(workerOf(t, r, spec, false)) {
+		for name := range envOf(workerOf(t, r, spec)) {
 			told[name] = true
 		}
 	}
@@ -677,7 +671,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 			start := launcherCommand(l, r)
 			carried := map[string]string{}
 			words := [][]string{start.Argv[:slices.Index(start.Argv, "--")]}
-			for _, c := range podOf(t, r, spec, false).Containers {
+			for _, c := range podOf(t, r, spec).Containers {
 				words = append(words, c.Command)
 			}
 			for _, command := range words {
@@ -726,7 +720,7 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pointer, pointed := envOf(workerOf(t, r, workerSpec(t), false))["DISPATCH_TOKEN_FILE"]
+			pointer, pointed := envOf(workerOf(t, r, workerSpec(t)))["DISPATCH_TOKEN_FILE"]
 			if got := l.secrets[dispatchTokenKey]; got != tc.bearer || pointed != (tc.bearer != "") {
 				t.Fatalf("the claim's Secret carries %q as %s and DISPATCH_TOKEN_FILE is %q (set: %t), want %q",
 					got, dispatchTokenKey, pointer, pointed, tc.bearer)
@@ -756,7 +750,7 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 		"fresh":     {workerSpec(t), ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec, false)
+			pod := podOf(t, r, tc.spec)
 			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_WORKSPACE_RECOVERED_FROM"]
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
@@ -782,9 +776,9 @@ func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
 	}
 	spec := workerSpec(t)
 	spec.Generation = 7
-	pod := podOf(t, r, spec, false)
+	pod := podOf(t, r, spec)
 	for name, c := range map[string]corev1.Container{
-		initContainer: containerNamed(t, pod, initContainer), "the worker process": workerOf(t, r, spec, false),
+		initContainer: containerNamed(t, pod, initContainer), "the worker process": workerOf(t, r, spec),
 	} {
 		got, set := envOf(c)["LEGION_GENERATION"]
 		if !set || got != "7" {
@@ -829,7 +823,7 @@ func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
 			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
 				t.Fatal(err)
 			}
-			pod := r.podTemplate(l, false).Spec
+			pod := r.podTemplate(l).Spec
 			env := envOf(containerNamed(t, pod, initContainer))
 			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
 			if got != tc.want || set != (tc.want != "") {
@@ -875,7 +869,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			spec := r.podTemplate(l, false).Spec
+			spec := r.podTemplate(l).Spec
 			if spec.ServiceAccountName != tc.account || spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
 				t.Fatalf("serviceAccountName %q automount %v", spec.ServiceAccountName, spec.AutomountServiceAccountToken)
 			}
@@ -886,7 +880,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 				}
 			}
 			role := manifestCases(t)["root"].spec.Role
-			worker := workerOf(t, r, manifestCases(t)["root"].spec, false)
+			worker := workerOf(t, r, manifestCases(t)["root"].spec)
 			keyVolume := roleVolume(agentSecretsKeyVolume, role)
 			env := map[string]string{}
 			for _, e := range worker.Env {
@@ -1016,8 +1010,8 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 		pod   corev1.PodSpec
 		agent corev1.Container
 	}{
-		{"root", podOf(t, r, rootSpec(t), false), workerOf(t, r, rootSpec(t), false)},
-		{"worker", podOf(t, r, workerSpec(t), true), workerOf(t, r, workerSpec(t), true)},
+		{"root", podOf(t, r, rootSpec(t)), workerOf(t, r, rootSpec(t))},
+		{"worker", podOf(t, r, workerSpec(t)), workerOf(t, r, workerSpec(t))},
 		{"probe", probeSpec, containerNamed(t, probeSpec, probeContainer)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1106,9 +1100,9 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 			if _, copied := l.secrets["NATS_NKEY_SEED"]; copied {
 				t.Errorf("the claim's Secret carries NATS_NKEY_SEED: %v", slices.Sorted(maps.Keys(l.secrets)))
 			}
-			worker := r.podTemplate(l, false).Spec
+			worker := r.podTemplate(l).Spec
 			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			workerProcess := workerOf(t, r, spec, false)
+			workerProcess := workerOf(t, r, spec)
 			for _, pod := range []struct {
 				spec      corev1.PodSpec
 				container string
@@ -1223,8 +1217,8 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	for _, tc := range manifestCases(t) {
 		spec := tc.spec
 		spec.Env, spec.Secrets = nil, nil
-		pod := podOf(t, r, spec, tc.colocate)
-		carry(pod, workerOf(t, r, spec, tc.colocate))
+		pod := podOf(t, r, spec)
+		carry(pod, workerOf(t, r, spec))
 	}
 	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
@@ -1264,38 +1258,30 @@ func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	}
 }
 
-// Every tree pod refuses a node that holds a pod of another tree (decision 2: the pool's floor
-// sizes the node for one tree), whether or not it also requires its own tree's node, and a pod
-// with no tree label — the image probe — never counts against it.
-func TestEveryTreePodKeepsOffAnotherTreesNode(t *testing.T) {
+// Every Legion pod, an issue's and the controller's alike, asks nothing of its placement beyond the
+// Legion pool: of its template's fields, the ones that bear on scheduling are the pool's node
+// selector and tolerations and the Legion priority class, and no other — nothing ties it to, or
+// keeps it off, another pod's node. Each issue pod owns a ReadWriteOnce volume of its own and
+// shares nothing with the other pods of its tree, so the scheduler places it wherever the pool has
+// room (LEGION-632). Pinned as the exact key set of the pod spec the manifest sends, so a field
+// added to the template shows here by name.
+func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []corev1.PodAffinityTerm{{
-		LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-			{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
-			{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{testTree}},
-		}},
-		TopologyKey: corev1.LabelHostname,
-	}}
-	for name, tc := range map[string]struct {
-		spec     runtime.SpawnSpec
-		affinity bool
-	}{
-		"root, alone":             {rootSpec(t), false},
-		"worker, beside its tree": {workerSpec(t), true},
-		"worker, alone":           {workerSpec(t), false},
-	} {
+	want := []string{
+		"automountServiceAccountToken", "containers", "enableServiceLinks", "initContainers", "nodeSelector",
+		"priorityClassName", "restartPolicy", "runtimeClassName", "securityContext", "terminationGracePeriodSeconds",
+		"tolerations", "volumes",
+	}
+	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec, tc.affinity)
-			if pod.Affinity == nil || pod.Affinity.PodAntiAffinity == nil ||
-				!reflect.DeepEqual(pod.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, want) ||
-				len(pod.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
-				t.Fatalf("pod anti-affinity %+v, want exactly the required term %+v", pod.Affinity, want)
-			}
-			if got := pod.Affinity.PodAffinity != nil; got != tc.affinity {
-				t.Errorf("the pod requires its own tree's node: %t, want %t", got, tc.affinity)
+			r.agentSecrets = tc.agentSecrets
+			manifest := manifestOf(t, r, tc.spec).(map[string]any)
+			pod := manifest["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
+			if got := slices.Sorted(maps.Keys(pod)); !slices.Equal(got, want) {
+				t.Errorf("the pod spec sent carries %v, want exactly %v", got, want)
 			}
 		})
 	}
@@ -1368,7 +1354,7 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
 		}
 	}
-	role := containerNamed(t, r.podTemplate(l, false).Spec, string(spec.Role))
+	role := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
 	for _, arg := range role.Command {
 		if expanded := kubeExpand(arg, envOf(role)); strings.ReplaceAll(arg, "$$", "$") != expanded {
 			t.Errorf("the launcher's argument %q reaches it as %q", arg, expanded)
