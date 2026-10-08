@@ -12,10 +12,12 @@
 # mise's github backend exactly as a tmux host resolves an `omp_invocation` naming it;
 # @sjawhar/pi-envoy and @sjawhar/pi-legion packed from this checkout's packages/pi-envoy and
 # packages/pi-legion at /opt/legion/pi-envoy and /opt/legion/pi-legion, the two roots a pod names as
-# Oh My Pi's explicit extensions (never linked into the profile: a plugin both linked and explicit
-# loads twice, LEGION-629); @bopstack/pi-codegraph (from npm, pinned) linked into the isolated OMP
-# profile `legion`, where discovery loads it, backed by the CodeGraph CLI (@colbymchenry/codegraph,
-# pinned) at /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
+# Oh My Pi's explicit extensions, and linked into the isolated OMP profile `legion` beside
+# @bopstack/pi-codegraph (from npm, pinned) — until LEGION-629 (#1848), whose pod lane loads profile
+# plugins: the two Legion plugins then load only as explicit extension roots and leave the profile (a
+# plugin both linked and explicit loads twice), and the CodeGraph plugin alone stays linked, where
+# discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
+# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
@@ -27,7 +29,7 @@
 # notices stage).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
 # the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
-# repository, and links the CodeGraph plugin into the profile, which fetches Oh My Pi's natives; the second
+# repository, and links the plugins into the profile, which fetches Oh My Pi's natives; the second
 # runs every toolchain command, the language servers', Python's and the browser's included; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
@@ -553,8 +555,9 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
 # pod environment can name all three. Then `legion probe-image` runs the three launch probes through
 # the daemon's own code, loading the plugins the way a Sandbox pod does (--envoy-plugin-root then
-# --plugin-root: the two explicit extensions, with discovery on, so the profile's CodeGraph plugin and
-# a repository's own extensions load beside them, LEGION-629), holds the Legion plugin to the daemon
+# --plugin-root: the two explicit extensions, discovery off; once the pod lane loads profile plugins
+# (LEGION-629, #1848), discovery is on there and here alike, so the profile's CodeGraph plugin and a
+# repository's own extensions load beside the two roots), holds the Legion plugin to the daemon
 # API contract this binary speaks and to the Envoy plugin's interface, and resolves by name every
 # task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
 # plugins' dist/skills directories). It leaves those agents' models unresolved
@@ -565,8 +568,9 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
 # node, bun and uv on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
-# `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
-# capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
+# `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked
+# model-fallback=on daemon-api-version=<N>` (once the pod lane loads profile plugins, LEGION-629, the
+# line also carries extensions=discovered after the session-storage mark) — `on` here is Oh My Pi's own default for retry.modelFallback,
 # since the build runs under no operator overlay; a probe pod reads the operator's value — and a build
 # whose image lacks a capability fails here, the
 # probe naming every missing one. The daemon's probe Sandbox runs it again with its own contract, on

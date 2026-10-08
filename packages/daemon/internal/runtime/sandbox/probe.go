@@ -46,8 +46,9 @@ const (
 	// the TypeScript probe's 50 (LOG_TAIL_LINES, worker-image-probe.ts:59) would leave a refused
 	// image's own messages, printed before the table, out of the tail the refusal quotes. The
 	// read's 64 KiB bound (probeLog) keeps the OK line, the tail's last line, in reach: a
-	// capability line is its prefix and a detail capped at 300 characters (capabilities.maxDetail),
-	// so a hundred of the longest lines the probe prints stay under 40 KiB.
+	// capability line is its prefix, the row's own words, and a command's quoted output cut at 300
+	// characters (capabilities.maxDetail), about 500 bytes at the longest, so a hundred such
+	// lines stay near 50 KiB, and a passing pod prints about twenty.
 	probeLogLines = 100
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
 	// save (worker-image-probe.ts:144).
