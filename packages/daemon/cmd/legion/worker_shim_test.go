@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -234,10 +235,11 @@ func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing
 }
 
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
-// the pod's baseline: the overlay written under LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, ahead of the operator's, and the baseline variables where the pod leaves them
-// unset. Without it the agent starts on the environment it always had. With --pod-safety and no
-// state directory the shim refuses naming it, before anything is dialled or spawned.
+// the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
+// PI_CONFIG_FILES, ahead of the operator's, and the two session-placing variables where the pod
+// leaves them unset. Without it the agent starts on the environment it always had. With
+// --pod-safety and no state directory the shim refuses naming it, before anything is dialled or
+// spawned.
 func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "s")
@@ -252,16 +254,19 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 	}
 	state := t.TempDir()
 	t.Setenv("PI_CONFIG_FILES", "/etc/operator.yml")
-	t.Setenv("OTEL_SDK_DISABLED", "")
+	// Restored by t.Setenv's cleanup; unset so the pod row proves the baseline fills it and the
+	// pane row that nothing does.
+	t.Setenv("OMP_SESSION_STORAGE", "")
+	os.Unsetenv("OMP_SESSION_STORAGE")
 	t.Setenv("LEGION_STATE_DIR", "")
 	marker := filepath.Join(dir, "spawned")
-	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OTEL_SDK_DISABLED-unset}" = "$2" ] && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED-unset}" >&2; exit 8`
-	shim := func(podSafety bool, overlays, otel string) []string {
+	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OMP_SESSION_STORAGE-unset}" = "$2" ] && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OMP_SESSION_STORAGE=${OMP_SESSION_STORAGE-unset}" >&2; exit 8`
+	shim := func(podSafety bool, overlays, sessions string) []string {
 		args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token}
 		if podSafety {
 			args = append(args, "--pod-safety")
 		}
-		return append(args, "--", "sh", "-c", check, marker, overlays, otel)
+		return append(args, "--", "sh", "-c", check, marker, overlays, sessions)
 	}
 	acknowledge := func() chan error {
 		daemon := make(chan error, 1)
@@ -303,17 +308,17 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 
 	t.Setenv("LEGION_STATE_DIR", state)
 	for name, tc := range map[string]struct {
-		podSafety      bool
-		overlays, otel string
+		podSafety          bool
+		overlays, sessions string
 	}{
-		"a pod":  {true, filepath.Join(state, "podsafety-overlay.yml") + ":/etc/operator.yml", "true"},
-		"a pane": {false, "/etc/operator.yml", ""},
+		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file"},
+		"a pane": {false, "/etc/operator.yml", "unset"},
 	} {
 		daemon := acknowledge()
 		stdout.Reset()
 		stderr.Reset()
-		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.otel), &stdout, &stderr); code != 7 {
-			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q and OTEL_SDK_DISABLED %q; stderr: %s", name, code, tc.overlays, tc.otel, stderr.String())
+		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions), &stdout, &stderr); code != 7 {
+			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q and OMP_SESSION_STORAGE %q; stderr: %s", name, code, tc.overlays, tc.sessions, stderr.String())
 		}
 		if err := <-daemon; err != nil {
 			t.Fatalf("%s: the daemon side: %v", name, err)

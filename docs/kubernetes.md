@@ -1327,12 +1327,14 @@ issue's pod (every role container of it alike) and the image probe's.
   naming the Secret and keys. A `provider_keys` variable that anything else in the pod sets is
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
-  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes the pod
-  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off) and names
-  it first, ahead of the operator's, so the operator's overlay outranks it. The baseline also sets
-  `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
-  when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
-  may not set, since they decide where Oh My Pi keeps the session a resume reads.
+  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes one overlay,
+  the turn-scoping one (`bash.autoBackground.enabled` and `async.enabled` off, the two keys a
+  takeover's abort depends on, `packages/daemon/internal/podsafety/turnscope.yml`), and names it
+  first, ahead of the operator's, so the operator's overlay outranks it. Nothing of a repository's
+  settings is held off: they reach a pod's agent as they reach any agent session, under the
+  operator's overlay. The pod sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent
+  where the pod leaves them unset, which an operator's pod may not set, since they decide where Oh
+  My Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
   `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
   `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate
@@ -1820,10 +1822,12 @@ on the Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.po
 providers Secret, so it reaches models by the route every worker does. Its one container,
 `controller`, runs `legion launcher --role controller`: it authenticates to the worker stream with
 its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on
-the pod baseline (`--pod-safety`), on the daemon's command, as an issue pod's role containers do
-theirs, so a relaunch in a healthy pod is a new generation of that child rather than a new pod. Its
-role Secret, `legion-<project>-controller-controller-boot`, holds that launcher's token alone, bound
-to the pod's uid, and is the only Secret its launch writes: there is no provisioning `-boot` Secret.
+the pod baseline (`--pod-safety`: the turn-scoping overlay first in `PI_CONFIG_FILES` and the two
+session-placing variables, [Settings order](#operator-configuration)), on the daemon's command, as
+an issue pod's role containers do theirs, so a relaunch in a healthy pod is a new generation of that
+child rather than a new pod. Its role Secret, `legion-<project>-controller-controller-boot`, holds
+that launcher's token alone, bound to the pod's uid, and is the only Secret its launch writes: there
+is no provisioning `-boot` Secret.
 Its Sandbox owns a volume of its own (`tree-legion-<project>-controller`, of
 `runtime.kubernetes.tree_volume` and `storage_class`), mounted at `/legion` with its `sessions`
 directory at Oh My Pi's sessions directory, so a relaunch resumes the session. It provisions no

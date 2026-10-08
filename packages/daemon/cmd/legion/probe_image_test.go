@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -23,7 +25,7 @@ import (
 // name; and the session-storage setting refuses a value it does not know, naming the variable.
 // Asked for task agents, it resolves their models too, unless told to skip them. With
 // $LEGION_TEST_SEEN set, each run appends the environment it saw there: PI_CONFIG_FILES, whether
-// the first overlay it names exists, and OTEL_SDK_DISABLED; with $LEGION_TEST_KEY_SEEN, the
+// the first overlay it names exists, and OMP_SESSION_STORAGE; with $LEGION_TEST_KEY_SEEN, the
 // provider key TEST_PROVIDER_KEY.
 func imageOmp(t *testing.T) string {
 	t.Helper()
@@ -32,7 +34,7 @@ func imageOmp(t *testing.T) string {
 if [ -n "${LEGION_TEST_SEEN:-}" ]; then
   first=${PI_CONFIG_FILES%%:*}
   if [ -n "$first" ] && [ -f "$first" ]; then written=written; else written=absent; fi
-  printf '%s %s %s\n' "${PI_CONFIG_FILES:-none}" "$written" "${OTEL_SDK_DISABLED:-unset}" >>"$LEGION_TEST_SEEN"
+  printf '%s %s %s\n' "${PI_CONFIG_FILES:-none}" "$written" "${OMP_SESSION_STORAGE:-unset}" >>"$LEGION_TEST_SEEN"
 fi
 [ -z "${LEGION_TEST_KEY_SEEN:-}" ] || printf '%s\n' "${TEST_PROVIDER_KEY:-unset}" >>"$LEGION_TEST_KEY_SEEN"
 case "$*" in
@@ -248,20 +250,28 @@ func TestProbeImageWithAProviderEnvDirExportsTheKeysAsTheShimDoes(t *testing.T) 
 }
 
 // With --pod-safety, as the daemon's probe Sandbox runs it, every probe runs Oh My Pi on the pod's
-// baseline, as a pod's shim starts it: the overlay written and named first in PI_CONFIG_FILES,
-// ahead of the pod's own, and OpenTelemetry held off. Without it, as the image's build runs it, the
-// probes run on the environment as it is.
+// baseline, as a pod's shim starts it: the turn-scoping overlay written and named first in
+// PI_CONFIG_FILES, ahead of the pod's own, and OMP_SESSION_STORAGE=file where the pod leaves it
+// unset — except on the session-storage probe, whose own export of that variable outranks the
+// baseline as a pod's own value does (bootgate.verifySessionStorage). Without it, as the image's
+// build runs it, the probes run on the environment as it is: the operator's overlay alone, which
+// nothing wrote, and the variable unset.
 func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
-	t.Setenv("PI_CONFIG_FILES", "/etc/legion-operator/overlay.yml")
-	t.Setenv("OTEL_SDK_DISABLED", "")
+	// The operator's overlay, at a path nothing on this machine holds, so "absent" is the probe's
+	// doing and not the machine's.
+	operator := filepath.Join(t.TempDir(), "operator.yml")
+	t.Setenv("PI_CONFIG_FILES", operator)
+	t.Setenv("OMP_SESSION_STORAGE", "")
+	os.Unsetenv("OMP_SESSION_STORAGE")
 	for name, tc := range map[string]struct {
-		args []string
-		want *regexp.Regexp
+		args     []string
+		overlays *regexp.Regexp
+		sessions string
 	}{
-		"--pod-safety": {img.flags("--pod-safety"), regexp.MustCompile(`^/\S+/podsafety-overlay\.yml:/etc/legion-operator/overlay\.yml written true$`)},
-		"bare":         {img.flags(), regexp.MustCompile(`^/etc/legion-operator/overlay\.yml absent unset$`)},
+		"--pod-safety": {img.flags("--pod-safety"), regexp.MustCompile(`^/\S+/` + regexp.QuoteMeta(podsafety.TurnScopeFile+":"+operator) + ` written$`), "file"},
+		"bare":         {img.flags(), regexp.MustCompile(`^` + regexp.QuoteMeta(operator) + ` absent$`), "unset"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			seen := filepath.Join(t.TempDir(), "seen")
@@ -278,10 +288,17 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 			if len(runs) < 3 {
 				t.Fatalf("Oh My Pi ran %d times, want the three probes: %q", len(runs), runs)
 			}
+			sessions := map[string]int{}
 			for _, run := range runs {
-				if !tc.want.MatchString(run) {
-					t.Errorf("a probe ran Oh My Pi with %q, want %s", run, tc.want)
+				fields := strings.Fields(run)
+				if len(fields) != 3 || !tc.overlays.MatchString(fields[0]+" "+fields[1]) {
+					t.Errorf("a probe ran Oh My Pi with %q, want %s", run, tc.overlays)
+					continue
 				}
+				sessions[fields[2]]++
+			}
+			if want := map[string]int{tc.sessions: len(runs) - 1, "legion-launch-probe": 1}; !maps.Equal(sessions, want) {
+				t.Errorf("the probes ran Oh My Pi with OMP_SESSION_STORAGE %v, want %v: the session-storage probe's own value once, %q otherwise", sessions, want, tc.sessions)
 			}
 		})
 	}

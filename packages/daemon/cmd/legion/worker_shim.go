@@ -19,13 +19,15 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
 // go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
-// (podsafety.Apply, its overlay written to LEGION_STATE_DIR). With --warm-codegraph, which the
-// Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose workspace the
-// daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has no workspace
-// — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the background
-// once Oh My Pi has started (shim.Config.WarmCodegraph). On a relaunch the warm-up runs again:
-// `codegraph status` on the volume's existing index answers complete and nothing runs, or an
-// index an earlier build left partial is repaired as workspace.nextCodegraphStep decides.
+// (podsafety.Apply: the turn-scoping overlay written to LEGION_STATE_DIR and named first in
+// PI_CONFIG_FILES, under the operator's, and the two variables that place a pod's sessions where
+// the pod leaves them unset; nothing of a repository's settings held off). With --warm-codegraph,
+// which the Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose
+// workspace the daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has
+// no workspace — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the
+// background once Oh My Pi has started (shim.Config.WarmCodegraph). On a relaunch the warm-up runs
+// again: `codegraph status` on the volume's existing index answers complete and nothing runs, or
+// an index an earlier build left partial is repaired as workspace.nextCodegraphStep decides.
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
@@ -59,8 +61,9 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	return code
 }
 
-// podSafeEnvironment is environ on the pod's baseline, its overlay written to the pod's state
-// directory, which the runtime names as LEGION_STATE_DIR.
+// podSafeEnvironment is environ on the pod's baseline: the turn-scoping overlay written to the
+// pod's state directory, which the runtime names as LEGION_STATE_DIR, and named first in
+// PI_CONFIG_FILES, and PI_CONFIG_DIR and OMP_SESSION_STORAGE set where environ leaves them unset.
 func podSafeEnvironment(environ []string) ([]string, error) {
 	state := os.Getenv("LEGION_STATE_DIR")
 	if state == "" {

@@ -2353,7 +2353,7 @@ begin ci-red-takeover
 # (supervise.Machine.Quiesce). The control: the same command with a shorter sleep, which nothing
 # interrupts, writes its file.
 #
-# A long bash call here depends on podsafety/overlay.yml's bash.autoBackground.enabled: false
+# A long bash call here depends on podsafety/turnscope.yml's bash.autoBackground.enabled: false
 # (LEGION-462). Oh My Pi backgrounds a bash call left running past its own threshold under
 # `--mode rpc` by default, and a backgrounded call is a job the turn-level abort no longer reaches:
 # the abort still lands, on the `wait` tool call the agent is told to use while the job runs, but
