@@ -1950,7 +1950,8 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
 SHA-256 of every served secret's name, owner, tier and ARN, is recorded on every request, and a
-live grant is re-checked only once it has moved (`stillAllowed`); the record line, the column and
+live grant is re-checked once it has moved, and always while any granted name is a service's,
+since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
 by slug (not by request name, which orders `A0` and `A_B` the other way), for a full load and a
@@ -2249,7 +2250,8 @@ before `endEnrollment` wrote one, reads as `cancelled` from its request row. A m
 pending while it carries no terminal event. `Values` releases a
 live grant's values, each read from the secret its request froze (the ARN), re-checking the
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
-since the grant was decided — that the current policy still allows every granted name
+since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
+not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
@@ -2284,7 +2286,7 @@ evaluates for a session builds the requester with them: `Create`, `currentPolicy
 request that was pending when a name was withheld is that name's owner's to approve, and no one's
 while the policy does not serve the name or denies it, as it does once a service owns it: admitted
 then, the approval would release it once the name returned with its old tags, since that restores
-the request's policy version and `Values` runs `stillAllowed` only when the version moved) and
+the request's policy version and `Values` runs `stillAllowed` for a name no service owns only when the version moved) and
 `stillAllowed` on release and reuse. So the session asks before it gets the name again while every
 other session is unaffected.
 `RevokeByApprover` locks the session's row `for no key update`

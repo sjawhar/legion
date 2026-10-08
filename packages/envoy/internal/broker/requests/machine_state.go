@@ -890,8 +890,9 @@ func matchingRequest(ctx context.Context, q querier, query, enrollmentID string,
 // name-set match (never a subset or superset — the same matching rule coalescing uses for pending
 // requests) against a still-live grant (not revoked, not expired) under this enrollment is
 // returned as-is, with no new request row and no new record, as long as the policy it was
-// decided under is still current or the current policy still allows it to the session
-// (stillAllowed, the check Values makes) and its whole approval chain still verifies (VerifyChain,
+// decided under is still current and no granted name is a service's (anyServiceOwned: the
+// policy's version does not cover BROKER_SERVICES' accounts), or the current policy still allows
+// it to the session (stillAllowed, the check Values makes), and its whole approval chain still verifies (VerifyChain,
 // the same check Values makes). A caller that already holds a live grant for these exact names
 // never re-asks a human who already approved it, a policy tightened since then is never bypassed
 // by reuse, and neither is a chain that no longer verifies. No live grant holds a withheld name

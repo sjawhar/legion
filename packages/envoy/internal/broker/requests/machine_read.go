@@ -19,10 +19,12 @@ import (
 )
 
 // Values releases the values of a live grant to its own enrollment. Every call re-checks the
-// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and —
-// when the policy has changed since the grant's request was decided — that the current policy
-// still allows the session, with the names its operator withheld from it, every granted name under
-// the login that decided it (stillAllowed). Each value is read from the secret the request froze.
+// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
+// the policy has changed since the grant's request was decided, or any granted name is a service's
+// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
+// current policy still allows the session, with the names its operator withheld from it, every
+// granted name under the login that decided it (stillAllowed). Each value is read from the secret
+// the request froze.
 // It holds no pooled connection across a Secrets Manager read: the grant's names are read into
 // memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, time.Time, error) {
