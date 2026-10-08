@@ -242,6 +242,38 @@ func (t *promptTerminal) signal(event promptSignal) error {
 	return nil
 }
 
+// holdTerminal waits until this process's group holds the terminal, then answers its
+// settings, which the reader restores at its end. A prompt started in the background
+// waits behind the shell's line editor, whose settings are not the ones fg hands back,
+// so it reads them only once the shell has handed it the terminal. A stop taken while
+// it waits, before the label shows, discards nothing: nothing has been typed for it yet.
+// The watcher writes a stop's wake byte before the stop takes effect, so a stop whose
+// event is still on its way when fg hands the terminal over is taken here too.
+func (t *promptTerminal) holdTerminal() (*unix.Termios, error) {
+	for {
+		if err := t.waitForeground(); err != nil {
+			return nil, err
+		}
+		fds := []unix.PollFd{{Fd: int32(t.wake), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, 0)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+		t.drainWake()
+		if err := t.signal(<-t.events); err != nil {
+			return nil, err
+		}
+	}
+	t.stopped, t.notice = false, false
+	return unix.IoctlGetTermios(t.fd, ioctlGetTermios)
+}
+
 // SIGCONT from bg resumes the process, not its ownership of the terminal. Do not
 // apply termios or read again until fg has actually handed the terminal back.
 //
@@ -285,6 +317,14 @@ func (t *promptTerminal) waitForeground() error {
 		}
 		if foreground == unix.Getpgrp() {
 			return nil
+		}
+		// No shell can hand an orphaned group the terminal (its starting shell has
+		// gone), and the kernel discards the stops it would take, so waiting would
+		// never end.
+		if orphaned, err := processGroupOrphaned(); err != nil {
+			return err
+		} else if orphaned {
+			return errNoForeground
 		}
 		// fg need not send SIGCONT to a job that bg already left running.
 		// A timed wake covers that handoff; signals still wake us immediately.

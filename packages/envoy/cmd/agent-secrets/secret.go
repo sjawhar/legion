@@ -202,8 +202,10 @@ var stdinTerminal = func(r io.Reader) (fd int, ok bool) {
 var disableCoreDumps = sync.OnceValue(preventCoreDumps)
 
 // readHidden reads one hidden line from terminal fd, less its line ending; tests
-// replace it. The reader drains bracketed pastes through their end, and input
-// following an unbracketed line through a bounded quiet window.
+// replace it. It calls prompt to show the label once it holds the terminal with echo
+// off, so a prompt started in the background shows nothing over the shell's own line.
+// The reader drains bracketed pastes through their end, and input following an
+// unbracketed line through a bounded quiet window.
 var readHidden = readHiddenAtTerminal
 
 // errMoreThanOneLine is readHidden's answer when more input followed the first line at the prompt,
@@ -222,6 +224,11 @@ var errValueCutShort = errors.New("the terminal hung up before the value ended")
 // A tty stop flushes unread bytes without reporting how many. The entire entry
 // must be refused, even when the reader had already received a prefix.
 var errPromptStopped = errors.New("the terminal stopped while reading the value")
+
+// errNoForeground is readHidden's answer when its process group is orphaned while it waits in the
+// background (the shell that started it has gone): no shell can ever hand it the terminal, so it
+// refuses before showing anything rather than waiting forever.
+var errNoForeground = errors.New("no shell can bring the value prompt to the foreground of this terminal")
 
 // promptControlByteError is an unhandled control byte typed at the prompt. Its byte lets the form
 // turn the reader error into a usage error that names the invisible input.
@@ -259,27 +266,35 @@ func pipeCommand(profile string, words ...string) string {
 }
 
 // readSecretValue reads the value of the secret name for a form. At a terminal it prompts on
-// stderr and reads one line with echo off (readHidden), as `gh secret set` does, so the value never
-// shows on the screen; a value of more than one line is refused there, naming pipeTo, the form's
-// own command line (pipeCommand) with the value piped in. Otherwise it reads all of secretStdin,
-// less one trailing newline, so `echo` and a file ending in a newline give the value without one.
-// An empty value is a usage error either way.
+// stderr, once it holds the terminal with echo off, and reads one line (readHidden), as
+// `gh secret set` does, so the value never shows on the screen; a value of more than one line is
+// refused there, naming pipeTo, the form's own command line (pipeCommand) with the value piped in.
+// Otherwise it reads all of secretStdin, less one trailing newline, so `echo` and a file ending
+// in a newline give the value without one. An empty value is a usage error either way.
 func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 	if err := disableCoreDumps(); err != nil {
 		return "", err
 	}
 	if fd, ok := stdinTerminal(secretStdin); ok {
-		fmt.Fprintf(stderr, "Value for %s: ", name)
+		prompted := false
 		line, err := readHidden(fd, func() {
+			prompted = true
+			fmt.Fprintf(stderr, "Value for %s: ", name)
+		}, func() {
 			fmt.Fprintf(stderr, "\nNothing was stored. Press Enter to finish discarding this entry, then run %s again and type the whole value.\n", pipeTo)
 		})
-		// Echo is off, so the line ending the person typed never reached the screen.
-		fmt.Fprintln(stderr)
+		if prompted {
+			// Echo is off, so the line ending the person typed never reached the screen.
+			fmt.Fprintln(stderr)
+		}
 		if errors.Is(err, errMoreThanOneLine) {
 			return "", usageErr{fmt.Errorf("a value of more than one line must be piped in: %s < FILE", pipeTo)}
 		}
 		if errors.Is(err, errPromptStopped) {
 			return "", usageErr{fmt.Errorf("nothing was stored: %w; run %s again and type the whole value", err, pipeTo)}
+		}
+		if errors.Is(err, errNoForeground) {
+			return "", usageErr{fmt.Errorf("%w; pipe the value in: %s < FILE", err, pipeTo)}
 		}
 		var control interface{ ControlByte() byte }
 		if errors.As(err, &control) {

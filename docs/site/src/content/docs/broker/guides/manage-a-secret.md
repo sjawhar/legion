@@ -96,6 +96,13 @@ terminal until `fg` gives it back, then discards the entry in the same way.
 A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry. The macOS
 stop/resume path has not been verified on a macOS machine.
 
+**A command started with `&` waits for `fg`.** It shows no prompt and reads nothing while your
+shell holds the terminal. `fg` brings it forward, the label appears, and the value reads hidden.
+When the command ends, the terminal is left the way `fg` handed it over. A stop before the label
+appears discards nothing, since you have typed nothing for it yet. If no shell can ever bring it
+forward, for example because it was started from a subshell that has since exited, it shows
+nothing and exits 2, naming the command that pipes the value in.
+
 The hidden prompt is available on Linux and macOS for amd64 and arm64. Builds for other targets
 refuse an interactive value and ask you to pipe it on stdin instead.
 

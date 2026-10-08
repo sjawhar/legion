@@ -312,6 +312,33 @@ func TestPromptJobStopBeforeTheLabelKeepsTheEntry(t *testing.T) {
 	s.noShellValue("head", "tail")
 }
 
+// A prompt whose process group is orphaned (the subshell that started it has exited) can
+// never be brought to the foreground: it refuses, naming the pipe, rather than waiting forever,
+// and shows no label over the shell's line.
+func TestPromptJobOrphanedBackgroundPromptRefuses(t *testing.T) {
+	s := newPromptShell(t)
+	// Without job control a background command's standard input is /dev/null, so
+	// the subshell names the terminal for it.
+	command := "AGENT_SECRETS_JOB_REFERENCE=" + s.foregroundState() + " AGENT_SECRETS_JOB_HELPER=1 " +
+		shellWord(os.Args[0]) + " -test.run='^TestPromptJobHelper$' </dev/tty"
+	s.out.Reset()
+	s.send("(" + command + " &)\r")
+	s.wait("HELPER_PID=")
+	start := strings.Index(s.out.String(), "HELPER_PID=") + len("HELPER_PID=")
+	pid, err := strconv.Atoi(strings.Fields(s.out.String()[start:])[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.pid = pid
+	s.wait("RETURNED no shell can bring the value prompt to the foreground of this terminal; pipe the value in: agent-secrets secret set DEMO_KEY < FILE")
+	s.wait("LABEL_HELD=false")
+	if strings.Contains(s.out.String(), "Value for") {
+		t.Fatalf("an orphaned prompt showed its label: %q", s.out.String())
+	}
+	s.send("echo SHELL_ALIVE\r")
+	s.wait("SHELL_ALIVE")
+}
+
 // processState is the state letter /proc gives process pid ("T" while stopped).
 func processState(t *testing.T, pid int) string {
 	t.Helper()
@@ -350,14 +377,7 @@ func TestPromptJobFastForegroundDoesNotRestopOrExposeValue(t *testing.T) {
 			s.send("\x1a")
 			// Queue fg at the first stopped thread, without waiting for all of the
 			// job's threads or bash to reclaim the terminal.
-			for deadline := time.Now().Add(5 * time.Second); ; {
-				stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", s.pid))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+2:])); fields[0] == "T" {
-					break
-				}
+			for deadline := time.Now().Add(5 * time.Second); processState(t, s.pid) != "T"; {
 				if time.Now().After(deadline) {
 					t.Fatal("prompt did not stop")
 				}
