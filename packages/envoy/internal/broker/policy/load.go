@@ -87,8 +87,8 @@ type Loader struct {
 	Prefix string
 	// KeyARN is the agent-secrets key's ARN; a secret encrypted with any other key is refused.
 	KeyARN string
-	// Services are the registered services a secret's owner tag may name. None is registered yet,
-	// so an owner tag naming a service is refused as malformed.
+	// Services are the registered services a secret's owner tag may name: the broker's
+	// BROKER_SERVICES. An owner tag naming any other service is refused as malformed.
 	Services []string
 	// Describer reads one secret's tags, key and version stages for LoadOne. DescribeSecret is
 	// read-after-write consistent where ListSecrets may lag a change by minutes.

@@ -45,6 +45,22 @@ Configuration: Missing Region"`.
 The broker refuses to start, naming the variable, when one is missing, malformed or out of range,
 and also while a variable it no longer reads is still set.
 
+A secret owned by a service rather than a person needs that service registered.
+`BROKER_SERVICES` lists each service with the Kubernetes service account its pods run as,
+whitespace-separated `name=<service account>` entries, for example
+`BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for the Legion daemon's
+worker pods.
+
+A pod gets the service's agent-tier secrets at once when two things hold: a machine login for the
+listed service enrolled it, and its projected token proved that service account. Every other
+session is denied them. Binding the account matters because a machine login names its service
+itself, and whoever its login names approves it, so the service name alone proves nothing. For the
+same reason each account is bound to one service: the broker refuses to start, naming both
+services, if `BROKER_SERVICES` binds one account to two of them.
+
+While a secret's owner tag names a service the list leaves out, the broker refuses the secret as
+`owner-tag-malformed` ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
+
 ## What it depends on
 
 | Dependency | What the broker needs from it |

@@ -1910,10 +1910,11 @@ authenticates the enrollment chooses the slot; a session's proof cannot enroll a
 while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
-ALREADY_ENROLLED`, and the policy never sees the slot or the service account: a pod is a requester
-with no operator. Migration 0007 is forward-only: an older broker binary's conflict lookup
-reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
-back past it once a slotted enrollment exists. `internal/broker/policy` decides who may have which
+ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose
+service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
+older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
+two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+`internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
@@ -1936,13 +1937,21 @@ whether a secret has a value is read from the same listing's `SecretVersionsToSt
 labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
 every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
 gives a secret created without a value no version, as Secrets Manager does); and
-an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
-`cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
+an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
+`cmd/broker` fills with `BROKER_SERVICES`' names. A session's `policy.Requester.Service` is the
+`service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
+`requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
+and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
+to (`requests.Machine.ServiceAccounts`, `requester()`): a machine login's service name is the machine's
+claim, approved by whoever its `login_hint` names. So a `legion-worker` pod the Legion daemon's
+login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
+one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
 SHA-256 of every served secret's name, owner, tier and ARN, is recorded on every request, and a
-live grant is re-checked only once it has moved (`stillAllowed`); the record line, the column and
+live grant is re-checked once it has moved, and always while any granted name is a service's,
+since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
 by slug (not by request name, which orders `A0` and `A_B` the other way), for a full load and a
@@ -2066,6 +2075,10 @@ the broker's own address, the request object's `aud` and the launcher proof's `h
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
 `BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
+`BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
+entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
+to one name — any other entry is refused naming it, and an account given twice names both; unset,
+`Config.ServiceAccounts` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
@@ -2238,7 +2251,8 @@ before `endEnrollment` wrote one, reads as `cancelled` from its request row. A m
 pending while it carries no terminal event. `Values` releases a
 live grant's values, each read from the secret its request froze (the ARN), re-checking the
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
-since the grant was decided — that the current policy still allows every granted name
+since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
+not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
@@ -2273,7 +2287,7 @@ evaluates for a session builds the requester with them: `Create`, `currentPolicy
 request that was pending when a name was withheld is that name's owner's to approve, and no one's
 while the policy does not serve the name or denies it, as it does once a service owns it: admitted
 then, the approval would release it once the name returned with its old tags, since that restores
-the request's policy version and `Values` runs `stillAllowed` only when the version moved) and
+the request's policy version and `Values` runs `stillAllowed` for a name no service owns only when the version moved) and
 `stillAllowed` on release and reuse. So the session asks before it gets the name again while every
 other session is unaffected.
 `RevokeByApprover` locks the session's row `for no key update`

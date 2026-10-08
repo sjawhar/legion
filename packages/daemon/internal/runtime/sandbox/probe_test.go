@@ -183,7 +183,8 @@ const unfinishedBudget = 300 * time.Millisecond
 
 func (g *probeRig) probe(p ImageProbe) error {
 	g.t.Helper()
-	return g.r.ProbeImage(g.ctx, p)
+	_, err := g.r.ProbeImage(g.ctx, p)
+	return err
 }
 
 func wantContains(t *testing.T, err error, wants ...string) {
@@ -196,9 +197,9 @@ func wantContains(t *testing.T, err error, wants ...string) {
 }
 
 // okLine is the OK line an image prints when every probe passed, confirming contract, the
-// prompt-named agents' models resolved.
+// prompt-named agents' models resolved, the capability list checked, model fallback off.
 func okLine(contract int) string {
-	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved)
+	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved, "off")
 }
 
 // Role references whose encoding the image's Decode refuses would fail the probe pod, and the
@@ -268,6 +269,28 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 	g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
 }
 
+// A passing probe reports what its OK line said of the image: the model-fallback mark, as the
+// line carries it, on the table the pod printed before it.
+func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
+	for _, mark := range []string{"off", "on"} {
+		t.Run(mark, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			g.succeeds("probe-image: capability eval-js: present (Oh My Pi is its JavaScript runtime, and the launch probes ran it)\n" +
+				"probe-image: capability model-fallback: reported (the daemon reports it from the deployment's configuration)\n" +
+				bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, mark) + "\n")
+
+			report, err := g.r.ProbeImage(g.ctx, probeOptions(t))
+
+			if err != nil {
+				t.Fatalf("ProbeImage = %v, want a pass", err)
+			}
+			if report.ModelFallback != mark {
+				t.Errorf("report.ModelFallback = %q, want %q", report.ModelFallback, mark)
+			}
+		})
+	}
+}
+
 // A pod that ran is judged by its log: only a Succeeded pod whose OK line confirms this daemon's
 // contract passes, and every other ending is an answer no retry changes — so the probe runs once.
 func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
@@ -288,13 +311,22 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		{"a CLI that predates the agent-model check", func(g *probeRig) {
 			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=3")
 		}, []string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: none, where the daemon's probe requires resolved)"}},
+		{"a CLI that predates the capability check", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved daemon-api-version=3")
+		}, []string{"Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit", "log tail: probe-image: OK"}},
 		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
 			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
 		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes: build the image from this daemon's commit"}},
-		{"a build-time probe's result", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped)) },
+		{"a capability the image lacks", func(g *probeRig) {
+			g.fails("probe-image: capability browser: missing (/nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory)\n" +
+				"legion probe-image: capability browser is missing: /nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory")
+		}, []string{"Failed (container probe terminated", "exit code 1", "capability browser is missing"}},
+		{"a build-time probe's result", func(g *probeRig) {
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, "off"))
+		},
 			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
 		{"a CLI that predates the discovery-on pod lane", func(g *probeRig) {
-			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=3")
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved capabilities=checked model-fallback=on daemon-api-version=3")
 		}, []string{"Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit"}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
@@ -30,9 +31,15 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // directories a pod loads as its two explicit extensions, and the command refuses a run without
 // either (exit 2): the probe certifies the lane a pod uses, so a build line that lost a flag fails
 // the build instead of probing a lane no pod loads.
-// It runs the image's launch probes under the image's own environment (daemon.ProbeImage) and,
-// when every one passes, prints bootprobe.OKLine; a failure is the probe's message, exit 1, so a
-// broken image never publishes. Unlike the TypeScript command, the contract is always checked:
+// It runs the image's launch probes under the image's own environment (daemon.ProbeImage), then
+// the capability check (capabilities.CheckImage) under the same environment and launch: every
+// image-site capability of the list every worker is held to (LEGION-578), with the whole table
+// printed, one line per capability, before anything else — so the probe pod's log reads as the
+// declared list — and a missing one named on stderr, exit 1, after the table. Then it reads
+// whether the image's Oh My Pi falls back to another model (capabilities.ReadModelFallback) and,
+// when every one passes, prints bootprobe.OKLine with the capabilities and model-fallback marks;
+// a failure is the probe's message, exit 1, so a broken image never publishes. Unlike the
+// TypeScript command, the contract is always checked:
 // with none named, against this binary's own DaemonAPIVersion, which the plugin packed from the
 // same commit must declare. The load probe also holds every task agent the
 // prompts dispatch to its own model; the OK line says so (agent-models=resolved), or that the
@@ -154,6 +161,24 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
+	// The capability check reads the environment the launch probes ran under — the pod baseline's
+	// and the provider keys' included — so a PATH or a PUPPETEER_EXECUTABLE_PATH the operator's pod
+	// env sets is checked as a worker's Oh My Pi would honour it. The table is printed whole even
+	// when a row is missing: the operator reads what was checked, then why it failed.
+	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
+	lines, err := capabilities.CheckImage(ctx, img)
+	for _, line := range lines {
+		fmt.Fprintln(stdout, line)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	}
+	modelFallback, err := capabilities.ReadModelFallback(ctx, img)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	}
 	agentModels := bootprobe.AgentModelsResolved
 	if *skipAgentModels {
 		agentModels = bootprobe.AgentModelsSkipped
@@ -161,6 +186,6 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if natsUser != "" {
 		fmt.Fprintln(stdout, bootprobe.NATSUserLine(natsUser))
 	}
-	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels))
+	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels, modelFallback))
 	return 0
 }

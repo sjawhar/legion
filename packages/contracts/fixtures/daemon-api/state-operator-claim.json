@@ -33,5 +33,6 @@
       "workers": {}
     }
   },
-  "pendingStatusWrites": []
+  "pendingStatusWrites": [],
+  "capabilities": []
 }

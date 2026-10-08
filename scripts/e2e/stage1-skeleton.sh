@@ -174,6 +174,16 @@ jq -e --arg p "$project" \
   echo "the first boot's state is not the project, boot 1, cap 4 and no issues stage 1 promises"
   exit 1
 }
+# The deployment's capability report rides the same document (LEGION-578): every row of the table,
+# and under tmux with nothing decided the resource-limits row open with the legion.yaml line that
+# records a decision — a report, never a refusal, so the daemon served it.
+jq -e '(.capabilities | length) == 19
+  and (.capabilities | map(select(.name == "resource-limits" and .status == "open"
+    and .configLine == "capabilities.decided.resource-limits: \"<reason>\"")) | length) == 1' \
+  "$work/state1.json" || {
+  echo "the state does not carry the 19-row capability report with resource-limits open under tmux"
+  exit 1
+}
 "$work/legion" legions --json |
   jq -e --arg p "$project" --argjson port "$port" 'map(select(.team == $p and .port == $port)) | length == 1' || {
   echo "the legions registry does not carry exactly one entry for $project on $port"
