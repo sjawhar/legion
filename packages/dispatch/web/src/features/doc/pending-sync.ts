@@ -131,14 +131,23 @@ export function startPendingSync({
   let lastState: PendingState | undefined;
   let nextOrdinal = 0;
   let reportTail = Promise.resolve();
+  let storageAvailable: boolean | undefined;
   const recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
 
-  const ready = store.catch((error: unknown) => {
-    console.error("Could not open the browser's pending document edits", error);
-    return undefined;
-  });
-
+  const ready = store
+    .catch((error: unknown) => {
+      console.error("Could not open the browser's pending document edits", error);
+      return undefined;
+    })
+    .then((edits) => {
+      storageAvailable = edits !== undefined;
+      if (!storageAvailable) {
+        recorded.length = 0;
+        sent = [];
+      }
+      return edits;
+    });
   const report = (): Promise<void> => {
     reportTail = reportTail
       .then(async () => {
@@ -197,7 +206,7 @@ export function startPendingSync({
   };
 
   const onUpdate = (update: Uint8Array, origin: unknown) => {
-    if (!destroyed && origin !== remoteOrigin) {
+    if (!destroyed && storageAvailable !== false && origin !== remoteOrigin) {
       record(update);
     }
   };
@@ -258,7 +267,7 @@ export function startPendingSync({
       }
     },
     frameWritten(frame) {
-      if (destroyed) {
+      if (destroyed || storageAvailable === false) {
         return;
       }
       const decoder = createDecoder(frame);

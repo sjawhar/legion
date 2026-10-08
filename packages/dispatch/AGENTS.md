@@ -954,7 +954,8 @@ file, which derives the target's `ENVOY_URL` from that same value; the README's 
 wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
 is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
+The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
@@ -965,8 +966,10 @@ Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a cl
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
 send still name one issue. So do its rows on a message in flight (the picker and Reply held, no sent text back in
 the composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still
-named, marked closed). The project selects all three specs by file name, not title, so renaming a row cannot drop it. CI
-installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
+named, marked closed). The project selects every listed spec by file name, not title, so renaming
+a row cannot drop it. The offline-edits rows exercise browser-held IndexedDB updates and the
+WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. CI installs WebKit
+beside Chromium for them (`bun run e2e:install` does the same locally).
 
 The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
@@ -988,11 +991,13 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, the live
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
-editing puts text typed over a code block's last line before that line's newline, and deletes a
-paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
-spec is the one that needs a second engine; the picker and deep-links specs run for the reasons given under `webkit` above. CI installs Firefox
-beside Chromium for them (`bun run e2e:install` does the same locally).
+The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`: Firefox's native editing puts
+text typed over a code block's last line before that line's newline, and deletes a paragraph's hard
+break along with the text after it, which Chromium and WebKit never do, so that spec is the one
+that needs a second engine; the picker and deep-links specs run for the reasons given under
+`webkit` above. CI installs Firefox beside Chromium for them (`bun run e2e:install` does the same
+locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to
