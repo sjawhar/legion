@@ -43,6 +43,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const (
@@ -190,7 +191,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		var cancelAfterMint context.CancelFunc
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
-		plan.identity = workflow.identity
+		plan.identity, plan.appLogins = workflow.identity, workflow.appLogins
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -204,6 +205,11 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			return fmt.Errorf("resolve this daemon's executable for the pane legion launcher: %w", err)
 		}
 		if err := workerbin.Install(cfg.StateDir, executable); err != nil {
+			workflow.stop()
+			st.Close()
+			return err
+		}
+		if err := reconfigureCloneCredential(boot, cfg, plan.tools, log); err != nil {
 			workflow.stop()
 			st.Close()
 			return err
@@ -349,12 +355,15 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// appLogins is each Legion App's bot login keyed by its App role, from the workflow's boot
+	// leases, which every tree role's launch is told (specs.appLogins); nil without a workflow.
+	appLogins map[appauth.AppRole]string
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
-	// tools are the gh, git, and jj boot resolved on the host, by name; nil without a repository,
-	// and under a runtime whose agents run the worker image's own.
+	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
+	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
 	project       string
 	operatorToken string
@@ -506,19 +515,24 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			roleReferences: p.roleReferences,
 			log:            log,
 		}.verify
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, log)
 	}
 	return nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
-// providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
-// environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
-		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
+// providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
+// the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
+// Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
+// scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
+		if tokens != nil {
+			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
+		}
 		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
@@ -535,8 +549,8 @@ func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatc
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream, which boot hands the factory.
-func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) tmux.Options {
+// stream and the GitHub credential function, which boot hands the factory.
+func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	return tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
@@ -553,6 +567,37 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+}
+
+// reconfigureCloneCredential brings the shared clone an earlier daemon provisioned under the state
+// directory to the helper every clone gets now (workspace.ConfigureRepositoryCredential): a clone
+// provisioned before each pane read GitHub from its own gh files names that daemon's `legion
+// credential` by the pane launcher's path, which answers no pane now, so its first push would
+// fail. It runs the git boot resolved (tools), as the outbox's provisioning does, and logs the one
+// clone it rewrote. A configuration with no repository, or a state directory with no clone yet, is
+// nothing to do: provisioning writes the helper into a clone it makes.
+func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools map[string]string, log *slog.Logger) error {
+	repo := cfg.Projects[cfg.Project].Repo
+	if repo.IsZero() || tools == nil {
+		return nil
+	}
+	// Location derives the clone from the repository alone; the issue names only the workspace
+	// beside it, which nothing here reads.
+	located, err := workspace.Location(cfg.StateDir, repo, cfg.Project)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(located.Clone, ".git")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read the shared clone %s: %w", located.Clone, err)
+	}
+	if err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone); err != nil {
+		return fmt.Errorf("set the shared clone's git credential helper: %w", err)
+	}
+	log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	return nil
 }
 
 // supervision is everything that runs a claim: the worker stream, the runtime, and the machines,
@@ -634,7 +679,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
-			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
+			identity: p.identity, appLogins: p.appLogins, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,

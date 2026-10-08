@@ -158,17 +158,39 @@ func logLines(logs string, what string) []string {
 	return lines
 }
 
-// A daemon's tmux runtime always has the daemon's credential function: without one no pane could
-// read GitHub, so New refuses at boot rather than at the first spawn.
-func TestNewRefusesWithoutAGitHubCredentialFunction(t *testing.T) {
-	_, err := New(Options{
-		Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
-		EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
-		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-		Executable: func() (string, error) { return "/opt/legion", nil },
-	})
-	if want := "tmux runtime: no github credential function for the panes' gh files"; err == nil || err.Error() != want {
-		t.Fatalf("New without a credential function = %v, want %q", err, want)
+// A daemon with no GitHub Apps (Stage 2's, which configures no workflow) hands the runtime no
+// credential function, and its panes still boot: New accepts the nil, a spawn writes no gh
+// directory under the claim's secrets and tells the pane none of the four gh variables, logs no
+// written credential, and the refresher — started by Observe for every runtime — does nothing.
+func TestARuntimeWithoutACredentialFunctionSpawnsPanesWithNoGhFiles(t *testing.T) {
+	var logs strings.Builder
+	f := newFakeServerRuntime(t, nil, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	spec := f.spec(t, claim.RoleTester)
+
+	loc, err := f.Spawn(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if loc.Claim != spec.Claim || loc.Incarnation != "4242:1234567" {
+		t.Fatalf("Spawn returned %+v", loc)
+	}
+	if _, err := os.Stat(runtime.GHConfigDir(f.stateDir, spec.Claim)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the launch made a gh directory with no credential to put in it (%v)", err)
+	}
+	for _, pair := range f.pairs(t) {
+		for _, name := range []string{"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST="} {
+			if strings.HasPrefix(pair, name) {
+				t.Errorf("the pane was told %q with no credential function", pair)
+			}
+		}
+	}
+	if written := logLines(logs.String(), "github credential"); len(written) != 0 {
+		t.Errorf("the runtime logged %q with no credential function", written)
+	}
+	// Spawn tracked the pane, so the refresher's walk reaches it and still writes nothing.
+	f.refreshGitHubCredentials(context.Background())
+	if _, err := os.Stat(runtime.GHConfigDir(f.stateDir, spec.Claim)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refresher made a gh directory with no credential to put in it (%v)", err)
 	}
 }
 

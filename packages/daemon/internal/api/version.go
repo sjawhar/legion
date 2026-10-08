@@ -55,4 +55,24 @@ package api
 // 15: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
 // issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
 // generation, with the incarnation `<pod uid>/<generation>`.
-const DaemonAPIVersion = 15
+//
+// 16: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
+// grant the plugin redeems: the three credential routes, `POST /legion/v1/gh-token`,
+// `POST /legion/v1/git-credential` and `POST /legion/v1/provisioning-credential`, and
+// `GrantRequest.push` on `POST /legion/v1/grants` are gone from the contract (a later task deletes
+// their code; a plugin on 16 calls none of them). The pane and pod environment gains
+// `GH_CONFIG_DIR`, the role's directory of gh files (`hosts.yml` and `config.yml` rendered from
+// its App token and rewritten as the lease turns over), with `GH_TOKEN`, `GITHUB_TOKEN` and
+// `GH_HOST` set to the empty string so nothing in the environment outranks the file — all four
+// runtime-set — and `LEGION_IMPLEMENT_APP_LOGIN` and `LEGION_REVIEW_APP_LOGIN`, the two Legion
+// Apps' bot logins, set in the spec's Env beside the git identity, which `legion threads resolve`
+// reads in place of `legionAppLogins` on the gh-token answer; and it loses `LEGION_GH_PATH`,
+// `LEGION_GIT_PATH`, `LEGION_JJ_PATH` and `LEGION_CREDENTIAL_HELPER`, since a pane's gh, git and
+// jj are its PATH's and every shared clone's helper is `gh auth git-credential`. No `worker-bin`
+// directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX` puts the `legion` launcher
+// directory first alone. The plugin mints a grant only before a bash command that invokes
+// `legion` (`legion push`, say), never before every command. A plugin or
+// image built before 16 would still shim gh over a token file it never reads and mint a grant
+// before every command, against routes a daemon on 16 may no longer serve, so the boot gate and
+// `legion probe-image` refuse the mixed pair.
+const DaemonAPIVersion = 16

@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -84,8 +85,10 @@ type workflowRuntime struct {
 	githubAPI string
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
-	// nothing about it.
+	// nothing about it. appLogins holds it beside the implement App's, keyed by App role, as every
+	// tree role's launch is told them (specs.appLogins).
 	reviewAppLogin string
+	appLogins      map[appauth.AppRole]string
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
 	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
 	// reviewPermissionTTL, and a test shortens it. limitedUntil is when GitHub's last rate limit
@@ -126,11 +129,11 @@ var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Seco
 // mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
 // after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token. It returns the review App's bot login from
-// its lease: the engine judges a push by its pusher against it, so one App configured for both
-// roles would make every implementer push the review App's and count no fix attempt, and is
-// refused.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (string, error) {
+// token passed asks GitHub only for the review token. It returns both Apps' bot logins from their
+// leases, keyed by App role: the engine judges a push by its pusher against the review App's, so
+// one App configured for both roles would make every implementer push the review App's and count
+// no fix attempt, and is refused, as is a review lease that names no login.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (map[appauth.AppRole]string, error) {
 	logins := map[appauth.AppRole]string{}
 	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
@@ -151,12 +154,12 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 		return bootprobe.Outcome{Passed: true}
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if logins[appauth.Review] == "" || logins[appauth.Review] == logins[appauth.Implement] {
-		return "", fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
+		return nil, fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
 	}
-	return logins[appauth.Review], nil
+	return logins, nil
 }
 
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
@@ -172,18 +175,18 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if tokens == nil {
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
-	reviewAppLogin, err := mintAtBoot(ctx, tokens, owner, log)
+	logins, err := mintAtBoot(ctx, tokens, owner, log)
 	if err != nil {
 		return nil, err
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	// The database is shared by every project's daemon: the workflow reads this project's issues.
 	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
-	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
+	engine := workflow.New(records, engineConfig(cfg, logins[appauth.Review]), log)
 	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
+		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: logins[appauth.Review], appLogins: logins,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
@@ -353,6 +356,22 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s: %w", appauth.AppRoleFor(role), role, err)
 	}
 	return lease.Identity, nil
+}
+
+// gitHubCredential is the runtime's function for a tree role's gh files (runtime.GitHubCredential)
+// over the workflow's App tokens: the role's App's lease for the repository owner — the manager
+// holds the lease and re-mints it as it nears its expiry, so a launch and every refresher tick ask
+// GitHub only when the lease turns over — rendered as gh's hosts.yml and config.yml, named for the
+// App and its expiry so the runtime's log can say whose token it wrote.
+func gitHubCredential(tokens appauth.Tokens, owner string) runtime.GitHubCredential {
+	return func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
+		appRole := appauth.AppRoleFor(role)
+		lease, err := tokens.Token(ctx, appRole, owner)
+		if err != nil {
+			return ghconfig.Rendered{}, fmt.Errorf("mint the %s App lease for %s: %w", appRole, role, err)
+		}
+		return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), nil
+	}
 }
 
 func (w *workflowRuntime) attach(supervision *supervision) {

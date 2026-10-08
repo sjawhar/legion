@@ -88,8 +88,13 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // each pane's role from its claim token (claim.Token.Role), skips a token that names no role and
 // the controller, which has no App, renders the credential, and rewrites hosts.yml only when it
 // differs (writeGHConfig), recreating a directory that is gone. A render or a write that fails is
-// logged and the pane keeps its last token until the next tick.
+// logged and the pane keeps its last token until the next tick. A runtime with no credential
+// function (Options.GitHubCredential nil: a daemon with no GitHub Apps) wrote no pane any gh
+// files, so it has nothing to refresh.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
+	if r.gitHubCredential == nil {
+		return
+	}
 	for _, entry := range r.trackedProcesses() {
 		token := entry.locator.Claim
 		role, ok := token.Role()

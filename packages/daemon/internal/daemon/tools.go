@@ -15,12 +15,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// daemonTools are the binaries Legion itself runs: `legion gh`'s gh, and the git and jj of
-// workspace provisioning. Boot resolves each once, so no Legion-owned child is a PATH lookup that
-// whatever wrapper heads the operator's PATH could answer.
-var daemonTools = []string{"gh", "git", "jj"}
+// daemonTools are the binaries Legion itself runs on the host: the git and jj of workspace
+// provisioning and removal (internal/workspace). Boot resolves each once, so no Legion-owned child
+// is a PATH lookup that whatever wrapper heads the operator's PATH could answer. No gh is among
+// them, and no pane is told any of them: a pane's gh, git and jj are whatever its PATH, the
+// daemon's, gives, with its gh reading the role's App token from its GH_CONFIG_DIR.
+var daemonTools = []string{"git", "jj"}
 
-// toolEnv is the pane variable that names a resolved tool, and its override at boot.
+// toolEnv is the daemon's own override for a tool at boot, LEGION_<TOOL>_PATH; it is never a
+// pane's variable.
 func toolEnv(tool string) string { return "LEGION_" + strings.ToUpper(tool) + "_PATH" }
 
 // resolveTools resolves each daemon tool by its LEGION_<TOOL>_PATH override, which must be an
@@ -113,26 +116,6 @@ func checkJJVersion(jj string) error {
 func isExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
-}
-
-// paneTools names each resolved tool by the variable a pane reads it from (LEGION_GH_PATH, …).
-func paneTools(tools map[string]string) map[string]string {
-	named := map[string]string{}
-	for tool, path := range tools {
-		named[toolEnv(tool)] = path
-	}
-	return named
-}
-
-// PaneTools are the gh, git and jj every pane is told, resolved from lookupEnv as boot resolves them
-// (resolveTools) and keyed by the variable a pane reads each from (paneTools). It is exported for
-// the rigs under packages/pi-legion/scripts, which tell a worker what a pane is told.
-func PaneTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
-	tools, err := resolveTools(lookupEnv)
-	if err != nil {
-		return nil, err
-	}
-	return paneTools(tools), nil
 }
 
 func envValue(environ []string, name string) (string, bool) {

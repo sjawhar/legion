@@ -132,8 +132,8 @@ func (c natsConnection) log(log *slog.Logger) {
 	log.Info("legion daemon connects to NATS", "user", c.user, "paneUser", c.paneUser, "seed", string(c.source))
 }
 
-// tmuxReads is what panes on this host need that readBoot reads: the OMP invocation, and the host's
-// gh, git and jj.
+// tmuxReads is what a daemon on this host needs that readBoot reads: the OMP invocation for its
+// panes, and the host's git and jj its own provisioning runs (daemonTools); no pane is told either.
 type tmuxReads struct {
 	invocation string            // "" when boot does not run the host's Oh My Pi
 	tools      map[string]string // nil without a repository
@@ -141,7 +141,7 @@ type tmuxReads struct {
 
 // readTmux is tmux's share of readBoot: the OMP invocation when boot runs the host's Oh My Pi
 // (hostOMP), whose one command is `mise where <tool>` when the invocation names a mise tool, and,
-// for a configuration with a repository, the host's gh, git and jj Legion runs itself.
+// for a configuration with a repository, the host's git and jj Legion runs itself.
 func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func(string) string, hostOMP bool) (tmuxReads, error) {
 	var r tmuxReads
 	var err error

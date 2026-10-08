@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,5 +61,18 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 				t.Fatalf("openWorkflow = %v, want the two-Apps refusal", err)
 			}
 		})
+	}
+}
+
+// The boot mint hands back both Apps' bot logins keyed by App role — the review App's for the
+// engine, both for every tree role's launch (specs.appLogins) — from the leases it minted.
+func TestMintAtBootReturnsBothAppLogins(t *testing.T) {
+	tokens := loginTokens{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}
+	logins, err := mintAtBoot(context.Background(), tokens, "acme", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("mintAtBoot: %v", err)
+	}
+	if !maps.Equal(logins, map[appauth.AppRole]string(tokens)) {
+		t.Fatalf("mintAtBoot = %v, want both logins %v", logins, tokens)
 	}
 }

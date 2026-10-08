@@ -75,7 +75,9 @@ type Options struct {
 	// launch calls it for the pane's claim and writes the two files under the claim's directory
 	// (runtime.GHConfigDir), the pane's GH_CONFIG_DIR, and the refresher started by Observe
 	// (refreshGitHubCredentials) calls it again for every tracked pane and rewrites hosts.yml when
-	// the render changed; never for the controller, which has no App. Required: New refuses nil.
+	// the render changed; never for the controller, which has no App. Nil is a daemon with no
+	// GitHub Apps (Stage 2's, which configures no workflow): its panes are told no GH_CONFIG_DIR,
+	// hold no gh files, and the refresher does nothing.
 	GitHubCredential runtime.GitHubCredential
 	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
@@ -186,8 +188,6 @@ func New(opts Options) (*Runtime, error) {
 		return nil, errors.New("tmux runtime: the Dispatch URL and token file must be configured together")
 	case opts.DispatchTokenFile != "" && !filepath.IsAbs(opts.DispatchTokenFile):
 		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
-	case opts.GitHubCredential == nil:
-		return nil, errors.New("tmux runtime: no github credential function for the panes' gh files")
 	}
 	environ := opts.Environ
 	if environ == nil {

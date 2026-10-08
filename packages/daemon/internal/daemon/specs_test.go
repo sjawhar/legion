@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -113,8 +114,8 @@ func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
 
 // The daemon's controller (`controller: daemon`) is launched with its role part and the headless
 // part, told the project's design gate policy as the operator's controller is, with the
-// deployment's instructions and launch secrets, and with no repository and no git identity: it
-// works Dispatch, never a checkout, and commits nothing.
+// deployment's instructions and launch secrets, and with no repository, no git identity and
+// neither App login: it works Dispatch, never a checkout or GitHub, and commits nothing.
 func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
@@ -123,7 +124,8 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	s := specs{
 		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
 		instructions: "/state/deployment-instructions.md", secrets: map[string]string{"ENVOY_TOKEN": "envoy-bearer"},
-		repo: ghrepo.MustParse("acme/widgets"),
+		repo:      ghrepo.MustParse("acme/widgets"),
+		appLogins: map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"},
 		identity: func(context.Context, claim.Role) (runtime.GitIdentity, error) {
 			t.Error("the controller's launch asked for a git identity")
 			return runtime.GitIdentity{}, nil

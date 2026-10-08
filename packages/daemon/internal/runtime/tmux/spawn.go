@@ -151,14 +151,15 @@ type PaneInputs struct {
 	StateDir, Workspace, DaemonURL, EnvoyURL, DispatchURL, DispatchTokenFile string
 	NATSURLs                                                                 []string
 	// GHConfigDir is the claim's directory of gh files (runtime.GHConfigDir), the pane's
-	// GH_CONFIG_DIR; a controller pane carries none.
+	// GH_CONFIG_DIR; "" is none, and the pane is then told no gh variable at all: a controller
+	// pane, which has no App, and every pane of a runtime with no GitHub credential function.
 	GHConfigDir string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// identity, daemon, state, workspace, Envoy and Dispatch variables; for a tree pane GH_CONFIG_DIR,
-// the claim's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST set to the empty
-// string, which gh ignores, so no token in the daemon's environment outranks the file — a
+// identity, daemon, state, workspace, Envoy and Dispatch variables; for a pane with a GHConfigDir,
+// GH_CONFIG_DIR, the claim's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST set to
+// the empty string, which gh ignores, so no token in the daemon's environment outranks the file — a
 // non-empty GH_TOKEN would; PI_SHELL_PREFIX, which keeps this daemon's legion launcher first in
 // the agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay
 // writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets
@@ -185,7 +186,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("DISPATCH_URL", in.DispatchURL)
 		add("DISPATCH_TOKEN_FILE", in.DispatchTokenFile)
 	}
-	if spec.Role != claim.RoleController {
+	if in.GHConfigDir != "" {
 		add("GH_CONFIG_DIR", in.GHConfigDir)
 		add("GH_TOKEN", "")
 		add("GITHUB_TOKEN", "")
@@ -385,7 +386,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	ghConfigDir := ""
-	if spec.Role != claim.RoleController {
+	if spec.Role != claim.RoleController && r.gitHubCredential != nil {
 		ghConfigDir = runtime.GHConfigDir(r.stateDir, spec.Claim)
 		rendered, err := r.gitHubCredential(ctx, spec.Role)
 		if err != nil {

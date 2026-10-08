@@ -590,9 +590,19 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 // of this machine's that the clone would carry to another.
 const GitHubCredentialHelper = "!gh auth git-credential"
 
+// ConfigureRepositoryCredential writes GitHubCredentialHelper as the shared clone's helper
+// (configureRepositoryCredential): the daemon runs it at boot over a clone an earlier daemon
+// provisioned, whose helper still names that daemon's `legion credential`, so a pane's git answers
+// from its GH_CONFIG_DIR as a clone provisioned now does.
+func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir string) error {
+	return configureRepositoryCredential(ctx, run, cloneDir, GitHubCredentialHelper)
+}
+
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
-// one-shot clone/fetch environment has been removed. This ports the helper writes in workspace.ts's
-// provisionIssueWorkspace.
+// one-shot clone/fetch environment has been removed: the clone's own credential.helper, and the
+// one for github.com, each reset and then set to credentialHelper, with credential.interactive
+// off so a helper that answers nothing fails rather than prompts. This ports the helper writes in
+// workspace.ts's provisionIssueWorkspace.
 func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, credentialHelper string) error {
 	gitDir := cloneDir + "/.git"
 	for _, argv := range [][]string{

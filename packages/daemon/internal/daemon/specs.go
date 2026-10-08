@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -41,6 +42,19 @@ type specs struct {
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// appLogins is each Legion App's bot login keyed by its App role, from the workflow's boot
+	// leases (mintAtBoot); nil for a daemon with no GitHub Apps. A tree role is told both as
+	// LEGION_IMPLEMENT_APP_LOGIN and LEGION_REVIEW_APP_LOGIN (appLoginEnv) beside its git identity:
+	// `legion threads resolve`'s non-reviewer branch builds its bot-thread rule from them — a thread
+	// a bot opened that is neither Legion App — and with neither set applies no bot rule. A bot
+	// login is public, so each travels as a plain value, never as a secret.
+	appLogins map[appauth.AppRole]string
+}
+
+// appLoginEnv is the variable a tree role reads each Legion App's bot login from.
+var appLoginEnv = map[appauth.AppRole]string{
+	appauth.Implement: "LEGION_IMPLEMENT_APP_LOGIN",
+	appauth.Review:    "LEGION_REVIEW_APP_LOGIN",
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -78,6 +92,9 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}
 		env = id.Env()
+	}
+	for app, login := range s.appLogins {
+		env[appLoginEnv[app]] = login
 	}
 	spec := runtime.SpawnSpec{
 		Env:     env,
