@@ -342,6 +342,7 @@ func (l *Ledger) releasedAuthors() map[string]map[string]struct{} {
 func (l *Ledger) creditRooms() {
 	for artifactID, seed := range l.seeds {
 		state := l.service.lockState(artifactID)
+		state.creditSeq.Add(1)
 		state.lastActor = new(seed.actor)
 		state.unsettled = true
 		state.registerAskAuthors(askBlockIDs(seed.tree), seed.actor)
@@ -353,6 +354,7 @@ func (l *Ledger) creditRooms() {
 			continue
 		}
 		state := l.service.lockState(artifactID)
+		state.creditSeq.Add(1)
 		state.lastActor = write.actor
 		state.unsettled = true
 		if write.actor != nil {

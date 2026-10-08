@@ -101,9 +101,9 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
-	// afterReadWarm runs once a read that may load its room holds that room - a version's
-	// capture (captureLiveTextAndAuthors) and VerifyMark - and before the read takes anything from
-	// it. Nil outside tests; tests use it to evict the room in that window.
+	// afterReadWarm runs after a version capture or VerifyMark has warmed a room and before the
+	// version takes its document lock and reads it. Nil outside tests; tests use it to evict the
+	// warmed room or edit it in that window.
 	afterReadWarm func(room string)
 	// afterCaptureAuthorsTake runs after a room-backed version capture takes its authors and before
 	// it copies the document. Nil outside tests; tests use it to edit the room in that window.
@@ -1813,12 +1813,16 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			s.unlockState(room, state)
 		}
 		if closed && changed {
+			persisted := lastActor == nil
 			if lastActor != nil {
 				if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
 					slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
 				} else {
-					s.lastActorPersisted(room, creditSeq)
+					persisted = true
 				}
+			}
+			if persisted {
+				s.lastActorPersisted(room, creditSeq)
 			}
 			// A room still loading has no state yet, and is closed once it has loaded.
 			_ = s.srv.CloseRoom(room, true)

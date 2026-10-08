@@ -1166,6 +1166,14 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err := s.warmLiveDocument(ctx, room); err != nil {
 		return nil, "", authorCapture{}, err
 	}
+	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
+	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
+	// need that lock, so invoking it from the tree read while we hold the lock would be a cycle.
+	// The capture below takes the lock only after the hook returns, then reads R and F before
+	// it holds the current room's tree.
+	if write == nil && s.afterReadWarm != nil {
+		s.afterReadWarm(room)
+	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return nil, "", authorCapture{}, err
 	}
@@ -1194,15 +1202,12 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			return nil, "", authorCapture{}, err
 		}
 	} else {
+		capture = s.captureAuthorsLocked(room, owed, nil, actor)
+		if s.afterCaptureAuthorsTake != nil {
+			s.afterCaptureAuthorsTake(room)
+		}
 		var readErr error
 		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-			if s.afterReadWarm != nil {
-				s.afterReadWarm(room)
-			}
-			capture = s.captureAuthorsLocked(room, owed, nil, actor)
-			if s.afterCaptureAuthorsTake != nil {
-				s.afterCaptureAuthorsTake(room)
-			}
 			var doc *crdt.Doc
 			var release func()
 			doc, release, readErr = s.holdLive(room, live)
