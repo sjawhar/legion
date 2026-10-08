@@ -52,7 +52,7 @@ type ExitRequest struct {
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence
 // it puts in the body. Both halves are a contract with the plugin, which ends its process on a
 // 403 or a 409 from the registration (`exitOnRegistrationRefusal` in
-// `packages/pi-envoy/extensions/legion.ts`) and logs the sentence for the operator, so neither
+// `packages/pi-legion/extensions/legion.ts`) and logs the sentence for the operator, so neither
 // can be reworded here alone. A Refusal is an `error`, comparable, and therefore matchable with
 // `errors.Is` after a handler has wrapped it with the request it refused.
 type Refusal struct {

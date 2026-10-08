@@ -61,6 +61,31 @@ import {
   expandSubscriptionTopics,
   mergeInterestSources,
 } from "@legion/envoy-client/transport";
+import {
+  endInjectedUserTurns,
+  matchInjectedUserTurn,
+  noteInjectedUserTurn,
+} from "@legion/pi-shared/injected-user-turns";
+import { LOCAL_ENVOY_NOTICE, publishEnvoyPluginInterface } from "@legion/pi-shared/interface";
+import type {
+  PiApi,
+  SessionContext,
+  SessionSwitchReason,
+  SideTurn,
+  ToolResult,
+} from "@legion/pi-shared/pi-types";
+import {
+  type LegionNoticeSubscription,
+  type LegionRoleClaim,
+  type LegionRoleClaimInstance,
+  legionRoleClaimBridge,
+  type RoleRegainReason,
+} from "@legion/pi-shared/role-claim-bridge";
+import {
+  type SessionIdentityContext,
+  subagentSessionCheck,
+} from "@legion/pi-shared/subagent-session";
+import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
@@ -69,35 +94,15 @@ import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictu
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
   type AcceptedUserTurn,
-  endInjectedUserTurns,
   HANDLED_ATTEMPT_ENTRY,
   handledAttemptKey,
   handledAttempts,
   isUserTurnCandidate,
-  matchInjectedUserTurn,
-  noteInjectedUserTurn,
   turnFromAccept,
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
-import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
-import {
-  type LegionNoticeSubscription,
-  type LegionRoleClaim,
-  type LegionRoleClaimInstance,
-  legionRoleClaimBridge,
-  type RoleRegainReason,
-} from "../src/legion/role-claim-bridge";
 import { deviceTool, opensAsk } from "../src/opens-ask";
-import type {
-  PiApi,
-  SessionContext,
-  SessionSwitchReason,
-  SideTurn,
-  ToolResult,
-} from "../src/pi-types";
 import { sideTurn } from "../src/side-turn";
-import { type SessionIdentityContext, subagentSessionCheck } from "../src/subagent-session";
-import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -225,7 +230,7 @@ const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): stri
 
 /**
  * A verdict whose first word is WAITING, after any markdown emphasis or quoting — the reply
- * convention the Legion phase-stall follow-up already uses (`src/legion/phase-stall.ts`).
+ * convention the Legion phase-stall follow-up already uses (`packages/pi-legion/src/phase-stall.ts`).
  * Case-sensitive and first-word-only on purpose: "NOT WAITING", "I am WAITING on Sami" and
  * "Waiting." are all PROCEEDING here, because a false WAITING is the expensive error — the
  * steer it buys asserts the agent said it is waiting, which sends it to page a human with a
@@ -362,6 +367,10 @@ const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(S
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
+  // The interface the Legion plugin reads (`@legion/pi-shared/interface`). `undefined` when an
+  // Envoy entry at another interface version published first: that entry's object stays the one
+  // Legion finds, and this instance pushes no claim instance onto it (first wins).
+  const publishedInterface = publishEnvoyPluginInterface(import.meta.url);
   const defaults = envoyDefaultsFromEnvironment(process.env);
   // One loader for the shared envoy.json contract: the dispatch tools are
   // registered only where the file names a service at load, and an invalid file
@@ -1349,7 +1358,8 @@ export default function envoyExtension(pi: PiApi): void {
     return run;
   };
 
-  const bridge = legionRoleClaimBridge();
+  // The bridge's state is read through `legionRoleClaimBridge()` at each use; only the instance
+  // list is this instance's own entry on the object it published into.
   const claim: LegionRoleClaim = async (targetSessionID, role, callerContext) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
@@ -1399,7 +1409,7 @@ export default function envoyExtension(pi: PiApi): void {
     // `sessionID` follows only once this instance's own rebind has run.
     sessionID: () => activeSessionContext?.sessionManager.getSessionId() ?? sessionID,
   };
-  bridge.instances.push(claimInstance);
+  if (publishedInterface !== undefined) publishedInterface.roleClaim.instances.push(claimInstance);
 
   // A `task` subagent loads its own instance of this module in the parent's process and fires
   // its own session_start. It shares the parent's Envoy identity: registering it would list an
@@ -1532,8 +1542,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
-    const bound = bridge.instances.indexOf(claimInstance);
-    if (bound !== -1) bridge.instances.splice(bound, 1);
+    if (publishedInterface !== undefined) {
+      const bound = publishedInterface.roleClaim.instances.indexOf(claimInstance);
+      if (bound !== -1) publishedInterface.roleClaim.instances.splice(bound, 1);
+    }
     // This session is about to deregister with the listener, so it stops being an address a
     // reply can reach: a subagent still running in this process must report none rather than
     // name it, and a dead entry must not be what makes some other session ambiguous.
@@ -1710,7 +1722,7 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
     // A person's direct message not yet seen as a user message by the end of the run is not
-    // looked for again (`src/dispatch-user-turn.ts`). The record is kept under this instance's own
+    // looked for again (`@legion/pi-shared/injected-user-turns`). The record is kept under this instance's own
     // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
     // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
     endInjectedUserTurns(sessionID);

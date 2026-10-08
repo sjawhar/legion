@@ -322,6 +322,9 @@
   only the F credits present at its last room read. The document room can therefore go idle without
   retaining author state or losing the authors a later version, ask or event must name
   (LEGION-513).
+- Agent bearer tokens can now list repository-to-project mappings and architecture sources, and set
+  or remove repository mappings, architecture sources, and delivery settings. Settings writes record
+  the bearer-supplied session actor, as other agent-authenticated writes do.
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,

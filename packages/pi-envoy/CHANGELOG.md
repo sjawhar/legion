@@ -79,7 +79,26 @@
   agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
   rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
   skill reaches every installed user of this package, not only its author.
-
+- **Breaking:** the package is renamed `@sjawhar/pi-envoy` and carries the Envoy entry alone
+  (LEGION-247). `@sjawhar/pi-legion-envoy` gets no further release. What stays here is
+  `extensions/envoy.ts` (published as `dist/envoy.js`): Envoy messaging, subscriptions, delivery,
+  the native Dispatch tools and the `dispatch-first` context, with the four skills every session
+  with Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) at
+  `dist/skills`. The Legion entry (`extensions/legion.ts`), its modules (the former `src/legion/`),
+  the task agents in `agents/`, the eight Legion skills and the `legion.daemonApiVersion` manifest
+  field moved to `@sjawhar/pi-legion` (`packages/pi-legion`), which a Legion pane loads beside this
+  package; this manifest has no `legion` key. The two entries meet through a versioned in-process
+  interface in the private workspace package `@legion/pi-shared` (`packages/pi-shared`, version 1,
+  one object on `globalThis` under `Symbol.for("legion.pi-shared.envoy-plugin-interface")`): this
+  entry publishes it at factory time, and the Legion entry claims roles, matches injected user turns
+  and reads the bootstrapped session through it, refusing to run in a Legion session when no
+  `@sjawhar/pi-envoy` is loaded, when the loaded one speaks another interface version, or when
+  `@sjawhar/pi-legion-envoy` is still installed beside it. Both plugins release from one commit and
+  the daemon's boot gate refuses a pair whose interface versions differ. A person who installed the
+  one package reinstalls once:
+  `omp plugin uninstall @sjawhar/pi-legion-envoy && omp plugin install @sjawhar/pi-envoy`; a Legion
+  deployment also runs `omp plugin install @sjawhar/pi-legion` in the daemon's profile, and the
+  worker image carries both at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.

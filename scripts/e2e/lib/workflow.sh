@@ -342,12 +342,29 @@ smoke_main_leftovers() {
   gh api "repos/$repo/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
 }
+# smoke_pr_mergeable PR: GitHub would merge the smoke repository's pull request PR now. The smoke
+# main requires the `gate` check, which has not started when a pull request is created, and GitHub
+# refuses a merge while it is queued or running: the pull request reads BLOCKED until it passes,
+# UNSTABLE while a check that is not required has not passed, then CLEAN. CLEAN, UNSTABLE and
+# HAS_HOOKS merge. Any other state, and a read that fails, is not yet, so the wait on a pull request
+# that can never merge (DIRTY, DRAFT) times out, and report_smoke_pr_merge_state, its timeout hook,
+# names smoke_pr_merge_state, the state the last poll read.
+smoke_pr_merge_state=
+smoke_pr_mergeable() {
+  smoke_pr_merge_state=$(timeout 60 gh -R "$repo" pr view "$1" --json mergeStateStatus -q .mergeStateStatus) ||
+    { smoke_pr_merge_state="unread (gh exited $?)"; return 1; }
+  case "$smoke_pr_merge_state" in
+    CLEAN | UNSTABLE | HAS_HOOKS) return 0 ;;
+  esac
+  return 1
+}
+report_smoke_pr_merge_state() { note "the cleanup pull request's last merge state: ${smoke_pr_merge_state:-never read}"; }
 # clean_smoke_main removes every leftover from the smoke main through the proof human's ordinary
 # merge (the smoke main takes changes only through pull requests), so the next run starts from a
 # fixture whose base carries no other issue's handoff. See approve_as_reviewer for why a merge
-# leaves them.
+# leaves them. It merges its pull request once smoke_pr_mergeable holds, waiting up to 600 s.
 clean_smoke_main() {
-  local paths base branch path sha url
+  local paths base branch path sha url pr
   paths=$(smoke_main_leftovers)
   [ -n "$paths" ] || return 0
   base=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
@@ -359,7 +376,11 @@ clean_smoke_main() {
   done <<<"$paths"
   url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
     --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
-  gh -R "$repo" pr merge "${url##*/}" --squash --delete-branch
+  pr=${url##*/}
+  timeout_hook=report_smoke_pr_merge_state
+  until_true 600 "$repo#$pr to pass its required checks (merge state CLEAN, UNSTABLE or HAS_HOOKS)" smoke_pr_mergeable "$pr"
+  timeout_hook=
+  gh -R "$repo" pr merge "$pr" --squash --delete-branch
   note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
 }
 
