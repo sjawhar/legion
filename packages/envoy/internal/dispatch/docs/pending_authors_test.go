@@ -114,11 +114,13 @@ func awaitAppendLandedOrQueued(t *testing.T, service *Service, artifactID string
 	t.Fatal("the room's update neither landed nor waited for the document lock")
 }
 
-// countVersionAuthor is how many of the document's versions list actor.
+// countVersionAuthor is how many non-fixture versions list actor. The test artifact's initial
+// version is a fixture baseline whose generic creator is `user:alice`; it predates every browser
+// edit this helper measures and must not count as that peer's credit.
 func countVersionAuthor(t *testing.T, database *store.Store, artifactID string, actor model.Actor) int {
 	t.Helper()
 	listed := 0
-	for number := 1; number < nextVersionNumber(t, database, artifactID); number++ {
+	for number := 2; number < nextVersionNumber(t, database, artifactID); number++ {
 		if slices.Contains(versionAuthors(t, database, artifactID, number), actor) {
 			listed++
 		}
