@@ -2418,8 +2418,8 @@ begin github-credential
 # App's, each in its own gh-<role> volume of its own role Secret, so neither reads the other's; the
 # agent's environment names GH_CONFIG_DIR and no tool pin, its PATH has no worker-bin shim, and a
 # task subagent it launches runs the same gh with the same credential and no grant. The pushes on
-# legion/<issue> were made by the Apps themselves: GitHub's events name the planner's handoff push
-# the review App's and the implementer's the implement App's.
+# legion/<issue> were made by the Apps themselves: GitHub's record of each head names the planner's
+# handoff commit the review App's and the implementer's head the implement App's.
 gh_pod=$(claim_sandbox "$tree1" implementer) || fail "tree 1's implementer has no Sandbox locator"
 gh_bin=$(pod_exec "$gh_pod" implementer sh -c 'command -v gh') || fail "no gh in the implementer container of $gh_pod"
 [ "$gh_bin" = /usr/local/bin/gh ] || fail "the implementer container's gh is $gh_bin, want the image's /usr/local/bin/gh"
@@ -2466,24 +2466,24 @@ on_tree "$tree1" until_true 600 "the implementer to report its subagent's gh vie
 legion_commands=$(bash_legion_commands "$tree1" implementer "$sub_label")
 [ -z "$legion_commands" ] || fail "the implementer ran a legion command for the subagent proof, so a grant may have been minted: $(tr '\n' ' ' <<<"$legion_commands" | cut -c1-300)"
 # The pushes: the planner's handoff by the review App, the implementer's head by the implement App.
+# GitHub's record of the commit (its committer, the account the pane's git identity maps to, which
+# is the App whose token the pane pushes with) is read for each head: the repository's events feed
+# is lossy (a push can be missing from it while later ones are listed), so it is no oracle.
 pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
 plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph -T 'commit_id ++ "\n"' | head -1)
 [ -n "$plan_head" ] || fail "no 'plan: record handoff' commit on tree 1's workspace"
-push_actors() {
-  # gh's --jq takes no --arg, so the ref is piped to jq proper; the events feed lags a push by a
-  # few minutes and holds the repository's newest 300 events.
-  gh api "repos/$repo/events" --paginate 2>/dev/null |
-    jq -r --arg ref "refs/heads/legion/$tree1" '.[] | select(.type == "PushEvent" and .payload.ref == $ref) | "\(.payload.head) \(.actor.login)"' >"$evidence/github-credential-pushes.txt" || true
-  grep -q "^$pr_head legion-implementer\[bot\]$" "$evidence/github-credential-pushes.txt" &&
-    grep -q "^$plan_head legion-reviewer\[bot\]$" "$evidence/github-credential-pushes.txt"
-}
-until_true 600 "GitHub's events to attribute the planner's push to legion-reviewer[bot] and the implementer's to legion-implementer[bot]" push_actors
+for pair in "$plan_head:legion-reviewer[bot]:the planner's handoff commit" "$pr_head:legion-implementer[bot]:the implementer's head"; do
+  IFS=: read -r sha want what <<<"$pair"
+  actor=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.committer.login // "nobody"') || fail "GitHub could not read $what $sha on $repo"
+  printf '%s %s %s\n' "$sha" "$actor" "$what" >>"$evidence/github-credential-pushes.txt"
+  [ "$actor" = "$want" ] || fail "$what $sha on legion/$tree1 was committed by $actor, want $want"
+done
 # Negative control: the same gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
 if pod_viewer "$gh_pod" implementer /nonexistent >/dev/null 2>"$evidence/github-credential-negative.txt"; then
   fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
 fi
 grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_CONFIG_DIR=/nonexistent failed without gh's own not-logged-in message: $(cat "$evidence/github-credential-negative.txt")"
-note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is legion-implementer[bot] and the reviewer's legion-reviewer[bot] from different hosts.yml files, each container mounts gh-<its role> alone; the implementer's subagent answered legion-implementer[bot] with no legion command; GitHub's events name the planner's push legion-reviewer[bot]'s ($plan_head) and the implementer's legion-implementer[bot]'s ($pr_head)"
+note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is legion-implementer[bot] and the reviewer's legion-reviewer[bot] from different hosts.yml files, each container mounts gh-<its role> alone; the implementer's subagent answered legion-implementer[bot] with no legion command; GitHub records the planner's handoff commit $plan_head as legion-reviewer[bot]'s and the implementer's head $pr_head as legion-implementer[bot]'s"
 pass
 
 begin ci-red-takeover
