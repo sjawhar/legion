@@ -34,6 +34,7 @@ import type {
   Message,
   MessageDelivery,
   MessageRead,
+  MyAnswersResponse,
   Project,
   UpdateIssueInput,
   UserAgentState,
@@ -222,6 +223,18 @@ export function listIssues(project: string, options: ApiOptions = {}): Promise<I
 /** The viewer's Inbox rows, as the SPA's own `["inbox"]` query reads them. */
 export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
   return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
+}
+
+/** `GET /api/v1/me/answers`: the caller's own answers and ask replies, newest first, one page. */
+export function listMyAnswers(
+  page: { limit?: number; offset?: number } = {},
+  options: ApiOptions = {}
+): Promise<MyAnswersResponse> {
+  const query = new URLSearchParams();
+  if (page.limit !== undefined) query.set("limit", String(page.limit));
+  if (page.offset !== undefined) query.set("offset", String(page.offset));
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<MyAnswersResponse>(`/api/v1/me/answers${suffix}`, "GET", undefined, options);
 }
 
 /** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until
