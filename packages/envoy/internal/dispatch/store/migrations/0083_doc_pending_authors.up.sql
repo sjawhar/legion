@@ -1,4 +1,4 @@
--- 0082_doc_pending_authors.up.sql
+-- 0083_doc_pending_authors.up.sql
 -- LEGION-513: a version's pending authors outlive a room and a process.
 --
 -- A version lists the authors whose changes it holds (LEGION-503). An author whose durable change

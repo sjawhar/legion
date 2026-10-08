@@ -341,7 +341,11 @@ The smoke `main` requires the `gate` check, which has not started when the fixtu
 created, and GitHub refuses a merge before it passes, so the cleanup first waits up to 600 s, named
 in the transcript, for the pull request's merge state to read `CLEAN`, `UNSTABLE` or `HAS_HOOKS`
 (`smoke_pr_mergeable` in `lib/workflow.sh`). A failed read is a poll that has not seen it yet, and
-a timeout names the last state read. That checkpoint, `smoke-main-clean`, is the fixture's
+a timeout names the last state read. The fixture pull request's branch is
+`proof/clean-main-<project, lowercased>`, and the cleanup fails, naming it, when a branch of that
+name is there before it makes its own: an earlier run left that one, and the cleanup neither uses
+nor removes it. To go on, delete that branch on `sjawhar/legion-smoke`, which also closes a pull
+request open on it, and run again. That checkpoint, `smoke-main-clean`, is the fixture's
 teardown, not the workflow under test. It begins only once every checkpoint before it has passed,
 the first issue's workflow through its human merge and sign-off included. A failure there stops
 the run like any other: the checkpoints after `smoke-main-clean`, from `held-after-launch-budget`
@@ -353,7 +357,8 @@ violation (`$evidence/pane-endpoint-violation.txt`, which aborts the cleanup's w
 after-failure production audit, the run's first at this point, found rig writes or could not
 confirm there were none. With either, no such line is printed and the ordinary failure stands. The
 run exits non-zero either way, and the smoke `main` may still carry the leftovers the cleanup was
-to remove.
+to remove; the trap closes the fixture pull request if it is still open and deletes its branch
+(below).
 From the proof's merge until that cleanup passes, the run holds the smoke `main`: an exclusive
 `flock` on `/tmp/legion-e2e-smoke-main.<owner>-<repo>.lock`, shared by every Stage 3 and Stage 4b
 run on the box (`hold_smoke_main` in `lib/workflow.sh`). Another run's merge inside that window
@@ -397,8 +402,8 @@ every mint (`model-gateway/`), state captures, negative-control outputs, the pan
 and the production audit. A passing run's last three checks stop every process, kill the private
 tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-gateway`), and close every pull request the run still has open on the
-smoke repository — its own, by branch: the daemon's `legion/<project>-*` and the proof human's
-`proof/clean-main-<project, lowercased>` — before removing the isolated OMP profile and the scratch
+smoke repository — its own, by branch, the daemon's `legion/<project>-*`; the proof human's fixture
+pull request merged in `smoke-main-clean` — before removing the isolated OMP profile and the scratch
 work directory, the agents' workspaces with it (`cleanup-is-complete`); each shows what it removed
 gone.
 The proof merges only the pull request its human-merge check merges, so the held-worker and outbox
@@ -407,7 +412,14 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open. A failed run
+pull request open and prints gh's reason, with a line saying some may still be open. When the run
+stopped inside `smoke-main-clean`, after the cleanup made its branch and before its merge deleted
+it (a merge GitHub answered with a 504, the wait that timed out), the trap also closes the fixture
+pull request if it is still open, with a comment naming the run, and deletes the branch
+(`close_smoke_cleanup` in `lib/workflow.sh`). It acts only on the branch the run recorded making,
+by its exact name, so a run that never reached the cleanup closes nothing of it, and another run's
+`proof/clean-main-<project>` is never touched. It prints the URL of each pull request it closed and
+of each it could not close, with gh's reason, and names a branch it could not delete. A failed run
 also [notes](#libmodel-gateway-unservedsh) each agent that could have failed the check for want of
 a model key, and still exits 1. The trap still closes the run's pull requests in two further cases
 ([`lib/transcript.sh`](#libtranscriptsh)):
@@ -751,9 +763,19 @@ the run that owns it. A signal to the whole process group does not stop the remo
   `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
   claim, so the daemon sets back its status write on a live root as it does any outside session's.
   The run takes trees out with `legion status` from the operator shell, the daemon's own write.
-- **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
-  the proof human merges. The teardown closes any pull request the run left open, such as one from a
-  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. Every one of
+- **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, tree 1's pull request, which
+  the proof human merges, and `done`'s cleanup pull request on `proof/clean-main-legsmoke`, which the
+  proof human merges too. The teardown closes any pull request the run left open, such as one from a
+  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. It also closes
+  the cleanup pull request if it is still open, with a comment naming the run, and deletes its
+  branch, when the run stopped after `done` made that branch and before the merge deleted it (a
+  merge GitHub answered with a 504, the wait that timed out, an interrupt;
+  [`close_smoke_cleanup`](#libworkflowsh)), and prints the URL of a pull request it could not close.
+  Every Stage 4b run's cleanup branch has that one name, so the teardown acts only on the branch the
+  run recorded making: a run that never reached the cleanup touches none, an earlier run's
+  included, and `done` fails, naming the branch, when one is there before it makes its own, which it
+  then leaves. To go on, delete that branch on `sjawhar/legion-smoke`, which also closes a pull
+  request open on it, and run again. Every one of
   these writes is Stage 3's proof human's: the devbox `gh`, and for the fixture push the git
   credential helper the same routing installs. So the driver runs from the operator's own Oh My Pi
   session, and `prerequisites` refuses to start, before it takes the lock, when `gh` acts as anyone
@@ -1576,6 +1598,21 @@ harness's GitHub teardown (Stage 3's `close_unpassed_run_pull_requests`, 4b.13b'
 Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check passed.
 `lib/proof-human.test.ts` drives the check and Stage 3's teardown against a fake `gh`
 (`bun test scripts/e2e/lib`, which CI runs).
+
+`clean_smoke_main` is Stage 3's `smoke-main-clean` and the cleanup inside Stage 4b's `done`: one
+fixture pull request, on the branch `proof/clean-main-<project, lowercased>`, that removes the
+handoffs and learnings proof merges leave on the smoke `main`. Stage 3's project is a fresh key per
+run, but Stage 4b's is `LEGSMOKE` in every run, so the branch's name alone cannot tell the run's own
+from one an earlier run left. The run records the branch as its own (`smoke_cleanup_branch`) once it
+has read that no such branch exists (`smoke_branch_state`, through `matching-refs`, which answers an
+absent branch with an empty list), just before it makes it, and empties the record once the merge
+has deleted it; it fails, naming the branch, when one is already there. `close_smoke_cleanup` is
+both stages' teardown of a run that stopped in between (Stage 3's `close_unpassed_run_pull_requests`,
+Stage 4b's `remove_run_branches`): it closes each open pull request whose branch is exactly the
+recorded one, with a comment naming the run's script, project and pid, deletes the branch, prints
+one line per pull request (its URL, and gh's reason when the close failed) and for the branch, and
+returns 1 when the pull request may still be open or the branch remains. Without a record it makes
+no `gh` call. `lib/smoke-cleanup.test.ts` drives both teardowns against a fake `gh`.
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop and the caller passes its own bound: a correction round, the

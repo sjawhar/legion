@@ -18,6 +18,7 @@ import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
+  ANSWERS_PATH,
   buildProjectPath,
   parseIssuePath,
   parseProjectPath,
@@ -123,6 +124,9 @@ const MachineLoginPage = lazy(() =>
     default: module.MachineLoginPage,
   }))
 );
+const AnswersPage = lazy(() =>
+  import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
+);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -187,7 +191,13 @@ function InboxPage(): ReactNode {
   useDocumentTitle("Inbox · Dispatch");
   return (
     <section>
-      <h1 className="mb-4 text-[22px] font-semibold tracking-tight">Inbox</h1>
+      {/* Only the page links to the answers page; the drawer's Inbox stays a peek. */}
+      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h1 className="text-[22px] font-semibold tracking-tight">Inbox</h1>
+        <Link className={`text-sm ${linkText} ${linkHoverText}`} to={ANSWERS_PATH}>
+          Answered by you
+        </Link>
+      </div>
       <Inbox />
     </section>
   );
@@ -672,6 +682,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <Suspense fallback={<IssuePageFallback />}>
               <Routes>
                 <Route element={<InboxPage />} path="/" />
+                <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />

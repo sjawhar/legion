@@ -14,7 +14,7 @@ import (
 // A document's pending authors - every author whose change no committed version lists yet - are
 // in one of two places. F is the room's in-flight credits (roomState.inflight): a browser edit's
 // authors from the moment the room's update observer credits them (creditContentChange) until the
-// edit's append lands. R is the durable record (doc_pending_authors, migration 0082): a browser
+// edit's append lands. R is the durable record (doc_pending_authors, migration 0083): a browser
 // edit's append writes its authors there in the update's own transaction, and a committed API
 // write writes its own in the transaction that commits its content. A version lists R and F's
 // unconsumed credits it read under the document's advisory lock (lockDocumentRoom), deletes the R

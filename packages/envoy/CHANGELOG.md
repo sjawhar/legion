@@ -4,6 +4,11 @@
 
 ### Added
 
+- `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
+  with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
+  `expected_answer_at` to change the current answer; the change is another `ask.answered`
+  carrying `previous_answer`, and `GET /api/v1/asks/{id}` lists the ask's `answers`. Migration
+  `0082_answers_by_person` adds the partial indexes the list reads (LEGION-622).
 - An agent's conversation owns the files and images sent in it, a third artifact owner beside an issue and a project: `POST /api/v1/agents/{session_id}/artifacts` takes a multipart upload with an issue upload's caps, errors and file-store write, and `.../artifacts/{slug}` and `.../artifacts/{slug}/versions/{n}` read one and its bytes; there is no list route. Such an artifact carries `session_id` (null on every other artifact), `ref_key` `agent/<session_id>/<slug>`, and is addressed `dispatch://agent/<session_id>/artifact/<slug>[@vN]`, which the reference graph indexes inside a picture's `![name](…)` as anywhere else, as it does the dashboard page `/agents/<session_id>/artifacts/<slug>[?v=N]`. It holds files and images only: a markdown document is `400 ARTIFACT_INPUT`, its file takes no comment, ask or subscriber (`400 ARTIFACT_AGENT_OWNED`), its upload appends no event, and a session id holding `/`, `?`, `#`, whitespace or a control character is `400 INVALID_SESSION_ID`. Every file or image version is now served with `Cache-Control: private, max-age=31536000, immutable`, since its bytes never change; a document version is not. Migration `0071` adds the column, the one-owner check and the partial index `artifacts_session_id`, which the upload's lookups of a conversation's artifact by name and by slug read, and turns `ref_key` into a trigger-filled column without rewriting the table; its census answers `0` (LEGION-541).
 - `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
   now return `advice.suggestions`: the three fused search hits (sjawhar/legion#1764) most like
@@ -310,7 +315,7 @@
   nothing still holds it. Before, every document opened since a restart kept its state and counted
   against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
 - A document's pending authors now survive room release, process restart and overlapping Dispatch
-  tasks in `doc_pending_authors` (migration `0082`). A browser update is first an in-flight,
+  tasks in `doc_pending_authors` (migration `0083`). A browser update is first an in-flight,
   room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
   document lock. A joined write records its authors in R in its content transaction. A version
   reads R under that lock and may capture F only from its own room; after its transaction commits,
@@ -322,6 +327,15 @@
   only the F credits present at its last room read. The document room can therefore go idle without
   retaining author state or losing the authors a later version, ask or event must name
   (LEGION-513).
+- `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
+  route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
+  issue page does not read, so following it landed on the issue and not the ask. A document ask's
+  `ref` is unchanged (LEGION-622).
+- The secrets broker no longer logs `agent secret policy load failed; previous policy kept` for a
+  periodic reread of the namespace that its own shutdown cut short: `policy.NewCurrent` logs a
+  failed reload only while its context is live, so the deployment's alarm on that line no longer
+  counts a shutdown as a failed load. A reload that fails while the broker runs logs exactly as
+  before.
 - Agent bearer tokens can now list repository-to-project mappings and architecture sources, and set
   or remove repository mappings, architecture sources, and delivery settings. Settings writes record
   the bearer-supplied session actor, as other agent-authenticated writes do.
