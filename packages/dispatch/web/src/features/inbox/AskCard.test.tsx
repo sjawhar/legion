@@ -181,6 +181,36 @@ test("a stale change says the answer changed", async () => {
   }
 });
 
+for (const [code, message] of [
+  ["NOT_ANSWERER", "Only the person who answered can change this answer."],
+  ["ASK_APPROVAL_REVIEW", "An approval is a review; record a new review on the document."],
+] as const) {
+  test(`a change refused ${code} closes the form and shows the recorded answer`, async () => {
+    const before = answeredAsk();
+    const { view } = renderCard(
+      <AskCard
+        answerAsk={async () => {
+          throw new ApiError(409, { code, error: "refused" });
+        }}
+        ask={before}
+        initialThread={thread(before)}
+      />
+    );
+    try {
+      fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+      fireEvent.click(view.getByRole("radio", { name: "Hold" }));
+      fireEvent.click(view.getByRole("button", { name: "Save answer" }));
+      expect(await view.findByText(message)).toBeTruthy();
+      // The refusal meets the same send again, so the form it was sent from closes.
+      expect(view.queryByRole("button", { name: "Save answer" })).toBeNull();
+      expect(view.getByText(/Answered by/)).toBeTruthy();
+      expect(view.queryByRole("button", { name: "Retry" })).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+}
+
 test("mode change opens the seeded form only when the viewer can change the answer", async () => {
   const mine = answeredAsk();
   const editable = renderCard(<AskCard ask={mine} initialThread={thread(mine)} mode="change" />);

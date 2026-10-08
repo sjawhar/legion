@@ -13,6 +13,7 @@ import type {
   InboxRow,
 } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { isViewer } from "../refs/actor";
 import { answerAskInput } from "./answer-ask";
 import {
   clearPendingAskThreadInvalidation,
@@ -156,8 +157,14 @@ export function useAskAnswerForm({
         setOtherSelected(false);
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
       }
-      if (error instanceof ApiError && error.code === "ASK_ANSWER_CHANGED") {
-        // The card shows the thread's current answer, not one this card recorded earlier.
+      if (
+        error instanceof ApiError &&
+        (error.code === "ASK_ANSWER_CHANGED" ||
+          error.code === "NOT_ANSWERER" ||
+          error.code === "ASK_APPROVAL_REVIEW")
+      ) {
+        // Each refusal meets the same change again, so the form it was sent from closes and the
+        // card shows the thread's current answer, not one this card recorded earlier.
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
         replacing.current = undefined;
         setJustAnswered(null);
@@ -243,8 +250,7 @@ export function useAskAnswerForm({
     recordedAsk.kind !== "approval" &&
     recordedAsk.state === "answered" &&
     recordedAsk.answer !== null &&
-    viewer !== undefined &&
-    recordedAsk.answer.user.toLowerCase() === viewer.toLowerCase();
+    isViewer({ id: recordedAsk.answer.user, kind: "user" }, viewer);
   const startChanging = () => {
     if (!canChangeAnswer || recordedAsk?.answer === null || recordedAsk === null) return;
     const current = recordedAsk.answer;
@@ -264,6 +270,9 @@ export function useAskAnswerForm({
     mutation.reset();
     setChanging(false);
   };
+  // No dependency list on purpose: it runs after every render until the viewer and the recorded
+  // answer have both resolved, then once (the ref is the guard), so `mode="change"` opens the form
+  // as soon as the card knows the viewer may change the answer.
   useEffect(() => {
     if (!initiallyChanging || initialChangeConsumed.current) return;
     if (viewer === undefined || recordedAsk === null) return;
