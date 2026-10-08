@@ -307,11 +307,11 @@ func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 		}, "")
 	}
 	dir := func(token claim.Token) string { return runtime.GHConfigDir(r.stateDir, token) }
-	if _, err := writeGHConfig(dir(stale), ghconfig.Render("ghs_stale_lease", string(appauth.Review), staticCredentialExpiry)); err != nil {
+	if _, err := WriteGHConfig(dir(stale), ghconfig.Render("ghs_stale_lease", string(appauth.Review), staticCredentialExpiry)); err != nil {
 		t.Fatal(err)
 	}
 	rendered, _ := staticCredential(ctx, claim.RoleImplementer)
-	if _, err := writeGHConfig(dir(current), rendered); err != nil {
+	if _, err := WriteGHConfig(dir(current), rendered); err != nil {
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-time.Hour)

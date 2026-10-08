@@ -79,7 +79,7 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
 // mints when it is not its own (the daemon mints a fresh capability and revokes the previous
 // controller's); write it
-// 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
+// 0600 under the local state directory beside the `legion` launcher and the
 // deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved
 // invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`, and
 // daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the

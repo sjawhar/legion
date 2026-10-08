@@ -215,7 +215,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			return err
 		}
 		if workflow != nil {
-			log.Info("legion workflow boot stage", "stage", "worker-bin")
+			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
 	if workflow != nil {
@@ -593,10 +593,13 @@ func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools ma
 		}
 		return fmt.Errorf("read the shared clone %s: %w", located.Clone, err)
 	}
-	if err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone); err != nil {
+	changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone)
+	if err != nil {
 		return fmt.Errorf("set the shared clone's git credential helper: %w", err)
 	}
-	log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	if changed {
+		log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	}
 	return nil
 }
 

@@ -61,7 +61,7 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 			t.Errorf("the launch's %s = %q, want %q", name, spec.Env[name], want)
 		}
 	}
-	for _, name := range appLoginEnv {
+	for _, name := range appauth.LoginEnv {
 		if value, set := spec.Env[name]; set {
 			t.Errorf("a daemon with no GitHub Apps told the launch %s=%q", name, value)
 		}

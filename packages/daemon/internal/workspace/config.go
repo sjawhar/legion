@@ -590,12 +590,31 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 // of this machine's that the clone would carry to another.
 const GitHubCredentialHelper = "!gh auth git-credential"
 
-// ConfigureRepositoryCredential writes GitHubCredentialHelper as the shared clone's helper
-// (configureRepositoryCredential): the daemon runs it at boot over a clone an earlier daemon
-// provisioned, whose helper still names that daemon's `legion credential`, so a pane's git answers
-// from its GH_CONFIG_DIR as a clone provisioned now does.
-func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir string) error {
-	return configureRepositoryCredential(ctx, run, cloneDir, GitHubCredentialHelper)
+// ConfigureRepositoryCredential brings the shared clone's helper to GitHubCredentialHelper
+// (configureRepositoryCredential) and reports whether it wrote anything: the daemon runs it at
+// every boot over a clone an earlier daemon provisioned, whose helper may still name that daemon's
+// `legion credential`, so a pane's git answers from its GH_CONFIG_DIR as a clone provisioned now
+// does. A clone whose two helper keys already end in GitHubCredentialHelper is left as it is, so
+// the ordinary boot runs one read per key rather than five writes, and logs no rewrite.
+func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir string) (bool, error) {
+	gitDir := cloneDir + "/.git"
+	current := true
+	for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
+		// `git config --get-all` exits 1 for a key the clone never set, which is as stale as an old
+		// helper; a run that failed to start is an error.
+		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", key}, nil, "")
+		if err != nil {
+			return false, fmt.Errorf("read the shared clone's %s: %w", key, err)
+		}
+		values := strings.Split(strings.TrimRight(result.Stdout, "\n"), "\n")
+		if result.ExitCode != 0 || values[len(values)-1] != GitHubCredentialHelper {
+			current = false
+		}
+	}
+	if current {
+		return false, nil
+	}
+	return true, configureRepositoryCredential(ctx, run, cloneDir, GitHubCredentialHelper)
 }
 
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the

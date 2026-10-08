@@ -233,7 +233,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 			t.Errorf("%s exists (%v): the host's pane machinery ran under kubernetes", path, err)
 		}
 	}
-	if strings.Contains(logged.String(), `"stage":"worker-bin"`) {
+	if strings.Contains(logged.String(), `"stage":"launcher"`) {
 		t.Errorf("the boot installed the pane launcher:\n%s", logged.String())
 	}
 }

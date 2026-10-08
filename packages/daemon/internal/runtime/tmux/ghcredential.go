@@ -22,12 +22,12 @@ import (
 // an installation token's hour, at one file read per tracked pane.
 const gitHubRefreshInterval = time.Minute
 
-// writeGHConfig brings dir, a claim's GH_CONFIG_DIR (runtime.GHConfigDir), to rendered: the
+// WriteGHConfig brings dir, a claim's GH_CONFIG_DIR (runtime.GHConfigDir), to rendered: the
 // directory made 0700 if it is gone, config.yml written once when absent or different, and
 // hosts.yml replaced — a temporary file in the directory (0600, as os.CreateTemp makes it) renamed
 // over it, so the pane's gh never reads a half-written file — only when its content differs. It
 // reports whether hosts.yml changed, which is what the refresher logs.
-func writeGHConfig(dir string, rendered ghconfig.Rendered) (changed bool, err error) {
+func WriteGHConfig(dir string, rendered ghconfig.Rendered) (changed bool, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, err
 	}
@@ -87,7 +87,7 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // read the token the daemon holds now. It walks a snapshot of the watch (trackedProcesses), takes
 // each pane's role from its claim token (claim.Token.Role), skips a token that names no role and
 // the controller, which has no App, renders the credential, and rewrites hosts.yml only when it
-// differs (writeGHConfig), recreating a directory that is gone. A render or a write that fails is
+// differs (WriteGHConfig), recreating a directory that is gone. A render or a write that fails is
 // logged and the pane keeps its last token until the next tick. A runtime with no credential
 // function (Options.GitHubCredential nil: a daemon with no GitHub Apps) wrote no pane any gh
 // files, so it has nothing to refresh.
@@ -106,7 +106,7 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", err)
 			continue
 		}
-		changed, err := writeGHConfig(runtime.GHConfigDir(r.stateDir, token), rendered)
+		changed, err := WriteGHConfig(runtime.GHConfigDir(r.stateDir, token), rendered)
 		if err != nil {
 			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", fmt.Errorf("write the github credential: %w", err))
 			continue

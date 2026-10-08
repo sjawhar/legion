@@ -40,7 +40,7 @@ type podKind interface {
 	initContainers(r *Runtime, l launch) []corev1.Container
 	initVolumes(l launch) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
-	agentEnv(r *Runtime, l launch) []corev1.EnvVar
+	agentEnv(l launch) []corev1.EnvVar
 	// holdsGitHubCredential is whether each of the pod's roles holds a GitHub App token: its role
 	// Secret carries the role's gh files (GitHubHostsKey, GitHubConfigKey) beside the launcher
 	// token, its container projects them read-only at GHConfigDir, and the refresher rewrites them
@@ -183,7 +183,7 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 // in the environment outranks the file: a non-empty GH_TOKEN would. No tool path or helper is
 // told: the agent's gh, git and jj are the image's on PATH, and the helper is the clone's own
 // configuration.
-func (issuePod) agentEnv(_ *Runtime, l launch) []corev1.EnvVar {
+func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "LEGION_TREE", Value: l.spec.Tree},
 		{Name: "LEGION_ISSUE", Value: l.spec.Issue},
@@ -369,7 +369,7 @@ func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 // agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, and nothing a tree agent alone
 // needs: no tree, issue or workspace, no GH_CONFIG_DIR of a GitHub credential, and none of uv's
 // directories on a tree volume.
-func (controllerPod) agentEnv(*Runtime, launch) []corev1.EnvVar {
+func (controllerPod) agentEnv(launch) []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
 }
 

@@ -18,8 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
@@ -123,8 +123,10 @@ func pane() error {
 	}
 	ghConfigDir := ""
 	if req.GHToken != "" {
+		// The runtime's own writer (tmux.WriteGHConfig), so the rig's directory is the daemon's layout;
+		// the App label and expiry only feed the runtime's log lines, which the rig does not write.
 		ghConfigDir = runtime.GHConfigDir(req.StateDir, token)
-		if err := writeGHConfig(ghConfigDir, req.GHToken); err != nil {
+		if _, err := tmux.WriteGHConfig(ghConfigDir, ghconfig.Render(req.GHToken, "", time.Time{})); err != nil {
 			return fmt.Errorf("write the claim's gh files: %w", err)
 		}
 	}
@@ -147,22 +149,6 @@ func pane() error {
 		}
 	}
 	return json.NewEncoder(os.Stdout).Encode(res)
-}
-
-// writeGHConfig writes the two gh files for token into dir as the daemon's tmux runtime does: the
-// directory 0700, config.yml and hosts.yml 0600 (ghconfig.Config, ghconfig.Hosts), so a pane's
-// plain `gh auth token` prints token and nothing else.
-func writeGHConfig(dir, token string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, ghconfig.ConfigFile), []byte(ghconfig.Config), 0o600); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, ghconfig.HostsFile), []byte(ghconfig.Hosts(token)), 0o600)
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the

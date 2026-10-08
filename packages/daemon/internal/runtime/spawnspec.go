@@ -35,10 +35,11 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 
 // GrantFile is the file an agent's LEGION_GRANT_FILE names: `<state_dir>/secrets/<claim>-grant`,
 // under tmux beside the claim's other secret files, which the daemon prunes it with. Every
-// runtime names it in the agent's environment from the process's start, because Oh My Pi copies
-// that environment once for every `gh` it runs to serve a pr:// or issue:// read, and none writes
-// it: the pi-legion extension writes a fresh grant there before each tool call that redeems one, and
-// `legion credential`, `legion gh` and `legion handoff complete` read it.
+// runtime names it in the agent's environment from the process's start, and none writes it: the
+// pi-legion extension writes a fresh grant there before each bash command that invokes `legion`,
+// and `legion handoff complete`, `legion threads resolve` and `legion status` read it. It is a
+// worker's authentication to the daemon alone; `gh` and `git` read the role's App token from the
+// gh files under GH_CONFIG_DIR (GHConfigDir on tmux, the gh volume in a pod).
 func GrantFile(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-grant")
 }

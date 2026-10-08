@@ -392,7 +392,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		if err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
-		if _, err := writeGHConfig(ghConfigDir, rendered); err != nil {
+		if _, err := WriteGHConfig(ghConfigDir, rendered); err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
 		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)

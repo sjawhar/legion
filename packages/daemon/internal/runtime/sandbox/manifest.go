@@ -707,7 +707,7 @@ func (r *Runtime) ProvisionBound() time.Duration {
 // volume leads PATH.
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
-	env := l.kind.agentEnv(r, l)
+	env := l.kind.agentEnv(l)
 	add := func(name, value string) { env = append(env, corev1.EnvVar{Name: name, Value: value}) }
 	add("LEGION_ROLE", string(spec.Role))
 	add("LEGION_GENERATION", strconv.FormatUint(spec.Generation, 10))

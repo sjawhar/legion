@@ -96,21 +96,14 @@ func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Wri
 	return printOutcomes(outcomes, 0, err, stdout, stderr)
 }
 
-// appLoginVariables is the variable a tree agent reads each Legion App's bot login from, the two
-// the daemon sets beside the role's git identity (internal/daemon's appLoginEnv).
-var appLoginVariables = map[appauth.AppRole]string{
-	appauth.Implement: "LEGION_IMPLEMENT_APP_LOGIN",
-	appauth.Review:    "LEGION_REVIEW_APP_LOGIN",
-}
-
 // roleApps is Legion's role Apps for the bot-thread rule, from the two logins the daemon names on
-// the pane (appLoginVariables): nil, so that no thread counts as a bot's, when either is unset or
+// the pane (appauth.LoginEnv): nil, so that no thread counts as a bot's, when either is unset or
 // blank, as a daemon with no Apps sets neither and the daemon's own rule then knows none. A login
 // that is not an App's is refused naming both variables, since the rule would otherwise spare the
 // wrong account.
 func roleApps() (*reviewthreads.Apps, error) {
-	logins := make(map[appauth.AppRole]string, len(appLoginVariables))
-	for role, variable := range appLoginVariables {
+	logins := make(map[appauth.AppRole]string, len(appauth.LoginEnv))
+	for role, variable := range appauth.LoginEnv {
 		login := strings.TrimSpace(os.Getenv(variable))
 		if login == "" {
 			return nil, nil
@@ -119,7 +112,7 @@ func roleApps() (*reviewthreads.Apps, error) {
 	}
 	apps, err := reviewthreads.AppsFrom(logins)
 	if err != nil {
-		return nil, fmt.Errorf("%s=%q and %s=%q: %w", appLoginVariables[appauth.Implement], logins[appauth.Implement], appLoginVariables[appauth.Review], logins[appauth.Review], err)
+		return nil, fmt.Errorf("%s=%q and %s=%q: %w", appauth.LoginEnv[appauth.Implement], logins[appauth.Implement], appauth.LoginEnv[appauth.Review], logins[appauth.Review], err)
 	}
 	return apps, nil
 }
