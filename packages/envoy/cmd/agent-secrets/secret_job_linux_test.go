@@ -102,6 +102,12 @@ func (s *promptShell) wait(want string) {
 func (s *promptShell) start(wrapper bool, background bool) {
 	s.t.Helper()
 	command := "AGENT_SECRETS_JOB_HELPER=1 " + shellWord(os.Args[0]) + " -test.run='^TestPromptJobHelper$'"
+	if background {
+		// fg hands the job the terminal in the state bash hands every foreground
+		// job, which is what the prompt must restore: not what the terminal holds
+		// while the job waits behind bash's line editor.
+		command = "AGENT_SECRETS_JOB_REFERENCE=" + s.foregroundState() + " " + command
+	}
 	if wrapper {
 		command = "bash -c " + shellWord("trap '' TSTP; "+command+"; echo WRAPPER_DONE")
 	}
@@ -118,10 +124,30 @@ func (s *promptShell) start(wrapper bool, background bool) {
 		s.t.Fatal(err)
 	}
 	s.pid = pid
-	if !background {
+	if background {
+		s.wait("PROMPT_STARTING")
+	} else {
 		s.wait("\x1b[?2004h")
 	}
 	s.out.Reset()
+}
+
+// foregroundState is the terminal state, as termiosKey writes it, that bash hands a
+// foreground job: what a fresh foreground command reads at its start.
+func (s *promptShell) foregroundState() string {
+	s.t.Helper()
+	s.out.Reset()
+	s.send("AGENT_SECRETS_JOB_HELPER=1 AGENT_SECRETS_JOB_PROBE=1 " + shellWord(os.Args[0]) + " -test.run='^TestPromptJobHelper$'\r")
+	s.wait("FOREGROUND_STATE=")
+	s.wait(" END")
+	s.wait("PROMPT$ ")
+	start := strings.Index(s.out.String(), "FOREGROUND_STATE=") + len("FOREGROUND_STATE=")
+	return strings.Fields(s.out.String()[start:])[0]
+}
+
+// termiosKey is every field of t, as one shell-safe word.
+func termiosKey(t *unix.Termios) string {
+	return fmt.Sprintf("%x.%x.%x.%x.%x.%x.%x.%x", t.Iflag, t.Oflag, t.Cflag, t.Lflag, t.Line, t.Cc[:], t.Ispeed, t.Ospeed)
 }
 
 func (s *promptShell) waitForeground(pid int) {
@@ -143,7 +169,7 @@ func (s *promptShell) waitForeground(pid int) {
 func (s *promptShell) noShellValue(markers ...string) {
 	s.t.Helper()
 	s.wait("PROMPT$ ")
-	s.wait("RESTORED=true")
+	s.wait("RESTORED=true LABEL_HELD=true")
 	s.send("history -w; printf 'HISTORY_%s\\n' SAVED\r")
 	s.wait("HISTORY_SAVED")
 	history, err := os.ReadFile(s.history)
@@ -157,14 +183,61 @@ func (s *promptShell) noShellValue(markers ...string) {
 	}
 }
 
+// labelCheck passes the prompt's writes to stderr and records whether its label
+// reached the terminal only while the prompt held it: in the foreground, echo off.
+type labelCheck struct {
+	shown, held bool
+}
+
+func (c *labelCheck) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("Value for ")) {
+		foreground, fgErr := unix.IoctlGetInt(0, unix.TIOCGPGRP)
+		tio, tioErr := unix.IoctlGetTermios(0, unix.TCGETS)
+		c.held = (!c.shown || c.held) && fgErr == nil && tioErr == nil &&
+			foreground == unix.Getpgrp() && tio.Lflag&unix.ECHO == 0
+		c.shown = true
+	}
+	return os.Stderr.Write(p)
+}
+
 func TestPromptJobHelper(t *testing.T) {
 	if os.Getenv("AGENT_SECRETS_JOB_HELPER") == "" {
 		t.Skip("subprocess helper")
 	}
+	if os.Getenv("AGENT_SECRETS_JOB_PROBE") != "" {
+		tio, err := unix.IoctlGetTermios(0, unix.TCGETS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("FOREGROUND_STATE=%s END\n", termiosKey(tio))
+		return
+	}
 	fmt.Printf("HELPER_PID=%d\nHELPER_READY\n", os.Getpid())
-	saved, err := unix.IoctlGetTermios(0, unix.TCGETS)
-	if err != nil {
-		t.Fatal(err)
+	reference := os.Getenv("AGENT_SECRETS_JOB_REFERENCE")
+	if reference == "" {
+		// Started in the foreground: bash has already handed it the terminal.
+		saved, err := unix.IoctlGetTermios(0, unix.TCGETS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reference = termiosKey(saved)
+	} else {
+		// Started with &: start the prompt only once bash's line editor holds the
+		// terminal (canonical mode off), which a prompt in the background must
+		// neither take as its baseline nor show its label over.
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+			tio, err := unix.IoctlGetTermios(0, unix.TCGETS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tio.Lflag&unix.ICANON == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("bash's line editor never took the terminal")
+			}
+		}
+		fmt.Println("PROMPT_STARTING")
 	}
 	real := readTerminal
 	quiet := false
@@ -175,9 +248,11 @@ func TestPromptJobHelper(t *testing.T) {
 		}
 		return real(fd, wake, buf, timeout)
 	}
-	value, err := readSecretValue("DEMO_KEY", "agent-secrets secret set DEMO_KEY", os.Stderr)
+	label := &labelCheck{}
+	value, err := readSecretValue("DEMO_KEY", "agent-secrets secret set DEMO_KEY", label)
 	restored, restoreErr := unix.IoctlGetTermios(0, unix.TCGETS)
-	fmt.Printf("RETURNED %v MATCH=%t EMPTY=%t RESTORED=%t\n", err, value == "headtail", value == "", restoreErr == nil && *saved == *restored)
+	fmt.Printf("RETURNED %v MATCH=%t EMPTY=%t RESTORED=%t LABEL_HELD=%t\n", err, value == "headtail", value == "",
+		restoreErr == nil && termiosKey(restored) == reference, label.shown && label.held)
 }
 
 func TestPromptJobBackgroundThenForegroundKeepsValueHidden(t *testing.T) {
@@ -208,6 +283,63 @@ func TestPromptJobBackgroundThenForegroundKeepsValueHidden(t *testing.T) {
 			s.noShellValue("head", "tail")
 		})
 	}
+}
+
+// A stop the prompt takes while it waits in the background, before its label,
+// discards nothing: nothing has been typed for it yet.
+func TestPromptJobStopBeforeTheLabelKeepsTheEntry(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, true)
+	// Go leaves SIGTSTP at its default action until the prompt's watcher asks
+	// for it, so a stop sent once the watcher catches it is the prompt's to handle.
+	for deadline := time.Now().Add(5 * time.Second); !catches(t, s.pid, syscall.SIGTSTP); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the prompt never caught SIGTSTP")
+		}
+	}
+	s.send("kill -TSTP %1\r")
+	for deadline := time.Now().Add(5 * time.Second); processState(t, s.pid) != "T"; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("prompt did not stop")
+		}
+	}
+	s.waitForeground(s.bash.Process.Pid)
+	s.out.Reset()
+	s.send("fg\r")
+	s.wait("\x1b[?2004h")
+	s.send("headtail\r")
+	s.wait("RETURNED <nil> MATCH=true")
+	s.noShellValue("head", "tail")
+}
+
+// processState is the state letter /proc gives process pid ("T" while stopped).
+func processState(t *testing.T, pid int) string {
+	t.Helper()
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+2:]))[0]
+}
+
+// catches reports whether process pid has a handler of its own installed for sig.
+func catches(t *testing.T, pid int, sig syscall.Signal) bool {
+	t.Helper()
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if mask, ok := strings.CutPrefix(line, "SigCgt:"); ok {
+			bits, err := strconv.ParseUint(strings.TrimSpace(mask), 16, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return bits&(1<<(uint(sig)-1)) != 0
+		}
+	}
+	t.Fatalf("no SigCgt line in /proc/%d/status", pid)
+	return false
 }
 
 func TestPromptJobFastForegroundDoesNotRestopOrExposeValue(t *testing.T) {

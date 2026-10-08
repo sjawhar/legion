@@ -40,12 +40,10 @@ var (
 // readHiddenAtTerminal reads one hidden line, drains refused input, and restores the
 // terminal only after joining its signal watcher. Bracketed pastes are read through
 // their closing mark; unbracketed input is drained through a 200 ms quiet window.
-func readHiddenAtTerminal(fd int, onStop func()) (line []byte, err error) {
+// prompt runs once the reader holds the terminal with echo off, to show the label:
+// a prompt started in the background shows nothing until fg gives it the terminal.
+func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error) {
 	if err := disableCoreDumps(); err != nil {
-		return nil, err
-	}
-	saved, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
-	if err != nil {
 		return nil, err
 	}
 	wake, notify, err := os.Pipe()
@@ -58,22 +56,8 @@ func readHiddenAtTerminal(fd int, onStop func()) (line []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	tty := promptTerminal{fd: fd, current: *saved, wake: int(wake.Fd()), events: events, wait: -1, onStop: onStop}
-	// Keep the kernel's signal flush: NOFLSH would leave unread secret bytes for
-	// bash when a stop gives it the foreground. Every caught stop invalidates the entry.
-	tty.current.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.NOFLSH
-	tty.current.Lflag |= unix.ISIG
-	var ignoredKeys [3]byte
-	for i, cc := range ignoredControls {
-		if key := saved.Cc[cc]; key != 0 && key != 0xff {
-			ignoredKeys[i] = key
-			// Even an ignored tty signal flushes input. Disable its tty character
-			// and let the reader consume it without flushing the value.
-			tty.current.Cc[cc] = disabledControlByte
-		}
-	}
-	// Poll owns both waits. Reads themselves never block, including after resume.
-	tty.current.Cc[unix.VMIN], tty.current.Cc[unix.VTIME] = 0, 0
+	tty := promptTerminal{fd: fd, wake: int(wake.Fd()), events: events, wait: -1, onStop: onStop}
+	var saved *unix.Termios // nil until the reader holds the terminal: nothing to restore before
 	defer func() {
 		pending := stop()
 		if pending.sig != 0 && !promptStopSignal(pending.sig) {
@@ -96,19 +80,40 @@ func readHiddenAtTerminal(fd int, onStop func()) (line []byte, err error) {
 		// blocked) or fd is not this process's controlling terminal at all
 		// (ENOTTY, as the unit tests' bare pseudo-terminal): neither leaves
 		// anything to restore to.
-		_, _ = unix.Write(fd, bracketedPasteOff)
-		if restoreErr := tty.restoreTerminal(saved); restoreErr != nil && err == nil {
-			line, err = nil, restoreErr
+		if saved != nil {
+			_, _ = unix.Write(fd, bracketedPasteOff)
+			if restoreErr := tty.restoreTerminal(saved); restoreErr != nil && err == nil {
+				line, err = nil, restoreErr
+			}
 		}
 		if tty.death != 0 {
 			endByPromptSignal(tty.death)
 		}
 	}()
-	if err := tty.waitForeground(); err != nil {
+	if saved, err = tty.holdTerminal(); err != nil {
 		return nil, err
 	}
+	tty.current = *saved
+	// Keep the kernel's signal flush: NOFLSH would leave unread secret bytes for
+	// bash when a stop gives it the foreground. Every caught stop invalidates the entry.
+	tty.current.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.NOFLSH
+	tty.current.Lflag |= unix.ISIG
+	var ignoredKeys [3]byte
+	for i, cc := range ignoredControls {
+		if key := saved.Cc[cc]; key != 0 && key != 0xff {
+			ignoredKeys[i] = key
+			// Even an ignored tty signal flushes input. Disable its tty character
+			// and let the reader consume it without flushing the value.
+			tty.current.Cc[cc] = disabledControlByte
+		}
+	}
+	// Poll owns both waits. Reads themselves never block, including after resume.
+	tty.current.Cc[unix.VMIN], tty.current.Cc[unix.VTIME] = 0, 0
 	if err := tty.apply(); err != nil {
 		return nil, err
+	}
+	if prompt != nil {
+		prompt()
 	}
 	r := promptReader{ignored: ignoredKeys, special: func(c byte, index int) bool {
 		v := saved.Cc[index]
