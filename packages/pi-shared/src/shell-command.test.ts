@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  dispatchCommandHead,
-  isSingleArchitectCommand,
-  isSingleLegionCommand,
-} from "./shell-command";
+import { dispatchCommandHead, isSingleArchitectCommand } from "./shell-command";
 
 /** Whether a real non-interactive bash, fed `command` and then a second command over a pipe as
  * the `bash` tool's persistent shell is fed, runs that second command: false when `command` left a
@@ -130,9 +126,36 @@ describe("an architect's single command", () => {
     expect(isSingleArchitectCommand(swallowing)).toBe(false);
   });
 
-  test("keeps the legion command's own scan", () => {
-    expect(isSingleLegionCommand("legion gh -- pr view 1")).toBe(true);
-    expect(isSingleLegionCommand("echo hi && legion gh")).toBe(false);
-    expect(isSingleLegionCommand("dispatch whoami")).toBe(false);
+  test("holds a legion head to the scan a dispatch head gets: one command, nothing expanded or redirected", () => {
+    // The legion commands the architect's role prompt and skill have it run.
+    for (const command of [
+      "legion state",
+      "legion gh -- pr view 12 --json mergeable,mergeStateStatus",
+      "legion gh -- api repos/{owner}/{repo}/pulls/12 --jq .body",
+      "legion handoff read --phase plan",
+      'legion "handoff" read',
+      "legion threads resolve --pr 12 --repo sjawhar/legion",
+    ]) {
+      expect({ command, allowed: isSingleArchitectCommand(command) }).toEqual({
+        command,
+        allowed: true,
+      });
+    }
+    for (const command of [
+      "legion gh -- pr view $(touch /tmp/pwned)",
+      "legion gh -- pr view `id`",
+      'legion gh -- pr view "$(id)"',
+      "legion state > /tmp/out",
+      "legion handoff write < /etc/passwd",
+      "legion state | sh",
+      "legion state; rm -rf /",
+      "legion state && rm -rf /",
+      "echo hi && legion gh",
+    ]) {
+      expect({ command, allowed: isSingleArchitectCommand(command) }).toEqual({
+        command,
+        allowed: false,
+      });
+    }
   });
 });

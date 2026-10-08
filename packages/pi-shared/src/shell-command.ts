@@ -4,37 +4,15 @@
  * character scan, not a shell parser: whatever it cannot reason about it refuses.
  */
 
-/** One `legion ...` invocation, with no chaining outside a quoted argument. It rejects some
- * legitimate quoting it can't reason about (nested quotes, escapes) rather than risk letting a
- * chained command through. */
-export function isSingleLegionCommand(command: unknown): boolean {
-  if (typeof command !== "string") return false;
-  const trimmed = command.trim();
-  if (trimmed.length === 0) return false;
-  let quote: '"' | "'" | undefined;
-  for (const char of trimmed) {
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === "\n" || char === ";" || char === "&" || char === "|") return false;
-  }
-  if (quote !== undefined) return false;
-  return trimmed.split(/\s+/, 1)[0] === "legion";
-}
-
 /** The one here-document a command's first line may end with, opened with a quoted delimiter so
  * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
  * which bash strips leading tabs from the delimiter line. */
 const HEREDOC_OPENING = /^(.*?)\s*<<(-?)\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*$/;
 
-/** Outside quotes, a `dispatch` head refuses whatever would end the command, start another, expand
- * something, redirect, start a comment (bash reads the rest of the line as one, a here-document
- * opener included) or escape a character (the shell's to interpret, so never modelled here). */
+/** Outside quotes, a `legion` or `dispatch` head refuses whatever would end the command, start
+ * another, expand something, redirect, start a comment (bash reads the rest of the line as one, a
+ * here-document opener included) or escape a character (the shell's to interpret, so never
+ * modelled here). */
 const REFUSED_UNQUOTED = "\n;&|$`<>()#\\";
 
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
@@ -70,8 +48,7 @@ function architectCommandHead(command: unknown): string | undefined {
     head = opening[1] ?? "";
   }
   const word = head.trim().split(/\s+/, 1)[0];
-  if (word === "dispatch") return headScan(head) ? head : undefined;
-  return word === "legion" && isSingleLegionCommand(head) ? head : undefined;
+  return (word === "dispatch" || word === "legion") && headScan(head) ? head : undefined;
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter
@@ -84,8 +61,8 @@ function hasControlCharacter(text: string): boolean {
   return false;
 }
 
-/** Whether a `dispatch` head is one command whose words the shell takes as written: single quotes
- * make every character literal, and an unterminated quote is refused. */
+/** Whether a `legion` or `dispatch` head is one command whose words the shell takes as written:
+ * single quotes make every character literal, and an unterminated quote is refused. */
 function headScan(head: string): boolean {
   let quote: '"' | "'" | undefined;
   for (const char of head) {

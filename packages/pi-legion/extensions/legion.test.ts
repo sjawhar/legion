@@ -1345,6 +1345,7 @@ describe("Legion OMP extension", () => {
     const grantsBefore = grantRequests(requests).length;
     for (const command of [
       "echo hi && legion gh",
+      "legion gh -- pr view $(touch /tmp/pwned)",
       "rm -rf x",
       "dispatch x; rm -rf /",
       'dispatch x "$(id)"',
