@@ -73,7 +73,7 @@ describe("the dispatch CLI the package ships", () => {
     const lines = (await readFile(path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh"), "utf8")).split(
       "\n"
     );
-    const builds = lines.filter((line) => line.startsWith("bun build "));
+    const builds = lines.map((line) => line.trimStart()).filter((line) => line.startsWith("bun build "));
     expect(builds.map((line) => line.split(" ")[2])).toEqual([
       "extensions/envoy.ts",
       "../envoy-client/bin/dispatch.ts",
