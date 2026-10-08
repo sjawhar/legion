@@ -27,7 +27,10 @@ import {
 // its prepack stages it. A `skill://` link resolves by name through Oh My Pi's discovery, so it is
 // held to the repository's skills/, where both plugins' skills live.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
-const skillAndPromptRoots = [repoSkillsRoot, path.join(REPO_ROOT, "packages/daemon/internal/prompts")];
+const skillAndPromptRoots = [
+  repoSkillsRoot,
+  path.join(REPO_ROOT, "packages/daemon/internal/prompts"),
+];
 const packageRoot = path.resolve(import.meta.dir, "..");
 // LEGION_TEST_OMP names the pinned Oh My Pi binary, as in extensions/dispatch-first-omp.test.ts: the
 // fork pin CI's pi-envoy job installs. A run without one skips the rule that reads it, except on

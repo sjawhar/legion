@@ -70,10 +70,12 @@ describe("the dispatch CLI the package ships", () => {
   test("prepack.sh gives every bun build its own metafile and reads all of them for the notices", async () => {
     // A chained `bun run build --metafile=…` hands the flag to its last command only, so the
     // extensions' packages would be missing from THIRD_PARTY_NOTICES.
-    const lines = (await readFile(path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh"), "utf8")).split(
-      "\n"
-    );
-    const builds = lines.map((line) => line.trimStart()).filter((line) => line.startsWith("bun build "));
+    const lines = (
+      await readFile(path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh"), "utf8")
+    ).split("\n");
+    const builds = lines
+      .map((line) => line.trimStart())
+      .filter((line) => line.startsWith("bun build "));
     expect(builds.map((line) => line.split(" ")[2])).toEqual([
       "extensions/envoy.ts",
       "../envoy-client/bin/dispatch.ts",

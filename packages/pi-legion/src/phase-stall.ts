@@ -34,7 +34,6 @@ export interface PhaseStallStep {
  * the daemon relaunches with `--resume` restores it from its branch. */
 export const PHASE_STALL_ENTRY = "legion-phase-stall";
 
-
 /** A line of the final message that starts with WAITING (after any markdown emphasis or quoting). */
 const WAITING_REPLY = /^\W*WAITING\b/m;
 

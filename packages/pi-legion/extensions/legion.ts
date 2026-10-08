@@ -24,8 +24,8 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "@legion/pi-shared/pi-types";
-import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { dispatchCommandHead, isSingleArchitectCommand } from "@legion/pi-shared/shell-command";
+import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, type LegionSessionKind, requiredEnvironment } from "../src/classify";

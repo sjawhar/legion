@@ -1,6 +1,5 @@
 import { asObject } from "@legion/envoy-client/dispatch-execute";
 
-
 /** The count a write's advice reports under key, 0 when it reports none. */
 function adviceCount(details: unknown, key: "decision_blocks" | "decision_blocks_added"): number {
   const count = asObject(asObject(details)?.advice)?.[key];
