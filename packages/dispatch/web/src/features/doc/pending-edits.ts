@@ -31,6 +31,15 @@ export interface RestoredEdits {
   at: number;
 }
 
+export interface RestoredEdit {
+  /** The exact persisted row key to delete only after this update is handled. */
+  key: PendingKey;
+  /** The Yjs update this one row holds. */
+  update: Uint8Array;
+  /** When this row was recorded, in milliseconds since the epoch. */
+  at: number;
+}
+
 export interface PendingEdits {
   /** Appends `update` as this client's next row. The sequence number is assigned at once;
    * `written` settles when the row is stored. */
@@ -39,7 +48,9 @@ export interface PendingEdits {
   clear(seq: number): Promise<void>;
   /** Deletes this client's rows at `seq` and below. */
   clearThrough(seq: number): Promise<void>;
-  /** Every row this document holds, from any client, merged; `undefined` when there are none. */
+  /** Every row this document holds, from any client, in IndexedDB key order. */
+  restoreRows(): Promise<readonly RestoredEdit[]>;
+  /** Every row this document holds, merged; `undefined` when there are none. */
   restore(): Promise<RestoredEdits | undefined>;
   /** Deletes exactly the rows `keys` names. */
   drop(keys: readonly PendingKey[]): Promise<void>;
@@ -122,6 +133,19 @@ export async function openPendingEdits(
     return committed(transaction);
   };
 
+  const restoreRows = async (): Promise<readonly RestoredEdit[]> => {
+    const rows = (await settled(
+      database.transaction(STORE, "readonly").objectStore(STORE).getAll(documentRange(artifactId))
+    )) as PendingRow[];
+    return rows.map(
+      (row): RestoredEdit => ({
+        at: row.at,
+        key: [row.artifactId, row.clientId, row.seq],
+        update: row.update,
+      })
+    );
+  };
+
   return {
     record(update) {
       seq += 1;
@@ -136,16 +160,15 @@ export async function openPendingEdits(
         store.delete(IDBKeyRange.bound([artifactId, clientId, 0], [artifactId, clientId, through]))
       );
     },
+    restoreRows,
     async restore() {
-      const rows = (await settled(
-        database.transaction(STORE, "readonly").objectStore(STORE).getAll(documentRange(artifactId))
-      )) as PendingRow[];
+      const rows = await restoreRows();
       if (rows.length === 0) {
         return undefined;
       }
       return {
         at: Math.min(...rows.map((row) => row.at)),
-        keys: rows.map((row): PendingKey => [row.artifactId, row.clientId, row.seq]),
+        keys: rows.map((row) => row.key),
         update: mergeUpdates(rows.map((row) => row.update)),
       };
     },

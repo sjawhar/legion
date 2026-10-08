@@ -121,8 +121,9 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     let authenticated = false;
     let announced = false;
     let provider: HocuspocusProvider;
+    // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
+    // after the provider exists; the explicit `websocket.connect()` is deliberately last.
     let sync: PendingSync | undefined;
-
     const WebSocketPolyfill = class extends globalThis.WebSocket {
       constructor(url: string, protocols?: string | string[]) {
         super(url, protocols);

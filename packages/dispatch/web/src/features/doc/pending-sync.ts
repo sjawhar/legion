@@ -1,3 +1,5 @@
+import { MessageType } from "@hocuspocus/provider";
+import type { Decoder } from "lib0/decoding";
 import {
   createDecoder,
   readVarInt,
@@ -5,14 +7,10 @@ import {
   readVarUint,
   readVarUint8Array,
 } from "lib0/decoding";
+import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
 import * as Y from "yjs";
 
 import type { PendingEdits } from "./pending-edits";
-
-const MESSAGE_SYNC = 0;
-const MESSAGE_SYNC_STATUS = 8;
-const SYNC_STEP_2 = 1;
-const SYNC_UPDATE = 2;
 
 export interface PendingState {
   /** Rows this document holds across every tab in this browser. */
@@ -59,6 +57,14 @@ function equals(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
+function skipVarUint8Array(decoder: Decoder): void {
+  const length = readVarUint(decoder);
+  decoder.pos += length;
+  if (decoder.pos > decoder.arr.length) {
+    throw new RangeError("truncated document sync frame");
+  }
+}
+
 function covers(
   ranges: readonly { clock: number; len: number }[],
   clock: number,
@@ -101,6 +107,7 @@ function addsPendingDeletes(before: Uint8Array | null, after: Uint8Array | null)
 
 /**
  * Applying a restore to a scratch document protects the live document from a history rebuild.
+ * yjs 13.6.32 exposes parked structs and deletes only through these `StructStore` internals.
  * `encodeStateAsUpdate` includes the live document's current parked structs and deletes, so only
  * parking the restore adds is a rebuild signal.
  */
@@ -130,8 +137,10 @@ export function startPendingSync({
   let rebuiltAt: number | undefined;
   let lastState: PendingState | undefined;
   let nextOrdinal = 0;
-  let reportTail = Promise.resolve();
+  let reporting: Promise<void> | undefined;
+  let reportAgain = false;
   let storageAvailable: boolean | undefined;
+  const persistedSeqByOrdinal = new Map<number, number>();
   const recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
 
@@ -149,8 +158,13 @@ export function startPendingSync({
       return edits;
     });
   const report = (): Promise<void> => {
-    reportTail = reportTail
-      .then(async () => {
+    if (reporting !== undefined) {
+      reportAgain = true;
+      return reporting;
+    }
+    reporting = (async () => {
+      do {
+        reportAgain = false;
         const edits = await ready;
         if (destroyed) {
           return;
@@ -171,11 +185,15 @@ export function startPendingSync({
           lastState = state;
           onChange(state);
         }
-      })
+      } while (reportAgain);
+    })()
       .catch((error: unknown) => {
         console.error("Could not count the browser's pending document edits", error);
+      })
+      .finally(() => {
+        reporting = undefined;
       });
-    return reportTail;
+    return reporting;
   };
 
   const record = (update: Uint8Array): RecordedUpdate => {
@@ -194,6 +212,7 @@ export function startPendingSync({
         }
         const row = edits.record(update);
         entry.seq = row.seq;
+        persistedSeqByOrdinal.set(entry.ordinal, row.seq);
         return row.written;
       })
       .then(
@@ -217,6 +236,8 @@ export function startPendingSync({
     if (edits === undefined) {
       return;
     }
+    // A provider Update frame carries exactly the Yjs event bytes. Separate local Yjs updates
+    // have distinct client-id/clock ranges, so only a retry of this same row can match these bytes.
     const index = recorded.findIndex((entry) => equals(entry.update, frame.update));
     if (index === -1) {
       console.error("The document server acknowledged an update this browser did not store.");
@@ -231,6 +252,7 @@ export function startPendingSync({
       return;
     }
     await edits.clear(entry.seq);
+    persistedSeqByOrdinal.delete(entry.ordinal);
     await report();
   };
 
@@ -239,22 +261,29 @@ export function startPendingSync({
     if (edits === undefined || through === 0) {
       return;
     }
-    const covered = recorded.filter((entry) => entry.ordinal <= through);
-    if (covered.length === 0) {
-      return;
+    const covered: RecordedUpdate[] = [];
+    const remaining: RecordedUpdate[] = [];
+    for (const entry of recorded) {
+      (entry.ordinal <= through ? covered : remaining).push(entry);
     }
     await Promise.all(covered.map((entry) => entry.written));
-    const seq = Math.max(...covered.map((entry) => entry.seq ?? 0));
-    if (seq === 0) {
-      return;
-    }
-    for (const entry of covered) {
-      const index = recorded.indexOf(entry);
-      if (index !== -1) {
-        recorded.splice(index, 1);
+    recorded.length = 0;
+    recorded.push(...remaining);
+
+    let seq = 0;
+    for (const [ordinal, persistedSeq] of persistedSeqByOrdinal) {
+      if (ordinal <= through) {
+        seq = Math.max(seq, persistedSeq);
       }
     }
-    await edits.clearThrough(seq);
+    if (seq > 0) {
+      await edits.clearThrough(seq);
+      for (const ordinal of persistedSeqByOrdinal.keys()) {
+        if (ordinal <= through) {
+          persistedSeqByOrdinal.delete(ordinal);
+        }
+      }
+    }
     await report();
   };
 
@@ -270,28 +299,39 @@ export function startPendingSync({
       if (destroyed || storageAvailable === false) {
         return;
       }
-      const decoder = createDecoder(frame);
-      readVarString(decoder);
-      if (readVarUint(decoder) !== MESSAGE_SYNC) {
-        return;
-      }
-      switch (readVarUint(decoder)) {
-        case SYNC_STEP_2:
-          readVarUint8Array(decoder);
-          sent.push({ kind: "step2", through: nextOrdinal });
-          break;
-        case SYNC_UPDATE:
-          sent.push({ kind: "update", update: readVarUint8Array(decoder) });
-          break;
+      try {
+        const decoder = createDecoder(frame);
+        readVarString(decoder);
+        if (readVarUint(decoder) !== MessageType.Sync) {
+          return;
+        }
+        switch (readVarUint(decoder)) {
+          case messageYjsSyncStep2:
+            skipVarUint8Array(decoder);
+            sent.push({ kind: "step2", through: nextOrdinal });
+            break;
+          case messageYjsUpdate:
+            sent.push({ kind: "update", update: readVarUint8Array(decoder) });
+            break;
+        }
+      } catch (error) {
+        console.error("Could not parse an outgoing document sync frame", error);
       }
     },
     async frameReceived(frame) {
       if (destroyed) {
         return;
       }
-      const decoder = createDecoder(frame);
-      readVarString(decoder);
-      if (readVarUint(decoder) !== MESSAGE_SYNC_STATUS) {
+      let applied: boolean;
+      try {
+        const decoder = createDecoder(frame);
+        readVarString(decoder);
+        if (readVarUint(decoder) !== MessageType.SyncStatus) {
+          return;
+        }
+        applied = readVarInt(decoder) === 1;
+      } catch (error) {
+        console.error("Could not parse a document SyncStatus frame", error);
         return;
       }
       const entry = sent.shift();
@@ -299,15 +339,18 @@ export function startPendingSync({
         console.error("The document server acknowledged a frame this browser did not send.");
         return;
       }
-      const applied = readVarInt(decoder) === 1;
       if (!applied) {
         await Promise.all(recorded.map((record) => record.written));
         return;
       }
-      if (entry.kind === "update") {
-        await clearUpdate(entry);
-      } else {
-        await clearThrough(entry.through);
+      try {
+        if (entry.kind === "update") {
+          await clearUpdate(entry);
+        } else {
+          await clearThrough(entry.through);
+        }
+      } catch (error) {
+        console.error("Could not clear an acknowledged pending document edit", error);
       }
     },
     async firstSync(nextReadOnly) {
@@ -318,27 +361,30 @@ export function startPendingSync({
         return;
       }
       try {
-        const restored = await edits.restore();
-        if (destroyed || restored === undefined) {
+        const restored = await edits.restoreRows();
+        if (destroyed || restored.length === 0) {
           await report();
           return;
         }
-        if (addsParking(doc, restored.update)) {
-          rebuiltAt = restored.at;
-          await edits.drop(restored.keys);
-          await report();
-          return;
-        }
+        for (const row of restored) {
+          if (addsParking(doc, row.update)) {
+            rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
+            await edits.drop([row.key]);
+            continue;
+          }
 
-        const before = nextOrdinal;
-        Y.applyUpdate(doc, restored.update, { restored: true });
-        const restoredEntry = recorded.at(-1);
-        if (nextOrdinal === before || restoredEntry === undefined) {
-          await edits.drop(restored.keys);
-        } else {
-          await restoredEntry.written;
-          if (!destroyed) {
-            await edits.drop(restored.keys);
+          const before = nextOrdinal;
+          // Applying through the live document deliberately reuses the normal local-update path:
+          // the provider sends this restored diff and this listener records its new client row.
+          Y.applyUpdate(doc, row.update, { restored: true });
+          const restoredEntry = recorded.at(-1);
+          if (nextOrdinal === before || restoredEntry === undefined) {
+            await edits.drop([row.key]);
+          } else {
+            await restoredEntry.written;
+            if (!destroyed) {
+              await edits.drop([row.key]);
+            }
           }
         }
         await report();

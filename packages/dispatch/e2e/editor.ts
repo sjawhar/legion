@@ -1,3 +1,4 @@
+import { MessageType } from "@hocuspocus/provider";
 import {
   type Browser,
   expect,
@@ -6,6 +7,7 @@ import {
   type Route,
   type WebSocketRoute,
 } from "@playwright/test";
+import { createDecoder, readVarString, readVarUint } from "lib0/decoding";
 
 import { createIssue, createProject, getArtifactText } from "./api";
 import { asUser } from "./users";
@@ -252,30 +254,18 @@ export function openDocumentSockets(page: Page): () => number {
   return () => open;
 }
 
-/** Reads the two Hocuspocus frame headers needed to recognize a server acknowledgement. */
+/** Identifies a Hocuspocus server acknowledgement without duplicating its wire constants. */
 function isSyncStatusFrame(message: string | Buffer): boolean {
   if (typeof message === "string") {
     return false;
   }
-  const readVarUint = (start: number): [number, number] => {
-    let value = 0;
-    let shift = 0;
-    for (let index = start; index < message.length; index += 1) {
-      const byte = message[index];
-      if (byte === undefined) {
-        break;
-      }
-      value += (byte & 0x7f) * 2 ** shift;
-      if ((byte & 0x80) === 0) {
-        return [value, index + 1];
-      }
-      shift += 7;
-    }
-    throw new Error("truncated document WebSocket frame");
-  };
-  const [nameLength, afterNameLength] = readVarUint(0);
-  const [type] = readVarUint(afterNameLength + nameLength);
-  return type === 8;
+  try {
+    const decoder = createDecoder(message);
+    readVarString(decoder);
+    return readVarUint(decoder) === MessageType.SyncStatus;
+  } catch {
+    return false;
+  }
 }
 
 /**

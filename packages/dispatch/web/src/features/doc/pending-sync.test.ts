@@ -252,6 +252,70 @@ test("a restore that merges is recorded under the new client and the old rows ar
   expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
 });
 
+test("a stale saved row does not discard another row that still applies", async () => {
+  const artifact = artifactId();
+  await savedEdit(artifact, serverWith("shared", 100), " stale");
+  const server = serverWith("shared", 200);
+  await savedEdit(artifact, server, " valid");
+  const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(false);
+
+  expect(doc.getText("t").toString()).toBe("shared valid");
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+  expect(states.at(-1)?.rebuiltAt).toBeDefined();
+});
+
+test("a later SyncStep2 acknowledgement retries an earlier row whose individual clear failed", async () => {
+  const artifact = artifactId();
+  const doc = new Y.Doc();
+  const edits = await storeFor(artifact, doc.clientID);
+  let refuseFirstClear = true;
+  const store: PendingEdits = {
+    ...edits,
+    clear: async (seq) => {
+      if (refuseFirstClear) {
+        refuseFirstClear = false;
+        throw new Error("clear failed");
+      }
+      return edits.clear(seq);
+    },
+  };
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  const sync = startPendingSync({
+    doc,
+    onChange() {},
+    remoteOrigin: SERVER,
+    store: Promise.resolve(store),
+  });
+  cleanups.push(() => sync.destroy());
+  try {
+    sync.socketOpened();
+    const first = (() => {
+      let update: Uint8Array | undefined;
+      doc.on("update", (emitted: Uint8Array) => {
+        update = emitted;
+      });
+      doc.getText("t").insert(0, "first");
+      if (update === undefined) {
+        throw new Error("a local edit emits an update");
+      }
+      return update;
+    })();
+    sync.frameWritten(updateFrame(first));
+    await sync.frameReceived(syncStatusFrame(true));
+    expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+
+    doc.getText("t").insert(doc.getText("t").length, " second");
+    sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
+    await sync.frameReceived(syncStatusFrame(true));
+
+    expect(await rowsOf(artifact)).toEqual([]);
+  } finally {
+    logged.mockRestore();
+  }
+});
+
 /** A socket already open, as the browser's is once it connects; the test plays the server. */
 class OpenSocket extends EventTarget {
   static opened: OpenSocket[] = [];
