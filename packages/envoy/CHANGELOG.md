@@ -309,57 +309,19 @@
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted
   against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
-- A document's pending settlement keeps the authors it will credit (`doc_settlements_pending.settlement_authors`,
-  migration `0079`): an API edit writes them in the transaction that writes its content and takes
-  out the authors any version it wrote credited, so closing the issue, releasing the room or
-  restarting the service no longer drops who wrote the version, ask or event the settlement
-  produces, nor credits an author again whose own edit's version already did. A version's release
-  now also raises the row's `released_through` watermark to the room's `creditSeq` as of its
-  own author capture, and every browser edit's credit names only the peers connected for it,
-  carries that same `creditSeq`, and is discarded
-  by the row instead of merged once it is at or before the watermark: a browser edit queued behind
-  an already-committed version's release, or a second edit arriving while that version's commit is
-  still in flight (`Ledger.commit` now holds each credited artifact's room state locked across the
-  commit and its in-memory release), can no longer bundle an already-credited author back into a
-  later, unrelated credit. The room drops only what a version or settlement read, too: a browser
-  that edits again after a version captured its authors and before that version commits stays owed
-  in the room, as it already did in the row, instead of the room forgetting that later edit while
-  the row kept it. An upload's full release of the room's pending map (an upload's write can
-  change or remove any edit pending at its own last read, so its version credits the uploader
-  alone but clears every pending author, not just its own) now has a durable counterpart
-  (`releaseSettlementCredit`'s `fullRelease` branch): each pending entry in the row carries its
-  own `credit_seq` (`settlementCredit.PendingSeq`), the row's durable twin of
-  `roomState.pendingAuthor.creditSeq`, and the row loses only an entry whose own sequence is at
-  or before the release's point - never one credited after, which the row cannot otherwise tell
-  from one the release's own write already accounted for - the same per-entry filter the room's
-  own full release already uses (`releaseAllPendingLocked`). Otherwise a browser's credit the
-  room had already released stayed in the row and came back into the room on its next load, or,
-  the opposite way, a browser's credit the room still owed - landed in the race window between
-  an upload's own early, unlocked read of the room and its eventual commit - was wiped from the
-  row while the room kept it owed. A rolling deploy can hold two Dispatch tasks' own live rooms
-  for one document at once, each with its own in-process `creditSeq` counter: a release
-  comparing sequence numbers alone could take another process's own, genuinely unsettled entry
-  if the numbers happened to collide. Each pending entry now also carries the room's own
-  `generation` (`settlementCredit.PendingGeneration`, `roomState.creditGeneration`), a
-  per-room-load instance id a release compares before it ever reads an entry's sequence, so a
-  release only ever takes out an entry from its own room's generation. A fresh room gets its own
-  fresh generation the moment it loads (`bumpSettlementCreditGeneration`) - needing no lock of
-  its own, a durable writer could hold and hang the load against (the wedge a load must never
-  risk) - and adopts a pending entry into it only once that entry's own generation holds no
-  unexpired lease (`doc_settlement_generation_leases`): a live room takes and refreshes a lease
-  on its own generation (`generationLeaseRefresh`, every 30s) while it stays live, so an entry a
-  different, still-live room still owns is left alone rather than credited twice on each room's
-  own next version. A lease outlives `generationLeaseTTL` (2 minutes) without a refresh, so a
-  task that stopped without releasing (a crash, or a rolling deploy's stop grace) still lets
-  another room adopt what it owed once that lease expires - the next load, or any live room's
-  own lease-refresh tick on the same document, so a document that never reloads is not stuck
-  waiting for one; a clean unload deletes its own lease at once instead of waiting out the TTL
-  (LEGION-513). A forced eviction (`evictRoom`, unlike the ordinary release path) can also orphan
-  a version's capture along with its room state; `forgetLocked` now carries a forgotten state's
-  outstanding `pendingVersions` forward to the next state the same room's next load creates, so
-  the version number that capture's own transaction still tries to release is not left behind -
-  and does not hold it forever if that never happens: a periodic sweep drops one once it is
-  older than the settle delay.
+- A document's pending authors now survive room release, process restart and overlapping Dispatch
+  tasks in `doc_pending_authors` (migration `0082`). A browser update is first an in-flight,
+  room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
+  document lock. A joined write records its authors in R in its content transaction. A version
+  reads R under that lock and may capture F only from its own room; after its transaction commits,
+  it deletes the R rows it listed and consumes the F credits it listed. The scoped rule means a
+  task can list another task's durable R records but never that task's F, while the same task can
+  consume F before its queued append can re-record an author. Each author is consequently pending
+  in F or R, or listed on one committed version, rather than in more than one of them. A settlement
+  that writes no version leaves R intact, and an upload that writes a replacement clears all R and
+  only the F credits present at its last room read. The document room can therefore go idle without
+  retaining author state or losing the authors a later version, ask or event must name
+  (LEGION-513).
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,
