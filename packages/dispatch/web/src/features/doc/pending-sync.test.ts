@@ -72,12 +72,20 @@ interface Scripted {
   type(text: string): Uint8Array;
 }
 
-async function scripted(artifact = artifactId(), seed?: Uint8Array): Promise<Scripted> {
+/**
+ * A `startPendingSync` over a fresh document and its store. `wrapStore` stands in for the store
+ * with one that changes how it behaves, given the real store of the document's client.
+ */
+async function scripted(
+  artifact = artifactId(),
+  seed?: Uint8Array,
+  wrapStore: (store: PendingEdits) => PendingEdits = (store) => store
+): Promise<Scripted> {
   const doc = new Y.Doc();
   if (seed !== undefined) {
     Y.applyUpdate(doc, seed, SERVER);
   }
-  const store = await storeFor(artifact, doc.clientID);
+  const store = wrapStore(await storeFor(artifact, doc.clientID));
   const states: PendingState[] = [];
   const sync = startPendingSync({
     doc,
@@ -412,9 +420,6 @@ test("a later SyncStep2 acknowledgement retries an earlier row whose individual 
 });
 
 test("an edit recorded while a SyncStep2 acknowledgement is clearing stays tracked for its own acknowledgement", async () => {
-  const artifact = artifactId();
-  const doc = new Y.Doc();
-  const edits = await storeFor(artifact, doc.clientID);
   let releaseFirstWrite = () => {};
   const firstWriteHeld = new Promise<void>((resolve) => {
     releaseFirstWrite = resolve;
@@ -426,7 +431,7 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
   let holdNextWrite = true;
   // The first row's IndexedDB write stays open, as a slow readwrite transaction does, so the
   // SyncStep2 acknowledgement that covers it waits on it while the reader keeps typing.
-  const store: PendingEdits = {
+  const wrapStore = (edits: PendingEdits): PendingEdits => ({
     ...edits,
     record(update) {
       const row = edits.record(update);
@@ -442,37 +447,18 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
         }),
       };
     },
-  };
-  const logged = spyOn(console, "error").mockImplementation(() => {});
-  const sync = startPendingSync({
-    doc,
-    onChange() {},
-    remoteOrigin: SERVER,
-    store: Promise.resolve(store),
   });
-  cleanups.push(() => sync.destroy());
-  const typeAtEnd = (text: string): Uint8Array => {
-    let emitted: Uint8Array | undefined;
-    const capture = (update: Uint8Array) => {
-      emitted = update;
-    };
-    doc.on("update", capture);
-    doc.getText("t").insert(doc.getText("t").length, text);
-    doc.off("update", capture);
-    if (emitted === undefined) {
-      throw new Error("a local edit emits an update");
-    }
-    return emitted;
-  };
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  const { artifact, doc, sync, type } = await scripted(artifactId(), undefined, wrapStore);
   try {
     sync.socketOpened();
-    typeAtEnd("first");
+    type("first");
     sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
     const clearing = sync.frameReceived(syncStatusFrame(true));
     // The acknowledgement has passed its read of the recorded rows and now waits on the held write.
     await holdReached;
 
-    const second = typeAtEnd(" second");
+    const second = type(" second");
     releaseFirstWrite();
     await clearing;
     sync.frameWritten(updateFrame(second));

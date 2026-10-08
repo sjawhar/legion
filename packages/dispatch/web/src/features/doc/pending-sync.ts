@@ -253,11 +253,12 @@ export function startPendingSync({
     if (edits === undefined || through === 0) {
       return;
     }
-    const covered = new Set(recorded.filter((entry) => entry.ordinal <= through));
-    await Promise.all([...covered].map((entry) => entry.written));
+    const covered = recorded.filter((entry) => entry.ordinal <= through);
+    await Promise.all(covered.map((entry) => entry.written));
     // Filter the list as it is now, not as it was before the await: an edit typed while those
     // writes were pending was appended since, and stays tracked for its own acknowledgement.
-    recorded = recorded.filter((entry) => !covered.has(entry));
+    const coveredSet = new Set(covered);
+    recorded = recorded.filter((entry) => !coveredSet.has(entry));
 
     let seq = 0;
     const acknowledged: number[] = [];
@@ -383,6 +384,7 @@ export function startPendingSync({
         }
         // The old rows go only once every re-recorded row is stored, in one IndexedDB write.
         await Promise.all(rerecorded);
+        // A destroy here leaves the rows; the next first sync re-applies them, which changes nothing.
         if (!destroyed) {
           await edits.drop(handled);
         }

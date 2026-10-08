@@ -8,8 +8,8 @@ import {
   type WebSocketRoute,
 } from "@playwright/test";
 import { createDecoder, readVarUint } from "lib0/decoding";
-import { readField } from "../web/src/features/doc/sync-frame";
 
+import { readField } from "../web/src/features/doc/sync-frame";
 import { createIssue, createProject, getArtifactText } from "./api";
 import { asUser } from "./users";
 
