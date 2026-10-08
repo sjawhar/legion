@@ -1293,12 +1293,13 @@ issue's pod (every role container of it alike) and the image probe's.
   shim without the broker's flags, so nothing Legion runs renews that enrollment, and the daemon,
   with no broker configured, cannot revoke it (it logs
   `supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it`).
-  Anything in the pod that knows the broker's URL can renew it, though: the broker accepts a
-  renewal on the key's proof alone, and `agent-secrets renew`, which the image ships, needs only
-  that URL and the key directory. So the enrollment can stay live until the pod is replaced, at the
-  latest when its issue closes, plus one lease (`BROKER_LEASE_SECONDS`). To end it at once, the
-  person who approved the daemon's machine login revokes that login on Dispatch's machine-login
-  page (`/credentials/machine`), which ends every session it enrolled
+  Anything in that role's container that knows the broker's URL can renew it, though: the role's
+  key directory is mounted into that container and no other, the broker accepts a renewal on the
+  key's proof alone, and `agent-secrets renew`, which the image ships, needs only that URL and the
+  key directory. So the enrollment can stay live until the pod is replaced, at the latest when its
+  issue closes, plus one lease (`BROKER_LEASE_SECONDS`). To end it at once, the person who approved
+  the daemon's machine login revokes that login on Dispatch's machine-login page
+  (`/credentials/machine`), which ends every session it enrolled
   (`docs/site/src/content/docs/broker/guides/revoke-a-session.md`, "End a machine's login").
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
