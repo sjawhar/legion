@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -17,19 +18,24 @@ import (
 // A child leaving the workflow ends only the child: the shipped daemon lingers the closed issue's
 // own tree and wakes the tree's architect for a child (reducers.ts reduceIssueClosed). Here the
 // root is mid-implementation when its child is signed off, or a human moves the child out of the
-// workflow. The child leaves the table: its phase is parked in done and every one of its claims
-// suspended, so no transition or status write follows. The root keeps its phase, its linger stays
-// unarmed, none of its claims is suspended, and the architect is told which child left and how.
+// workflow. The child leaves the table: its phase is parked in done, so no transition or status
+// write follows. The root keeps its phase, its linger stays unarmed, none of its claims is stopped,
+// and the architect is told which child left and how. What the child's claims get is the
+// status's: a child closed as done has every claim closed (issue_close) and its Sandbox released
+// with its volume (a releasing IssueSuspend), while one parked in backlog or triage has every
+// claim suspended and its Sandbox kept (a keeping IssueSuspend).
 func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		fact   intake.Fact
-		notice record.NoticeKind
+		name    string
+		fact    intake.Fact
+		notice  record.NoticeKind
+		op      string
+		release bool
 	}{
-		{name: "signed off", fact: intake.SignOff{Issue: "LEGION-209"}, notice: "child-closed"},
-		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed"},
-		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status"},
-		{name: "moved to triage", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "triage", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status"},
+		{name: "signed off", fact: intake.SignOff{Issue: "LEGION-209"}, notice: "child-closed", op: "issue_close", release: true},
+		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", op: "issue_close", release: true},
+		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
+		{name: "moved to triage", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "triage", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -61,11 +67,22 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 				t.Fatalf("child phase = %s, want parked in done", childPhase)
 			}
 			assertOutboxCount(t, pool, "linger_close", 0)
-			suspended := superviseRequests(t, pool, "suspend")
+			stopped := superviseRequests(t, pool, tc.op)
 			for _, role := range claim.Roles {
-				if suspended["LEGION-209/"+string(role)] == 0 || suspended["LEGION-208/"+string(role)] != 0 {
-					t.Fatalf("suspended %v, want every one of the child's claims and none of the root's", suspended)
+				if stopped["LEGION-209/"+string(role)] != 1 || stopped["LEGION-208/"+string(role)] != 0 {
+					t.Fatalf("%s rows %v, want one for every one of the child's claims and none of the root's", tc.op, stopped)
 				}
+			}
+			for _, other := range []string{"suspend", "issue_close", "tree_close"} {
+				if other != tc.op && len(superviseRequests(t, pool, other)) != 0 {
+					t.Fatalf("the child's leave as %s queued %s rows %v, want %s rows alone", tc.notice, other, superviseRequests(t, pool, other), tc.op)
+				}
+			}
+			if got := issueSuspensions(t, pool, "LEGION-209"); len(got) != 1 || got[0].Release != tc.release || got[0].Tree != "LEGION-208" || got[0].Generation != 7 || got[0].TreeGeneration != 7 {
+				t.Fatalf("issue suspensions of the child = %+v, want one of its tree at both generations 7 with release %t", got, tc.release)
+			}
+			if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 0 {
+				t.Fatalf("the child's leave suspended the root's issue: %+v", got)
 			}
 			if got := noticeKinds(t, pool, "LEGION-209"); !containsNotice(got, tc.notice) {
 				t.Fatalf("child notices = %v, want %s for the tree's architect", got, tc.notice)
@@ -123,6 +140,64 @@ func containsNotice(kinds []record.NoticeKind, want record.NoticeKind) bool {
 		}
 	}
 	return false
+}
+
+// issueSuspensions decodes the queued issue_suspend rows of issue, oldest first.
+func issueSuspensions(t *testing.T, pool *pgxpool.Pool, issue string) []record.IssueSuspend {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select payload from outbox where kind = 'issue_suspend' and issue = $1 order by id", issue)
+	if err != nil {
+		t.Fatalf("read issue suspensions: %v", err)
+	}
+	defer rows.Close()
+	var suspensions []record.IssueSuspend
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			t.Fatalf("scan issue suspension: %v", err)
+		}
+		var suspension record.IssueSuspend
+		if err := json.Unmarshal(payload, &suspension); err != nil {
+			t.Fatalf("decode issue suspension %s: %v", payload, err)
+		}
+		suspensions = append(suspensions, suspension)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate issue suspensions: %v", err)
+	}
+	return suspensions
+}
+
+// An issue close is fenced as a suspend is: it acts unless a newer start has run against the claim
+// — a person set the done child todo again, whose run it must not end — and a row without an id is
+// never dropped. It names no linger, so no root is read for it; a tree close acts on its linger
+// alone.
+func TestStopActsFencesAnIssueCloseLikeASuspend(t *testing.T) {
+	until := time.Date(2026, 9, 23, 5, 0, 0, 0, time.UTC)
+	lingering := &record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Generation: 7, LingerUntil: &until}
+	for _, tc := range []struct {
+		name      string
+		id        int64
+		stop      record.SuperviseRequest
+		lastStart int64
+		root      *record.Issue
+		want      bool
+	}{
+		{name: "an issue close no start followed", id: 10, stop: record.SuperviseRequest{Op: "issue_close"}, lastStart: 4, want: true},
+		{name: "an issue close a newer start superseded", id: 10, stop: record.SuperviseRequest{Op: "issue_close"}, lastStart: 11, want: false},
+		{name: "an issue close with no id", id: 0, stop: record.SuperviseRequest{Op: "issue_close"}, lastStart: 11, want: true},
+		{name: "an issue close of a lingering tree reads no root", id: 10, stop: record.SuperviseRequest{Op: "issue_close"}, lastStart: 11, root: lingering, want: false},
+		{name: "a suspend a newer start superseded", id: 10, stop: record.SuperviseRequest{Op: "suspend"}, lastStart: 11, want: false},
+		{name: "a tree close of its linger", id: 10, stop: record.SuperviseRequest{Op: "tree_close", Linger: 7}, lastStart: 11, root: lingering, want: true},
+		{name: "a tree close with no root", id: 10, stop: record.SuperviseRequest{Op: "tree_close", Linger: 7}, lastStart: 4, want: false},
+		{name: "a start is not a stop", id: 10, stop: record.SuperviseRequest{Op: "start"}, lastStart: 4, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StopActs(tc.id, tc.stop, tc.lastStart, tc.root); got != tc.want {
+				t.Fatalf("StopActs(%d, %s, %d, %v) = %t, want %t", tc.id, tc.stop.Op, tc.lastStart, tc.root != nil, got, tc.want)
+			}
+		})
+	}
 }
 
 // The record keeps whether its pull request merged or closed, whatever phase the issue is in, so a

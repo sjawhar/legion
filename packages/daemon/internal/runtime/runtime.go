@@ -97,10 +97,13 @@ type Runtime interface {
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
 // lock, says the issue's durable close and its complete stored role population allow it (false
-// finishes the close without acting). Process-only runtimes have no shared issue resources to
-// suspend.
+// finishes the close without acting). With release, the close is a child's as done: once the pod
+// is stopped, the issue's Sandbox is deleted with everything it owns, its volume included, and the
+// call returns once the cluster no longer has it; a Sandbox already gone is success, so a retried
+// close finishes. Without it the Sandbox is kept, Suspended, for a later re-admission to resume.
+// Process-only runtimes have no shared issue resources to suspend.
 type IssueSuspender interface {
-	SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error
+	SuspendIssue(ctx context.Context, issue, tree string, release bool, authorize func(context.Context) (bool, error)) error
 }
 
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus

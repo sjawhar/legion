@@ -741,7 +741,15 @@ func (m *Machine) relaunchFresh(ctx context.Context) error {
 // loseSession drops the session the claim recorded, which lived on an issue's volume since lost:
 // the claim expects no session until a new agent registers, and its launches recreate the workspace.
 func (m *Machine) loseSession() {
-	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
+	m.forgetSession()
+	m.claim.WorkspaceLost = true
+}
+
+// forgetSession drops the session the claim recorded and any loss recorded with it, leaving the
+// claim as one no agent has registered for: the next launch is a fresh spawn that provisions its
+// workspace anew. The issue's close releases the volume the session lived on (table's issueClose).
+func (m *Machine) forgetSession() {
+	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", false
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -978,6 +986,8 @@ func claimOf(ev Event) claim.Token {
 	case RequestStop:
 		return ev.Claim
 	case RequestTreeClose:
+		return ev.Claim
+	case RequestIssueClose:
 		return ev.Claim
 	case RequestOperatorClose:
 		return ev.Claim

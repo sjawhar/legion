@@ -46,7 +46,7 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 		t.Run(string(tc.state), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
-			api := &issueSandboxAPI{object: map[string]any{
+			api := newIssueSandboxAPI(map[string]any{
 				"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
 				"metadata": map[string]any{
 					"name": "legion-legion-controller", "namespace": "legion", "uid": "sandbox-uid", "resourceVersion": "1",
@@ -54,7 +54,7 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 					"labels":            map[string]any{"legion.dev/project": "legion", "legion.dev/role": "controller"},
 				},
 				"spec": map[string]any{"operatingMode": "Running"},
-			}}
+			})
 			server := httptest.NewServer(api)
 			t.Cleanup(func() { cancel(); server.Close() })
 			rt, err := sandbox.New(ctx, &rest.Config{Host: server.URL}, sandbox.Options{
@@ -78,7 +78,7 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 			if err := rt.ReconcileOrphans(ctx, known, orphanGrace); err != nil {
 				t.Fatal(err)
 			}
-			if got := api.mode(); got != tc.want {
+			if got := api.mode("legion-legion-controller"); got != tc.want {
 				t.Fatalf("the %s controller's Sandbox after the sweep is %s, want %s", tc.state, got, tc.want)
 			}
 		})

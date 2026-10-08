@@ -189,8 +189,10 @@ const (
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
-// the one request that ends the claim, the tree's root claim included. There is no plain stop:
-// only the tree's close ends a claim from the workflow, so the op states it.
+// the request that ends the claim, the tree's root claim included; "issue_close" is a child issue's
+// close as done, which ends the claim as a tree close does and drops its session, since the
+// issue's volume the session lived on is released with the close (IssueSuspend's Release). There
+// is no plain stop: only a close ends a claim from the workflow, so the op states which.
 type SuperviseOp string
 
 // SuperviseRequest describes the session operation the outbox runner performs.
@@ -245,11 +247,15 @@ type LingerClose struct {
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
 // IssueSuspend retains an issue's shared resources after its close stops every role. Both
-// workflow generations and this row's ID fence a later re-admission or start.
+// workflow generations and this row's ID fence a later re-admission or start. Release is a child's
+// close as done: once every claim of the issue has retired, the issue's Sandbox and the volume it
+// owns are deleted rather than kept, so a later todo re-enters the child fresh. An absent field
+// reads false, the close that keeps.
 type IssueSuspend struct {
 	Tree           string `json:"tree"`
 	Generation     uint64 `json:"generation"`
 	TreeGeneration uint64 `json:"treeGeneration"`
+	Release        bool   `json:"release,omitempty"`
 }
 
 func (IssueSuspend) OutboxKind() OutboxKind { return OutboxKindIssueSuspend }
@@ -491,7 +497,7 @@ func controllerOnlyNoticeKind(kind NoticeKind) bool {
 
 func validSuperviseOp(op SuperviseOp) bool {
 	switch op {
-	case "start", "suspend", "tree_close":
+	case "start", "suspend", "tree_close", "issue_close":
 		return true
 	default:
 		return false
