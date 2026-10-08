@@ -139,8 +139,10 @@ test("lists the person's answers and replies newest first with time, owner, ques
     await waitFor(() => expect(within(first).getByText("Which release path?")).toBeTruthy());
     expect(within(first).getByText("Ship")).toBeTruthy();
     await waitFor(() => expect(within(first).getByText("Go now.")).toBeTruthy());
+    // An issue ask opens through its item route, as the Inbox row's owner link does: anchored, it
+    // lands on its document with the card selected; unanchored, on its Conversation turn.
     expect(within(first).getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
-      "/issues/CORE-1?ask=ask-1"
+      "/issues/CORE-1/asks/ask-1"
     );
     expect(within(first).queryByText("Changed since")).toBeNull();
     expect(within(first).getByRole("button", { name: "Change answer" })).toBeTruthy();
