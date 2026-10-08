@@ -286,3 +286,39 @@ test("the row under the pointer stays put when a row above it is answered elsewh
     await alice.close();
   }
 });
+
+test("a grouped header stays with its pointer-held row while a P0 ask arrives", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const grouped = await createIssue({ project: "CORE", title: "Grouped stability" });
+  await createAsk(grouped.key, { question: "Grouped first" }, session);
+  const held = await createAsk(grouped.key, { question: "Grouped held" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const row = page.locator(`[data-inbox-row="${held.id}"]`);
+    const header = page.locator(`[data-inbox-group-header="issue:${grouped.key}"]`);
+    await expect(row).toBeVisible();
+    await expect(header).toBeVisible();
+    const box = await row.boundingBox();
+    if (box === null) throw new Error("held row has no box");
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    const rowBefore = await topOf(row);
+    const headerBefore = await topOf(header);
+
+    const urgent = await createIssue({ project: "CORE", title: "Ungrouped P0 arrival" });
+    await patchIssue(urgent.key, { priority: 0 });
+    const p0 = await createAsk(urgent.key, { question: "Urgent arrival" }, session);
+
+    await expect(page.locator(`[data-inbox-row="${p0.id}"]`)).toBeAttached();
+    expect(Math.abs((await topOf(row)) - rowBefore)).toBeLessThanOrEqual(2);
+    expect(Math.abs((await topOf(header)) - headerBefore)).toBeLessThanOrEqual(2);
+
+    await leaveRow(page);
+  } finally {
+    await alice.close();
+  }
+});
