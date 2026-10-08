@@ -305,6 +305,9 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- Agent bearer tokens can now list repository-to-project mappings and architecture sources, and set
+  or remove repository mappings, architecture sources, and delivery settings. Settings writes record
+  the bearer-supplied session actor, as other agent-authenticated writes do.
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,
