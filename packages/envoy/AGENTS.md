@@ -1911,9 +1911,10 @@ while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` i
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot or the service account: a pod is a requester
-with no operator. Migration 0007 is forward-only: an older broker binary's conflict lookup
-reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
-back past it once a slotted enrollment exists. `internal/broker/policy` decides who may have which
+with no operator, and with its launcher credential's service. Migration 0007 is forward-only: an
+older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
+two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+`internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
@@ -1936,8 +1937,12 @@ whether a secret has a value is read from the same listing's `SecretVersionsToSt
 labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
 every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
 gives a secret created without a value no version, as Secrets Manager does); and
-an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
-`cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
+an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
+`cmd/broker` fills from `BROKER_SERVICES`. A session's `policy.Requester.Service` is the `service`
+of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
+`requests.Machine`'s enrollment reads into `enrollmentRow.Service`), so a pod the Legion daemon's
+login enrolled is `legion-daemon`'s, and a service's secret goes at once to its sessions and to no
+one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
@@ -2066,6 +2071,9 @@ the broker's own address, the request object's `aud` and the launcher proof's `h
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
 `BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
+`BROKER_SERVICES` (optional; the registered services an owner tag may name, whitespace-separated,
+each `record.ValidService`'s form and not `shared` — any other entry is refused naming it; unset,
+`Config.Services` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is

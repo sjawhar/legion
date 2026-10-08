@@ -31,9 +31,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.operator
-		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Operator)
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.operator, c.service
+		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
+		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Operator, &enr.Service)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, time.Time{}, ErrGrantNotLive
 	}

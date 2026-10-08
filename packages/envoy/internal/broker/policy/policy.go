@@ -135,8 +135,9 @@ type Requester struct {
 	// Operator is the email of the person whose machine login the session enrolled under; empty
 	// for a pod.
 	Operator string
-	// Service is the registered service the session proved it is. No session proves one yet, so a
-	// service's secret is refused to every requester.
+	// Service is the registered service the session proved it is: a session proves its service
+	// through the launcher credential that enrolled it, the service its machine login was for (the
+	// Legion daemon's pods are legion-daemon's). Empty for a session no service's login enrolled.
 	Service string
 	// Withheld is the names the session's operator withheld from it by revoking a grant of them
 	// the session got without asking (requests.Machine.RevokeByApprover). Evaluate answers each as

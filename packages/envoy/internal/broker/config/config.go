@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -46,6 +47,14 @@ type Config struct {
 	// Required. A secret under the prefix encrypted with any other key, the AWS-managed one
 	// included, is refused.
 	SecretsKMSKeyARN string
+	// BROKER_SERVICES: the registered services a secret's owner tag may name, whitespace-separated,
+	// each lowercase letters, digits and hyphens (at most 64) and not shared. A session proves its
+	// service through the launcher credential that enrolled it, the service its machine login was
+	// for (the Legion daemon's is legion-daemon, so its pods are legion-daemon's); a secret owned by
+	// a listed service goes at once to those sessions and is refused to every other. Unset, no
+	// service is registered, and a secret whose owner tag names one is refused as
+	// owner-tag-malformed.
+	Services []string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -163,6 +172,12 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if !policy.ValidKeyARN(cfg.SecretsKMSKeyARN) {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
+	}
+	for _, service := range strings.Fields(getenv("BROKER_SERVICES")) {
+		if !record.ValidService(service) || service == policy.OwnerShared {
+			return Config{}, fmt.Errorf("BROKER_SERVICES must be service names of lowercase letters, digits and hyphens, at most 64 each, none of them %s, got %q", policy.OwnerShared, service)
+		}
+		cfg.Services = append(cfg.Services, service)
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {

@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -108,6 +109,38 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 	}
 	if cfg.TrustedProxyHeader != "X-Forwarded-For" {
 		t.Fatalf("TrustedProxyHeader = %q, want X-Forwarded-For", cfg.TrustedProxyHeader)
+	}
+}
+
+// TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated service names,
+// none when unset, each one a name a machine login's service can take ([a-z0-9-]{1,64}) and not
+// the owner tag's own "shared", which an owner tag never names a service by; any other entry
+// refuses to start naming it, since the broker could never serve that service a secret.
+func TestLoadReadsTheRegisteredServices(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Services != nil {
+		t.Fatalf("Services = %q, want nil when BROKER_SERVICES is unset", cfg.Services)
+	}
+
+	e := validEnv()
+	e["BROKER_SERVICES"] = " example-service\tother-service\n"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"example-service", "other-service"}; !slices.Equal(cfg.Services, want) {
+		t.Fatalf("Services = %q, want %q", cfg.Services, want)
+	}
+
+	for _, bad := range []string{"Example-Service", "example_service", "ada@example.com", "shared", strings.Repeat("a", 65)} {
+		e := validEnv()
+		e["BROKER_SERVICES"] = "example-service " + bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") || !strings.Contains(err.Error(), bad) {
+			t.Errorf("BROKER_SERVICES with %q: err = %v, want a refusal naming BROKER_SERVICES and the entry", bad, err)
+		}
 	}
 }
 

@@ -71,7 +71,7 @@ func main() {
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	fatal(err)
 	fatal(st.Migrate(ctx))
-	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN}
+	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: cfg.Services}
 	var reader secrets.Reader
 	if fakeSecrets != "" {
 		local, err := secrets.LocalFromFile(fakeSecrets)

@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -142,7 +143,9 @@ func waitForBoundAddress(t *testing.T, stderr io.Reader) string {
 // process's own listener.
 // It also holds a fake Secrets Manager with one secret whose owner tag names nobody, and asserts
 // the real binary refuses it at boot with the exact line the deployment's alarm filters on, while
-// still booting to serve the rest.
+// still booting to serve the rest; and one owned by example-service, which BROKER_SERVICES
+// registers, and asserts the binary serves it: the policy loader main builds carries the
+// configured services.
 func TestMainLogsRealBoundAddress(t *testing.T) {
 	databaseURL := storetest.URL(t)
 
@@ -157,7 +160,8 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 	const key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 	const fakeSecrets = `{"secrets": [
 		{"name": "example/agent-secrets/demo-key", "kms_key_id": "` + key + `", "tags": {"owner": "shared", "tier": "agent"}, "value": "demo"},
-		{"name": "example/agent-secrets/untagged-key", "kms_key_id": "` + key + `", "tags": {"owner": "sjawhar", "tier": "agent"}, "value": "nope"}
+		{"name": "example/agent-secrets/untagged-key", "kms_key_id": "` + key + `", "tags": {"owner": "sjawhar", "tier": "agent"}, "value": "nope"},
+		{"name": "example/agent-secrets/service-key", "kms_key_id": "` + key + `", "tags": {"owner": "example-service", "tier": "agent"}, "value": "service"}
 	]}`
 	if err := os.WriteFile(fakeSecretsFile, []byte(fakeSecrets), 0o600); err != nil {
 		t.Fatal(err)
@@ -169,6 +173,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
 		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
+		"BROKER_SERVICES=example-service",
 	)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -188,6 +193,9 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 	if !refused.MatchString(boot.String()) {
 		t.Fatalf("boot log has no refusal line matching %s:\n%s", refused, boot.String())
 	}
+	if strings.Contains(boot.String(), "name=example/agent-secrets/service-key") {
+		t.Fatalf("boot log refuses the secret example-service owns, which BROKER_SERVICES registers:\n%s", boot.String())
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatalf("logged address %q did not parse as host:port: %v", addr, err)
@@ -206,5 +214,18 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET http://%s/healthz: status %d, want 200", addr, resp.StatusCode)
+	}
+
+	reread, err := http.Post("http://"+addr+"/v1/secrets/SERVICE_KEY/reread", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /v1/secrets/SERVICE_KEY/reread: %v", err)
+	}
+	defer reread.Body.Close()
+	var answer struct {
+		Served bool   `json:"served"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(reread.Body).Decode(&answer); err != nil || reread.StatusCode != http.StatusOK || !answer.Served {
+		t.Fatalf("reread SERVICE_KEY = status %d, %+v, %v; want served, its owner a service BROKER_SERVICES registers", reread.StatusCode, answer, err)
 	}
 }
