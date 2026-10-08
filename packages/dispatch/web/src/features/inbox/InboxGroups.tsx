@@ -4,6 +4,7 @@ import type { InboxRow } from "../../api/types";
 import { linkHoverText, linkText, textSecondaryOnCanvas } from "../../theme/classes";
 import { InboxOwnerLink } from "./AskOwnerLink";
 import type { CrossBandCount, InboxGroup } from "./grouping";
+import { ROW_SELECTOR } from "./inbox-row";
 import { type InboxSection, SECTION_TITLES } from "./sections";
 
 /** A visual grouping label only: rows stay the flat list's keyboard and viewport targets. */
@@ -87,9 +88,7 @@ export function useGroupJump(
   const [jumpTo, setJumpTo] = useState<{ ownerKey: string; section: InboxSection } | null>(null);
   useLayoutEffect(() => {
     if (jumpTo === null) return;
-    const target = [
-      ...(listRef.current?.querySelectorAll<HTMLElement>("[data-inbox-owner-key]") ?? []),
-    ].find(
+    const target = [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])].find(
       (row) =>
         row.dataset.inboxOwnerKey === jumpTo.ownerKey && row.dataset.inboxSection === jumpTo.section
     );

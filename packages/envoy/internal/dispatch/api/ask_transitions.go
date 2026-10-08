@@ -127,10 +127,14 @@ func parseAnswerPrecondition(field string, raw json.RawMessage) (value *string, 
 	if len(raw) == 0 {
 		return nil, false, nil
 	}
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return nil, true, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
 		return nil, true, errorf(http.StatusBadRequest, "INVALID_ANSWER", "%s must be an RFC3339 timestamp or null", field)
 	}
-	return value, true, nil
+	return &text, true, nil
 }
 
 // parseReplacesAnswer reads expected_answer_at, the `at` of the current answer a change replaces:

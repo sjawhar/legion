@@ -43,6 +43,7 @@ import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { crossBandCounts, groupRows } from "./grouping";
 import { bandGroupItems, useGroupJump } from "./InboxGroups";
+import { ROW_ATTRIBUTE, ROW_SELECTOR } from "./inbox-row";
 import { useMotionHold } from "./motion-hold";
 import { SnoozeControl } from "./SnoozeControl";
 import {
@@ -71,8 +72,6 @@ function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
   return null;
 }
 
-const ROW_ATTRIBUTE = "data-inbox-row";
-const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
 
