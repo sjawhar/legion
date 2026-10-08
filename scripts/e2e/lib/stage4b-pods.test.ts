@@ -798,7 +798,8 @@ describe("the pod-watch-verdict checkpoint's matching", () => {
       join(evidence, "driver-actions.txt"),
       actions.map((uid) => `kill-container ${uid} 2026-10-08T14:00:00.000Z\n`).join("")
     );
-    const out = runScript(`work=${JSON.stringify(evidence)} lost_detail="the issue's volume was lost: "
+    const out =
+      runScript(`work=${JSON.stringify(evidence)} lost_detail="the issue's volume was lost: "
 ${fn("never_scheduled_deaths")}
 ${fn("pod_watch_verdict")}
 pod_watch_verdict "$work/pod-watch.json" "$work/driver-actions.txt" "$work/daemon.log" >/dev/null || true
