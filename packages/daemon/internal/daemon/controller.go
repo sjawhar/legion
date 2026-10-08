@@ -29,13 +29,14 @@ const (
 	controllerRetryMax   = 30 * time.Minute
 )
 
-// controllerKeeper keeps the daemon's own controller running (`controller: daemon`), in place of
-// watchController's line about the operator's. The controller is one claim, on the controller role
-// with no issue, which its machine supervises as any claim's: a death relaunches the same session,
-// within the launch failure budget. What the machine leaves to its caller is the keeper's: the claim
-// is created when the store holds none, launched while queued, resumed when suspended, and, when
-// its budget ran out (failed) or its agent ended it (retired), retried with fresh budgets after a
-// wait that doubles while it keeps failing. At each ready it hands the controller the start message.
+// controllerKeeper keeps the daemon's own controller running (`controller: daemon`). The controller
+// is one claim, on the controller role with no issue, which its machine supervises as any claim's:
+// a death relaunches the same session, within the launch failure budget. What the machine leaves to
+// its caller is the keeper's: the claim is created when the store holds none, launched while
+// queued, resumed when suspended, and, when its budget ran out (failed) or its agent ended it
+// (retired), retried with fresh budgets after a wait that doubles while it keeps failing. At each
+// ready it hands the controller the start message. The liveness sweep (watchController) runs it at
+// every interval, and says when its controller is not registered.
 type controllerKeeper struct {
 	supervisor *supervisor
 	// project is the project token the claim is filed under.
@@ -59,20 +60,20 @@ func newControllerKeeper(ctx context.Context, sup *supervisor, project string, r
 
 func (k *controllerKeeper) token() claim.Token { return claim.ControllerToken(k.project) }
 
-// run keeps the controller at once and then every interval until ctx is done.
-func (k *controllerKeeper) run(ctx context.Context, every time.Duration) {
-	ticker := time.NewTicker(every)
-	defer ticker.Stop()
-	for {
-		if err := k.keep(); err != nil && ctx.Err() == nil {
-			k.log.Error("controller: keep the daemon's controller running", "claim", k.token(), "error", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+// tick is one keep, with its failure logged.
+func (k *controllerKeeper) tick(ctx context.Context) {
+	if err := k.keep(); err != nil && ctx.Err() == nil {
+		k.log.Error("controller: keep the daemon's controller running", "claim", k.token(), "error", err)
 	}
+}
+
+// claimState is the state of the controller's claim, "" while the daemon supervises none.
+func (k *controllerKeeper) claimState() supervise.ClaimState {
+	m, ok := k.supervisor.Machine(k.token())
+	if !ok {
+		return ""
+	}
+	return m.Claim().State
 }
 
 // keep is one look at the controller's claim, and the one request its state calls for.
@@ -204,12 +205,27 @@ func (s *supervision) endLaunchedRegistration(ctx context.Context, c supervise.C
 	return nil
 }
 
-// watchController is the daemon's one line about the controller it never launches, under either
-// runtime: every sweep interval it reads the project's controller record, and when no session holds
-// it, or the Envoy role registry says the session is gone, it says so and how to start one, at most
-// once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was reached;
-// Unknown is never a death verdict, so it says nothing more.
-func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
+// controllerNotRegistered is the liveness sweep's line while no live controller holds the record:
+// the whole line under `controller: operator`, and its leading phrase under `controller: daemon`,
+// so one log query on it counts either mode.
+const controllerNotRegistered = "controller not registered; run legion controller start"
+
+// watchController is the daemon's liveness sweep over the project's controller, under either
+// runtime and either `controller` mode. Every sweep interval it first runs the keeper, under
+// `controller: daemon` (nil under `controller: operator`), then reads the project's controller
+// record, and when no session holds it, or the Envoy role registry says the session is gone, it says
+// so at most once per worker boot timeout, naming the remedy for its mode: `legion controller
+// start` for the operator's controller, the keeper's relaunch for the daemon's, with its claim's
+// state, so a launch in flight or a backoff reads apart from a death. The Prober logs why each Gone
+// or Unknown verdict was reached; Unknown is never a death verdict, so it says nothing more. Every
+// line the sweep and its Prober write names the mode, and both modes write the same lines on the
+// same cadence.
+func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, keeper *controllerKeeper, log *slog.Logger) {
+	mode := config.ControllerLaunchOperator
+	if keeper != nil {
+		mode = config.ControllerLaunchDaemon
+	}
+	log = log.With("mode", string(mode))
 	prober := controller.NewProber(controller.ProberOptions{
 		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
 	})
@@ -217,6 +233,9 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 	defer ticker.Stop()
 	var logged time.Time
 	for {
+		if keeper != nil {
+			keeper.tick(ctx)
+		}
 		record, _, err := st.Controller(ctx, p.project)
 		liveness := controller.Gone
 		switch {
@@ -233,7 +252,12 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 			logged = time.Time{}
 		case controller.Gone:
 			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {
-				log.Warn("controller not registered; run legion controller start", "project", cfg.Project)
+				if keeper == nil {
+					log.Warn(controllerNotRegistered, "project", cfg.Project, "registered", record.Registered())
+				} else {
+					log.Warn(controllerNotRegistered+" only under controller: operator; this daemon launches its own controller and relaunches it",
+						"project", cfg.Project, "registered", record.Registered(), "claimState", keeper.claimState())
+				}
 				logged = time.Now()
 			}
 		}

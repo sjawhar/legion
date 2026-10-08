@@ -841,7 +841,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		claimReady = workflow.claimReady
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
-	// its ready; otherwise watchController says when the operator's is missing.
+	// its ready. The liveness sweep runs under either mode, and runs the keeper.
 	var keeper *controllerKeeper
 	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
 		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
@@ -894,11 +894,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		group.Go(func() error { return workflow.run(serving) })
 	}
 	group.Go(func() error {
-		if keeper != nil {
-			keeper.run(serving, p.orphanSweep)
-		} else {
-			watchController(serving, st, cfg, p, s.log)
-		}
+		watchController(serving, st, cfg, p, keeper, s.log)
 		return nil
 	})
 	return group.Wait()

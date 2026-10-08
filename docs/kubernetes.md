@@ -1485,6 +1485,22 @@ itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#dae
 `controller: daemon` needs `runtime: kubernetes`; the loader refuses it under tmux (`controller:
 daemon needs runtime: kubernetes, …`) and refuses any value but the two.
 
+### Controller liveness
+
+Under either `controller` mode the daemon checks the project's controller every minute: it reads
+the controller's record and, while a session holds it, that session's liveness from the Envoy role
+registry. While no session holds the current capability, or the registry says the session is gone,
+it logs `controller not registered; run legion controller start` at most once per
+`worker_boot_timeout_seconds`. Under `controller: daemon` the line goes on with that mode's remedy,
+`… only under controller: operator; this daemon launches its own controller and relaunches it`,
+and names the state of the controller's claim (`claimState`): `launching` while a launch is in
+flight, `failed` or `retired` while the daemon waits to retry it, so a launch or a backoff reads
+apart from a death. While the registry holds the controller role for nobody, the daemon also logs
+`controller liveness: the controller role has no live holder; the controller is gone` at every
+check. Both modes log both lines on the same schedule, and every line names the mode (`mode`; the
+not-registered line also says whether a session holds the record, `registered`), so one log query
+on either line's text counts either mode.
+
 ### Daemon-launched controller
 
 Under `controller: daemon` the daemon launches the project's controller at boot and keeps it
@@ -1616,10 +1632,8 @@ this release, never the previous image. A revert that cannot be avoided goes in 
 Under `controller: operator` the daemon launches no controller, under either runtime: it has no
 process of the controller to start or resume, and it stops at boot the claim of one an earlier boot
 under `controller: daemon` launched ([Switching back](#daemon-launched-controller)). It holds the
-controller's record and reads the
-session's liveness from the Envoy role registry. While no session holds the current capability, or
-the registry says the session is gone, the daemon logs `controller not registered; run legion
-controller start` at most once per `worker_boot_timeout_seconds`.
+controller's record and reads the session's liveness from the Envoy role registry, and says when no
+controller is registered ([Controller liveness](#controller-liveness)).
 
 **The operator token.** `operator_token_file` in `legion.yaml` names a file holding one long random
 string (`openssl rand -hex 32`). The Go daemon requires it under every runtime, because the operator
