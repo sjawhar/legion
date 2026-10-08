@@ -191,7 +191,8 @@ pair_session=
 # The completed idle planner probe spends only the former, by deleting each replacement before it
 # registers (supervise/budgets.go).
 launch_failure_limit=3
-
+# Set while done cleans the smoke main (clean_smoke_main), so the verdict can tell that failure apart.
+smoke_main_cleaning=
 
 begin() {
   check=$1
@@ -1541,10 +1542,17 @@ cleanup() {
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
   # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
-  # lets a blocked checkpoint end BLOCKED.
+  # lets a blocked checkpoint end BLOCKED. A failure while done cleans the smoke main
+  # (smoke_main_cleaning) is the fixture's teardown, not the workflow under test, and the verdict
+  # says so, unless a teardown check failed or a production guard recorded a violation: then the
+  # ordinary failure stands.
   if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
-    echo "stage 4b e2e: FAIL (check $check)"
+    if [ -n "$smoke_main_cleaning" ] && [ -z "$teardown_failed" ] && [ ! -s "$evidence/pane-endpoint-violation.txt" ]; then
+      echo "stage 4b e2e: FAIL (fixture teardown, in check $check): every checkpoint before $check passed, and $check failed only at the cleanup of $repo main, after tree 1's merge, production check and sign-off; the rest of $check and the checkpoints after it did not run"
+    else
+      echo "stage 4b e2e: FAIL (check $check)"
+    fi
   elif [ -n "$teardown_failed" ]; then
     echo "stage 4b e2e: FAIL (check $teardown_failed, in the teardown after check $check)"
   elif [ -n "$was_blocked" ]; then
@@ -3305,8 +3313,13 @@ if issue_phase "$tree1" production_check >/dev/null 2>&1; then
 fi
 on_tree "$tree1" wait_for_phase "$tree1" "done" 900
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
+# The smoke main's cleanup is the fixture's teardown, not the workflow under test. It stays inside
+# this checkpoint, so a STAGE4B_UNTIL=done run still cleans the smoke main, and smoke_main_cleaning
+# tells the EXIT trap's verdict that a failure here is the cleanup's.
+smoke_main_cleaning=1
 clean_smoke_main
 release_smoke_main
+smoke_main_cleaning=
 note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
 # The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
 # session kept for a re-admission to resume.

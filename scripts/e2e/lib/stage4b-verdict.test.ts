@@ -6,11 +6,11 @@ import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's own blocked, fail, pass, until_reached, cleanup, audit_verdict and audit_failure,
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
-// passed as a STAGE4B_UNTIL run's last checkpoint), with the teardown's cluster, NATS and GitHub
-// helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
-// LEGSMOKE, or none. A timed-out wait runs the script's own capacity hook and limit_pending
-// against a kubectl that answers pods (filtered by the -l selector, as the API server does) and
-// FailedScheduling events from the test's fixture.
+// passed as a STAGE4B_UNTIL run's last checkpoint), or after done fails while it cleans the smoke
+// main, with the teardown's cluster, NATS and GitHub helpers stubbed and production_audit's
+// Dispatch read replaced by its result: a write outside LEGSMOKE, or none. A timed-out wait runs
+// the script's own capacity hook and limit_pending against a kubectl that answers pods (filtered by
+// the -l selector, as the API server does) and FailedScheduling events from the test's fixture.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const rigFn = scriptFunctions(join(import.meta.dir, "rig.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
@@ -97,6 +97,26 @@ function controllerRun(
   ending: "blocked" | "fail" | "pass" | "timeout" = "blocked",
   capacity: Capacity = {}
 ) {
+  return verdictRun(
+    outside,
+    ending !== "timeout"
+      ? `${ending} "the controller's model route could not be installed"`
+      : `timeout_hook=limit_pending_blocked; ${capacity.subject === undefined ? "" : `on_tree ${capacity.subject} `}until_true 1 "the controller to take its first turn" false`,
+    capacity
+  );
+}
+// cleaningRun fails done while it cleans the smoke main, as clean_smoke_main's timed-out wait does;
+// with a violation, a production guard recorded it first.
+function cleaningRun(outside: string, violation = false) {
+  return verdictRun(
+    outside,
+    `check=done check_started=2026-09-30T13:00:00Z repo=sjawhar/legion-smoke smoke_main_cleaning=1
+${violation ? `printf 'pod x (uid u1): runtimeClassName is runc\\n' >"$evidence/pane-endpoint-violation.txt"` : ""}
+fail "timed out after 600s (240 polls) waiting for sjawhar/legion-smoke#600 to pass its required checks"`
+  );
+}
+// verdictRun runs the tail after the checkpoint's variables, then the trap.
+function verdictRun(outside: string, tail: string, capacity: Capacity = {}) {
   const run = join(dir, `run-${++runs}`);
   const evidence = join(run, "evidence");
   mkdirSync(evidence, { recursive: true });
@@ -109,7 +129,7 @@ root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
-tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
+tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x smoke_main_cleaning=
 operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"
 # The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
@@ -138,7 +158,7 @@ ${fn("limit_pending_blocked")}
 ${rigFn("until_true")}
 ${fn("cleanup")}
 trap cleanup EXIT
-${ending !== "timeout" ? `${ending} "the controller's model route could not be installed"` : `timeout_hook=limit_pending_blocked; ${capacity.subject === undefined ? "" : `on_tree ${capacity.subject} `}until_true 1 "the controller to take its first turn" false`}
+${tail}
 `,
     ],
     {
@@ -352,5 +372,30 @@ if left=$(on_tree T2 left_planning T2); then echo "left planning ($left)"; else 
         phaseChanged("T2", "planning", "implementing", "2026-10-04T19:02:06Z"),
       ])
     ).toBe('left planning ({"time":"2026-10-04T19:02:06Z","to":"implementing"})');
+  });
+  test("names a failure while done cleans the smoke main as the fixture teardown's, when the teardown is clean", () => {
+    const cleaning = cleaningRun("[]");
+    expect(cleaning.code).toBe(1);
+    expect(cleaning.stdout).toContain(
+      "stage 4b e2e: FAIL (fixture teardown, in check done): every checkpoint before done passed, and done failed only at the cleanup of sjawhar/legion-smoke main"
+    );
+    expect(cleaning.stdout).not.toContain("stage 4b e2e: FAIL (check done)");
+  });
+
+  test("keeps the ordinary verdict for a failure while done cleans the smoke main once the teardown's audit finds a write outside LEGSMOKE", () => {
+    const outside = cleaningRun(outsideWrite);
+    expect(outside.code).toBe(1);
+    expect(outside.stdout).toContain(
+      "CHECK production-audit: FAIL: the run wrote outside LEGSMOKE or subscribed outside it:"
+    );
+    expect(outside.stdout).toContain("stage 4b e2e: FAIL (check done)");
+    expect(outside.stdout).not.toContain("fixture teardown");
+  });
+
+  test("keeps the ordinary verdict for a failure while done cleans the smoke main once a production guard recorded a violation", () => {
+    const violated = cleaningRun("[]", true);
+    expect(violated.code).toBe(1);
+    expect(violated.stdout).toContain("stage 4b e2e: FAIL (check done)");
+    expect(violated.stdout).not.toContain("fixture teardown");
   });
 });

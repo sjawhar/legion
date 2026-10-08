@@ -2,12 +2,18 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import type { DeliveryTimelineOptions } from "../../api/client";
+import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
 import { deliveryTimelineQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
-import { bgTransparent, textMutedOnCanvas, textPrimaryOnCanvas } from "../../theme/classes";
+import {
+  bgTransparent,
+  textMutedOnCanvas,
+  textPrimaryOnCanvas,
+  textSecondaryOnCanvas,
+} from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { DeliverySettingsForm } from "./DeliverySettingsForm";
 import { DrillDown } from "./DrillDown";
 import { FacetPanel } from "./FacetPanel";
 import type { ColorFacet } from "./lib/colorScale";
@@ -120,8 +126,9 @@ const COLOR_BY_OPTIONS: { value: ColorFacet; label: string }[] = [
 ];
 
 /** `/delivery`: successful production deploys, pipeline failures, and merged PRs labelled by
- *  agent session, Dispatch issue, priority, and architectural component — LEGION-567 slice 1,
- *  ported from the local prototype at `~/proto/delivery-timeline`. */
+ *  agent session, Dispatch issue, priority, and architectural component. Until the timeline's
+ *  configuration is set, the server answers `DELIVERY_NOT_CONFIGURED` and the page shows the
+ *  settings form in the timeline's place; a save refetches the timeline, which then renders. */
 export function DeliveryPage(): ReactNode {
   useDocumentTitle("Delivery · Dispatch");
   const [state, setState] = useDeliveryUrlState();
@@ -157,84 +164,115 @@ export function DeliveryPage(): ReactNode {
     return prs.some((pr) => pr.id === selection.id) ? selection : null;
   }, [selection, prs]);
 
+  // Whether the page shows the setup form: the last settled timeline read's answer, held while a
+  // read is in flight. A refetch with nothing cached clears `query.error` the moment it starts
+  // (the window regaining focus, the event stream's reconnect refresh), so a body read live from
+  // the query would unmount the form, and the draft typed into it, on every tab switch. A read
+  // that settles on anything but `DELIVERY_NOT_CONFIGURED` shows that instead: the timeline a
+  // save brings, or a failure with Retry. Set during render (React's pattern for state derived
+  // from props), so the render that settles already shows the new body.
+  const [notConfigured, setNotConfigured] = useState(false);
+  if (query.fetchStatus === "idle" && isDeliveryNotConfigured(query.error) !== notConfigured) {
+    setNotConfigured(!notConfigured);
+  }
   return (
     <section className="flex h-full flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-2">
         <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
-        <div className="flex items-center gap-2 text-sm">
-          <label className={textMutedOnCanvas}>
-            Color by
-            <select
-              className={`ml-2 rounded border px-2 py-1 ${bgTransparent}`}
-              onChange={(event) => setColorBy(event.target.value as ColorFacet)}
-              value={colorBy}
+        {notConfigured ? null : (
+          <div className="flex items-center gap-2 text-sm">
+            <label className={textMutedOnCanvas}>
+              Color by
+              <select
+                className={`ml-2 rounded border px-2 py-1 ${bgTransparent}`}
+                onChange={(event) => setColorBy(event.target.value as ColorFacet)}
+                value={colorBy}
+              >
+                {COLOR_BY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="rounded border px-3 py-1"
+              onClick={() =>
+                setState({ ...state, mode: state.mode === "list" ? "timeline" : "list" })
+              }
+              type="button"
             >
-              {COLOR_BY_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="rounded border px-3 py-1"
-            onClick={() =>
-              setState({ ...state, mode: state.mode === "list" ? "timeline" : "list" })
-            }
-            type="button"
-          >
-            {state.mode === "list" ? "Show timeline" : "Show list"}
-          </button>
-        </div>
+              {state.mode === "list" ? "Show timeline" : "Show list"}
+            </button>
+          </div>
+        )}
       </header>
 
-      {query.data === undefined ? null : <SourceFreshness freshness={query.data.freshness} />}
+      {notConfigured ? (
+        <section aria-labelledby="delivery-setup-heading" className="max-w-4xl">
+          <h2
+            className={`text-base font-semibold ${textPrimaryOnCanvas}`}
+            id="delivery-setup-heading"
+          >
+            Set up the delivery timeline
+          </h2>
+          <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+            Once set, this page shows the merged pull requests of the authors you name, the
+            production deploys that shipped them, and the pipeline failures in between.
+          </p>
+          <DeliverySettingsForm initial={null} />
+        </section>
+      ) : (
+        <>
+          {query.data === undefined ? null : <SourceFreshness freshness={query.data.freshness} />}
 
-      <FacetPanel
-        component={state.component}
-        filters={state.filters}
-        onChange={(filters) => setState({ ...state, filters })}
-        onComponentChange={(component) => setState({ ...state, component })}
-        onPriorityChange={(priority) => setState({ ...state, priority })}
-        prs={prs}
-        priority={state.priority}
-      />
+          <FacetPanel
+            component={state.component}
+            filters={state.filters}
+            onChange={(filters) => setState({ ...state, filters })}
+            onComponentChange={(component) => setState({ ...state, component })}
+            onPriorityChange={(priority) => setState({ ...state, priority })}
+            prs={prs}
+            priority={state.priority}
+          />
 
-      {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
-      {query.isError ? (
-        <QueryError
-          message="Couldn't load the delivery timeline."
-          onRetry={() => void query.refetch()}
-        />
-      ) : null}
+          {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
+          {query.isError ? (
+            <QueryError
+              message="Couldn't load the delivery timeline."
+              onRetry={() => void query.refetch()}
+            />
+          ) : null}
 
-      {query.data === undefined ? null : (
-        <div className="flex min-h-0 flex-1 gap-4">
-          <div className="min-w-0 flex-1">
-            {state.mode === "timeline" ? (
-              <Timeline
-                colorBy={colorBy}
-                onBrush={(window) => setState({ ...state, from: window.from, to: window.to })}
-                onSelect={setSelection}
+          {query.data === undefined ? null : (
+            <div className="flex min-h-0 flex-1 gap-4">
+              <div className="min-w-0 flex-1">
+                {state.mode === "timeline" ? (
+                  <Timeline
+                    colorBy={colorBy}
+                    onBrush={(window) => setState({ ...state, from: window.from, to: window.to })}
+                    onSelect={setSelection}
+                    prs={prs}
+                    runs={query.data.runs}
+                  />
+                ) : (
+                  <PRList
+                    colorBy={colorBy}
+                    onSelect={(id) => setSelection({ kind: "pr", id })}
+                    prs={prs}
+                    selectedId={selection?.kind === "pr" ? selection.id : undefined}
+                  />
+                )}
+              </div>
+              <DrillDown
+                onClose={() => setSelection(null)}
                 prs={prs}
                 runs={query.data.runs}
+                selection={drillDownSelection}
               />
-            ) : (
-              <PRList
-                colorBy={colorBy}
-                onSelect={(id) => setSelection({ kind: "pr", id })}
-                prs={prs}
-                selectedId={selection?.kind === "pr" ? selection.id : undefined}
-              />
-            )}
-          </div>
-          <DrillDown
-            onClose={() => setSelection(null)}
-            prs={prs}
-            runs={query.data.runs}
-            selection={drillDownSelection}
-          />
-        </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

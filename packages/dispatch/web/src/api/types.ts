@@ -74,6 +74,8 @@ export type {
   DeliveryPR,
   DeliveryRun,
   DeliveryRunJob,
+  DeliverySettings,
+  DeliverySettingsInput,
   DeliveryTimelineResponse,
   DispatchEvent,
   DispatchUser,
