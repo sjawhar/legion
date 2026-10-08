@@ -266,7 +266,7 @@ func TestAWorkersExtensionErrorIsLogged(t *testing.T) {
 	p := dial(t, h.listener.Addr())
 	p.hello(testToken)
 	p.expect(shimwire.TypeHelloAck)
-	p.send(shimwire.Raw{Type: "extension_error", JSON: json.RawMessage(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion-envoy/dist/legion.js","event":"session_start","error":"LEGION_DAEMON_URL is required for Legion"}`)})
+	p.send(shimwire.Raw{Type: "extension_error", JSON: json.RawMessage(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion/dist/legion.js","event":"session_start","error":"LEGION_DAEMON_URL is required for Legion"}`)})
 	p.conn.Close()
 	for _, want := range []Event{Hello{Claim: testClaim, Generation: testGeneration}, Closed{Claim: testClaim}} {
 		if got := h.next(); got != want {
@@ -277,7 +277,7 @@ func TestAWorkersExtensionErrorIsLogged(t *testing.T) {
 	logs := h.logs.Lines()
 	if len(logs) != 1 || !strings.HasPrefix(logs[0], "worker-stream: an extension of the worker's Oh My Pi failed") ||
 		!strings.Contains(logs[0], "claim="+string(testClaim)) ||
-		!strings.Contains(logs[0], "extension=/opt/legion/pi-legion-envoy/dist/legion.js") ||
+		!strings.Contains(logs[0], "extension=/opt/legion/pi-legion/dist/legion.js") ||
 		!strings.Contains(logs[0], "event=session_start") ||
 		!strings.Contains(logs[0], "error=LEGION_DAEMON_URL is required for Legion") {
 		t.Fatalf("logs = %q, want one warning naming the claim, the extension, its event and its error", logs)

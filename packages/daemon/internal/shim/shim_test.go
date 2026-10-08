@@ -82,7 +82,7 @@ func fakeOMP() int {
 
 	emit(fmt.Sprintf(`{"type":"fake_ready","pid":%d}`, os.Getpid()))
 	if message := os.Getenv("FAKE_OMP_EXTENSION_ERROR"); message != "" {
-		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion-envoy/dist/legion.js","event":"session_start","error":%q}`, message))
+		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion/dist/legion.js","event":"session_start","error":%q}`, message))
 	}
 	if os.Getenv("FAKE_OMP_HUGE_LINE") == "1" {
 		emit(`{"type":"fake_huge","pad":"` + strings.Repeat("x", 2<<20) + `"}`)
@@ -1011,5 +1011,5 @@ func TestTheShimLogsAnExtensionError(t *testing.T) {
 	sh := run(t, config(t, path, child), newClock())
 	daemon.accept(t).open(t)
 
-	sh.log.awaitLine(t, "extension_error /opt/legion/pi-legion-envoy/dist/legion.js session_start: LEGION_DAEMON_URL is required for Legion", 1)
+	sh.log.awaitLine(t, "extension_error /opt/legion/pi-legion/dist/legion.js session_start: LEGION_DAEMON_URL is required for Legion", 1)
 }

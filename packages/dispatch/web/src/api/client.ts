@@ -38,6 +38,8 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DeliverySettings,
+  DeliverySettingsInput,
   DeliveryTimelineResponse,
   DispatchUser,
   EditCommentInput,
@@ -139,6 +141,14 @@ export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
+// The delivery timeline answers this 404 until someone sets its configuration: definitive like the
+// two above, since retrying changes nothing until the settings form is saved.
+export function isDeliveryNotConfigured(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 404 && error.code === "DELIVERY_NOT_CONFIGURED"
+  );
+}
+
 // A stored document outside the Proof schema is a repairable state, not a transient failure:
 // retrying the read cannot repair it, while opening its live editor could let the browser rewrite it.
 export function isDocumentSchemaError(error: unknown): boolean {
@@ -152,15 +162,16 @@ export function isDocumentUnloadable(error: unknown): boolean {
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
-// source, an unconfigured credential broker, a stored document outside Proof's schema, or a
-// stored history that cannot load is definitive and retrying it changes nothing; any other failure
-// (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry
-// affordance to the user.
+// source, an unconfigured credential broker or delivery timeline, a stored document outside
+// Proof's schema, or a stored history that cannot load is definitive and retrying it changes
+// nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic attempts
+// before surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
     !isSourceNotFound(error) &&
     !isCredentialFeatureOff(error) &&
+    !isDeliveryNotConfigured(error) &&
     !isDocumentSchemaError(error) &&
     !isDocumentUnloadable(error)
   );
@@ -680,6 +691,17 @@ export class DispatchApiClient {
    *  PRs within `[from, to)` and the given facets, all applied server-side. */
   getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
     return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
+  }
+
+  /** The delivery timeline's configuration record, or `null` until someone sets it. */
+  getDeliverySettings(): Promise<DeliverySettings | null> {
+    return this.json<DeliverySettings | null>("/api/v1/settings/delivery");
+  }
+
+  /** Replaces the delivery timeline's configuration (human callers only). The server first proves
+   *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
+  putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
+    return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {

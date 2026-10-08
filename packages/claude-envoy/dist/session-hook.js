@@ -15842,7 +15842,7 @@ function followsAsk(owner) {
   return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
 }
 var triageAdviceShown = new Set;
-var SPEC_CHECK_REMINDER = 'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent (`plan-gap-analyst` on Oh My Pi) check it now and fix what it finds. See the `dispatch-first` skill, "Design in the spec".';
+var SPEC_CHECK_REMINDER = 'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent check it now and fix what it finds: on Oh My Pi, `task(agent="scout")`, or whatever read-only agent your host bundles; a Legion architect\'s own spec uses the Legion plugin\'s `plan-gap-analyst` agent instead, which only a Legion session has. See the `dispatch-first` skill, "Design in the spec".';
 function renderAdvice(tool, key, advice, opts) {
   if (advice === undefined)
     return [];

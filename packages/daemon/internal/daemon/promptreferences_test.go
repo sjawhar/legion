@@ -11,27 +11,53 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
-// testPlugin lays out a pi-legion-envoy under dir as the image unpacks one: a manifest declaring
-// contract 3 and a skills directory, the legion.ts load marker, and files, each named relative to
-// the plugin's root.
+// testPlugin lays out a pi-legion under dir as the image unpacks one: a manifest declaring
+// contract 3 and a skills directory, the legion.ts load marker naming interface 1, and files,
+// each named relative to the plugin's root.
 func testPlugin(t *testing.T, dir string, files map[string]string) string {
 	t.Helper()
-	root := filepath.Join(dir, "pi-legion-envoy")
+	root := filepath.Join(dir, "pi-legion")
 	all := map[string]string{
-		"package.json": `{"name":"@sjawhar/pi-legion-envoy","version":"0.0.0-test","legion":{"daemonApiVersion":3},` +
+		"package.json": `{"name":"@sjawhar/pi-legion","version":"0.0.0-test","legion":{"daemonApiVersion":3},` +
 			`"omp":{"extensions":["dist/legion.js"],"skills":["dist/skills"]}}`,
-		filepath.Join("dist", "legion.js"): "globalThis[Symbol.for(\"legion.pi-envoy.legion-loaded\")] = import.meta.url;\n" +
+		filepath.Join("dist", "legion.js"): "globalThis[Symbol.for(\"legion.pi-legion.loaded\")] = { from: import.meta.url, envoyInterface: 1 };\n" +
 			"export default function () {}\n",
 	}
 	maps.Copy(all, files)
-	for name, content := range all {
+	writeTree(t, root, all)
+	return root
+}
+
+// testEnvoyPlugin lays out a pi-envoy under dir as the image unpacks one: a manifest naming a
+// skills directory, empty until a test stages skills into it, an envoy.js that publishes the plugin
+// interface at version 1 as the Envoy entry does (get-or-create, then its own URL among the
+// publishers), and files, each named relative to the plugin's root.
+func testEnvoyPlugin(t *testing.T, dir string, files map[string]string) string {
+	t.Helper()
+	root := filepath.Join(dir, "pi-envoy")
+	all := map[string]string{
+		"package.json": `{"name":"@sjawhar/pi-envoy","version":"0.0.0-test","omp":{"extensions":["dist/envoy.js"],"skills":["dist/skills"]}}`,
+		filepath.Join("dist", "envoy.js"): "const key = Symbol.for(\"legion.pi-shared.envoy-plugin-interface\");\n" +
+			"globalThis[key] ??= { version: 1, publishers: [] };\n" +
+			"globalThis[key].publishers.push(import.meta.url);\n" +
+			"export default function () {}\n",
+	}
+	maps.Copy(all, files)
+	writeTree(t, root, all)
+	mkdir(t, filepath.Join(root, "dist", "skills"))
+	return root
+}
+
+// writeTree writes each of files, named relative to root, under it.
+func writeTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
 		path := filepath.Join(root, name)
 		mkdir(t, filepath.Dir(path))
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return root
 }
 
 // referencePlugin is a testPlugin whose one skill loads itself and dispatches

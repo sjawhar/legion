@@ -18,6 +18,8 @@ COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
+COPY packages/pi-legion/package.json packages/pi-legion/package.json
+COPY packages/pi-shared/package.json packages/pi-shared/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json

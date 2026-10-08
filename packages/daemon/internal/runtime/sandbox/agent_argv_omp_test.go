@@ -23,14 +23,16 @@ func importMarker(name string) string {
 
 // A pod's agent runs agentArgv in the repository's working copy. On the pinned binary that argv
 // imports none of the repository's extensions, hooks or TypeScript custom commands, each of which
-// runs its module code at import, while the Legion plugin still loads as the one explicit
-// extension. The control drops --no-extensions and keeps the plugin root, and imports all four:
+// runs its module code at import, while the Envoy and Legion plugins still load as the explicit
+// extensions. The control drops --no-extensions and keeps the plugin roots, and imports all five:
 // without it, a missing marker could mean a fixture Oh My Pi never looks at.
 func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 	omp := testbin.OMP(t)
 	dir := t.TempDir()
-	plugin, repo, home := filepath.Join(dir, "plugin"), filepath.Join(dir, "repo"), filepath.Join(dir, "home")
+	envoy, plugin, repo, home := filepath.Join(dir, "envoy"), filepath.Join(dir, "plugin"), filepath.Join(dir, "repo"), filepath.Join(dir, "home")
 	for path, content := range map[string]string{
+		filepath.Join(envoy, "package.json"):                              `{"name":"envoy-test-plugin","version":"0.0.1","omp":{"extensions":["extension.js"]}}`,
+		filepath.Join(envoy, "extension.js"):                              importMarker("envoy"),
 		filepath.Join(plugin, "package.json"):                             `{"name":"legion-test-plugin","version":"0.0.1","omp":{"extensions":["extension.js"]}}`,
 		filepath.Join(plugin, "extension.js"):                             importMarker("plugin"),
 		filepath.Join(repo, ".omp", "extensions", "repository.ts"):        importMarker("extension"),
@@ -68,11 +70,13 @@ func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 	environ := []string{"HOME=" + home, "OMP_PROFILE=legion", "PATH=/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED=true"}
 
 	pod := launch{prompt: "The test's system prompt."}.agentArgv([]string{omp})
-	root := slices.Index(pod, legionPlugin)
-	if root < 0 {
-		t.Fatalf("agentArgv %q names no %s", pod, legionPlugin)
+	for _, root := range []struct{ image, test string }{{envoyPlugin, envoy}, {legionPlugin, plugin}} {
+		at := slices.Index(pod, root.image)
+		if at < 0 {
+			t.Fatalf("agentArgv %q names no %s", pod, root.image)
+		}
+		pod[at] = root.test
 	}
-	pod[root] = plugin
 	control := slices.DeleteFunc(slices.Clone(pod), func(arg string) bool { return arg == "--no-extensions" })
 
 	for _, testCase := range []struct {
@@ -80,8 +84,8 @@ func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 		argv []string
 		want []string
 	}{
-		{"the pod's argv", pod, []string{"plugin"}},
-		{"the discovery-on control", control, []string{"command", "extension", "hook", "plugin"}},
+		{"the pod's argv", pod, []string{"envoy", "plugin"}},
+		{"the discovery-on control", control, []string{"command", "envoy", "extension", "hook", "plugin"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			marks := t.TempDir()

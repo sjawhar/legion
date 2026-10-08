@@ -164,12 +164,13 @@
       },
     },
     "packages/pi-envoy": {
-      "name": "@sjawhar/pi-legion-envoy",
+      "name": "@sjawhar/pi-envoy",
       "version": "7.12.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
+        "@legion/pi-shared": "workspace:*",
         "@oh-my-pi/pi-tui": "^18.1.15",
         "@oh-my-pi/pi-utils": "^18.1.15",
         "@toon-format/toon": "^4.1.1",
@@ -177,6 +178,32 @@
         "nats": "^2.29.2",
         "typescript": "^5.3.0",
         "zod": "4.3.6",
+      },
+    },
+    "packages/pi-legion": {
+      "name": "@sjawhar/pi-legion",
+      "version": "7.12.0",
+      "devDependencies": {
+        "@biomejs/biome": "^2.3.14",
+        "@legion/contracts": "workspace:*",
+        "@legion/envoy-client": "workspace:*",
+        "@legion/pi-shared": "workspace:*",
+        "@oh-my-pi/pi-utils": "^18.1.15",
+        "@types/bun": "latest",
+        "typescript": "^5.3.0",
+        "zod": "4.3.6",
+      },
+    },
+    "packages/pi-shared": {
+      "name": "@legion/pi-shared",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@biomejs/biome": "^2.3.14",
+        "@legion/envoy-client": "workspace:*",
+        "@oh-my-pi/pi-tui": "^18.1.15",
+        "@oh-my-pi/pi-utils": "^18.1.15",
+        "@types/bun": "latest",
+        "typescript": "^5.3.0",
       },
     },
     "packages/proof-editor": {
@@ -596,6 +623,8 @@
 
     "@legion/envoy-client": ["@legion/envoy-client@workspace:packages/envoy-client"],
 
+    "@legion/pi-shared": ["@legion/pi-shared@workspace:packages/pi-shared"],
+
     "@legion/proof-editor": ["@legion/proof-editor@workspace:packages/proof-editor"],
 
     "@lezer/common": ["@lezer/common@1.5.2", "", {}, "sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ=="],
@@ -992,7 +1021,9 @@
 
     "@sjawhar/opencode-legion-envoy": ["@sjawhar/opencode-legion-envoy@workspace:packages/envoy-plugin"],
 
-    "@sjawhar/pi-legion-envoy": ["@sjawhar/pi-legion-envoy@workspace:packages/pi-envoy"],
+    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@workspace:packages/pi-envoy"],
+
+    "@sjawhar/pi-legion": ["@sjawhar/pi-legion@workspace:packages/pi-legion"],
 
     "@smithy/core": ["@smithy/core@3.33.3", "", { "dependencies": { "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-CsOeKq/9kA3y6VJHt+/+VTCtBaxJ4OTFpgrjIUhPpDIKxBci1k2bJaQASF2h/ELWrulGp+t97DZ0mevfAD8idg=="],
 

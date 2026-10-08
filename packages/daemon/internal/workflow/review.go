@@ -372,7 +372,7 @@ func (r round) stuckAs(other round) bool {
 // the decision it posted on GitHub, recorded on the round. Either may arrive second, and an
 // approval also waits for the head's checks to settle green. A red at a code head sends the work
 // back first. A round whose reviewer never completes is not ended by the decision alone: the
-// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
+// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-legion's
 // phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
 // stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
 // the head, since the decision it needs is of the head. An approved round under a red only declared

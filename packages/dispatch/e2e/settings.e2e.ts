@@ -20,7 +20,14 @@ test("a repository mapping added in Settings assigns a new external issue to its
   try {
     await page.goto("/settings");
     await expect(page.getByRole("heading", { name: "Repositories → Projects" })).toBeVisible();
-    await page.getByLabel("Repository", { exact: true }).fill("Owner/Repo.git");
+    const repository = page.getByLabel("Repository", { exact: true });
+    // The browser compiles `pattern` with the `v` flag and ignores one that does not compile, so a
+    // refusal here says `ownerRepoPattern` compiles as the browser reads it.
+    await repository.fill("a/b/c");
+    expect(
+      await repository.evaluate((input: HTMLInputElement) => input.validity.patternMismatch)
+    ).toBe(true);
+    await repository.fill("Owner/Repo.git");
     await page.getByRole("combobox", { exact: true, name: "Project" }).selectOption("CORE");
     const mappingSaved = page.waitForResponse(
       (response) =>

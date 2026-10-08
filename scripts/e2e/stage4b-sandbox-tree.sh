@@ -17,7 +17,7 @@
 # is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
 # killed mid-turn and an implementer killed until it is held, and is taken out the same way. Each
 # checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
-# plugin version recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
+# two plugins' versions recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
 # `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
@@ -178,6 +178,8 @@ audited=
 fixture_branch=
 pair_recorded=
 pair_session=
+# Set while done cleans the smoke main (clean_smoke_main), so the verdict can tell that failure apart.
+smoke_main_cleaning=
 
 begin() {
   check=$1
@@ -1246,10 +1248,17 @@ cleanup() {
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
   # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
-  # lets a blocked checkpoint end BLOCKED.
+  # lets a blocked checkpoint end BLOCKED. A failure while done cleans the smoke main
+  # (smoke_main_cleaning) is the fixture's teardown, not the workflow under test, and the verdict
+  # says so, unless a teardown check failed or a production guard recorded a violation: then the
+  # ordinary failure stands.
   if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
-    echo "stage 4b e2e: FAIL (check $check)"
+    if [ -n "$smoke_main_cleaning" ] && [ -z "$teardown_failed" ] && [ ! -s "$evidence/pane-endpoint-violation.txt" ]; then
+      echo "stage 4b e2e: FAIL (fixture teardown, in check $check): every checkpoint before $check passed, and $check failed only at the cleanup of $repo main, after tree 1's merge, production check and sign-off; the rest of $check and the checkpoints after it did not run"
+    else
+      echo "stage 4b e2e: FAIL (check $check)"
+    fi
   elif [ -n "$teardown_failed" ]; then
     echo "stage 4b e2e: FAIL (check $teardown_failed, in the teardown after check $check)"
   elif [ -n "$was_blocked" ]; then
@@ -1513,9 +1522,11 @@ stale_consumers=$(nats_stream consumers "$nats_url" "$stream" "legion-go-$projec
 locked=1
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
 revision=$(sed -n 's/^source: //p' <<<"$built")
-jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
-  --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugin: $plugin, started: $started}' >"$evidence/run.json"
-note "source $revision; image $image; plugin $(jq -r .plugin "$evidence/run.json")"
+jq -n --arg revision "$revision" --arg image "$image" \
+  --arg envoy "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
+  --arg legion "$(jq -r '.name + "@" + .version' "$root/packages/pi-legion/package.json")" \
+  --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugins: {envoy: $envoy, legion: $legion}, started: $started}' >"$evidence/run.json"
+note "source $revision; image $image; plugins $(jq -r '.plugins.envoy + " and " + .plugins.legion' "$evidence/run.json")"
 note "daemon bind $bind, advertise_host $host: API http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
 if [ -n "$until" ]; then
   # A name no checkpoint has would run the whole proof as a development run.
@@ -2439,7 +2450,8 @@ skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
 else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 make_omp_home "$omp_home"
-bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" >/dev/null
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" >/dev/null
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
 pin=$(<"$root/.omp-pin")
@@ -2777,8 +2789,13 @@ if issue_phase "$tree1" production_check >/dev/null 2>&1; then
 fi
 wait_for_phase "$tree1" "done" 900
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
+# The smoke main's cleanup is the fixture's teardown, not the workflow under test. It stays inside
+# this checkpoint, so a STAGE4B_UNTIL=done run still cleans the smoke main, and smoke_main_cleaning
+# tells the EXIT trap's verdict that a failure here is the cleanup's.
+smoke_main_cleaning=1
 clean_smoke_main
 release_smoke_main
+smoke_main_cleaning=
 note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
 # The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
 dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
