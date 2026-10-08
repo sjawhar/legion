@@ -18,7 +18,7 @@
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget
-# and chromium (the browser PUPPETEER_EXECUTABLE_PATH names); and a generic toolchain for the
+# and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
 # pnpm and yarn, and the AWS CLI v2 — each of these on PATH at /usr/local/bin or /usr/bin; and the
 # license of every third-party piece of all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the
@@ -450,20 +450,18 @@ COPY --from=plugin /out/codegraph /opt/codegraph
 # because OMP's DirResolver derives the profile root from it. DO_NOT_TRACK=1: CodeGraph's telemetry
 # and update-check opt-out (ranked above CODEGRAPH_TELEMETRY, above stored config, above
 # default-on) — every worker's own `codegraph` call, and the warm-up the tmux daemon runs outside
-# this image, must never phone home for an automatic, non-opt-in tool. PUPPETEER_EXECUTABLE_PATH: the
-# browser Oh My Pi's browser tools launch. Oh My Pi takes this variable first; without it, it takes
-# the first of google-chrome-stable, google-chrome, chromium, chromium-browser and chrome on PATH (then
-# /usr/bin/chromium and its neighbours), and with none of those downloads Chrome for Testing into its
-# cache on a worker's first browser call. Naming the image's Chromium makes the choice deterministic
-# and the download impossible: the capability check runs this very executable (`browser`, image.go),
-# so the browser a worker gets is the one the probe ran. Image ENV, not a pod variable, because the
-# browser is the image's; an operator's pod env can still override it, and the probe then checks what
-# the pod would run.
+# this image, must never phone home for an automatic, non-opt-in tool. No PUPPETEER_EXECUTABLE_PATH:
+# Oh My Pi picks its browser by that variable first, else the first of google-chrome-stable,
+# google-chrome, chromium, chromium-browser and chrome on PATH (then /usr/bin/chromium and its
+# neighbours), and downloads Chrome for Testing only with none of those — so the image's chromium on
+# PATH is the one every worker gets with no download, and the capability check runs that same
+# resolution (`browser`, image.go). The variable stays the operator's: every variable this ENV sets
+# is one runtime.kubernetes.pod.env is refused (sandbox/operatorpod.go imageEnv), and an operator
+# pod naming another browser is exactly what the probe should check, not refuse.
 ENV OMP_PROFILE=legion \
     LEGION_OMP_PATH=/opt/omp/bin/omp \
     HOME=/home/legion \
     DO_NOT_TRACK=1 \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin
 # Numeric uid:gid (user `legion`, created above) so Kubernetes `runAsNonRoot` can verify it from the
 # image alone.
@@ -559,8 +557,8 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # plugins' dist/skills directories). It leaves those agents' models unresolved
 # (--skip-agent-models): the build has none of the operator's model configuration, which the pod
 # brings. Then it checks every image-site row of the capability table against this image, as a
-# worker's Oh My Pi would find each: `omp setup python --check`, the Chromium PUPPETEER_EXECUTABLE_PATH
-# names run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
+# worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
+# PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
 # CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
 # node, bun and uv on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then

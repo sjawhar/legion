@@ -62,12 +62,13 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
   on it), `curl`, `wget`, and `chromium` for the browser tools, installed without its Recommends (no
-  setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). The image sets
-  `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`, which Oh My Pi reads first when it picks a browser —
-  without it, it takes the first Chrome or Chromium it finds on `PATH`, and with none downloads Chrome
-  for Testing into its cache on a worker's first browser call — so the browser a worker gets is the one
-  the probe ran, and nothing is downloaded. An operator's pod env can still override the variable; the
-  probe then checks what the pod would run. `uv` still installs each project's own Python, from its
+  setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
+  its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
+  `PATH`, and downloads Chrome for Testing into its cache only with none of those — so the image's
+  `chromium` is the one every worker gets, with nothing downloaded, and the probe runs that same
+  resolution. The image sets no `PUPPETEER_EXECUTABLE_PATH`: a variable the image's `ENV` sets is one
+  `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
+  probe checks (it runs that executable), not something to refuse. `uv` still installs each project's own Python, from its
   `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
   Sandbox pod that is on the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
   elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
@@ -118,8 +119,8 @@ planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's r
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
 leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
-would find each — `omp setup python --check`, the Chromium `PUPPETEER_EXECUTABLE_PATH` names run with
-`--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
+would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
+`PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
 profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun` and `uv` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
