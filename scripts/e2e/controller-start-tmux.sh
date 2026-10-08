@@ -189,7 +189,13 @@ EOF
 # ---- --check-config --------------------------------------------------------------------------------
 begin check-config-passes
 out=$(legion start --check-config --config "$work/legion.yaml")
-[ "$out" = "Config OK: project=$project" ] || fail "got $out"
+[ "$(head -1 <<<"$out")" = "Config OK: project=$project" ] || fail "got $out"
+# After the OK line, one line per deployment capability the file alone leaves open, in boot's words
+# (LEGION-578): under tmux the secrets and resource-limits rows, each ending with the legion.yaml
+# line that records a decision. A report, so the exit stayed 0.
+want_gaps='capability secrets is open: the tmux runtime enrolls no process with the secrets broker; to record a decision, add to legion.yaml: capabilities.decided.secrets: "<reason>"
+capability resource-limits is open: the tmux runtime sets no requests or limits on a pane; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: "<reason>"'
+[ "$(tail -n +2 <<<"$out")" = "$want_gaps" ] || fail "the lines after the OK line are not the two open gaps: $out"
 note "$out"
 pass
 

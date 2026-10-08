@@ -128,7 +128,14 @@ row, before the OK line:
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
-tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). To run it yourself:
+tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). It requires
+`capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
+is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
+check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
+is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
+`missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
+pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). The runtime keeps the line's `model-fallback`
+mark for the deployment's capability report ([The deployment's capability report](#the-deployments-capability-report)). To run it yourself:
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
@@ -453,9 +460,10 @@ runtime:
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
       priority_class: legion
-    resources:                  # optional; a role absent here gets no requests or limits
-      tester: { limits: { memory: 8Gi } }
-      controller: { requests: { cpu: 250m, memory: 1Gi }, limits: { memory: 2Gi } }   # controller: daemon only
+    resources:                  # optional; a role absent here gets no requests or limits. A role is covered for the
+                                # resource-limits capability when it sets CPU and memory in both requests and limits
+      tester: { requests: { cpu: 2, memory: 4Gi }, limits: { cpu: 4, memory: 12Gi } }
+      controller: { requests: { cpu: 250m, memory: 1Gi }, limits: { cpu: 1, memory: 2Gi } }   # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
@@ -465,6 +473,8 @@ bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: 13371
 daemon_url: http://<the address pods reach the daemon at>:13370
+capabilities:                   # optional: the deployment capabilities decided by name, with the reason (The deployment's capability report, below); a gap is reported, never refused
+  decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>" }
 ```
 
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
@@ -507,7 +517,12 @@ all of it without starting the daemon, writing a file or running a key command, 
 refusal boot makes from the files and the environment before its first write, in boot's words: the
 operator, Envoy and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the
 runtime's own reads (the kubeconfig and every value's translation; under tmux, the OMP invocation,
-through `mise where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it
+through `mise where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). After its
+`Config OK: project=…` line it prints one line per deployment capability the file alone leaves open
+with no decision — `resource-limits` while a role reserves no CPU and memory, and `secrets` when no
+broker is configured — in boot's words (`capability <name> is open: <detail>; to record a decision,
+add to legion.yaml: capabilities.decided.<name>: "<reason>"`), and still exits 0: a report, not a
+refusal ([The deployment's capability report](#the-deployments-capability-report)). What it
 does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin
 gate and the image probe.
 
@@ -663,6 +678,48 @@ consumes both events, and that error line is its only sign. `legion-pane` is nev
 daemon's subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as
 `legion-pane`, and each refused subject logs the error line above (a refused consumer or
 subscription never delivers).
+
+### The deployment's capability report
+
+`packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
+every worker is a full agent), 19 rows, each checked at one site. The image rows (`eval-js`,
+`eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
+([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)); the live rows
+(`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) are
+proved against a running pod; the withheld rows carry the ruling that keeps them from every worker
+(`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`: dispatch://LEGION-200,
+Legion owns its dependencies; `production-identities`: dispatch://LEGION-551 and dispatch://LEGION-205);
+and the three deployment rows are the daemon's to measure from its own configuration, since no image or
+pod can show them:
+
+- `secrets`: `runtime.kubernetes.agent_secrets` is configured and the daemon's broker login is
+  `issued`. Under tmux it is open unless decided: no process is enrolled with the broker.
+- `model-fallback`: the pod's Oh My Pi has `retry.modelFallback` true, as the probe's OK line's
+  `model-fallback` mark reports it; under tmux the plugin gate reads the host's Oh My Pi once the gate
+  has passed. The example overlay turns it on ([Operator configuration](#operator-configuration)).
+- `resource-limits`: every workflow role — and the controller's, under `controller: daemon` — sets
+  CPU and memory in both requests and limits under `runtime.kubernetes.resources`
+  (`config.RoleResources.Reserved`); the row names each role that does not. Under tmux it is open
+  unless decided: a pane has no requests or limits.
+
+A deployment row is `present` when the deployment satisfies it, `decided` when `legion.yaml`'s
+`capabilities.decided.<name>: "<reason>"` records a decision on it (the report shows the reason in
+the gap's place; a decision on a satisfied row is moot and the row reads present), and `open`
+otherwise, carrying the line that records one. A name that is not one of the three is refused at
+load naming them; a blank reason too. The report appears in four places: the daemon's log, one
+warning per open row at boot and again whenever the set of open rows changes (the broker login
+reaching `issued` is the one change a running daemon sees), as `capability <name> is open: <detail>;
+to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
+--json` under `capabilities` (daemon API contract 15: every row as `{name, status, detail,
+decision?, configLine?}`, `status` one of `present`, `unchecked`, `live`, `withheld`, `decided` or
+`open`, the image rows `present` once the probe passed and `unchecked` before it or under tmux);
+the controller's `tick` notice, whose `openCapabilities` names the open rows so the day's report
+names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-config`, which prints
+after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a
+daemon that would not run its pods would itself keep workers from working, so a gap is the
+operator's to close or to decide, by name and with the reason. The example `legion.yaml`
+(`deploy/kubernetes/daemon/legion.yaml.example`) reserves CPU and memory for every role and decides
+`secrets`.
 
 ### Anatomy of a Sandbox pod
 
@@ -839,7 +896,8 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 ### Tree sizing: one tree per node
 
 The pool's floor, not the pod, decides node size. Legion pods carry no
-`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
+`karpenter.k8s.aws/instance-cpu` selector, and only the requests and limits
+`runtime.kubernetes.resources` gives their role. The `legion` NodePool's
 `karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
 
 Every tree pod carries two rules:
@@ -847,8 +905,13 @@ Every tree pod carries two rules:
 - a required anti-affinity against the pods of every other tree (`legion.dev/tree Exists` and
   `NotIn [<own tree>]`, at `kubernetes.io/hostname`).
 
-So concurrent trees never share a node. Requests stay unset because under required colocation the
-first pod placed decides the node, and a request on a later pod would strand it.
+So concurrent trees never share a node. Under required colocation the first pod placed decides the
+node, so a request on a later pod that the node cannot fit beside the tree's resident pods strands
+it: requests, when set, must fit the tree's node alongside the pods resident at once — an architect
+and one phase worker at a time — which is how the example `legion.yaml` sizes them for the 4-vCPU
+node (the `resource-limits` capability, LEGION-578's ruling; [The deployment's capability
+report](#the-deployments-capability-report)). A pod per issue, with a reservation of its own and the
+node spread that allows, is dispatch://LEGION-632's.
 
 **The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
 trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
@@ -1075,7 +1138,14 @@ claim's pod and the image probe's.
   ConfigMap `legion-operator-route` in namespace `legion`, its only writer. To change a role's
   model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
   Pods started after that use it; a running pod keeps the files it started with until it restarts,
-  since both are mounted by `subPath`, which the kubelet never refreshes.
+  since both are mounted by `subPath`, which the kubelet never refreshes. The example overlay also
+  turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried on another
+  model; which model is the repository's `retry.fallbackChains` to name): the probe pod reads the
+  effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its
+  OK line's `model-fallback` mark, and the daemon reports the `model-fallback` capability open while
+  a deployment's copy turns it off — a report, not a refusal; a `capabilities.decided.model-fallback:
+  "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability
+  report](#the-deployments-capability-report)).
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
