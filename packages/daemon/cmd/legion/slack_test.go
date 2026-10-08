@@ -129,4 +129,3 @@ LEGION_SLACK_BOT_TOKEN=test-bot-token exec "$child" -test.run=TestSlackCommandHe
 		t.Errorf("agent-secrets reasons = %q", got)
 	}
 }
-
