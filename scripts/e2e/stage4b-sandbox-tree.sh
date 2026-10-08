@@ -15,7 +15,9 @@
 # node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
 # admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
 # is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
-# killed mid-turn and an implementer killed until it is held, and is taken out the same way. Each
+# killed mid-turn and an implementer killed until it is held, and is taken out the same way. Between
+# the operator's controller and tree 4, the daemon runs under `controller: daemon` and back
+# (daemon-controller-liveness). Each
 # checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
 # two plugins' versions recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
@@ -476,6 +478,11 @@ nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@" 2> >(scrub >&2);
 
 # ---- the daemon ----------------------------------------------------------------------------------
 
+# controller_launch is legion.yaml's `controller`, and controller_cpu the CPU the pod of the
+# controller the daemon launches requests (runtime.kubernetes.resources.controller). Both stay empty,
+# the operator's controller, but in daemon-controller-liveness.
+controller_launch=
+controller_cpu=
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
@@ -522,6 +529,18 @@ EOF
   render_operator_pod
   sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
   grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+  if [ -n "$controller_launch" ]; then
+    cat >>"$work/legion.yaml" <<EOF
+    resources:
+      controller:
+        requests:
+          cpu: "$controller_cpu"
+          memory: 1Gi
+        limits:
+          memory: 2Gi
+controller: $controller_launch
+EOF
+  fi
 }
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
 # in place of its placeholder.
@@ -621,6 +640,14 @@ log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_lo
 left_planning() {
   log_lines "workflow: phase changed" |
     jq -s -e -c --arg issue "$1" 'map(select(.issue == $issue and .from == "planning")) | first // empty | {time, to}'
+}
+# liveness_verdict PHASE MARK [--arg NAME VALUE]... is lib/controller-liveness-verdict.jq's verdict
+# for PHASE on the daemon log's lines after line MARK (daemon-controller-liveness).
+liveness_verdict() {
+  local phase=$1 mark=$2
+  shift 2
+  tail -n "+$((mark + 1))" "$daemon_log" |
+    jq -R -s -c --arg phase "$phase" --argjson boot "$boot_timeout" "$@" -f "$root/scripts/e2e/lib/controller-liveness-verdict.jq"
 }
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
@@ -1290,12 +1317,16 @@ production_baseline() {
   dispatch_get "issues?project=$project" >/dev/null || fail "read production Dispatch"
   prod_baseline=$(date -u +%FT%T.%NZ)
 }
+# registered_jq selects the daemon log's lines that record one of the run's sessions registering: an
+# agent's claim, the operator's controller, and the controller the daemon launches
+# (daemon-controller-liveness). Each carries the session.
+registered_jq='select(.msg | IN("api: claim registered", "api: controller registered", "api: launched controller registered"))'
 # production_audit fails on any production write the run made outside LEGSMOKE, and on any sampled
 # interest of the run's sessions outside it.
 production_audit() {
   local sessions actors
   audited=1
-  sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session) | unique' "$daemon_log")
+  sessions=$(jq -R -s -c "split(\"\\n\") | map(fromjson? | $registered_jq | .session) | unique" "$daemon_log")
   printf '%s\n' "$sessions" >"$evidence/run-sessions.json"
   # Production Dispatch is busy with other work while the run goes on, so an issue outside
   # LEGSMOKE updated since the baseline is the run's write only when one of its events names one
@@ -1369,14 +1400,14 @@ find_outside_writer() {
   fail "$(wc -w <<<"$keys") issues outside $project were updated since $prod_baseline, and none of their events reads as since then"
 }
 # interests_sample LABEL appends the Envoy interests of every session the run has registered so far
-# (its agents' claims and the operator's controller)
+# (registered_jq: its agents' claims and both kinds of controller)
 # to $evidence/interests.jsonl, each line labelled, and each attempt's outcome to
 # $evidence/interests-outcomes.txt as "TIME SESSION ok|absent|error DETAIL". A session no longer
 # registered answers 404 (absent). No answer, or any other, is an error, so an unreadable listener
 # never reads as a clean sample.
 interests_sample() {
   local session code now tmp=$work/interest.$BASHPID.json
-  for session in $(jq -R -r 'fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session' "$daemon_log" | sort -u); do
+  for session in $(jq -R -r "fromjson? | $registered_jq | .session" "$daemon_log" | sort -u); do
     now=$(date -u +%FT%T.%3NZ)
     if ! code=$(curl -sS --max-time 20 -o "$tmp" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session" 2>&1); then
       printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code" | scrub)" >>"$evidence/interests-outcomes.txt"
@@ -2689,6 +2720,142 @@ report_after_tick || fail "the controller's first report message was not posted 
 note "the controller parked $report ('$report_title') in icebox and posted its daily report there on a tick's turn"
 pass
 fi # the daily report
+
+# boot_timeout is worker_boot_timeout_seconds, the daemon's default (120), which the run's legion.yaml
+# leaves unset: the least time between two not-registered lines, and how long a pod may stay
+# unscheduled before the runtime retires it.
+boot_timeout=120
+begin daemon-controller-liveness
+# Under `controller: daemon` the daemon's liveness sweep watches the controller it launches as it
+# watches the operator's, and writes the two lines a log monitor on the daemon counts, with the same
+# text and on the same cadence (docs/kubernetes.md, "Controller liveness"; the texts and the verdict
+# are lib/controller-liveness-verdict.jq's). The operator's controller quits first, so no session of
+# it holds the controller role. Then the daemon restarts three times:
+# 1. `controller: daemon`, the controller's pod sized to run: the controller the daemon launches
+#    registers, holds the role and is ready, and for two boot timeouts and more the daemon logs
+#    neither line. That is the negative control.
+# 2. The same, the pod's CPU request past any node's: the daemon re-adopts the running controller,
+#    and the driver deletes its pod. Each relaunch's pod stays unschedulable until the runtime
+#    retires it at the boot timeout, so the controller cannot come back, and the record still names
+#    the dead session: the Prober's no-holder line at every sweep, and the not-registered line once
+#    per boot timeout in the daemon's form, through a relaunch that died.
+# 3. `controller: operator`: the boot stops the controller's claim, releases its Sandbox and volume
+#    and ends its registration, and the sweep logs the operator's line, exactly the monitored text.
+# The rest of the run keeps `controller: operator` with no controller registered, as before the
+# controller checkpoint.
+controller_token=legion-${project,,}-controller
+# controller_claim prints the controller's claim as `legion claims` shows it.
+controller_claim() { claims_cli list --json | jq -ce --arg t "$controller_token" '.claims[] | select(.token == $t)'; }
+controller_live() { controller_claim | jq -e '.state | IN("ready", "idle", "working")' >/dev/null; }
+# role_answer prints the listener's status for the lookup of the controller role, and leaves its body
+# in $work/controller-role.json.
+role_answer() { curl -sS --max-time 20 -o "$work/controller-role.json" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/roles/$controller_token" 2>/dev/null; }
+role_unheld() { [ "$(role_answer)" = 404 ]; }
+role_held_by() { [ "$(role_answer)" = 200 ] && jq -e --arg s "$1" '.holder == $s' "$work/controller-role.json" >/dev/null; }
+restart_daemon() {
+  stop_pid "$daemon_pid"
+  daemon_pid=
+  write_legion_config
+  start_daemon
+}
+# The operator's controller quits as a person quits it (controller-start-tmux.sh): Ctrl-C ends a
+# turn and asks again, and Ctrl-D on the empty editor quits. The tmux command's own shell, which
+# names the command too, is not `legion controller start`, so the pattern is anchored at the binary.
+operator_controller_runs() { pgrep -f -- "^$work/legion controller start --config $work/controller.yaml" >/dev/null; }
+operator_controller_quit() { ! operator_controller_runs; }
+if operator_controller_runs; then
+  for _ in 1 2 3 4 5; do
+    operator_controller_runs || break
+    tmux -L "legion-e2e4b-$$" send-keys -t controller C-c
+    sleep 2
+  done
+  if operator_controller_runs; then tmux -L "legion-e2e4b-$$" send-keys -t controller C-d; fi
+  until_true 60 "the operator's controller to quit" operator_controller_quit
+  note "the operator's controller quit"
+fi
+until_true 300 "the listener to answer that the controller role $controller_token has no live holder" role_unheld
+# 1. The negative control.
+controller_launch=daemon
+controller_cpu=250m
+restart_daemon
+until_true 900 "the controller the daemon launched, $controller_token, to register and be ready" controller_live
+launched_session=$(controller_claim | jq -r .session)
+until_true 120 "the controller role to name $launched_session" role_held_by "$launched_session"
+locator=$(daemon_state | jq -c .controllerLocator)
+jq -e --arg s "$launched_session" '.sessionId == $s' <<<"$locator" >/dev/null ||
+  fail "controllerLocator $locator does not name $launched_session, the session of the controller the daemon launched"
+log_lines "api: launched controller registered" | jq -e --arg s "$launched_session" 'select(.session == $s)' >/dev/null ||
+  fail "the daemon logged no registration of $launched_session as the controller it launched"
+up_mark=$(wc -l <"$daemon_log")
+watched=$((2 * boot_timeout + 30))
+note "$controller_token is ready as $launched_session and holds the role; watching the daemon log for $watched s"
+sleep "$watched"
+controller_live || fail "the daemon's controller left ready during the negative control: $(controller_claim | jq -c '{state, generation}')"
+role_held_by "$launched_session" || fail "the controller role stopped naming $launched_session during the negative control"
+up=$(liveness_verdict up "$up_mark") || fail "lib/controller-liveness-verdict.jq could not read the daemon log"
+printf '%s\n' "$up" >"$evidence/controller-liveness-up.json"
+jq -e '.wrong == []' <<<"$up" >/dev/null || fail "the daemon logged a liveness line while its controller held the role: $(jq -c .wrong <<<"$up")"
+note "negative control: after line $up_mark of the daemon log, for $watched s with $launched_session holding the role, neither line"
+pod=$(controller_claim | jq -r .locator.sandbox.name)
+mkdir -p "$evidence/transcripts/daemon-controller"
+op exec "$pod" -c worker -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
+  tar -C "$evidence/transcripts/daemon-controller" -xf - 2>/dev/null || note "the session of the controller the daemon launched could not be copied from $pod"
+# 2. The controller cannot come back.
+controller_cpu=100000
+restart_daemon
+until_true 300 "the restarted daemon to re-adopt its controller, ready" controller_live
+claim=$(controller_claim)
+[ "$(jq -r .session <<<"$claim")" = "$launched_session" ] || fail "the restarted daemon's controller is $(jq -c '{session, state}' <<<"$claim"), not $launched_session re-adopted"
+deleted=$(jq -r .locator.incarnation <<<"$claim")
+pod=$(jq -r .locator.sandbox.name <<<"$claim")
+down_mark=$(wc -l <"$daemon_log")
+driver_action delete "$deleted"
+op delete pod "$pod" --wait=false >/dev/null
+note "deleted the controller's pod $pod (uid $deleted); each relaunch requests $controller_cpu CPU, more than any node holds"
+liveness_down() {
+  liveness_verdict down "$down_mark" --arg claim "$controller_token" --arg session "$launched_session" --arg deleted "$deleted" \
+    >"$work/controller-liveness-down.json"
+}
+down_settled() { liveness_down && jq -e '.missing == [] or .wrong != []' "$work/controller-liveness-down.json" >/dev/null; }
+report_down() { note "the verdict so far: $(jq -c '{missing, wrong}' "$work/controller-liveness-down.json" 2>/dev/null)"; }
+timeout_hook=report_down
+until_true 900 "both liveness lines while the controller cannot come back, through a relaunch that died" down_settled
+timeout_hook=
+cp "$work/controller-liveness-down.json" "$evidence/controller-liveness-down.json"
+jq -e '.wrong == []' "$work/controller-liveness-down.json" >/dev/null ||
+  fail "the daemon's liveness lines depart from what a log monitor counts: $(jq -c .wrong "$work/controller-liveness-down.json")"
+# Each relaunch that died is one the runtime retired at the boot timeout because the scheduler never
+# placed its pod: the launch the driver made to fail, and no other death.
+unscheduled=$(never_scheduled_deaths "$evidence/pod-watch.json" "$daemon_log")
+for uid in $(jq -r '.deaths[].incarnation' "$work/controller-liveness-down.json"); do
+  grep -qxF -- "$uid" <<<"$unscheduled" || fail "the controller's relaunch $uid died, but the pod watch did not see its pod only unschedulable"
+done
+note "$(jq -r --arg m "$down_mark" --arg s "$launched_session" '"after line \($m) of the daemon log: the no-holder line \(.noHolder | length) times, each naming \($s), from \(.noHolder[0].time) to \(.noHolder[-1].time); the not-registered line \(.notRegistered | length) times, at \([.notRegistered[].time] | join(", ")), claim states \([.notRegistered[].claimState] | unique | join(", ")), each in the daemon form; relaunches retired unscheduled: \([.deaths[] | "\(.incarnation) at \(.time)"] | join(", "))"' "$work/controller-liveness-down.json")"
+# 3. Back to the operator.
+op_mark=$(wc -l <"$daemon_log")
+controller_launch=
+controller_cpu=
+restart_daemon
+controller_retired() { controller_claim | jq -e '.state == "retired"' >/dev/null; }
+until_true 120 "$controller_token to be retired" controller_retired
+until_true 600 "the controller's Sandbox and volume to be gone" sh -c \
+  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get sandboxes,pvc -l 'legion.dev/project=$run_label,legion.dev/role=controller' -o name) && [ -z \"\$out\" ]"
+for msg in "controller: stopping the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator" \
+  "controller: ending the registration of the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator"; do
+  [ "$(tail -n "+$((op_mark + 1))" "$daemon_log" | jq -R -c --arg m "$msg" 'fromjson? | select(.msg == $m)' | wc -l)" = 1 ] ||
+    fail "the boot under controller: operator did not log '$msg' once"
+done
+daemon_state | jq -e '.controllerLocator == null' >/dev/null || fail "controllerLocator still names $(daemon_state | jq -c .controllerLocator) after the switch back"
+operator_settled() {
+  liveness_verdict operator "$op_mark" >"$work/controller-liveness-operator.json" &&
+    jq -e '.missing == [] or .wrong != []' "$work/controller-liveness-operator.json" >/dev/null
+}
+until_true $((boot_timeout + 120)) "the operator's not-registered line" operator_settled
+cp "$work/controller-liveness-operator.json" "$evidence/controller-liveness-operator.json"
+jq -e '.wrong == []' "$work/controller-liveness-operator.json" >/dev/null ||
+  fail "the operator's line departs from the monitored text: $(jq -c .wrong "$work/controller-liveness-operator.json")"
+note "back under controller: operator: $controller_token retired, its Sandbox and volume gone, its registration ended, and the operator's line at $(jq -r '.notRegistered[0].time' "$work/controller-liveness-operator.json"), exactly the monitored text"
+pass
 
 begin deaths-with-work
 # A worker whose process dies after its agent is ready, while it has its task outstanding, gets the

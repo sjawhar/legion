@@ -1493,13 +1493,17 @@ registry. While no session holds the current capability, or the registry says th
 it logs `controller not registered; run legion controller start` at most once per
 `worker_boot_timeout_seconds`. Under `controller: daemon` the line goes on with that mode's remedy,
 `… only under controller: operator; this daemon launches its own controller and relaunches it`,
-and names the state of the controller's claim (`claimState`): `launching` while a launch is in
-flight, `failed` or `retired` while the daemon waits to retry it, so a launch or a backoff reads
-apart from a death. While the registry holds the controller role for nobody, the daemon also logs
-`controller liveness: the controller role has no live holder; the controller is gone` at every
-check. Both modes log both lines on the same schedule, and every line names the mode (`mode`; the
-not-registered line also says whether a session holds the record, `registered`), so one log query
-on either line's text counts either mode.
+and names the state of the controller's claim as the daemon's store holds it (`claimState`):
+`launching` while a launch is in flight, `failed` or `retired` while the daemon waits to retry it,
+so a launch or a backoff reads apart from a death. The check runs beside the daemon's keeping of its
+controller and never waits on a launch, however long one takes. While the registry holds the
+controller role for nobody, the daemon also logs `controller liveness: the controller role has no
+live holder; the controller is gone` at every check. Both modes log both lines on the same schedule,
+and every line names the mode (`mode`; the not-registered line also says whether a session holds the
+record, `registered`), so one log query on either line's text counts either mode. Stage 4b's
+`daemon-controller-liveness` checkpoint shows both lines for a daemon-launched controller that dies
+and cannot be relaunched, and neither while it runs
+([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh)).
 
 ### Daemon-launched controller
 
