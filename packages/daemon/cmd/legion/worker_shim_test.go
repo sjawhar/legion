@@ -217,6 +217,74 @@ func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing
 	}
 }
 
+// A role's stop is one signal to its whole process group (internal/launcher's signalGeneration:
+// `kill(-1)` in the role's PID namespace): Oh My Pi exits at once on its own SIGTERM, the shim
+// follows its child, and the `codegraph init` the warm-up still has in flight dies with them. That
+// build's lease, `.codegraph/legion-warm.lock`, is released by the warm-up once its dead child is
+// reaped — which can only happen while the shim process is still alive. So the command returns
+// only once an in-flight warm-up has let go, with the agent's exit status as before: a shim that
+// exits the moment the agent does leaves the lease behind, and the role's relaunch within
+// warmLeaseStale (60 s) reads it as a live build elsewhere and skips its own warm-up, so the
+// issue's index stays partial until a launch a minute later takes the lease over. Measured in the
+// LEGION-629 tester pod with the branch's `legion worker-shim --warm-codegraph` wrapping the real
+// Oh My Pi: `kill -TERM -- -<shim pgid>` twelve seconds into the build left the lease, with no
+// `[legion]` line logged, and the next launch logged `skipped: another process holds`.
+//
+// Here the agent exits the moment the lease exists, and the fake `codegraph init` ends half a
+// second later, as the real one does when the group signal reaches it; at the command's return the
+// lease must be gone.
+func TestWorkerShimLetsAnInFlightWarmUpReleaseItsLeaseBeforeItExits(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const slowInit = `#!/bin/sh
+case "$1" in
+  status) printf '{"initialized":false}\n' ;;
+  init) sleep 0.5; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "codegraph"), []byte(slowInit), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	workspaceDir := t.TempDir()
+	t.Setenv("LEGION_WORKSPACE", workspaceDir)
+	lease := filepath.Join(workspaceDir, ".codegraph", "legion-warm.lock")
+
+	daemon := acknowledgeHello(ln)
+
+	var stdout, stderr bytes.Buffer
+	started := time.Now()
+	code := run(context.Background(), []string{"legion", "worker-shim",
+		"--connect", "unix://" + socket, "--boot-token-file", token, "--warm-codegraph",
+		"--", "sh", "-c", `echo '{"type":"fake_ready"}'; while [ ! -e "$0" ]; do sleep 0.01; done; exit 7`, lease}, &stdout, &stderr)
+	elapsed := time.Since(started)
+	if code != 7 {
+		t.Fatalf("exit %d, want the child's 7; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if _, err := os.Stat(lease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the shim returned %s after the agent exited with the warm-up's lease still at %s (stat: %v): a relaunch within the minute will skip its warm-up; stderr: %s", elapsed, lease, err, stderr.String())
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("the shim took %s to return after the agent exited; the wait for the warm-up must be bounded", elapsed)
+	}
+	if err := <-daemon; err != nil {
+		t.Fatalf("the daemon side: %v", err)
+	}
+}
+
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
 // the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
 // PI_CONFIG_FILES, ahead of the operator's, and the two session-placing variables where the pod
