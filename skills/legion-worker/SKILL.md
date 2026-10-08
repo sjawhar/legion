@@ -424,9 +424,12 @@ report with `handoff_complete` alone (below).
 ## Completion: report to the architect, then stay
 
 Report completion to the architect: call the `legion` tool with `op: "handoff_complete"` and
-`summary`: two sentences for the architect. A worker never runs `legion handoff complete` from
-bash, where the extension refuses it: the tool call is what the extension records, and a turn that
-ends with the phase still open gets one reminder.
+`summary`: two sentences for the architect. Report it through that tool call, never the shell
+command `legion handoff complete`: the tool call is what the extension's phase stall records, and
+a turn that ends with the phase still open gets one reminder. A completion run from the shell is
+recorded by the daemon all the same, but the stall does not see it and sends its one reminder; do
+not complete again on that reminder — the first completion stands, and a second is refused
+because the issue has already left your phase.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or

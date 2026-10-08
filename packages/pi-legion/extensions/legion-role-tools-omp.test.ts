@@ -357,14 +357,8 @@ const SCRATCH_TURNS: readonly Reply[] = [
   [{ type: "text", text: "WAITING: done." }],
 ];
 
-/** What a refusal of the deleted gate said, by role, and the words any refusal carries. */
-const REFUSALS = [
-  "the architect delegates all code work",
-  "the reviewer edits no code",
-  "the merger only verifies and reports",
-  "block",
-  "refused",
-];
+/** The words any refusal carries. */
+const REFUSALS = ["block", "refused"];
 
 /**
  * Asserts the pane's `count` tool results: every one before the control is a success that names
