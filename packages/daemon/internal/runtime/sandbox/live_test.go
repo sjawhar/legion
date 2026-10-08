@@ -733,7 +733,7 @@ func (r *liveRig) startRuntime() error {
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
 		Agent: stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
-		Tokens: r.tokens, Conns: ln, Log: r.log,
+		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log,
 	}
 	if r.env.agentSecretsURL != "" {
 		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}

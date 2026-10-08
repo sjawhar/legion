@@ -26,6 +26,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -65,8 +66,9 @@ func expectSteps(t *testing.T, got []string, want ...string) {
 }
 
 // A first launch creates the issue Sandbox Suspended, writes the init-only and every role-private
-// Secret, then sets it Running. The returned locator addresses only the requested role process in
-// the shared pod.
+// Secret — each role's holding its launcher token and the two gh files of its own App's token,
+// hosts.yml parsing back to that token — then sets it Running. The returned locator addresses only
+// the requested role process in the shared pod.
 func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
@@ -91,8 +93,11 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 		t.Fatalf("provision secret data %v", provision.Data)
 	}
 	secret := g.secret(roleSecretName(name, spec.Role))
-	if len(secret.Data) != 1 || len(secret.Data[LauncherTokenFile]) == 0 {
-		t.Fatalf("role secret keys %v, want the launcher token alone", slices.Sorted(maps.Keys(secret.Data)))
+	if len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 || string(secret.Data[GitHubConfigKey]) != ghconfig.Config {
+		t.Fatalf("role secret keys %v, want the launcher token and the role's two gh files", slices.Sorted(maps.Keys(secret.Data)))
+	}
+	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey]); err != nil || token != staticCredentialToken(spec.Role) {
+		t.Fatalf("the tester's hosts.yml holds token %q (%v), want its App's %q", token, err, staticCredentialToken(spec.Role))
 	}
 	var start shimwire.LauncherStart
 	for _, frame := range g.sent(workerToken) {
@@ -105,6 +110,27 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 	if owner := secret.OwnerReferences; len(owner) != 1 || owner[0].UID != g.sandbox(name).UID || owner[0].Kind != "Sandbox" {
 		t.Fatalf("secret owners %+v, want the issue sandbox", owner)
+	}
+}
+
+// The controller's one Secret holds its launcher token alone: it has no GitHub App, so its launch
+// never asks for a credential and its pod has no gh volume to project one into.
+func TestTheControllersSecretHoldsTheLauncherTokenAlone(t *testing.T) {
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.GitHubCredential = func(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
+			return ghconfig.Rendered{}, fmt.Errorf("the controller's launch asked for %s's github credential", role)
+		}
+	}))
+	g.spawn(controllerSpec(t))
+	name := SandboxName(controllerToken)
+	secret := g.secret(roleSecretName(name, claim.RoleController))
+	if secret == nil || len(secret.Data) != 1 || len(secret.Data[LauncherTokenFile]) == 0 {
+		t.Fatalf("the controller's Secret holds %v, want the launcher token alone", secret)
+	}
+	for _, volume := range g.pod(name).Spec.Volumes {
+		if strings.HasPrefix(volume.Name, "gh-") {
+			t.Errorf("the controller's pod has the %s volume", volume.Name)
+		}
 	}
 }
 
@@ -827,9 +853,9 @@ func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 
 // A step of an issue pod's preparation that fails — the wait for the tree's other pods to finish
 // initializing, the retained-sessions read, the removable-workspaces read, the provisioning-token
-// mint (a GitHub outage), the provisioning Secret's write — fails that launch with its error and
-// nothing more: the launch returns it, never panics, gives the tree's launch turn back, and the
-// tree's next launch, once the failure passes, launches.
+// mint (a GitHub outage), the provisioning Secret's write, a role's GitHub credential mint for its
+// Secret — fails that launch with its error and nothing more: the launch returns it, never panics,
+// gives the tree's launch turn back, and the tree's next launch, once the failure passes, launches.
 func TestAFailedStepOfAnIssuePodsPreparationReleasesTheTreesTurn(t *testing.T) {
 	failure := errors.New("the step failed")
 	for name, tc := range map[string]struct {
@@ -889,6 +915,18 @@ func TestAFailedStepOfAnIssuePodsPreparationReleasesTheTreesTurn(t *testing.T) {
 				}
 			},
 			want: "write its provisioning secret",
+		},
+		"a role's github credential mint": {
+			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
+				credential := func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
+					if failed.CompareAndSwap(false, true) {
+						return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+					}
+					return staticCredential(ctx, role)
+				}
+				return withOptions(func(o *Options) { o.GitHubCredential = credential }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
+			},
+			want: "write its launcher secrets: write the github credential for " + string(claim.Roles[0]) + ": no installation token",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

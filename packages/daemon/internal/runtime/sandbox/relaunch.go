@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -410,19 +411,38 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // writeLauncherSecrets makes, for each launcher role of the pod (l.roles), a role-private Secret
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
-// launcher's start command instead (launcherCommand).
+// launcher's start command instead (launcherCommand). In an issue pod (podKind.holdsGitHubCredential)
+// the Secret also carries the role's GitHub credential, its gh hosts.yml and config.yml rendered
+// from the role's App token (Options.GitHubCredential), which its container projects at GHConfigDir;
+// a mint that fails fails the launch naming the role, as a provisioning-token mint does, since a pod
+// whose gh holds no token would start every role unable to reach GitHub. The controller's Secret
+// holds the launcher token alone.
 func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch) error {
 	for _, role := range l.roles {
 		token, err := launcherToken()
 		if err != nil {
 			return err
 		}
+		data := map[string][]byte{LauncherTokenFile: []byte(token)}
+		var rendered ghconfig.Rendered
+		if l.kind.holdsGitHubCredential() {
+			minting, cancel := call(ctx)
+			rendered, err = r.gitHubCredential(minting, role)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("write the github credential for %s: %w", role, err)
+			}
+			data[GitHubHostsKey], data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
+		}
 		if err := r.upsertSecret(ctx, corev1.Secret{
 			ObjectMeta: r.secretMeta(s, l, roleSecretName(s.Name, role)),
 			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{LauncherTokenFile: []byte(token)},
+			Data:       data,
 		}); err != nil {
 			return err
+		}
+		if l.kind.holdsGitHubCredential() {
+			r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
 		}
 	}
 	return nil

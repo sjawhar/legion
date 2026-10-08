@@ -119,6 +119,11 @@
                 "name": "config"
               },
               {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-architect",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -199,6 +204,11 @@
                 "name": "config"
               },
               {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-planner",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -277,6 +287,11 @@
               {
                 "mountPath": "/home/legion/.config",
                 "name": "config"
+              },
+              {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-implementer",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -367,6 +382,11 @@
                 "name": "config"
               },
               {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-tester",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -447,6 +467,11 @@
                 "name": "config"
               },
               {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-reviewer",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -525,6 +550,11 @@
               {
                 "mountPath": "/home/legion/.config",
                 "name": "config"
+              },
+              {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-merger",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -608,7 +638,7 @@
               "--root",
               "/legion",
               "--credential-helper",
-              "!/opt/legion/bin/legion credential",
+              "!gh auth git-credential",
               "--feed",
               "/var/run/legion/feed"
             ],
@@ -761,6 +791,23 @@
             "name": "state-architect"
           },
           {
+            "name": "gh-architect",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-architect-boot"
+            }
+          },
+          {
             "name": "launcher-planner",
             "secret": {
               "defaultMode": 288,
@@ -784,6 +831,23 @@
               "medium": "Memory"
             },
             "name": "state-planner"
+          },
+          {
+            "name": "gh-planner",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-planner-boot"
+            }
           },
           {
             "name": "launcher-implementer",
@@ -811,6 +875,23 @@
             "name": "state-implementer"
           },
           {
+            "name": "gh-implementer",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-implementer-boot"
+            }
+          },
+          {
             "name": "launcher-tester",
             "secret": {
               "defaultMode": 288,
@@ -834,6 +915,23 @@
               "medium": "Memory"
             },
             "name": "state-tester"
+          },
+          {
+            "name": "gh-tester",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-tester-boot"
+            }
           },
           {
             "name": "launcher-reviewer",
@@ -861,6 +959,23 @@
             "name": "state-reviewer"
           },
           {
+            "name": "gh-reviewer",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-reviewer-boot"
+            }
+          },
+          {
             "name": "launcher-merger",
             "secret": {
               "defaultMode": 288,
@@ -884,6 +999,23 @@
               "medium": "Memory"
             },
             "name": "state-merger"
+          },
+          {
+            "name": "gh-merger",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-merger-boot"
+            }
           },
           {
             "name": "agent-secrets-token",

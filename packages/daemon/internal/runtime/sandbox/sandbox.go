@@ -81,6 +81,7 @@ type Runtime struct {
 	probeInterval                           time.Duration
 	adoptTimeout                            time.Duration
 	tokens                                  ProvisionTokens
+	gitHubCredential                        runtime.GitHubCredential
 	store                                   Store
 	conns                                   runtime.Conns
 	launchers                               *launchers
@@ -235,6 +236,8 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("the registration deadline must be a positive number of boot intervals")
 	case opts.Tokens == nil:
 		return refuse("no provisioning token source")
+	case opts.GitHubCredential == nil:
+		return refuse("no github credential function for the roles' gh files")
 	case opts.Store == nil:
 		return refuse("no store")
 	case opts.Conns == nil:
@@ -287,7 +290,7 @@ func configure(opts Options) (*Runtime, error) {
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
 		trees: map[string]chan struct{}{}, launchers: newLaunchers(),
 	}
@@ -303,8 +306,9 @@ func configure(opts Options) (*Runtime, error) {
 	return r, nil
 }
 
-// start runs both informers, selected on the project label, until ctx ends, and waits for both
-// stores to sync.
+// start runs both informers, selected on the project label, until ctx ends, waits for both stores
+// to sync, and then runs the GitHub credential refresher (refreshGitHubCredentials) on the same
+// lifetime, so it stops with the informers whose pod store it walks.
 func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
 	r.dyn, r.kube = dyn, kube
 	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
@@ -352,6 +356,7 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 		}
 	}
 	context.AfterFunc(ctx, stop)
+	go r.refreshGitHubCredentialsEvery(running, gitHubRefreshInterval)
 	return nil
 }
 

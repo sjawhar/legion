@@ -122,9 +122,12 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	for _, v := range pod.Volumes {
 		volumes[v.Name] = v
 	}
-	for _, name := range []string{provisionVolume, feedVolume, tempVolume, agentSecretsTokenVolume, roleVolume(agentSecretsKeyVolume, claim.RoleController)} {
+	for _, name := range []string{
+		provisionVolume, feedVolume, tempVolume, agentSecretsTokenVolume,
+		roleVolume(agentSecretsKeyVolume, claim.RoleController), roleVolume(ghVolume, claim.RoleController),
+	} {
 		if _, ok := volumes[name]; ok {
-			t.Errorf("the controller's pod has the %s volume, which only provisioning a workspace or enrolling a key needs", name)
+			t.Errorf("the controller's pod has the %s volume, which only provisioning a workspace, enrolling a key or holding a GitHub credential needs", name)
 		}
 	}
 	for _, role := range claim.Roles {
