@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -104,8 +105,10 @@ func (i image) without(t *testing.T, name string) {
 
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
 // links both plugins and whose plugin lock enables the CodeGraph plugin, the Legion manifest
-// declaring contract, LEGION_OMP_PATH set to omp, and a bin first on PATH stubbing every binary
-// the capability check's image rows look for. It answers the plugin roots a pod loads.
+// declaring contract, LEGION_OMP_PATH set to omp, and a PATH that is one bin alone, stubbing every
+// binary the capability check's image rows look for — alone, not ahead of the process's PATH,
+// since a runner's own python3 behind the stubs would answer for one a test removed. The `sh` the
+// probes run their scripts with is linked into that bin from the one on the process's PATH.
 func inImage(t *testing.T, contract, omp string) image {
 	t.Helper()
 	home := t.TempDir()
@@ -139,11 +142,18 @@ func inImage(t *testing.T, contract, omp string) image {
 			t.Fatal(err)
 		}
 	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sh, filepath.Join(roots.bin, "sh")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_PROFILE", "legion")
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("LEGION_OMP_PATH", omp)
-	t.Setenv("PATH", roots.bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", roots.bin)
 	t.Chdir(t.TempDir())
 	return roots
 }

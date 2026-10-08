@@ -2,7 +2,7 @@ package workflow
 
 import (
 	"context"
-	"slices"
+	"reflect"
 	"testing"
 	"time"
 
@@ -40,7 +40,7 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 		t.Fatalf("root phase = %s held from %v, want planning and not held", gotPhase, heldFrom)
 	}
 	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 }
@@ -59,7 +59,7 @@ func TestAnEscalationIsRecordedOnTheHoldForAControllerThatStartsLater(t *testing
 		t.Fatalf("after the escalation the state reads phase %s hold reason %q, want held and escalated", got, reason)
 	}
 	escalated := record.Notice{Kind: "held", Phase: phase.Planning, Reason: "escalated"}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{escalated, record.ControllerNotice(escalated)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{escalated, record.ControllerNotice(escalated)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "architect", "retry", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
@@ -153,7 +153,7 @@ func TestALingeringTreesFailedClaimHoldsNothingAndItsArchitectsIsStillTold(t *te
 		t.Fatalf("ApplyFact the architect's failed claim: %v", err)
 	}
 	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Done}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 }
