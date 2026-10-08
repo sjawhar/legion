@@ -11,7 +11,7 @@ import {
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
-import { messageFor } from "@legion/envoy-client/errors"
+import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
@@ -43,7 +43,6 @@ import {
 } from "./channel-forwarder"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import {
-  hasErrnoCode,
   pruneStaleSessionHandoffs,
   readSessionHandoff,
   roleStateFile,

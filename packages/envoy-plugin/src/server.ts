@@ -32,17 +32,17 @@ const PACKAGE_NAME = "@sjawhar/opencode-legion-envoy";
 
 /** The package root: the nearest directory above `from` whose package.json names this package.
  *  The packed server.js sits in dist/src/, the repo's server.ts in src/. A manifest on the way up
- *  that is not JSON is some other package's and is passed over. */
+ *  that is missing, unreadable or not JSON is passed over. */
 function packageRoot(from: string): string {
   for (let directory = from; ; directory = path.dirname(directory)) {
-    const manifest = path.join(directory, "package.json");
-    if (existsSync(manifest) && manifestName(manifest) === PACKAGE_NAME) return directory;
+    if (manifestName(path.join(directory, "package.json")) === PACKAGE_NAME) return directory;
     if (path.dirname(directory) === directory) {
       throw new Error(`envoy: no ${PACKAGE_NAME} package.json above ${from}`);
     }
   }
 }
 
+/** A manifest's `name`, or undefined when the file is missing, unreadable or not JSON. */
 function manifestName(manifest: string): unknown {
   try {
     const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));

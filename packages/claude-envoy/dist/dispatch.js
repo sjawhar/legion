@@ -14543,6 +14543,9 @@ function zodSchemaApi(zod) {
 function messageFor(error48) {
   return error48 instanceof Error ? error48.message : String(error48);
 }
+function hasErrnoCode(error48, code) {
+  return error48 instanceof Error && "code" in error48 && error48.code === code;
+}
 
 // ../envoy-client/src/dispatch-command.ts
 var STDIN = "-";
@@ -14833,8 +14836,9 @@ function parseCommand(argv, io) {
     }
     switch (action) {
       case "set": {
+        const claimed = claim(field, flag, false);
         const parsed = info.kind === "number" ? number4(flag, value) : value;
-        if (parsed !== undefined && claim(field, flag, false))
+        if (claimed && parsed !== undefined)
           args[field] = parsed;
         break;
       }
@@ -14904,17 +14908,16 @@ function fieldWords(field, info, value) {
   }
   if (kind === "json")
     return flagWithValue(`--${name}-json`, JSON.stringify(value));
+  const listKind = kind === "options" || typeof kind === "object";
+  if (listKind && Array.isArray(value) && value.length === 0)
+    return [`--clear-${name}`];
   if (kind === "options" && Array.isArray(value)) {
-    if (value.length === 0)
-      return [`--clear-${name}`];
     const texts = value.map(optionText);
     if (texts.includes(undefined))
       return flagWithValue(`--${name}-json`, JSON.stringify(value));
     return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
   }
   if (typeof kind === "object" && Array.isArray(value)) {
-    if (value.length === 0)
-      return [`--clear-${name}`];
     const flag = `--${singular(name)}`;
     return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }
@@ -18364,14 +18367,11 @@ function sessionDirectory(env, sessionId) {
 function ensureDirectory(dir) {
   mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
 }
-function isMissing(error48) {
-  return error48?.code === "ENOENT";
-}
 function readIfPresent(path2) {
   try {
     return readFileSync3(path2, "utf-8");
   } catch (error48) {
-    if (isMissing(error48))
+    if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
   }
@@ -18452,7 +18452,7 @@ function pruneSessions(root, now) {
     if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error48) {
-    if (!isMissing(error48))
+    if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
   }
   const sessions = join2(root, "sessions");
@@ -18460,7 +18460,7 @@ function pruneSessions(root, now) {
   try {
     entries = readdirSync(sessions, { withFileTypes: true });
   } catch (error48) {
-    if (!isMissing(error48))
+    if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
   }
   for (const entry of entries) {
@@ -18472,7 +18472,7 @@ function pruneSessions(root, now) {
         rmSync(dir, { recursive: true, force: true });
       }
     } catch (error48) {
-      if (!isMissing(error48))
+      if (!hasErrnoCode(error48, "ENOENT"))
         throw error48;
     }
   }
@@ -18540,9 +18540,34 @@ var USAGE = 2;
 var HOSTS = { omp: "omp", claude: "claude", opencode: "opencode" };
 var CLAUDE_OUTPUT_MAX = 25000;
 var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
+function stateWriteFailed(problem) {
+  return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
+}
+function fitClaudeOutput(text, pictures, kept, limit, writeFull) {
+  const whole = [text, ...pictures, ...kept].join(`
+`);
+  if (whole.length <= limit)
+    return whole;
+  const full = [text, ...pictures].join(`
+`);
+  const marker = `(the full result, ${full.length} characters: ${writeFull(full)})`;
+  const tail = (shown2) => {
+    const left = pictures.length - shown2;
+    const dropped = left === 0 ? [] : [`(${left} more picture line${left === 1 ? "" : "s"} left out: see the full result)`];
+    return [marker, ...pictures.slice(0, shown2), ...dropped, ...kept].join(`
+`);
+  };
+  let shown = pictures.length;
+  while (shown > 0 && tail(shown).length + 1 > limit)
+    shown -= 1;
+  const after = tail(shown);
+  const room = limit - after.length - 1;
+  return room >= 0 ? `${text.slice(0, room)}
+${after}` : after.slice(0, limit);
+}
 async function runDispatchCli(argv, rawEnv, io) {
-  const print = (text) => io.stdout(text.endsWith(`
-`) ? text : `${text}
+  const print = (text2) => io.stdout(text2.endsWith(`
+`) ? text2 : `${text2}
 `);
   const env = {};
   for (const [name, value] of Object.entries(rawEnv)) {
@@ -18613,7 +18638,10 @@ async function runDispatchCli(argv, rawEnv, io) {
     return USAGE;
   }
   const { tool, args } = parsed;
-  let lines;
+  let text;
+  const pictures = [];
+  const notes = [];
+  const problems = [];
   let entry;
   let code;
   try {
@@ -18628,52 +18656,41 @@ async function runDispatchCli(argv, rawEnv, io) {
       env,
       ...io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }
     });
-    const after = [];
-    let stateProblem;
+    text = result.text;
     try {
       for (const image of result.images ?? []) {
         const picture = writePicture(dir, image);
-        after.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
+        pictures.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
       }
     } catch (error48) {
-      stateProblem = messageFor(error48);
+      problems.push(messageFor(error48));
     }
     const notice = dispatchFollowNotice(result.details);
     if (notice !== null && !follows.has(notice.ask)) {
       follows.add(notice.ask);
-      after.push(notice.text);
-    }
-    let text = result.text;
-    const tail = after.map((line) => `
-${line}`).join("");
-    if (host === "claude" && text.length + tail.length > CLAUDE_OUTPUT_MAX) {
-      try {
-        const path2 = writeLongOutput(dir, text);
-        const marker = `
-(the full result, ${text.length} characters: ${path2})`;
-        text = `${text.slice(0, Math.max(0, CLAUDE_OUTPUT_MAX - tail.length - marker.length))}${marker}`;
-      } catch (error48) {
-        stateProblem ??= messageFor(error48);
-      }
-    }
-    lines = [`${text}${tail}`];
-    if (stateProblem !== undefined) {
-      lines.push(`${STATE_WRITE_FAILED} could not be written: ${stateProblem}`);
+      notes.push(notice.text);
     }
     entry = { tool, details: result.details };
     code = OK;
   } catch (error48) {
-    const message = messageFor(error48);
-    lines = [message];
-    entry = { tool, error: message };
+    text = messageFor(error48);
+    entry = { tool, error: text };
     code = REFUSED;
   }
   try {
     recordOutcome(dir, sessionId, follows, entry);
   } catch (error48) {
-    lines.push(`${STATE_WRITE_FAILED} could not be written: ${messageFor(error48)}`);
+    problems.push(messageFor(error48));
   }
-  print(lines.join(`
+  const kept = [...notes, ...problems.map(stateWriteFailed)];
+  const writeFull = (full) => {
+    try {
+      return writeLongOutput(dir, full);
+    } catch (error48) {
+      return `not written, ${messageFor(error48)}`;
+    }
+  };
+  print(host === "claude" ? fitClaudeOutput(text, pictures, kept, CLAUDE_OUTPUT_MAX, writeFull) : [text, ...pictures, ...kept].join(`
 `));
   return code;
 }

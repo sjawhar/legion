@@ -13590,6 +13590,9 @@ config(en_default());
 function messageFor(error48) {
   return error48 instanceof Error ? error48.message : String(error48);
 }
+function hasErrnoCode(error48, code) {
+  return error48 instanceof Error && "code" in error48 && error48.code === code;
+}
 
 // ../envoy-client/src/secret-file.ts
 import { readFileSync } from "fs";
@@ -14999,8 +15002,9 @@ function parseCommand(argv, io) {
     }
     switch (action) {
       case "set": {
+        const claimed = claim(field, flag, false);
         const parsed = info.kind === "number" ? number4(flag, value) : value;
-        if (parsed !== undefined && claim(field, flag, false))
+        if (claimed && parsed !== undefined)
           args[field] = parsed;
         break;
       }
@@ -15070,17 +15074,16 @@ function fieldWords(field, info, value) {
   }
   if (kind === "json")
     return flagWithValue(`--${name}-json`, JSON.stringify(value));
+  const listKind = kind === "options" || typeof kind === "object";
+  if (listKind && Array.isArray(value) && value.length === 0)
+    return [`--clear-${name}`];
   if (kind === "options" && Array.isArray(value)) {
-    if (value.length === 0)
-      return [`--clear-${name}`];
     const texts = value.map(optionText);
     if (texts.includes(undefined))
       return flagWithValue(`--${name}-json`, JSON.stringify(value));
     return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
   }
   if (typeof kind === "object" && Array.isArray(value)) {
-    if (value.length === 0)
-      return [`--clear-${name}`];
     const flag = `--${singular(name)}`;
     return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }
@@ -18363,7 +18366,6 @@ function claudeProjectDirectory(environment, fallback) {
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { dirname, join as join3 } from "path";
-
 class SessionIdentity {
   directory;
   #id;
@@ -18386,9 +18388,6 @@ function sessionHandoffFile(stateDirectory, claudePid) {
 }
 function roleStateFile(stateDirectory, sessionId) {
   return join3(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
-}
-function hasErrnoCode(error48, code) {
-  return error48 instanceof Error && "code" in error48 && error48.code === code;
 }
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname(file2), { recursive: true, mode: 448 });

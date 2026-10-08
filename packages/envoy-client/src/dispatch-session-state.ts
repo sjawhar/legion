@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { adviceMemory } from "./dispatch-execute";
 import { shownPictures } from "./dispatch-picture-tools";
 import type { PictureType, ToolImage } from "./dispatch-pictures";
+import { hasErrnoCode, messageFor } from "./errors";
 
 /**
  * The `dispatch` CLI's state, one directory per host session under
@@ -81,17 +82,12 @@ function ensureDirectory(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 
-/** Whether a filesystem call failed because the path is not there. */
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
-}
-
 /** A file's text, or undefined when it is not there. */
 function readIfPresent(path: string): string | undefined {
   try {
     return readFileSync(path, "utf-8");
   } catch (error) {
-    if (isMissing(error)) return undefined;
+    if (hasErrnoCode(error, "ENOENT")) return undefined;
     throw error;
   }
 }
@@ -189,45 +185,41 @@ export function readResultsSince(
   try {
     fd = openSync(path, "r");
   } catch (error) {
-    if (isMissing(error)) return { entries: [], offset };
+    if (hasErrnoCode(error, "ENOENT")) return { entries: [], offset };
     throw error;
   }
-  let buffer: Buffer;
+  const entries: ResultEntry[] = [];
+  let complete: number;
   try {
     const size = fstatSync(fd).size;
     if (size <= offset) return { entries: [], offset: size };
-    buffer = Buffer.alloc(size - offset);
+    const buffer = Buffer.alloc(size - offset);
     readSync(fd, buffer, 0, buffer.length, offset);
+    complete = buffer.lastIndexOf(0x0a) + 1;
+    const lines = buffer.subarray(0, complete).toString("utf-8").split("\n");
+    let firstLine: number | undefined;
+    lines.forEach((line, index) => {
+      if (line === "") return;
+      try {
+        entries.push(JSON.parse(line) as ResultEntry);
+      } catch (error) {
+        // Counted only for a line to name, through the descriptor already open.
+        firstLine ??= linesBefore(fd, offset) + 1;
+        onMalformed(
+          `${path}:${firstLine + index}: skipped a ledger line that is not JSON (${messageFor(error)})`
+        );
+      }
+    });
   } finally {
     closeSync(fd);
   }
-  const complete = buffer.lastIndexOf(0x0a) + 1;
-  const lines = buffer.subarray(0, complete).toString("utf-8").split("\n");
-  const entries: ResultEntry[] = [];
-  let firstLine: number | undefined;
-  lines.forEach((line, index) => {
-    if (line === "") return;
-    try {
-      entries.push(JSON.parse(line) as ResultEntry);
-    } catch (error) {
-      firstLine ??= linesBefore(path, offset) + 1;
-      onMalformed(
-        `${path}:${firstLine + index}: skipped a ledger line that is not JSON (${(error as Error).message})`
-      );
-    }
-  });
   return { entries, offset: offset + complete };
 }
 
-/** How many lines end before byte `offset`: read only to name a malformed line. */
-function linesBefore(path: string, offset: number): number {
+/** How many lines of the open file end before byte `offset`. */
+function linesBefore(fd: number, offset: number): number {
   const prefix = Buffer.alloc(offset);
-  const fd = openSync(path, "r");
-  try {
-    readSync(fd, prefix, 0, offset, 0);
-  } finally {
-    closeSync(fd);
-  }
+  readSync(fd, prefix, 0, offset, 0);
   let count = 0;
   for (const byte of prefix) if (byte === 0x0a) count += 1;
   return count;
@@ -238,7 +230,7 @@ export function resultsEnd(dir: string): number {
   try {
     return statSync(join(dir, "results.jsonl")).size;
   } catch (error) {
-    if (isMissing(error)) return 0;
+    if (hasErrnoCode(error, "ENOENT")) return 0;
     throw error;
   }
 }
@@ -288,14 +280,14 @@ export function pruneSessions(root: string, now: number): void {
   try {
     if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS) return;
   } catch (error) {
-    if (!isMissing(error)) throw error;
+    if (!hasErrnoCode(error, "ENOENT")) throw error;
   }
   const sessions = join(root, "sessions");
   let entries: Dirent[] = [];
   try {
     entries = readdirSync(sessions, { withFileTypes: true });
   } catch (error) {
-    if (!isMissing(error)) throw error;
+    if (!hasErrnoCode(error, "ENOENT")) throw error;
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -306,7 +298,7 @@ export function pruneSessions(root: string, now: number): void {
       }
     } catch (error) {
       // Another process removed it since the listing.
-      if (!isMissing(error)) throw error;
+      if (!hasErrnoCode(error, "ENOENT")) throw error;
     }
   }
   ensureDirectory(root);
