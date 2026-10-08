@@ -90,8 +90,11 @@ CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the
 A node that has never run the image pulls it whole before the pod's init containers start, so the
 image's compressed size is a cold launch's first cost. Before the capability tools above,
 `ghcr.io/sjawhar/legion-worker:1.18.1` was 12 layers and 369 MiB compressed (386,510,448 bytes). With
-them — the Go toolchain, Chromium with its library closure, Python, the language servers — it is
-larger (the pull request's run records the figure; see the PR body). The bound that pull must fit,
+them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
+pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
+Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
+tree with the two npm language servers is 66 MiB. How long a node takes to pull that is not
+recorded here: the stage 4a launch below is where it is measured. The bound that pull must fit,
 with the init containers' clone and Oh My Pi's boot after it, is the registration deadline:
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`
 (`packages/daemon/internal/config/config.go`; 120 s × 3 = 360 s by default), which the Sandbox
