@@ -1,0 +1,26 @@
+# Written by the Go `legion` daemon (packages/daemon/internal/podsafety) ahead of every other
+# settings overlay a Legion role's Oh My Pi is given, pod or pane alike: the two keys
+# supervise.Machine.Quiesce's own promise depends on, holding the workspace Oh My Pi reads and
+# writes to a single role's turn at a time. Every Legion role runs `omp --mode rpc`, and the pinned
+# fork turns both of these on by default for that protocol.
+#
+# bash.autoBackground.enabled lets a bash call left running past its own threshold move to a
+# background job a takeover's abort no longer reaches once it has moved — only the turn asking it
+# to finish does. async.enabled is the wider door to the same gap: with it on, the thermonuclear
+# review pair a reviewer dispatches without `blocking: true` runs as background jobs the RPC abort
+# does not own, and its async result starts a new reviewer turn beside whatever claims the issue
+# next — which a CI-red takeover can be, mid-review, exactly the turn boundary Quiesce exists to
+# hold. Off, both stay inside the turn that started them, so the abort that ends the turn ends them
+# too (LEGION-462 found the bash case live, legion-smoke LEGSMOKE-463, at commit 80d0c82b: the
+# proof's own long `/usr/bin/sleep` outlived the interrupt once it had been running about a minute).
+#
+# tmux has neither Sandbox's pod isolation nor an overlay of its own otherwise, so it needs this
+# one: TurnScopeFile is named first in a pane's PI_CONFIG_FILES (runtime/tmux). Quiesce itself is
+# runtime-agnostic, and an issue's roles share one host workspace there too (workspace/config.go)
+# — the same guarantee, the same two keys, without the rest of a pod's own baseline (compaction,
+# memory, images, dev), which a pane run on the operator's own trusted machine has no need of.
+bash:
+  autoBackground:
+    enabled: false
+async:
+  enabled: false

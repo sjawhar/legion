@@ -23,6 +23,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -85,7 +87,25 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.SlowCommandTimeout)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts)
+	p.clusterCheck = func(ctx context.Context) error {
+		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
+		defer cancel()
+		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+			return err
+		}
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	}
+	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
+		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
+		if err != nil {
+			return err
+		}
+		if legacy {
+			return fmt.Errorf("refuse the Kubernetes runtime before any schema write: project %s still has legacy per-claim Sandbox locators", p.project)
+		}
+		return nil
+	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
@@ -226,7 +246,7 @@ type brokerEnroller struct{ client *agentsecrets.Client }
 
 func (b brokerEnroller) Enroll(ctx context.Context, e supervise.PodEnrollment) (string, error) {
 	enrolled, err := b.client.Enroll(ctx, agentsecrets.PodEnrollment{
-		PodUID: e.PodUID, Thumbprint: e.Thumbprint, PodToken: e.PodToken, Session: e.Session,
+		PodUID: e.PodUID, Slot: e.Slot, Thumbprint: e.Thumbprint, PodToken: e.PodToken, Session: e.Session,
 	})
 	if err != nil {
 		return "", err
@@ -294,23 +314,24 @@ func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
 	return list, nil
 }
 
-// sandboxRuntime builds the Agent Sandbox runtime in the order its boot refusals need: Agent
-// Sandbox's install check first, so a cluster without it is refused by name, then the runtime,
-// whose informers run for ctx (supervision's lifetime), over the worker stream and with the
-// workflow's implement App as every pod's provisioning token source.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, budget time.Duration) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
-		checking, cancel := context.WithTimeout(ctx, budget)
-		defer cancel()
-		if err := sandbox.CheckInstalled(checking, rc, agentSandbox); err != nil {
-			return nil, err
-		}
-		opts.Conns, opts.StreamURL = conns, stream
+// sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
+// lifetime), over the worker stream and with the workflow's implement App as every pod's
+// provisioning token source and removable as its tree's removable-workspace candidates, and
+// registers its launcher acceptor on the stream listener. Boot has already run the cluster check
+// (plan.clusterCheck): Agent Sandbox is installed and no per-claim Sandbox of the layout before
+// issue pods remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options) runtimeFactory {
+	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		opts.Conns, opts.StreamURL, opts.Store, opts.Removable = listener, address, st, removable
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 		}
-		opts.Removable = removable
-		return sandbox.New(ctx, rc, opts)
+		rt, err := sandbox.New(ctx, rc, opts)
+		if err != nil {
+			return nil, err
+		}
+		listener.SetLauncherResolver(rt.LauncherResolver())
+		return rt, nil
 	}
 }
 

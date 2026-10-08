@@ -1,0 +1,377 @@
+package sandbox
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"net"
+	"sync"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+)
+
+// launcherPodUIDAnnotation binds a role Secret's launcher token to the pod it was issued for; a
+// launcher of any other pod is refused. annotationIssue carries the exact issue key (labels are
+// lowercased), from which the resolver derives the claim token.
+const (
+	launcherPodUIDAnnotation = "legion.dev/launcher-pod-uid"
+	annotationIssue          = "legion.dev/issue"
+)
+
+type launchers struct {
+	mu       sync.Mutex
+	sessions map[claim.Token]*launcherSession
+}
+
+type launcherSession struct {
+	owner  *launchers
+	token  claim.Token
+	id     string
+	podUID string
+
+	mu      sync.Mutex
+	conn    net.Conn
+	write   *shimwire.Writer
+	state   shimwire.LauncherState
+	ready   chan struct{}
+	waiters map[string]chan shimwire.Frame
+	closed  bool
+}
+
+func newLaunchers() *launchers { return &launchers{sessions: map[claim.Token]*launcherSession{}} }
+
+// accept registers a launcher connection. The newest authenticated connection for a role wins:
+// a half-open predecessor is closed so its pending requests fail instead of waiting forever.
+func (d *launchers) accept(token claim.Token, hello shimwire.LauncherHello) *launcherSession {
+	s := &launcherSession{owner: d, token: token, id: hello.LauncherID, podUID: hello.PodUID, ready: make(chan struct{}), waiters: map[string]chan shimwire.Frame{}}
+	d.mu.Lock()
+	old := d.sessions[token]
+	d.sessions[token] = s
+	d.mu.Unlock()
+	if old != nil {
+		old.close()
+	}
+	return s
+}
+
+func (s *launcherSession) ServeLauncher(conn net.Conn, reader *bufio.Reader, writer *shimwire.Writer) {
+	s.mu.Lock()
+	s.conn, s.write = conn, writer
+	closed := s.closed
+	s.mu.Unlock()
+	defer s.close()
+	if closed {
+		return
+	}
+	frames := shimwire.NewReader(reader)
+	for {
+		line, err := frames.ReadLine()
+		if err != nil {
+			return
+		}
+		frame, err := shimwire.Decode(line)
+		if err != nil {
+			return
+		}
+		switch value := frame.(type) {
+		case shimwire.LauncherState:
+			s.mu.Lock()
+			s.state = value
+			select {
+			case <-s.ready:
+			default:
+				close(s.ready)
+			}
+			s.mu.Unlock()
+		case shimwire.LauncherStartResult:
+			s.mu.Lock()
+			if value.OK && (s.state.LastExit == nil || s.state.LastExit.Generation < value.RunningGeneration) &&
+				(s.state.Child == nil || s.state.Child.Generation < value.RunningGeneration) {
+				s.state.Child = &shimwire.LauncherChild{Generation: value.RunningGeneration}
+			}
+			s.mu.Unlock()
+			s.deliver(value.ID, value)
+		case shimwire.LauncherStopResult:
+			s.deliver(value.ID, value)
+		default:
+			return
+		}
+	}
+}
+
+func (s *launcherSession) close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	for _, waiter := range s.waiters {
+		close(waiter)
+	}
+	s.waiters = nil
+	conn := s.conn
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	s.owner.remove(s.token, s)
+}
+
+func (s *launcherSession) deliver(id string, frame shimwire.Frame) {
+	s.mu.Lock()
+	waiter := s.waiters[id]
+	delete(s.waiters, id)
+	s.mu.Unlock()
+	if waiter != nil {
+		waiter <- frame
+		close(waiter)
+	}
+}
+
+func (d *launchers) remove(token claim.Token, session *launcherSession) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessions[token] == session {
+		delete(d.sessions, token)
+	}
+}
+
+func (d *launchers) state(token claim.Token, podUID string) (shimwire.LauncherState, bool) {
+	d.mu.Lock()
+	session := d.sessions[token]
+	d.mu.Unlock()
+	if session == nil || session.podUID != podUID {
+		return shimwire.LauncherState{}, false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed {
+		return shimwire.LauncherState{}, false
+	}
+	select {
+	case <-session.ready:
+	default:
+		return shimwire.LauncherState{}, false
+	}
+	return session.state, true
+}
+
+func (d *launchers) await(ctx context.Context, token claim.Token, podUID string) (*launcherSession, error) {
+	for {
+		d.mu.Lock()
+		session := d.sessions[token]
+		d.mu.Unlock()
+		if session != nil && session.podUID == podUID {
+			select {
+			case <-session.ready:
+				session.mu.Lock()
+				closed := session.closed
+				session.mu.Unlock()
+				if !closed {
+					return session, nil
+				}
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		select {
+		case <-time.After(25 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (d *launchers) request(ctx context.Context, token claim.Token, podUID string, frame shimwire.Frame, id string) (shimwire.Frame, *launcherSession, error) {
+	session, err := d.await(ctx, token, podUID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("launcher %s did not connect: %w", token, err)
+	}
+	waiter := make(chan shimwire.Frame, 1)
+	session.mu.Lock()
+	if session.closed || session.write == nil {
+		session.mu.Unlock()
+		return nil, nil, errors.New("launcher connection closed")
+	}
+	session.waiters[id] = waiter
+	deadline := time.Now().Add(apiTimeout)
+	if until, ok := ctx.Deadline(); ok && until.Before(deadline) {
+		deadline = until
+	}
+	err = session.conn.SetWriteDeadline(deadline)
+	if err == nil {
+		stopCancel := context.AfterFunc(ctx, func() { _ = session.conn.Close() })
+		err = session.write.WriteFrame(frame)
+		stopCancel()
+		_ = session.conn.SetWriteDeadline(time.Time{})
+	}
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		delete(session.waiters, id)
+		session.mu.Unlock()
+	}()
+	if err != nil {
+		session.close()
+		return nil, nil, err
+	}
+	select {
+	case answer, ok := <-waiter:
+		if !ok {
+			return nil, nil, errors.New("launcher connection closed before its answer")
+		}
+		d.mu.Lock()
+		current := d.sessions[token]
+		sameProcess := current != nil && current.podUID == podUID && current.id == session.id
+		d.mu.Unlock()
+		if !sameProcess {
+			return nil, nil, errors.New("launcher process changed before its answer was confirmed")
+		}
+		return answer, session, nil
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+}
+
+// startRefusal is a Start the launcher answered OK: false, without starting the generation: the one
+// start error after which no child of that generation can be running (stopIssuedChild).
+type startRefusal struct {
+	token      claim.Token
+	generation uint64
+	reason     string
+}
+
+func (e startRefusal) Error() string {
+	return fmt.Sprintf("launcher %s start generation %d: %s", e.token, e.generation, e.reason)
+}
+
+func (d *launchers) start(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherStart) error {
+	answer, _, err := d.request(ctx, token, podUID, command, command.ID)
+	if err != nil {
+		return err
+	}
+	result, ok := answer.(shimwire.LauncherStartResult)
+	if !ok {
+		return fmt.Errorf("launcher %s start: got %T", token, answer)
+	}
+	if !result.OK {
+		return startRefusal{token: token, generation: command.Generation, reason: result.Error}
+	}
+	// An OK answer naming another generation says the launcher started something, and not what it
+	// was asked: the Start's outcome is unknown, never a refusal, so the issued generation is stopped.
+	if result.RunningGeneration != command.Generation {
+		return fmt.Errorf("launcher %s start generation %d: answered OK naming generation %d", token, command.Generation, result.RunningGeneration)
+	}
+	return nil
+}
+
+func (d *launchers) stop(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherStop) error {
+	answer, session, err := d.request(ctx, token, podUID, command, command.ID)
+	if err != nil {
+		return err
+	}
+	result, ok := answer.(shimwire.LauncherStopResult)
+	if !ok {
+		return fmt.Errorf("launcher %s stop: got %T", token, answer)
+	}
+	if !result.OK {
+		return fmt.Errorf("launcher %s stop generation %d: %s", token, command.Generation, result.Error)
+	}
+	// The launcher answers only after the child has exited; its own state frame may follow the
+	// answer, so the confirmed stop is recorded now.
+	if session != nil {
+		session.mu.Lock()
+		if child := session.state.Child; child != nil && child.Generation == command.Generation {
+			session.state.Child = nil
+			session.state.LastExit = &shimwire.LauncherExit{Generation: command.Generation}
+		}
+		session.mu.Unlock()
+	}
+	return nil
+}
+
+// bindLauncherSecrets binds each launcher role's Secret of the pod l launches to the new pod's uid,
+// so only that pod's launchers authenticate with it.
+func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch, uid string) error {
+	for _, role := range l.roles {
+		name := roleSecretName(s.Name, role)
+		updating, cancel := call(ctx)
+		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(updating, name, metav1.GetOptions{})
+		cancel()
+		if err != nil {
+			return fmt.Errorf("bind launcher secret %s: %w", name, err)
+		}
+		if !ownedBySandbox(secret.OwnerReferences, s.UID) {
+			return fmt.Errorf("bind launcher secret %s: it is not owned by Sandbox %s", name, s.Name)
+		}
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		secret.Annotations[launcherPodUIDAnnotation] = uid
+		updating, cancel = call(ctx)
+		_, err = r.kube.CoreV1().Secrets(r.namespace).Update(updating, secret, metav1.UpdateOptions{})
+		cancel()
+		if err != nil {
+			return fmt.Errorf("bind launcher secret %s to pod UID: %w", name, err)
+		}
+		r.cacheLauncherCredential(s, secret)
+	}
+	return nil
+}
+
+// launcherBound reports whether pod is one whose launchers this runtime bound: the Secret of every
+// role of roles, the pod's launcher roles, exists, is the Sandbox's, and binds pod by uid. A running
+// pod an older runtime made (one worker container, no launchers) or one whose binding never landed
+// is replaced rather than trusted. Any other failure to read a Secret, such as a timeout, a
+// throttled request or a server error, proves nothing about the pod: it is returned, so only the
+// launch that read it fails, and the caller stops that role's previous process (runtime.Runtime's
+// Spawn and Resume); the pod and every other role running in it are left as they are.
+func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
+	for _, role := range roles {
+		name := roleSecretName(s.Name, role)
+		reading, cancel := call(ctx)
+		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(reading, name, metav1.GetOptions{})
+		cancel()
+		switch {
+		case apierrors.IsNotFound(err):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("read launcher secret %s: %w", name, err)
+		case !ownedBySandbox(secret.OwnerReferences, s.UID) || secret.Annotations[launcherPodUIDAnnotation] != string(pod.UID):
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
+	dir := generationDir(l.spec.Generation)
+	shim := []string{r.tools.Legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety"}
+	if r.mountsProviders() {
+		shim = append(shim, "--provider-env-dir", ProvidersDir)
+	}
+	if broker := r.enrolledWith(l.spec.Role); broker != nil {
+		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile, "--agent-secrets-bin", r.tools.AgentSecrets)
+	}
+	_, values := r.launchEnvironment(l)
+	values = append(values, bootTokenKey+"_FILE="+dir+"/"+bootTokenKey)
+	files := maps.Clone(l.secrets)
+	if files == nil {
+		files = map[string]string{}
+	}
+	files[bootTokenKey] = l.spec.BootToken
+	return shimwire.LauncherStart{
+		ID: "start-" + fmt.Sprint(l.spec.Generation), Generation: l.spec.Generation,
+		Argv: append(shim, append([]string{"--"}, l.agentArgv(r.agent)...)...), Env: values, Files: files,
+		ResumeFile: l.resumeFile,
+	}
+}
