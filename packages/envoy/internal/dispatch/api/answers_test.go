@@ -223,3 +223,27 @@ func TestListMyAnswersCollapsesRestoredAnswerEvents(t *testing.T) {
 		t.Fatalf("restored answer rows = %#v, want Alice's one current answer", alice.Rows)
 	}
 }
+
+func TestListMyAnswersMarksAChangedAnswerAsNoLongerCurrent(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Changed answer page", "A spec")
+	ask := createChangeableAsk(t, handler, issue.Key)
+	first := answerAskForChange(t, handler, ask.ID, "alice", "Ship", nil)
+	if first.Answer == nil {
+		t.Fatal("first answer is missing")
+	}
+	firstAt := timestampValue(first.Answer.At)
+	answerAskForChange(t, handler, ask.ID, "alice", "Hold", &firstAt)
+
+	answers := getMyAnswers(t, handler, "alice", "")
+	if answers.Total != 2 || len(answers.Rows) != 2 {
+		t.Fatalf("changed answer page = %#v, want both answers", answers)
+	}
+	newest, earlier := answers.Rows[0], answers.Rows[1]
+	if newest.Answer == nil || newest.Answer.Selected[0] != "Hold" || !newest.Current {
+		t.Fatalf("newest answer row = %#v, want current Hold", newest)
+	}
+	if earlier.Answer == nil || earlier.Answer.Selected[0] != "Ship" || earlier.Current {
+		t.Fatalf("earlier answer row = %#v, want replaced Ship", earlier)
+	}
+}

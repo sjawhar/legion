@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -164,5 +165,93 @@ func TestAnswerAskChangeRefusesClosedAndApprovalAsks(t *testing.T) {
 		"selected": []string{"Approve"}, "expected_answer_at": approvalAt,
 	}, "alice"); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_APPROVAL_REVIEW"`) {
 		t.Fatalf("replace approval: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAnswerAskHistoryIgnoresARestorationAndKeepsTheLaterChange(t *testing.T) {
+	handler, database := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Restored history", "decision", transportAsk, "Which transport?")
+	before := readBlockAsk(t, handler, askID)
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected":           []string{"REST"},
+		"expected_edited_at": before.EditedAt,
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer block ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	if deleted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "delete", "block": "decision"}},
+	}, "bob"); deleted.Code != http.StatusOK {
+		t.Fatalf("delete answered block: status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "history-after-delete")
+	// Rows written before settlement left deleted answered blocks answered can still hold its
+	// retraction, with the answer only in events.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update asks
+		set state = 'resolved', answer = null,
+		    resolution = jsonb_build_object(
+		      'kind', 'retracted',
+		      'reason', 'removed from the document in version 3',
+		      'actor', jsonb_build_object('kind', 'system', 'id', 'document-settlement'),
+		      'at', now()
+		    )
+		where id = $1
+	`, askID); err != nil {
+		t.Fatalf("seed legacy settlement retraction: %v", err)
+	}
+	if restored := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": transportAsk}},
+	}, "bob"); restored.Code != http.StatusOK {
+		t.Fatalf("restore answered block: status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "history-after-restore")
+
+	read := decodeBody[answerHistoryRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice"))
+	if len(read.Answers) != 1 || read.Answers[0].User != "alice" || read.Answers[0].Selected[0] != "REST" {
+		t.Fatalf("restored answer history = %#v, want Alice's one answer", read.Answers)
+	}
+	currentAt := timestampValue(read.Answers[0].At)
+	changed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected":           []string{"gRPC"},
+		"expected_edited_at": read.Ask.EditedAt,
+		"expected_answer_at": currentAt,
+	}, "alice")
+	if changed.Code != http.StatusOK {
+		t.Fatalf("change restored answer: status=%d body=%s", changed.Code, changed.Body.String())
+	}
+	history := decodeBody[answerHistoryRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice"))
+	if len(history.Answers) != 2 || history.Answers[0].Selected[0] != "REST" || history.Answers[1].Selected[0] != "gRPC" {
+		t.Fatalf("changed restored history = %#v, want REST then gRPC", history.Answers)
+	}
+}
+
+func TestAnswerAskChangeStillRequiresTheReviewedQuestionRevision(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Question revision", "A spec")
+	ask := createChangeableAsk(t, handler, issue.Key)
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+ask.ID, map[string]any{
+		"question": "Should we ship today?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	current := decodeBody[model.Ask](t, edited)
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected": []string{"Ship"}, "expected_edited_at": current.EditedAt,
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer edited ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	first := decodeBody[model.Ask](t, answered)
+	if first.Answer == nil {
+		t.Fatal("answer is missing")
+	}
+	if stale := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected":           []string{"Hold"},
+		"expected_edited_at": nil,
+		"expected_answer_at": timestampValue(first.Answer.At),
+	}, "alice"); stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"code":"ASK_EDITED"`) {
+		t.Fatalf("change with stale question revision: status=%d body=%s", stale.Code, stale.Body.String())
 	}
 }
