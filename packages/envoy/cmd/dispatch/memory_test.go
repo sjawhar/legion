@@ -410,7 +410,6 @@ func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			insert := map[string]any{"op": "insert", "after": shape.after, "markdown": shape.chunk}
 			server := memory.start(t)
 			issue := server.createIssue(t, "Growth by "+shape.name, shape.spec)
-			text := server.text(t, issue.PrimaryArtifactID)
 			refused := false
 			for index := range shape.inserts {
 				var answer response
@@ -427,13 +426,14 @@ func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			if !refused {
 				t.Errorf("all %d inserts were taken, want the document's growth refused", shape.inserts)
 			}
+			server.get(t, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks")
+			text := server.text(t, issue.PrimaryArtifactID)
 			if shape.byBytes {
 				if fill := documentCap - len(text) - 64; fill > 0 {
 					if answer := server.edit(t, issue.PrimaryArtifactID, map[string]any{"op": "insert", "after": "end", "markdown": prose(fill)}); answer.status != http.StatusOK {
 						t.Errorf("fill the document to the cap: %d %.300s, want 200", answer.status, answer.body)
 					}
 				}
-				server.get(t, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks")
 				text = server.text(t, issue.PrimaryArtifactID)
 			}
 			server.stop(t)
