@@ -418,7 +418,10 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
-# pod environment can name all three. Then `legion probe-image` runs the three launch probes through
+# pod environment can name all three. The plugin's `dispatch` shim runs its bundled CLI under the
+# image's bun and prints its help, so a plugin packed without bin/ or dist/dispatch.js, or an image
+# without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's own
+# test. Then `legion probe-image` runs the three launch probes through
 # the daemon's own code, loading the plugin the way a Sandbox pod does (--plugin-root: the one
 # explicit extension, discovery off), holds the plugin to the daemon API contract this binary speaks,
 # and resolves by name every task agent and skill Legion's prompts name (shipped in its agents/ and
@@ -436,6 +439,10 @@ RUN set -eu; \
     done; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
+    DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
+      /opt/legion/pi-legion-envoy/bin/dispatch --help > /tmp/dispatch-help; \
+    echo "dispatch: $(sed -n 1p /tmp/dispatch-help)"; grep -q '^Usage: dispatch ' /tmp/dispatch-help; \
+    rm /tmp/dispatch-help; \
     agent_secrets="$(command -v agent-secrets)"; test "$agent_secrets" = /opt/legion/bin/agent-secrets; \
     version="$(legion version)"; echo "$version"; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
