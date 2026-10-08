@@ -115,11 +115,17 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
 	}
+	// RebuildTx holds the document's advisory lock until this transaction ends, so the pending
+	// authors read here are the ones the version's commit deletes.
+	owed, err := readPendingAuthors(ctx, tx, artifactID)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
 	state := s.lockState(artifactID)
-	capture, authors := captureAuthors(state, nil, &actor)
+	capture := captureAuthors(state, owed, nil, &actor)
 	s.unlockState(artifactID, state)
 	written, err := s.writeVersionTx(ctx, tx, artifactID, canonical, tree, actor, &versionWrite{
-		authors: authors,
+		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
 	if err != nil {
