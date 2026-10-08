@@ -5,6 +5,7 @@ import { executeDispatchTool } from "./dispatch-execute";
 import {
   loadSessionMemory,
   pruneSessions,
+  type ResultInput,
   readSessionTitle,
   recordOutcome,
   sessionDirectory,
@@ -34,7 +35,7 @@ const HOSTS: Record<string, DispatchHost> = { omp: "omp", claude: "claude", open
 
 /** Claude Code reads back at most 30,000 characters of a command's output by default
  *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare, every line
- *  the CLI adds counted (`fitClaudeOutput`). */
+ *  the CLI adds counted (`fitOutput`). */
 const CLAUDE_OUTPUT_MAX = 25_000;
 
 /** What the CLI prints when the call reached Dispatch but its local record could not be written. */
@@ -45,14 +46,14 @@ function stateWriteFailed(problem: string): string {
 }
 
 /**
- * The output, as lines, at most `limit` characters. Within the limit it is the result text, the
- * picture lines, then the `kept` lines (the follow notice and the CLI's own notes) as given. Past
- * it, the text and every picture line are written whole through `writeFull`, and the output names
- * that file: the result text is cut first, then picture lines are dropped from the end with a line
- * saying how many, while the kept lines stay whole. Only when the kept lines alone pass the limit
- * is the whole output, naming the file first, cut to it.
+ * The output, at most `limit` characters (unbounded for a host that shows all of it). Within the
+ * limit it is the result text, the picture lines, then the `kept` lines (the follow notice and the
+ * CLI's own notes) as given. Past it, the text and every picture line are written whole through
+ * `writeFull`, and the output names that file: the result text is cut first, then picture lines are
+ * dropped from the end with a line saying how many, while the kept lines stay whole. Only when the
+ * kept lines alone pass the limit is the whole output, naming the file first, cut to it.
  */
-export function fitClaudeOutput(
+export function fitOutput(
   text: string,
   pictures: readonly string[],
   kept: readonly string[],
@@ -63,18 +64,30 @@ export function fitClaudeOutput(
   if (whole.length <= limit) return whole;
   const full = [text, ...pictures].join("\n");
   const marker = `(the full result, ${full.length} characters: ${writeFull(full)})`;
-  const tail = (shown: number): string => {
-    const left = pictures.length - shown;
-    const dropped =
-      left === 0
-        ? []
-        : [`(${left} more picture line${left === 1 ? "" : "s"} left out: see the full result)`];
-    return [marker, ...pictures.slice(0, shown), ...dropped, ...kept].join("\n");
-  };
+  const droppedLine = (left: number): string =>
+    `(${left} more picture line${left === 1 ? "" : "s"} left out: see the full result)`;
+  // The tail's length for each number of picture lines shown, from the parts' lengths alone, one
+  // newline between parts; the text needs at least the newline before the marker.
+  const keptLength = kept.reduce((sum, line) => sum + line.length + 1, 0);
+  let pictureLength = pictures.reduce((sum, line) => sum + line.length + 1, 0);
   let shown = pictures.length;
-  // The text needs at least the newline before the marker.
-  while (shown > 0 && tail(shown).length + 1 > limit) shown -= 1;
-  const after = tail(shown);
+  const tailLength = (): number => {
+    const left = pictures.length - shown;
+    return (
+      marker.length + pictureLength + (left === 0 ? 0 : droppedLine(left).length + 1) + keptLength
+    );
+  };
+  while (shown > 0 && tailLength() + 1 > limit) {
+    shown -= 1;
+    pictureLength -= (pictures[shown]?.length ?? 0) + 1;
+  }
+  const left = pictures.length - shown;
+  const after = [
+    marker,
+    ...pictures.slice(0, shown),
+    ...(left === 0 ? [] : [droppedLine(left)]),
+    ...kept,
+  ].join("\n");
   const room = limit - after.length - 1;
   return room >= 0 ? `${text.slice(0, room)}\n${after}` : after.slice(0, limit);
 }
@@ -175,7 +188,7 @@ export async function runDispatchCli(
   const pictures: string[] = [];
   const notes: string[] = [];
   const problems: string[] = [];
-  let entry: { tool: string; details?: unknown; error?: string };
+  let entry: ResultInput;
   let code: number;
   try {
     const result = await executeDispatchTool({
@@ -224,9 +237,13 @@ export async function runDispatchCli(
     }
   };
   print(
-    host === "claude"
-      ? fitClaudeOutput(text, pictures, kept, CLAUDE_OUTPUT_MAX, writeFull)
-      : [text, ...pictures, ...kept].join("\n")
+    fitOutput(
+      text,
+      pictures,
+      kept,
+      host === "claude" ? CLAUDE_OUTPUT_MAX : Number.POSITIVE_INFINITY,
+      writeFull
+    )
   );
   return code;
 }

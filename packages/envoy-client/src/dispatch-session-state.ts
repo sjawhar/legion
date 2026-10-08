@@ -144,7 +144,8 @@ function writeMemory(dir: string, sessionId: string, follows: Set<string>): void
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}\n`);
 }
 
-type ResultInput = { readonly tool: string; readonly details?: unknown; readonly error?: string };
+/** What one call leaves in the ledger, before `at` is added. */
+export type ResultInput = Omit<ResultEntry, "at">;
 
 /** Appends one call's result, with `at` added, to the ledger as one JSON line. */
 export function appendResult(dir: string, entry: ResultInput): void {
@@ -246,7 +247,7 @@ export function writePicture(dir: string, image: ToolImage): { path: string; byt
     writeFileSync(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
   } catch (error) {
     // The same bytes, already written under their hash.
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!hasErrnoCode(error, "EEXIST")) throw error;
   }
   return { path, bytes: bytes.length };
 }

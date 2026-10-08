@@ -65,9 +65,9 @@ function architectCommandHead(command: unknown): string | undefined {
   return (word === "dispatch" || word === "legion") && headScan(head) ? head : undefined;
 }
 
-/** The head's first word as bash splits it, at a space or a tab. */
+/** The trimmed head's first word as bash splits it, at a space or a tab. */
 function firstWord(head: string): string {
-  return head.replace(/^[ \t]+/, "").split(/[ \t]/, 1)[0] ?? "";
+  return head.split(/[ \t]/, 1)[0] ?? "";
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter

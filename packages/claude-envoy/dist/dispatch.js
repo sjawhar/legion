@@ -14908,16 +14908,15 @@ function fieldWords(field, info, value) {
   }
   if (kind === "json")
     return flagWithValue(`--${name}-json`, JSON.stringify(value));
-  const listKind = kind === "options" || typeof kind === "object";
-  if (listKind && Array.isArray(value) && value.length === 0)
-    return [`--clear-${name}`];
-  if (kind === "options" && Array.isArray(value)) {
-    const texts = value.map(optionText);
-    if (texts.includes(undefined))
-      return flagWithValue(`--${name}-json`, JSON.stringify(value));
-    return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
-  }
-  if (typeof kind === "object" && Array.isArray(value)) {
+  if (Array.isArray(value) && (kind === "options" || typeof kind === "object")) {
+    if (value.length === 0)
+      return [`--clear-${name}`];
+    if (kind === "options") {
+      const texts = value.map(optionText);
+      if (texts.includes(undefined))
+        return flagWithValue(`--${name}-json`, JSON.stringify(value));
+      return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
+    }
     const flag = `--${singular(name)}`;
     return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }
@@ -18431,7 +18430,7 @@ function writePicture(dir, image) {
   try {
     writeFileSync(path2, bytes, { mode: PRIVATE_FILE, flag: "wx" });
   } catch (error48) {
-    if (error48.code !== "EEXIST")
+    if (!hasErrnoCode(error48, "EEXIST"))
       throw error48;
   }
   return { path: path2, bytes: bytes.length };
@@ -18543,7 +18542,7 @@ var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's s
 function stateWriteFailed(problem) {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
-function fitClaudeOutput(text, pictures, kept, limit, writeFull) {
+function fitOutput(text, pictures, kept, limit, writeFull) {
   const whole = [text, ...pictures, ...kept].join(`
 `);
   if (whole.length <= limit)
@@ -18551,16 +18550,26 @@ function fitClaudeOutput(text, pictures, kept, limit, writeFull) {
   const full = [text, ...pictures].join(`
 `);
   const marker = `(the full result, ${full.length} characters: ${writeFull(full)})`;
-  const tail = (shown2) => {
-    const left = pictures.length - shown2;
-    const dropped = left === 0 ? [] : [`(${left} more picture line${left === 1 ? "" : "s"} left out: see the full result)`];
-    return [marker, ...pictures.slice(0, shown2), ...dropped, ...kept].join(`
-`);
-  };
+  const droppedLine = (left2) => `(${left2} more picture line${left2 === 1 ? "" : "s"} left out: see the full result)`;
+  const keptLength = kept.reduce((sum, line) => sum + line.length + 1, 0);
+  let pictureLength = pictures.reduce((sum, line) => sum + line.length + 1, 0);
   let shown = pictures.length;
-  while (shown > 0 && tail(shown).length + 1 > limit)
+  const tailLength = () => {
+    const left2 = pictures.length - shown;
+    return marker.length + pictureLength + (left2 === 0 ? 0 : droppedLine(left2).length + 1) + keptLength;
+  };
+  while (shown > 0 && tailLength() + 1 > limit) {
     shown -= 1;
-  const after = tail(shown);
+    pictureLength -= (pictures[shown]?.length ?? 0) + 1;
+  }
+  const left = pictures.length - shown;
+  const after = [
+    marker,
+    ...pictures.slice(0, shown),
+    ...left === 0 ? [] : [droppedLine(left)],
+    ...kept
+  ].join(`
+`);
   const room = limit - after.length - 1;
   return room >= 0 ? `${text.slice(0, room)}
 ${after}` : after.slice(0, limit);
@@ -18690,8 +18699,7 @@ async function runDispatchCli(argv, rawEnv, io) {
       return `not written, ${messageFor(error48)}`;
     }
   };
-  print(host === "claude" ? fitClaudeOutput(text, pictures, kept, CLAUDE_OUTPUT_MAX, writeFull) : [text, ...pictures, ...kept].join(`
-`));
+  print(fitOutput(text, pictures, kept, host === "claude" ? CLAUDE_OUTPUT_MAX : Number.POSITIVE_INFINITY, writeFull));
   return code;
 }
 

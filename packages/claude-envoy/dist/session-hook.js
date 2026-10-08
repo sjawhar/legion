@@ -15074,16 +15074,15 @@ function fieldWords(field, info, value) {
   }
   if (kind === "json")
     return flagWithValue(`--${name}-json`, JSON.stringify(value));
-  const listKind = kind === "options" || typeof kind === "object";
-  if (listKind && Array.isArray(value) && value.length === 0)
-    return [`--clear-${name}`];
-  if (kind === "options" && Array.isArray(value)) {
-    const texts = value.map(optionText);
-    if (texts.includes(undefined))
-      return flagWithValue(`--${name}-json`, JSON.stringify(value));
-    return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
-  }
-  if (typeof kind === "object" && Array.isArray(value)) {
+  if (Array.isArray(value) && (kind === "options" || typeof kind === "object")) {
+    if (value.length === 0)
+      return [`--clear-${name}`];
+    if (kind === "options") {
+      const texts = value.map(optionText);
+      if (texts.includes(undefined))
+        return flagWithValue(`--${name}-json`, JSON.stringify(value));
+      return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
+    }
     const flag = `--${singular(name)}`;
     return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }

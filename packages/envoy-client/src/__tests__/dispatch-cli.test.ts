@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fitClaudeOutput, runDispatchCli } from "../dispatch-cli";
+import { fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
@@ -337,23 +337,17 @@ describe("the dispatch CLI", () => {
   });
 });
 
-describe("fitClaudeOutput", () => {
+describe("fitOutput", () => {
   const write = (text: string): string => `/state/out/${text.length}.md`;
 
   test("leaves an output under the limit as it is", () => {
-    expect(fitClaudeOutput("text", ["- picture: a"], ["note"], 100, write)).toBe(
+    expect(fitOutput("text", ["- picture: a"], ["note"], 100, write)).toBe(
       "text\n- picture: a\nnote"
     );
   });
 
   test("cuts the result text first, keeping every line after it and naming the full result", () => {
-    const out = fitClaudeOutput(
-      "x".repeat(200),
-      ["- picture: a"],
-      ["follow notice", "note"],
-      120,
-      write
-    );
+    const out = fitOutput("x".repeat(200), ["- picture: a"], ["follow notice", "note"], 120, write);
     expect(out.length).toBeLessThanOrEqual(120);
     expect(out).toContain("(the full result, 213 characters: /state/out/213.md)");
     expect(out).toEndWith("\n- picture: a\nfollow notice\nnote");
@@ -364,7 +358,7 @@ describe("fitClaudeOutput", () => {
       { length: 10 },
       (_, index) => `- picture: /p/${index} (${"y".repeat(30)})`
     );
-    const out = fitClaudeOutput("x".repeat(50), pictures, ["follow notice", "note"], 200, write);
+    const out = fitOutput("x".repeat(50), pictures, ["follow notice", "note"], 200, write);
     expect(out.length).toBeLessThanOrEqual(200);
     expect(out).toEndWith("\nfollow notice\nnote");
     expect(out).toMatch(/\n\(\d+ more picture lines? left out: see the full result\)\n/);
@@ -372,8 +366,14 @@ describe("fitClaudeOutput", () => {
   });
 
   test("when the kept lines alone pass the limit, the output is cut to it and names the file first", () => {
-    const out = fitClaudeOutput("x".repeat(50), ["- picture: a"], ["n".repeat(500)], 200, write);
+    const out = fitOutput("x".repeat(50), ["- picture: a"], ["n".repeat(500)], 200, write);
     expect(out.length).toBe(200);
     expect(out).toStartWith("(the full result, 63 characters: /state/out/63.md)");
+  });
+
+  test("an unbounded limit returns every line as given", () => {
+    expect(fitOutput("text", ["- picture: a"], ["note"], Number.POSITIVE_INFINITY, write)).toBe(
+      "text\n- picture: a\nnote"
+    );
   });
 });
