@@ -282,7 +282,7 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
@@ -534,7 +534,7 @@ assigned_in() { jq -e -s --arg a "Issue: $2. Phase: $3." 'any(.[]; .type == "mes
 instruction_for() {
   local issue=$1 role=$2 phase=$3
   case "$role:$phase" in
-    implementer:implementing) printf '%s' "Acceptance implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$issue, and open its pull request with base branch $scratch_base (pass --base $scratch_base to legion gh -- pr create; this proof's pull requests never target main). Record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge." ;;
+    implementer:implementing) printf '%s' "Acceptance implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$issue, and open its pull request with base branch $scratch_base (pass --base $scratch_base to gh pr create; this proof's pull requests never target main). Record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge." ;;
     tester:testing) printf '%s' "Acceptance test operation: inspect the implementer's actual one-file change and this issue's pull request, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass and a summary that begins 'TESTER-SUMMARY $issue:'." ;;
     reviewer:reviewing) printf '%s' "Acceptance final review: use the bash tool to submit APPROVE on this issue's pull request (head legion/$issue) in $repo at its current head as legion-reviewer[bot], then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round." ;;
     implementer:retro) printf '%s' "Acceptance retro: write the required retro handoff for this issue's pull request and complete the phase. Do not change the approved implementation." ;;
@@ -1148,8 +1148,8 @@ grant_changed() { [ "$(grant_mtime "$1")" != "$2" ]; }
 begin ready-cap-refused-at-the-boundary
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
 # The pane's LEGION_GRANT_FILE is <LEGION_STATE_DIR>/secrets/<claim token>-grant, the file the
-# daemon names on the pane and the plugin writes a grant into before each bash command (pi-legion
-# extensions/legion.ts).
+# daemon names on the pane and the plugin writes a grant into before each bash command that invokes
+# `legion` (pi-legion extensions/legion.ts); the `legion state` below is one.
 merger_state=$(pane_value "$merger_omp" LEGION_STATE_DIR)
 merger_ws=$(readlink "/proc/$merger_omp/cwd")
 [ -n "$merger_state" ] || fail "$root1's merger pane names no LEGION_STATE_DIR"

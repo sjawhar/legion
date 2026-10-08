@@ -545,6 +545,40 @@ pod_exec() {
   op exec "$pod" -c "$role" -- "$@"
 }
 
+# ---- each role's GitHub credential: the gh files its container alone mounts (LEGION-631) ---------
+
+# A role's GitHub App token is gh's hosts.yml under /var/run/legion/gh in its container, projected
+# from its role Secret and rewritten in place by the daemon as the lease turns over. The checks read
+# the file through sha256 (gh_hosts_hash) and read the token itself into a shell variable only
+# (gh_hosts_token), never into the evidence or a note; `pod_viewer` is what the role's plain gh
+# says it is, which only that App's token answers.
+gh_config_dir=/var/run/legion/gh
+gh_hosts_hash() { pod_exec "$1" "$2" sh -c "sha256sum $gh_config_dir/hosts.yml | cut -d' ' -f1"; }
+gh_hosts_token() { pod_exec "$1" "$2" sh -c "sed -n 's/^    oauth_token: //p' $gh_config_dir/hosts.yml | head -1"; }
+# pod_viewer POD ROLE [DIR] runs the role container's own gh with GH_CONFIG_DIR set (an exec gets
+# no environment of the role's Oh My Pi, whose variables travel in its launcher's start command) and
+# prints the GitHub login the token answers for; DIR other than the role's directory is a control.
+pod_viewer() {
+  pod_exec "$1" "$2" sh -c "GH_CONFIG_DIR=${3:-$gh_config_dir} GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login"
+}
+# gh_log_line MSG POD ROLE prints the daemon's newest credential log line with MSG (`written` or
+# `refreshed`) for the role's Secret, as the daemon logs it (sandbox runtime: github credential …).
+gh_log_line() {
+  jq -R -s -c --arg msg "sandbox runtime: github credential $1" --arg sandbox "$2" --arg role "$3" \
+    '[split("\n")[] | fromjson? | select(.msg == $msg and .sandbox == $sandbox and .role == $role)] | last // empty' "$daemon_log" | grep .
+}
+# bash_legion_commands ISSUE ROLE LABEL prints every bash tool command the role's session ran after
+# the instruction LABEL that invokes `legion` (a word equal to legion or ending /legion), so a proof
+# that nothing minted a grant for a GitHub call can show the commands between an instruction and
+# the reply named no legion command.
+bash_legion_commands() {
+  claim_session_text "$1" "$2" | jq -R -s -r --arg label "$3" '[split("\n")[] | fromjson?] as $e
+    | ($e | map(tostring | contains($label)) | index(true)) as $at
+    | if $at == null then empty else $e[($at + 1):][] | select(.type == "message" and .message.role == "assistant")
+        | .message.content[]? | select(.type == "toolCall" and .name == "bash") | .arguments.command // ""
+        | select(test("(^|[^A-Za-z0-9_/-])(\\S*/)?legion([^A-Za-z0-9_-]|$)")) end'
+}
+
 # ---- the review pair: the reviewer's two thermonuclear task dispatches, as its session shows them ----
 
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
@@ -1224,16 +1258,43 @@ shape_problems() {
             | "the \(.role) launcher dials \(.connect // "nothing (no --connect)"), not advertise_host at \($stream)" end),
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s | role_containers[] | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "a role launcher mounts the provision volume" else empty end),
-      ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end)
+      ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end),
+      # Each role holds its GitHub App token in a gh volume of its own (LEGION-631): gh-<role>
+      # projects the two gh keys of that role Secret, read-only at GH_CONFIG_DIR in that role
+      # container alone, so no container reads another role token; the clone helper is gh itself;
+      # and the containers share no process namespace, which would let one read another /proc.
+      ($roles[] | . as $role | ([$s.volumes[] | select(.name == "gh-\($role)")] | first) as $v
+        | ([$s.volumes[] | select(.name == "launcher-\($role)")] | first | .secret.secretName) as $own
+        | if $v == null then "no gh-\($role) volume" else
+            (if $v.secret.secretName != $own then "gh-\($role) projects Secret \($v.secret.secretName), not the role Secret \($own) its launcher token comes from" else empty end),
+            (if (($v.secret.items // []) | map({(.key): .path}) | add) != {"github-hosts": "hosts.yml", "github-config": "config.yml"} then "gh-\($role) projects \($v.secret.items | tostring), not hosts.yml and config.yml" else empty end),
+            (if $v.secret.defaultMode != 288 then "gh-\($role) has defaultMode \($v.secret.defaultMode), not 0440" else empty end)
+          end),
+      ($s | role_containers[] | .name as $role
+        | ([.volumeMounts[]? | select(.name | startswith("gh-"))]) as $gh
+        | if ($gh | length) != 1 or $gh[0].name != "gh-\($role)" or $gh[0].mountPath != "/var/run/legion/gh" or $gh[0].readOnly != true
+          then "container \($role) mounts gh volumes \($gh | map("\(.name) at \(.mountPath)\(if .readOnly then " read-only" else "" end)") | join(", ")), want gh-\($role) alone, read-only at /var/run/legion/gh" else empty end),
+      ([$s.initContainers[]?, $s.containers[]] | .[] as $c | [$c.volumeMounts[]? | select(.mountPath | startswith("/var/run/legion/gh")) | select(.name != "gh-\($c.name)")] | .[]
+        | "container \($c.name) mounts \(.name) under /var/run/legion/gh"),
+      (if $s.shareProcessNamespace == true then "shareProcessNamespace is set" else empty end),
+      ([$s.initContainers[]? | select(.name == "workspace-init")] | .[] | (.command | index("--credential-helper")) as $i
+        | if $i == null or .command[$i + 1] != "!gh auth git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !gh auth git-credential" else empty end)
   '
 }
+# check_pod_shape SPEC prints the pod's shape problems, then whether any Secret value of the pod's
+# claim is in a container's command, args or environment: the provisioning token, each role's
+# launcher token, and each role's GitHub App token — the `oauth_token` lines of its `github-hosts`
+# key (gh's hosts.yml, two lines of which carry the token); `github-config` holds no secret.
 check_pod_shape() {
   local spec=$1 tokens name role values
   shape_problems <<<"$spec"
   name=$(jq -r '.metadata.name' <<<"$spec")
   tokens=$(op get secret "$name-boot" -o json 2>/dev/null | jq -r '.data // {} | .[] | @base64d') || tokens=
   for role in architect planner implementer tester reviewer merger; do
-    values=$(op get secret "$name-$role-boot" -o json 2>/dev/null | jq -r '.data // {} | .[] | @base64d') || values=
+    values=$(op get secret "$name-$role-boot" -o json 2>/dev/null | jq -r '.data // {} | to_entries[]
+      | if .key == "github-hosts" then (.value | @base64d | split("\n")[] | select(test("oauth_token: ")) | sub("^.*oauth_token: "; ""))
+        elif .key == "github-config" then empty
+        else (.value | @base64d) end') || values=
     tokens+="${tokens:+$'\n'}$values"
   done
   if [ -n "$tokens" ]; then
@@ -2212,6 +2273,16 @@ start_memory_hog "$nodes1"
 until_true 300 "the memory hog on $nodes1 to be OOMKilled" hog_oomkilled
 op delete pod "legion-e2e4b-memory-hog-$$" --wait=false >/dev/null
 note "the memory hog on tree 1's node $nodes1 was OOMKilled by its own 64Mi limit"
+# The architect's GitHub credential as it is now, for github-credential-refresh: the hash of its
+# hosts.yml and the token itself, read into this shell alone. The architect container is the pod's
+# longest-lived, so the hour boundary is observed on it.
+gh_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
+gh_before_hash=$(gh_hosts_hash "$gh_pod" architect) || fail "could not hash the architect's hosts.yml in $gh_pod"
+gh_before_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's hosts.yml in $gh_pod"
+[ -n "$gh_before_token" ] || fail "the architect's hosts.yml in $gh_pod names no oauth_token"
+gh_before_at=$(date -u +%FT%TZ)
+gh_before_uid=$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')
+note "the architect's hosts.yml in $gh_pod hashes to ${gh_before_hash:0:12}… at $gh_before_at (its token kept in this shell for the refresh check)"
 pass
 
 begin repository-configuration
@@ -2334,6 +2405,78 @@ adoption=$(workspace_jj "$tree1" log -r '@|@-' --no-graph -T 'if(empty, "empty",
 note "after the tester's adoption: $(tr '\n' ' ' <<<"$adoption")"
 [ "$(sed -n 1p <<<"$adoption")" = "empty|legion-reviewer[bot]" ] || fail "the tester's adoption left @ as '$(sed -n 1p <<<"$adoption")', want a new empty change authored by legion-reviewer[bot]"
 [ "$(sed -n 2p <<<"$adoption" | cut -d'|' -f2)" = "legion-implementer[bot]" ] || fail "the adoption rewrote the implementer's commit author: '$(sed -n 2p <<<"$adoption")'"
+pass
+
+begin github-credential
+# Each role's GitHub App token is a file its plain gh and git read (LEGION-631): the implementer's
+# container holds the implement App's hosts.yml under /var/run/legion/gh, the reviewer's the review
+# App's, each in its own gh-<role> volume of its own role Secret, so neither reads the other's; the
+# agent's environment names GH_CONFIG_DIR and no tool pin, its PATH has no worker-bin shim, and a
+# task subagent it launches runs the same gh with the same credential and no grant. The pushes on
+# legion/<issue> were made by the Apps themselves: GitHub's events name the planner's handoff push
+# the review App's and the implementer's the implement App's.
+gh_pod=$(claim_sandbox "$tree1" implementer) || fail "tree 1's implementer has no Sandbox locator"
+gh_bin=$(pod_exec "$gh_pod" implementer sh -c 'command -v gh') || fail "no gh in the implementer container of $gh_pod"
+[ "$gh_bin" = /usr/local/bin/gh ] || fail "the implementer container's gh is $gh_bin, want the image's /usr/local/bin/gh"
+status=$(pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh auth status 2>&1") || fail "gh auth status in the implementer container failed: $(scrub <<<"$status" | head -5)"
+grep -q "x-access-token" <<<"$status" || fail "gh auth status in the implementer container names no x-access-token account: $(scrub <<<"$status" | head -5)"
+for pair in implementer:legion-implementer[bot] reviewer:legion-reviewer[bot]; do
+  viewer=$(pod_viewer "$gh_pod" "${pair%%:*}") || fail "gh in the ${pair%%:*} container of $gh_pod answered no viewer"
+  [ "$viewer" = "${pair#*:}" ] || fail "gh in the ${pair%%:*} container of $gh_pod acts as $viewer, want ${pair#*:}"
+  listed=$(pod_exec "$gh_pod" "${pair%%:*}" sh -c "ls -A $gh_config_dir | sort | tr '\n' ' '")
+  [ "$listed" = "config.yml hosts.yml " ] || fail "the ${pair%%:*} container's $gh_config_dir holds '$listed', want config.yml and hosts.yml alone"
+done
+impl_hash=$(gh_hosts_hash "$gh_pod" implementer) || fail "could not hash the implementer's hosts.yml"
+rev_hash=$(gh_hosts_hash "$gh_pod" reviewer) || fail "could not hash the reviewer's hosts.yml"
+[ "$impl_hash" != "$rev_hash" ] || fail "the implementer's and the reviewer's hosts.yml in $gh_pod are the same file (hash $impl_hash): the two roles hold one token"
+impl_env=$(pod_env "$gh_pod" implementer) || fail "no readable Oh My Pi environment in the implementer container of $gh_pod"
+for want in "GH_CONFIG_DIR=$gh_config_dir" "GH_TOKEN=" "GITHUB_TOKEN=" "GH_HOST=" "LEGION_IMPLEMENT_APP_LOGIN=legion-implementer[bot]" "LEGION_REVIEW_APP_LOGIN=legion-reviewer[bot]"; do
+  grep -qxF -- "$want" <<<"$impl_env" || fail "the implementer's Oh My Pi environment lacks $want: $(grep -E '^(GH_|GITHUB_|LEGION_(IMPLEMENT|REVIEW)_APP)' <<<"$impl_env" | tr '\n' ' ')"
+done
+for absent in LEGION_GH_PATH LEGION_GIT_PATH LEGION_JJ_PATH LEGION_CREDENTIAL_HELPER; do
+  ! grep -q "^$absent=" <<<"$impl_env" || fail "the implementer's Oh My Pi environment still carries $(grep "^$absent=" <<<"$impl_env")"
+done
+impl_path=$(sed -n 's/^PATH=//p' <<<"$impl_env")
+case ":$impl_path:" in
+  *worker-bin*) fail "the implementer's PATH names a worker-bin shim directory: $impl_path" ;;
+  "/opt/legion/bin:"*) ;;
+  *) fail "the implementer's PATH is $impl_path, want the image's legion directory first" ;;
+esac
+op get pod "$gh_pod" -o json >"$evidence/github-credential-pod.json"
+jq -e '["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
+  | (.spec.shareProcessNamespace != true)
+  and all(.spec.containers[] | select(.name as $n | $roles | index($n));
+      ([.volumeMounts[] | select(.name | startswith("gh-")) | .name] == ["gh-\(.name)"]))' "$evidence/github-credential-pod.json" >/dev/null ||
+  fail "$gh_pod does not mount each role's gh volume in its own container alone: $(jq -c '[.spec.containers[] | {name, gh: [.volumeMounts[] | select(.name | startswith("gh-")) | .name]}]' "$evidence/github-credential-pod.json")"
+# Every role's Secret got its gh files when the pod was made, and no daemon route serves a token.
+for role in architect planner implementer tester reviewer merger; do
+  gh_log_line written "$gh_pod" "$role" >/dev/null || fail "the daemon log has no 'github credential written' line for $role of $gh_pod"
+done
+! grep -qE '/legion/v1/(gh-token|git-credential|provisioning-credential)' "$daemon_log" || fail "the daemon log names a token route: $(grep -E '/legion/v1/(gh-token|git-credential|provisioning-credential)' "$daemon_log" | head -3 | scrub)"
+# A task subagent inherits the same credential: its gh answers the implement App with no grant,
+# and no bash command of the implementer's between the instruction and the reply ran legion.
+sub_label="Stage 4b credential proof (subagent)"
+send_agent "$tree1" implementer "$sub_label: launch one task subagent whose only job is to run exactly gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login in its bash tool and reply with the exact output. Run no bash command yourself. Then reply with one line: SUB-VIEWER= followed by the subagent's exact output. Wait after reporting."
+on_tree "$tree1" until_true 600 "the implementer to report its subagent's gh viewer" session_contains "$tree1" implementer "SUB-VIEWER=legion-implementer[bot]"
+legion_commands=$(bash_legion_commands "$tree1" implementer "$sub_label")
+[ -z "$legion_commands" ] || fail "the implementer ran a legion command for the subagent proof, so a grant may have been minted: $(tr '\n' ' ' <<<"$legion_commands" | cut -c1-300)"
+# The pushes: the planner's handoff by the review App, the implementer's head by the implement App.
+pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
+plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph -T 'commit_id ++ "\n"' | head -1)
+[ -n "$plan_head" ] || fail "no 'plan: record handoff' commit on tree 1's workspace"
+push_actors() {
+  gh api "repos/$repo/events" --paginate --jq --arg ref "refs/heads/legion/$tree1" \
+    '.[] | select(.type == "PushEvent" and .payload.ref == $ref) | "\(.payload.head) \(.actor.login)"' >"$evidence/github-credential-pushes.txt" 2>/dev/null
+  grep -q "^$pr_head legion-implementer\[bot\]$" "$evidence/github-credential-pushes.txt" &&
+    grep -q "^$plan_head legion-reviewer\[bot\]$" "$evidence/github-credential-pushes.txt"
+}
+until_true 600 "GitHub's events to attribute the planner's push to legion-reviewer[bot] and the implementer's to legion-implementer[bot]" push_actors
+# Negative control: the same gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
+if pod_viewer "$gh_pod" implementer /nonexistent >/dev/null 2>"$evidence/github-credential-negative.txt"; then
+  fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
+fi
+grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_CONFIG_DIR=/nonexistent failed without gh's own not-logged-in message: $(cat "$evidence/github-credential-negative.txt")"
+note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is legion-implementer[bot] and the reviewer's legion-reviewer[bot] from different hosts.yml files, each container mounts gh-<its role> alone; the implementer's subagent answered legion-implementer[bot] with no legion command; GitHub's events name the planner's push legion-reviewer[bot]'s ($plan_head) and the implementer's legion-implementer[bot]'s ($pr_head)"
 pass
 
 begin ci-red-takeover
@@ -2662,6 +2805,75 @@ note "turns after the rotation were answered by $after"
 route_models=$(sed -n '/^modelRoles:/,/^[^ ]/s/^  [a-z]*: \([^:]*\).*/\1/p' "$operator_route/overlay.yml" | jq -R -s -c 'split("\n") | map(select(. != "")) | unique')
 jq -e --argjson route "$route_models" 'all(.[]; . as $m | any($route[]; . == $m))' <<<"$after" >/dev/null ||
   fail "a turn after the rotation left the operator fixture's role models $route_models: $after"
+pass
+
+begin github-credential-refresh
+# The hour boundary (LEGION-631): the review App's lease the daemon minted at boot lasts an hour,
+# the daemon re-mints it once fewer than twenty minutes remain and rewrites the architect's role
+# Secret, and the kubelet rewrites the projected hosts.yml in the architect's container in place,
+# so the file read at tree-separation and the file now differ, in the same pod, with nothing sent
+# to the agent between the reads; the old token stops working at its own expiry while the new one
+# answers. The daemon log gives the first lease's expiry (its `written` line) and the refresh.
+gh_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
+[ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod ($(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')) is not the one whose hosts.yml was read at tree-separation ($gh_before_uid), so its file is a new pod's first, not a refresh"
+written=$(gh_log_line written "$gh_pod" architect) || fail "the daemon log has no 'github credential written' line for the architect of $gh_pod"
+first_expiry=$(jq -r .expiresAt <<<"$written")
+first_expiry_s=$(date -d "$first_expiry" +%s) || fail "the written line's expiresAt is not a time: $written"
+note "the architect's first lease (app $(jq -r .app <<<"$written")) expires at $first_expiry"
+# The read at tree-separation must precede the refresh it is compared with. Planning that ran past
+# the first lease's refresh (some forty minutes after boot) leaves that read already on the second
+# lease: then the second lease is the one whose boundary is observed, read now, and its own
+# refresh is awaited, which can be most of an hour away.
+if early=$(gh_log_line refreshed "$gh_pod" architect) && [ "$(date -d "$(jq -r .time <<<"$early")" +%s)" -gt "$(date -d "$gh_before_at" +%s)" ]; then
+  :
+elif [ -n "${early:-}" ]; then
+  note "the architect's credential was already refreshed at $(jq -r .time <<<"$early"), before the read at $gh_before_at; observing the next boundary from the file as it is now"
+  first_expiry=$(jq -r .expiresAt <<<"$early")
+  first_expiry_s=$(date -d "$first_expiry" +%s) || fail "the refreshed line's expiresAt is not a time: $early"
+  gh_before_hash=$(gh_hosts_hash "$gh_pod" architect) || fail "could not hash the architect's hosts.yml in $gh_pod"
+  gh_before_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's hosts.yml in $gh_pod"
+  gh_before_at=$(date -u +%FT%TZ)
+fi
+refreshed_after_read() {
+  local line
+  line=$(gh_log_line refreshed "$gh_pod" architect) || return 1
+  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -gt "$(date -d "$gh_before_at" +%s)" ]
+}
+on_tree "$tree1" until_true 2700 "the daemon to refresh the architect's github credential" refreshed_after_read
+refreshed=$(gh_log_line refreshed "$gh_pod" architect)
+refreshed_at=$(jq -r .time <<<"$refreshed")
+[ "$(jq -r .app <<<"$refreshed")" = review ] || fail "the architect's credential was refreshed with app $(jq -r .app <<<"$refreshed"), want review"
+[ "$(date -d "$(jq -r .expiresAt <<<"$refreshed")" +%s)" -gt "$first_expiry_s" ] || fail "the refreshed lease expires no later than the first: $refreshed"
+refreshed_s=$(date -d "$refreshed_at" +%s) || fail "the refreshed line's time is not a time: $refreshed"
+# The daemon re-mints once fewer than twenty minutes of the lease remain (appauth refreshWindow),
+# so its write lands at least fifteen minutes before the first lease expires, whenever this check
+# happens to read it.
+[ "$refreshed_s" -le $((first_expiry_s - 900)) ] || fail "the daemon refreshed the architect's credential at $refreshed_at, fewer than fifteen minutes before the first lease's expiry $first_expiry"
+# The kubelet's projection: the file in the container changes within its sync period.
+hosts_changed() { [ "$(gh_hosts_hash "$gh_pod" architect)" != "$gh_before_hash" ]; }
+until_true 300 "the architect container's hosts.yml to carry the refreshed token" hosts_changed
+propagated_at=$(date -u +%FT%TZ)
+[ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod was replaced while the refresh was awaited"
+propagation=$(( $(date -d "$propagated_at" +%s) - refreshed_s ))
+gh_after_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's refreshed hosts.yml"
+[ -n "$gh_after_token" ] && [ "$gh_after_token" != "$gh_before_token" ] || fail "the architect's hosts.yml changed but names the token it had at tree-separation"
+viewer=$(pod_viewer "$gh_pod" architect) || fail "the architect's gh answered no viewer after the refresh"
+[ "$viewer" = "legion-reviewer[bot]" ] || fail "the architect's gh acts as $viewer after the refresh, want legion-reviewer[bot]"
+note "the daemon refreshed the architect's credential at $refreshed_at; the container's hosts.yml had changed by $propagated_at ($propagation s after the daemon's write — an upper bound when the change predates this check, which polls every few seconds), and the architect's gh is legion-reviewer[bot] on it"
+# The old token stops working at its own expiry: GitHub keeps it valid until then, which is what
+# lets a gh that started on it finish. Both calls run from this shell; the tokens are its variables
+# alone and reach no file.
+now_s=$(date +%s)
+if [ "$now_s" -lt $((first_expiry_s + 60)) ]; then
+  note "waiting $((first_expiry_s + 60 - now_s)) s for the first lease to expire"
+  sleep $((first_expiry_s + 60 - now_s))
+fi
+old_answer=$(GH_TOKEN="$gh_before_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's first token still answers GitHub after its expiry: $old_answer"
+grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's first token was refused for another reason than its expiry: $old_answer"
+new_answer=$(GH_TOKEN="$gh_after_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
+[ "$new_answer" = "legion-reviewer[bot]" ] || fail "the architect's refreshed token answers as $new_answer, want legion-reviewer[bot]"
+unset gh_before_token gh_after_token
+note "after $first_expiry the first token answers 401 and the refreshed one legion-reviewer[bot]"
 pass
 
 begin idle-resident

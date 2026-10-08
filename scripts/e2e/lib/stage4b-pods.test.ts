@@ -80,10 +80,10 @@ interface Run {
   // advertise_host at the port since before the pod was created.
   streams?: Stream[];
 }
-// connectProblems runs shape_problems on the pod and prints only its --connect lines: the golden
-// pod departs from the run's other rules (its route ConfigMap and audience are the golden's own),
-// which are not under test here.
-function connectProblems(object: object, run: Run = {}): string[] {
+// problems runs shape_problems on the pod under RUN's worker streams and returns every line it
+// prints; the filters below each keep the lines of one rule, since the golden pod departs from the
+// run's other rules (its route ConfigMap and audience are the golden's own).
+function problems(object: object, run: Run = {}): string[] {
   const host = run.host ?? "192.0.2.250";
   const port = run.port ?? 13371;
   const evidence = join(dir, `run-${++runs}`);
@@ -108,10 +108,13 @@ shape_problems`,
   );
   if (result.exitCode !== 0)
     throw new Error(`shape_problems exited ${result.exitCode}: ${result.stderr}`);
-  return result.stdout
-    .toString()
-    .split("\n")
-    .filter((line) => line.includes("launcher dials") || line.includes("launchers dial"));
+  return result.stdout.toString().split("\n");
+}
+// connectProblems is the --connect rule's lines alone.
+function connectProblems(object: object, run: Run = {}): string[] {
+  return problems(object, run).filter(
+    (line) => line.includes("launcher dials") || line.includes("launchers dial")
+  );
 }
 
 describe("the pod shape's --connect rule", () => {
@@ -170,6 +173,51 @@ describe("the pod shape's --connect rule", () => {
     expect(
       runJq(["-r", "-L", lib, 'include "stage4b-pods"; launcher_connect'], JSON.stringify(pod()))
     ).toBe(`${goldenStream}\n`);
+  });
+});
+
+// ghProblems runs shape_problems on the pod and prints only its gh credential lines (LEGION-631):
+// each role's gh-<role> volume, mount and the clone's helper.
+function ghProblems(object: object): string[] {
+  return problems(object).filter((line) =>
+    /gh-|credential-helper|shareProcessNamespace/.test(line)
+  );
+}
+
+describe("the pod shape's gh credential rule", () => {
+  test("the golden issue pod projects each role's gh files into its own container alone", () => {
+    expect(ghProblems(pod())).toEqual([]);
+  });
+
+  test("a container mounting another role's gh volume departs, naming both", () => {
+    const crossed = pod();
+    const implementer = crossed.spec.containers.find((c: Container) => c.name === "implementer");
+    implementer.volumeMounts.push({
+      name: "gh-reviewer",
+      mountPath: "/var/run/legion/gh-reviewer",
+      readOnly: true,
+    });
+    expect(ghProblems(crossed)).toEqual([
+      "container implementer mounts gh volumes gh-implementer at /var/run/legion/gh read-only, gh-reviewer at /var/run/legion/gh-reviewer read-only, want gh-implementer alone, read-only at /var/run/legion/gh",
+      "container implementer mounts gh-reviewer under /var/run/legion/gh",
+    ]);
+  });
+
+  test("a gh volume of another Secret, a missing file, a shared pid namespace and the old helper each depart", () => {
+    const departed = pod();
+    departed.spec.volumes.find((v: { name: string }) => v.name === "gh-merger").secret.secretName =
+      "other";
+    departed.spec.volumes.find((v: { name: string }) => v.name === "gh-tester").secret.items.pop();
+    departed.spec.shareProcessNamespace = true;
+    const init = departed.spec.initContainers.find((c: Container) => c.name === "workspace-init");
+    init.command[init.command.indexOf("--credential-helper") + 1] =
+      "!/opt/legion/bin/legion credential";
+    expect(ghProblems(departed)).toEqual([
+      'gh-tester projects [{"key":"github-hosts","path":"hosts.yml"}], not hosts.yml and config.yml',
+      "gh-merger projects Secret other, not the role Secret legion-legion-legion-208-merger-boot its launcher token comes from",
+      "shareProcessNamespace is set",
+      "the --credential-helper of workspace-init is !/opt/legion/bin/legion credential, not !gh auth git-credential",
+    ]);
   });
 });
 
