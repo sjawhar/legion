@@ -1172,6 +1172,56 @@ func TestASpecBuilderRefusalOnResumeNeverLeavesASupervisedRoleChildRunning(t *te
 	}
 }
 
+// A claim that never registered is relaunched through Spawn, which hands the runtime no previous
+// locator. When that Spawn fails before its Start (here every read of the role's launcher Secret
+// fails), the Machine must stop the generation it let go, since the runtime cannot know it: retried
+// to Failed, no child of the role is left running and nothing is watched.
+func TestASpawnRefusalForAnUnregisteredClaimNeverLeavesItsChildRunning(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	machine, store, _ := supervisedSandboxMachine(t, g, spec)
+	g.launcher(spec.Claim)
+	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
+		t.Fatalf("initial Spawn: %v", err)
+	}
+	first := machine.Claim().Locator
+	if first == nil {
+		t.Fatal("initial Spawn left the Machine without a locator")
+	}
+	if err := machine.Handle(g.ctx, supervise.StreamHello{Claim: spec.Claim, Generation: 1}); err != nil {
+		t.Fatalf("hello for generation 1: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateShimConnected {
+		t.Fatalf("role state = %s, want shim_connected and unregistered", got)
+	}
+	secret := roleSecretName(first.Sandbox.Name, claim.RoleTester)
+	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() == secret {
+			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+		}
+		return false, nil, nil
+	})
+	err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *first, Kind: runtime.StaleAddress, At: rigNow,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "read its pod's launcher bindings") {
+		t.Fatalf("StaleAddress = %v, want the binding-read failure", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
+		t.Fatalf("claim after the persistent Spawn refusal = %+v, want failed with three launch failures and no locator", got)
+	}
+	if recorded, found := g.r.recorded(spec.Claim); found {
+		t.Errorf("runtime still records %s after the failed claim", recorded.Incarnation)
+	}
+	state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+	if !connected || state.Child != nil {
+		t.Fatalf("the failed claim left launcher connected=%t child=%+v, want no child", connected, state.Child)
+	}
+	if stored := store.claim; stored.State != supervise.StateFailed || stored.Locator != nil {
+		t.Errorf("stored claim after failure = %+v, want failed with no locator", stored)
+	}
+}
+
 // startSupervisedSandboxRole walks a real Sandbox runtime's role through the Machine to Ready at
 // generation 1, returning the recorded locator a later Resume must stop on error.
 func startSupervisedSandboxRole(
@@ -1203,10 +1253,10 @@ func startSupervisedSandboxRole(
 }
 
 // A launcher can receive a Start while its answer is delayed past the runtime's start deadline.
-// That start may have begun the new generation even though start returns an error, so relaunch
-// sends a Stop for the issued generation before returning. This holds both where Resume has no
-// previous locator and where its previous locator names the same pod: startIssued must replace the
-// prior generation as the stop candidate, never leave it selected.
+// That start may have begun the new generation even though start returns an error, so relaunch,
+// which owns the child it started, sends a Stop for the issued generation before returning. This
+// holds both where Resume has no previous locator and where its previous locator names the same
+// pod: the Stop names the issued generation, never the previous one, which is the caller's.
 func TestAStartWhoseAnswerIsDelayedPastItsDeadlineIsStoppedBeforeResumeReturns(t *testing.T) {
 	for name, previous := range map[string]bool{
 		"without a previous locator":              false,
@@ -1236,6 +1286,12 @@ func TestAStartWhoseAnswerIsDelayedPastItsDeadlineIsStoppedBeforeResumeReturns(t
 			if recorded, found := g.r.recorded(spec.Claim); found {
 				t.Errorf("runtime still records %s after the failed Resume", recorded.Incarnation)
 			}
+			// The launcher reports generation 2's exit in the state frame it writes after its Stop
+			// result, which the runtime reads asynchronously; wait for it, then hold it exactly.
+			g.eventually("the launcher to report generation 2 ended", func() bool {
+				state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+				return connected && state.LastExit != nil && state.LastExit.Generation == 2
+			})
 			state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
 			if !connected || state.Child != nil || state.LastExit == nil || state.LastExit.Generation != 2 {
 				t.Fatalf("launcher after the delayed Start = connected=%t state=%+v, want generation 2 ended", connected, state)

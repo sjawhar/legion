@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -969,6 +971,65 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 	}
 	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
 		t.Fatalf("Probe right after Spawn = %+v, want alive: the locator was handed out while its pane was still tmux's fork", obs)
+	}
+}
+
+// A Spawn that fails after it opened its pane returns no locator for the pane's process, so it
+// kills the pane itself: no process the daemon never recorded runs on (runtime.Runtime's Spawn).
+// Here every read of the new pane process's /proc stat is refused with a permission error, which
+// proves nothing about the process, so the launch fails while it waits for the pane's command.
+func TestRealTmuxSpawnThatFailsAfterOpeningItsPaneKillsThePane(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	read := r.rt.readProc
+	var mu sync.Mutex
+	panes := map[int]bool{}
+	r.rt.readProc = func(path string) ([]byte, error) {
+		var pid int
+		if _, err := fmt.Sscanf(path, "/proc/%d/stat", &pid); err != nil {
+			return read(path)
+		}
+		stat, err := read(path)
+		if err != nil {
+			return stat, err
+		}
+		_, parentPid, err := parseProcStatCommAndParent(string(stat))
+		if err != nil {
+			return stat, nil
+		}
+		parent, err := read(fmt.Sprintf("/proc/%d/stat", parentPid))
+		if err != nil {
+			return stat, nil
+		}
+		if parentComm, _, err := parseProcStatCommAndParent(string(parent)); err != nil || parentComm != "tmux: server" {
+			return stat, nil
+		}
+		mu.Lock()
+		panes[pid] = true
+		mu.Unlock()
+		return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EACCES}
+	}
+
+	if loc, err := r.rt.Spawn(ctx, r.spec("LEGION-8", "LEGION-8", claim.RoleArchitect)); err == nil || !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("Spawn = %+v, %v; want the refused /proc read", loc, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(panes) == 0 {
+		t.Fatal("no pane process was ever read: the launch did not get as far as its pane")
+	}
+	for pid := range panes {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(err) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("pane process %d still runs after its Spawn failed", pid)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 }
 
