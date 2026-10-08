@@ -1,13 +1,18 @@
 /**
  * Which shell commands a Legion architect may run, and where a `dispatch` command's own text ends,
  * for `extensions/envoy.ts` and `extensions/legion.ts`, which bundle separately. A conservative
- * character scan, not a shell parser: whatever it cannot reason about it refuses.
+ * character scan, not a shell parser: whatever it cannot reason about it refuses. Whitespace is
+ * bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break space that
+ * bash reads as part of a word.
  */
 
 /** The one here-document a command's first line may end with, opened with a quoted delimiter so
  * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
  * which bash strips leading tabs from the delimiter line. */
-const HEREDOC_OPENING = /^(.*?)\s*<<(-?)\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*$/;
+const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*$/;
+
+/** A line of nothing but blanks, which bash runs as no command. */
+const BLANK_LINE = /^[ \t]*$/;
 
 /** Outside quotes, a `legion` or `dispatch` head refuses whatever would end the command, start
  * another, expand something, redirect, start a comment (bash reads the rest of the line as one, a
@@ -27,12 +32,20 @@ export function isSingleArchitectCommand(command: unknown): boolean {
  * `isSingleArchitectCommand`; undefined for any other command. */
 export function dispatchCommandHead(command: unknown): string | undefined {
   const head = architectCommandHead(command);
-  return head?.trim().split(/\s+/, 1)[0] === "dispatch" ? head : undefined;
+  return head !== undefined && firstWord(head) === "dispatch" ? head : undefined;
 }
 
 function architectCommandHead(command: unknown): string | undefined {
   if (typeof command !== "string" || hasControlCharacter(command)) return undefined;
-  const lines = command.trim().split("\n");
+  // Blank lines before the head and after the command's last line run as no command, so they are
+  // dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
+  // exactly its delimiter (with leading tabs stripped under `<<-`), whatever blanks the line
+  // carries before or after it.
+  const all = command.split("\n");
+  const first = all.findIndex((line) => !BLANK_LINE.test(line));
+  if (first === -1) return undefined;
+  const last = all.findLastIndex((line) => !BLANK_LINE.test(line));
+  const lines = all.slice(first, last + 1);
   let head = lines[0] ?? "";
   if (lines.length > 1) {
     const opening = HEREDOC_OPENING.exec(head);
@@ -47,8 +60,14 @@ function architectCommandHead(command: unknown): string | undefined {
     if (end !== lines.length - 1) return undefined;
     head = opening[1] ?? "";
   }
-  const word = head.trim().split(/\s+/, 1)[0];
+  head = head.replace(/^[ \t]+|[ \t]+$/g, "");
+  const word = firstWord(head);
   return (word === "dispatch" || word === "legion") && headScan(head) ? head : undefined;
+}
+
+/** The head's first word as bash splits it, at a space or a tab. */
+function firstWord(head: string): string {
+  return head.replace(/^[ \t]+/, "").split(/[ \t]/, 1)[0] ?? "";
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter

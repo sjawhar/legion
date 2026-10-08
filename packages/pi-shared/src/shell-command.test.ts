@@ -1,26 +1,100 @@
 import { describe, expect, test } from "bun:test";
 import { dispatchCommandHead, isSingleArchitectCommand } from "./shell-command";
 
-/** Whether a real non-interactive bash, fed `command` and then a second command over a pipe as
- * the `bash` tool's persistent shell is fed, runs that second command: false when `command` left a
- * here-document open that swallowed it. `dispatch` and `legion` are stand-ins that drain stdin. */
-function bashRunsNextCommand(command: string): boolean {
-  const script = [
-    "dispatch() { cat >/dev/null; }",
-    "legion() { cat >/dev/null; }",
-    command,
-    "echo NEXT_COMMAND_RAN",
-    "",
-  ].join("\n");
-  const run = Bun.spawnSync(["bash", "--noprofile", "--norc"], {
+/** The bash the differential test runs, or null on a machine without one. */
+const BASH = Bun.which("bash");
+
+/** Whether a real non-interactive bash, fed `command` and then `echo NEXT` over a pipe as the
+ * `bash` tool's persistent shell is fed, runs exactly one command and then NEXT. `dispatch` and
+ * `legion` are stand-ins that print RAN without reading stdin, so a here-document bash left open
+ * (it swallows `echo NEXT` as body), a second command, or a command bash never ran each print
+ * something else. */
+function bashRunsOneCommand(command: string): boolean {
+  const script = `dispatch() { echo RAN; }\nlegion() { echo RAN; }\n${command}\necho NEXT\n`;
+  const run = Bun.spawnSync([BASH ?? "bash", "--noprofile", "--norc"], {
     stdin: new TextEncoder().encode(script),
     stdout: "pipe",
     stderr: "pipe",
   });
-  return run.stdout.toString().includes("NEXT_COMMAND_RAN");
+  return run.stdout.toString() === "RAN\nNEXT\n";
 }
 
 const lines = (...parts: string[]): string => parts.join("\n");
+
+/** Characters JavaScript's `\s` takes as whitespace and bash's lexer does not: a no-break space,
+ * a byte-order mark and an ideographic space. Bash reads each as part of the word beside it. */
+const UNICODE_BLANKS = ["\u00a0", "\ufeff", "\u3000"];
+
+/** Commands built from every way a here-document can be opened, written and ended that the scan
+ * and bash might read differently: `<<` and `<<-`; quoted, unquoted and double-quoted delimiters;
+ * the Unicode blanks above beside the quotes, inside the delimiter and before and after the
+ * terminator; spaces and tabs before and after the terminator; LF and CRLF line ends; the
+ * terminator as the last line, before blank lines, and before a second command; two
+ * here-documents; and the delimiter inside the body. */
+function hereDocumentCorpus(): string[] {
+  const heads = [
+    "dispatch message --issue LEGION-2 --body-file -",
+    "  dispatch x",
+    "legion handoff write",
+  ];
+  const openers = [
+    "'EOF'",
+    "EOF",
+    '"EOF"',
+    " 'EOF'",
+    "'EOF' \t",
+    ...UNICODE_BLANKS.flatMap((blank) => [`${blank}'EOF'`, `'EOF'${blank}`, `'E${blank}OF'`]),
+  ];
+  const terminators = [
+    "EOF",
+    "EOF ",
+    "EOF\t",
+    "EOF  \t",
+    " EOF",
+    "\tEOF",
+    "\t\tEOF",
+    " \tEOF",
+    "\t EOF",
+    ...UNICODE_BLANKS.flatMap((blank) => [`${blank}EOF`, `EOF${blank}`, `E${blank}OF`]),
+  ];
+  const bodies = [["a body"], ["naming EOF in passing", "EOF x"], ["\tindented", "", "EOF "]];
+  const tails = [[], [""], ["", "  ", "\t"], ["echo EXTRA"], ["dispatch y"]];
+  const cases: string[] = [];
+  let n = 0;
+  for (const operator of ["<<", "<<-"]) {
+    for (const opener of openers) {
+      for (const terminator of terminators) {
+        for (const tail of tails) {
+          const head = heads[n % heads.length];
+          const body = bodies[n % bodies.length] ?? [];
+          n += 1;
+          const parts = [`${head} ${operator}${opener}`, ...body, terminator, ...tail];
+          cases.push(parts.join("\n"));
+          if (terminator === "EOF" || terminator === "\tEOF") cases.push(parts.join("\r\n"));
+        }
+      }
+    }
+  }
+  return [
+    ...cases,
+    lines("dispatch x <<'A' <<'B'", "a", "A", "b", "B"),
+    lines("dispatch x <<'A'", "a", "A", "dispatch y <<'B'", "b", "B"),
+    lines("dispatch x <<'EOF'", "a", "EOF", "more", "EOF"),
+    lines("dispatch x <<'EOF'", "EOF ", "\tEOF", "EOF"),
+    lines("dispatch x <<-'EOF'", "\tEOF\t", "\t\tEOF"),
+    lines("dispatch x <<'EOF'", "a", "EOF", ""),
+    lines("", "  ", "dispatch x <<'EOF'", "a", "EOF"),
+    "dispatch search --query x\n",
+    "dispatch search --query x \t",
+    "  dispatch search --query x",
+    ...UNICODE_BLANKS.flatMap((blank) => [
+      `dispatch${blank}search --query x`,
+      `${blank}dispatch search --query x`,
+      lines(`dispatch x <<'EOF'`, "a", "EOF", blank),
+      lines(blank, `dispatch x <<'EOF'`, "a", "EOF"),
+    ]),
+  ];
+}
 
 describe("an architect's single command", () => {
   test("allows one legion or dispatch command, and one quoted here-document feeding it", () => {
@@ -102,29 +176,27 @@ describe("an architect's single command", () => {
     expect(dispatchCommandHead(canonical)).toBe("dispatch message --issue LEGION-2 --body-file -");
   });
 
-  test("every here-document it accepts is one a real bash closes before the next command", () => {
-    const accepted = [
-      lines("dispatch message --issue LEGION-2 --body-file - <<'EOF'", "a body", "EOF"),
-      lines("dispatch message --issue LEGION-2 --body-file - <<-'EOF'", "\tbody", "\tEOF"),
-      lines("dispatch x <<'EOF'", "\tEOF", "EOF"),
-      lines("legion handoff write <<'EOF'", "{}", "EOF"),
-    ];
-    for (const command of accepted) {
-      expect({ command, accepted: isSingleArchitectCommand(command) }).toEqual({
-        command,
-        accepted: true,
-      });
-      expect({ command, nextRan: bashRunsNextCommand(command) }).toEqual({
-        command,
-        nextRan: true,
-      });
-    }
-    // The divergence the scan refuses: bash keeps this here-document open and swallows the next
-    // command as its body.
-    const swallowing = lines("dispatch x <<'EOF'", "\tEOF");
-    expect(bashRunsNextCommand(swallowing)).toBe(false);
-    expect(isSingleArchitectCommand(swallowing)).toBe(false);
-  });
+  // The scan may refuse what bash would run as one command (a CRLF command, an unquoted
+  // delimiter), but it never accepts one bash would read otherwise: the class of the tab-stripped
+  // and whitespace-trimmed terminators, each of which let a here-document swallow the next command.
+  (BASH === null ? test.skip : test)(
+    BASH === null
+      ? "matches a real bash on every here-document it accepts (skipped: no bash on PATH)"
+      : "matches a real bash on every here-document it accepts",
+    () => {
+      const corpus = hereDocumentCorpus();
+      const accepted = corpus.filter((command) => isSingleArchitectCommand(command));
+      const disagreements = accepted.filter((command) => !bashRunsOneCommand(command));
+      expect(disagreements).toEqual([]);
+      // The corpus reaches the scan's accepting paths, not only its refusals.
+      expect(accepted).toContain(
+        lines("dispatch message --issue LEGION-2 --body-file - <<'EOF'", "a body", "EOF")
+      );
+      expect(accepted).toContain(lines("dispatch x <<-'EOF'", "\tEOF\t", "\t\tEOF"));
+      expect(accepted.length).toBeGreaterThan(20);
+    },
+    60_000
+  );
 
   test("holds a legion head to the scan a dispatch head gets: one command, nothing expanded or redirected", () => {
     // The legion commands the architect's role prompt and skill have it run.
