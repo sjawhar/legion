@@ -743,3 +743,82 @@ pod_shape_verdict "$work/pod-watch-wrong-shape.json" | sed 's/^/control /'`);
     expect(result.keys).toBe('["object","type"]');
   });
 });
+
+// The pod-watch-verdict checkpoint's matching (pod_watch_verdict, never_scheduled_deaths): the
+// daemon names a dead process by its incarnation, `<pod uid>/<generation>`, and the driver records an
+// action by the pod uid alone (driver_action). An action on a pod accounts for a death of any
+// generation of any role in that pod, and of no other pod, a pod whose uid it is a prefix of
+// included; a death whose pod the scheduler never placed is accounted for by that pod's own
+// conditions.
+describe("the pod-watch-verdict checkpoint's matching", () => {
+  const scheduled = (uid: string) => ({
+    kind: "Pod",
+    metadata: { name: `pod-${uid}`, uid, labels: {} },
+    spec: { nodeName: "node-1" },
+    status: { phase: "Running", conditions: [{ type: "PodScheduled", status: "True" }] },
+  });
+  const unscheduled = (uid: string) => ({
+    kind: "Pod",
+    metadata: { name: `pod-${uid}`, uid, labels: {} },
+    spec: {},
+    status: {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable" }],
+    },
+  });
+  // The memory hog the verdict requires to have been seen OOMKilled.
+  const hog = {
+    kind: "Pod",
+    metadata: { name: "hog", uid: "uid-hog", labels: { "legion.dev/e2e-control": "memory-hog" } },
+    spec: {},
+    status: {
+      containerStatuses: [{ state: { terminated: { reason: "OOMKilled", exitCode: 137 } } }],
+    },
+  };
+  const died = (incarnation: string) =>
+    JSON.stringify({
+      msg: "supervise: process died",
+      incarnation,
+      observed: "gone",
+      detail: "test",
+    });
+
+  // verdict runs pod_watch_verdict on a watch of the pods, the daemon's death lines for DEATHS, and
+  // driver actions on ACTIONS (pod uids), and prints each incarnation it names, in order.
+  function verdict(deaths: string[], actions: string[]) {
+    const evidence = join(dir, `run-${++runs}`);
+    mkdirSync(evidence);
+    const pods = [scheduled("uid-a"), scheduled("uid-a2"), unscheduled("uid-u"), hog];
+    writeFileSync(
+      join(evidence, "pod-watch.json"),
+      pods.map((object) => `${JSON.stringify({ type: "ADDED", object })}\n`).join("")
+    );
+    writeFileSync(join(evidence, "daemon.log"), deaths.map((i) => `${died(i)}\n`).join(""));
+    writeFileSync(
+      join(evidence, "driver-actions.txt"),
+      actions.map((uid) => `kill-container ${uid} 2026-10-08T14:00:00.000Z\n`).join("")
+    );
+    const out = runScript(`work=${JSON.stringify(evidence)} lost_detail="the issue's volume was lost: "
+${fn("never_scheduled_deaths")}
+${fn("pod_watch_verdict")}
+pod_watch_verdict "$work/pod-watch.json" "$work/driver-actions.txt" "$work/daemon.log" >/dev/null || true
+sed -n 's/^incarnation \\(.*\\) died with no driver action.*/\\1/p' "$work/pod-watch-verdict.txt"`);
+    if (out.exitCode !== 0) throw new Error(`the verdict's run exited ${out.exitCode}`);
+    return out.out.split("\n").filter((line) => line !== "");
+  }
+
+  test("an action on a pod accounts for every generation of every role in it, and no other pod", () => {
+    expect(verdict(["uid-a/1", "uid-a/3", "uid-a2/1", "uid-b/1"], ["uid-a"])).toEqual([
+      "uid-a2/1",
+      "uid-b/1",
+    ]);
+  });
+
+  test("with no action, every death of a scheduled pod is named", () => {
+    expect(verdict(["uid-a/1", "uid-a/3"], [])).toEqual(["uid-a/1", "uid-a/3"]);
+  });
+
+  test("a death whose pod was never scheduled is accounted for, whatever its generation", () => {
+    expect(verdict(["uid-u/2"], [])).toEqual([]);
+  });
+});
