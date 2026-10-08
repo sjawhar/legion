@@ -84,11 +84,11 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
 // TRUNCATE, the reset takes ACCESS EXCLUSIVE on every table the TRUNCATE empties: the tables it
 // names, and every table whose foreign keys reach them, which CASCADE empties too. It never waits
 // while it holds one of those locks. Each try takes them all with NOWAIT; when one is held, the
-// try lets go of every lock it took and waits for that one table alone, holding nothing, so the
-// wait cannot close a cycle. Once it holds them all, nothing else touches those tables until
-// COMMIT; the TRUNCATE's other locks are on the tables' own sequences, which only an insert into
-// one of those tables advances. A table still held after 5 s fails the reset, naming the
-// transactions that hold it.
+// try lets go of every lock it took, and the next try first waits for that one table while it
+// holds none, so the wait cannot close a cycle. Once it holds them all, nothing else touches those
+// tables until COMMIT; the TRUNCATE's other locks are on the tables' own sequences, which only an
+// insert into one of those tables advances. A table still held after 5 s fails the reset, naming
+// the transactions that hold it.
 
 async function resetDatabaseOnce(): Promise<void> {
   await sql(
