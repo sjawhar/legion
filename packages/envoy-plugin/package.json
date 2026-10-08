@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/opencode-legion-envoy",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/src/server.js",
