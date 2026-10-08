@@ -82,10 +82,11 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 15 for contract 15's `capabilities` list on `GET /legion/v1/state` (LEGION-578), after
-contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push` grant and
-`LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries no
-`legion` key, and the gate reads only this package's.
+number is 16 for contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578), after
+contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract 14's daemon-launched
+controller pod (LEGION-592) and contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES`
+payload (LEGION-583); the Envoy plugin's manifest carries no `legion` key, and the gate reads only
+this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
@@ -153,8 +154,11 @@ close an admitted root tree (a root architect only), and read records; phase wor
 backward move and read records. No `claims/exit` report runs at shutdown, because a
 daemon-requested suspend ends the session but keeps its claim for resumption.
 
-A daemon that sets `controller: daemon` launches the controller itself, as a pod with
-`LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE` (`controllerSession` in
+A daemon that sets `controller: daemon` launches the controller itself, in a Sandbox pod of its own
+whose one container, `controller`, runs `legion launcher` as an issue pod's role containers do: the
+launcher starts the session's shim and Oh My Pi with `LEGION_CONTROLLER=1` and
+`LEGION_BOOT_TOKEN_FILE`, the generation's boot token it wrote into its private directory from the
+daemon's start command (`controllerSession` in
 `src/controller-session.ts`): the session registers on `claims/register` with that boot
 token in place of a capability, is answered with the same controller registration, claims the role,
 subscribes to the controller topic, and then calls `claims/ready`, which is when the daemon sends
@@ -223,7 +227,10 @@ and paths; without it the title is `Legion controller`, so no daemon contract nu
 call or Envoy role claim, so the claim's registration already carries the title the Envoy listener
 lists, and every Dispatch write stamps it as `origin.session_title` (`getSessionName`, read at
 call time). Oh My Pi titles a session itself from the first message typed at its terminal or given
-on its command line, so a headless `omp --mode rpc` session the daemon prompts otherwise has none.
+on its command line, so a headless `omp --mode rpc` session the daemon prompts otherwise has none;
+the controller's own first message is neither (LEGION_CONTROLLER_START_MESSAGE, sent at claim time
+by `controller-session.ts`'s `claim`, never a CLI word), and its title is always this extension's
+own, set before that send.
 The controller also titles the session a `/new`, `/resume`, `/fork`, branch or tree navigation
 leaves it on, before it re-claims.
 

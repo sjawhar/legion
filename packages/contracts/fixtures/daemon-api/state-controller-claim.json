@@ -1,7 +1,7 @@
 {
   "daemon": {
     "project": "LEGION",
-    "schemaVersion": 32,
+    "schemaVersion": 35,
     "boots": 2,
     "firstBootAt": "2026-10-06T17:02:11Z",
     "startedAt": "2026-10-06T18:01:11Z"
@@ -25,10 +25,13 @@
         "locator": {
           "runtime": "sandbox",
           "claim": "legion-legion-legion-208-architect",
-          "incarnation": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04",
+          "incarnation": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04/1",
           "sandbox": {
             "namespace": "legion",
-            "name": "legion-legion-legion-208-architect"
+            "name": "legion-legion-legion-208",
+            "podUid": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04",
+            "container": "architect",
+            "generation": 1
           }
         }
       },

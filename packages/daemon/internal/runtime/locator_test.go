@@ -13,15 +13,19 @@ import (
 // and projected into the state the plugin reads, so a Go-side rename that the tests only read
 // back through Go would be invisible until a daemon restart failed to find its own panes.
 //
-// A sandbox is named for its claim: the token lowercased to a DNS-1123 name, and past 63
-// characters a readable prefix and an 8-hex hash of the whole token. The name is the same for
-// every generation of the claim; this token is short, so its name is the token lowercased.
+// A sandbox is named for its issue: the project and issue lowercased to a DNS-1123 name. Every
+// role in an issue shares it. The project controller's sandbox is named for its token and runs the
+// controller alone. The locator's pod UID, role container and generation identify one process, and
+// the composed incarnation fences stale process events.
 const (
 	tmuxLocatorJSON = `{"runtime":"tmux","claim":"legion-omp-LEGION-208-tester",` +
 		`"incarnation":"31847:918273","tmux":{"window":"@3","pane":"%41"}}`
 	sandboxLocatorJSON = `{"runtime":"sandbox","claim":"legion-omp-LEGION-208-tester",` +
-		`"incarnation":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f",` +
-		`"sandbox":{"namespace":"legion","name":"legion-omp-legion-208-tester"}}`
+		`"incarnation":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f/7",` +
+		`"sandbox":{"namespace":"legion","name":"legion-omp-legion-208","podUid":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f","container":"tester","generation":7}}`
+	controllerLocatorJSON = `{"runtime":"sandbox","claim":"legion-omp-controller",` +
+		`"incarnation":"9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57/3",` +
+		`"sandbox":{"namespace":"legion","name":"legion-omp-controller","podUid":"9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57","container":"controller","generation":3}}`
 )
 
 func tmuxLocator() Locator {
@@ -37,8 +41,25 @@ func sandboxLocator() Locator {
 	return Locator{
 		Runtime:     RuntimeSandbox,
 		Claim:       claim.Token("legion-omp-LEGION-208-tester"),
-		Incarnation: "3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f",
-		Sandbox:     &SandboxLocator{Namespace: "legion", Name: "legion-omp-legion-208-tester"},
+		Incarnation: "3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f/7",
+		Sandbox: &SandboxLocator{
+			Namespace: "legion", Name: "legion-omp-legion-208", PodUID: "3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f",
+			Container: "tester", Generation: 7,
+		},
+	}
+}
+
+// controllerLocator is the project controller's process: the one launcher of its own Sandbox,
+// whose container is the controller role its token names (claim.Token.Role).
+func controllerLocator() Locator {
+	return Locator{
+		Runtime:     RuntimeSandbox,
+		Claim:       claim.ControllerToken("omp"),
+		Incarnation: "9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57/3",
+		Sandbox: &SandboxLocator{
+			Namespace: "legion", Name: "legion-omp-controller", PodUID: "9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57",
+			Container: "controller", Generation: 3,
+		},
 	}
 }
 
@@ -50,6 +71,7 @@ func TestLocatorRoundTripsByteForByte(t *testing.T) {
 	}{
 		{name: "tmux", locator: tmuxLocator(), want: tmuxLocatorJSON},
 		{name: "sandbox", locator: sandboxLocator(), want: sandboxLocatorJSON},
+		{name: "sandbox, the controller's", locator: controllerLocator(), want: controllerLocatorJSON},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			encoded, err := json.Marshal(testCase.locator)
@@ -180,6 +202,24 @@ func TestValidateRefusesALocatorNothingCouldBeActedOnThrough(t *testing.T) {
 				Sandbox:     &SandboxLocator{Namespace: "legion"},
 			},
 			wantFragment: "name",
+		},
+		{
+			name: "the controller's process in a workflow role's container",
+			locator: func() Locator {
+				l := controllerLocator()
+				l.Sandbox.Container = "architect"
+				return l
+			}(),
+			wantFragment: "does not match claim role",
+		},
+		{
+			name: "a workflow role's process in the controller's container",
+			locator: func() Locator {
+				l := sandboxLocator()
+				l.Sandbox.Container = "controller"
+				return l
+			}(),
+			wantFragment: "does not match claim role",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

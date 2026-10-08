@@ -288,7 +288,7 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
-// The state's capability report (contract 15): the golden carries a decided row with the operator's
+// The state's capability report (contract 16): the golden carries a decided row with the operator's
 // reason and an open row with the legion.yaml line that records a decision, beside the present,
 // installed (codegraph: the image carries the tooling, a pod's agent awaits the launch that loads
 // it), live and withheld rows, and the report is never absent from a state.

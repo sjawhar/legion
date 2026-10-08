@@ -81,8 +81,9 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * `runtime.Locator` — where a claim's process is: the runtime word, the claim token, the process
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
- * `<pane pid>:<start ticks>`) or `sandbox` (the Agent Sandbox object; the incarnation is its pod's
- * uid).
+ * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
+ * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
   z.strictObject({
@@ -95,7 +96,13 @@ const legionLocator = z.discriminatedUnion("runtime", [
     runtime: z.literal("sandbox"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    sandbox: z.strictObject({ namespace: nonEmptyString, name: nonEmptyString }),
+    sandbox: z.strictObject({
+      namespace: nonEmptyString,
+      name: nonEmptyString,
+      podUid: nonEmptyString,
+      container: nonEmptyString,
+      generation: z.number().int().positive(),
+    }),
   }),
 ]);
 
@@ -218,7 +225,7 @@ const legionAgentSecretsLoginView = z.strictObject({
  * (no probe has checked the image row), `live` (a live check is to prove it), `withheld` (a ruling,
  * cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open row
  * carrying `configLine`, the `legion.yaml` line that records a decision. A gap is reported here,
- * never refused (contract 15). */
+ * never refused (contract 16). */
 const legionCapabilityState = z.strictObject({
   name: nonEmptyString,
   status: z.enum(["present", "installed", "unchecked", "live", "withheld", "decided", "open"]),
@@ -231,7 +238,7 @@ const legionCapabilityState = z.strictObject({
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
- * `capabilities` is the deployment's report, never null (contract 15). */
+ * `capabilities` is the deployment's report, never null (contract 16). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,

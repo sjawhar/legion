@@ -52,9 +52,16 @@ package api
 // controller, throws for want of `LEGION_CONTROLLER_SECRET`, and never registers, so the image probe
 // must refuse such an image rather than leave the controller's keeper relaunching it forever.
 //
-// 15: LEGION-578 -- api.State gains `capabilities`, the deployment's capability report
+// 15: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
+// issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
+// generation, with the incarnation `<pod uid>/<generation>`.
+//
+// 16: LEGION-578 -- api.State gains `capabilities`, the deployment's capability report
 // (capabilities.Deployment.Report): one row per capability of the table, each `present`,
 // `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`, an open row carrying the
 // legion.yaml line that records a decision. Never null, so a plugin built before it refuses the
-// state, and the bump is why the two never meet.
-const DaemonAPIVersion = 15
+// state, and the bump is why the two never meet. (This branch first took 15; LEGION-462 landed at
+// 15 first, and pi-legion 8.3.0 declares it without `capabilities`, so a daemon at 15 would pass
+// the gate against a plugin whose strict reader refuses its state. Renumbered, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md says.)
+const DaemonAPIVersion = 16

@@ -16,14 +16,25 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- `legion.daemonApiVersion` is 15 (LEGION-578). Contract 15 adds `capabilities` to
+- `legion.daemonApiVersion` is 16 (LEGION-578). Contract 16 adds `capabilities` to
   `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
   `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its
   `detail`, and on an open row the `configLine` to write into `legion.yaml`. Install this release
   with a Go `legion` built from the same commit; the daemon's image probe refuses a worker image
-  whose plugin declares 14.
+  whose plugin declares 15 (the 8.3.0 release, whose strict state reader has no `capabilities`).
+- `legion.daemonApiVersion` is 15. Contract 15 changes a Sandbox locator on the daemon's
+  `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
+  `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
+  generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The client's strict
+  state parse needs this release beside a daemon at 15; the daemon's boot gate refuses any earlier
+  contract.
+- Every phase worker stays live from its role's first assignment until its issue closes
+  (LEGION-462): no move between phases suspends it, so a role that finished its phase still
+  answers questions through Envoy, and its next assignment arrives in the same session. The worker
+  and architect skills and the headless worker prompt say so, in place of the phase-end suspension
+  LEGION-223's entry in `packages/pi-envoy/CHANGELOG.md` describes.
 - `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
-  pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
+  pod, whose agent's environment carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
   release registers it with the launch's boot token, where an earlier one reads it as the
   operator's controller and never registers. Install this release with a Go `legion` built from
   the same commit; the daemon's image probe refuses a worker image whose plugin declares 13.
@@ -36,7 +47,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 15 (LEGION-578 and LEGION-592, above). The Envoy messaging and Dispatch tools every session loads are
+  release declares 16 (LEGION-578, above; 15 since LEGION-462, 14 since LEGION-592). The Envoy messaging and Dispatch tools every session loads are
   `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
   through the in-process interface the Envoy entry publishes (`@legion/pi-shared/interface`, version

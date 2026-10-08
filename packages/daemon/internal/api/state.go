@@ -45,7 +45,7 @@ type State struct {
 	// per capability in the table's order: what the worker image was probed for, what a live check
 	// proves, what a ruling withholds, and what the deployment's own configuration closes, decides
 	// or leaves open — each open row with the legion.yaml line that records a decision. Never
-	// null; a gap is reported here, never refused (contract 15).
+	// null; a gap is reported here, never refused (contract 16).
 	Capabilities []CapabilityState `json:"capabilities"`
 }
 

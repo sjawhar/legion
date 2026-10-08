@@ -149,10 +149,25 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 
 	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 	defer cancelBoot()
+	// The cluster's refusals run before the store opens, so before any schema write, image probe or
+	// reconcile: Agent Sandbox must be installed, and no per-claim Sandbox of the layout before issue
+	// pods may remain. The claims' half of that layout fence runs once the store opens, before it
+	// migrates.
+	if plan.clusterCheck != nil {
+		if err := plan.clusterCheck(boot); err != nil {
+			return err
+		}
+	}
 
 	st, err := store.Open(boot, cfg.PostgresDSN)
 	if err != nil {
 		return err
+	}
+	if plan.claimsCheck != nil {
+		if err := plan.claimsCheck(boot, st); err != nil {
+			st.Close()
+			return err
+		}
 	}
 	applied, err := st.Migrate(boot)
 	if err != nil {
@@ -377,6 +392,14 @@ type plan struct {
 	// recorded, answering what its OK line reported of the image; nil under tmux, and for a
 	// replaced runtime without one.
 	probe func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
+	// clusterCheck is the Kubernetes runtime's refusals before the store opens: Agent Sandbox's
+	// install check, then the census of per-claim Sandboxes (sandbox.CensusLegacyIssueSandboxes).
+	// Nil under tmux, and for a replaced runtime.
+	clusterCheck func(ctx context.Context) error
+	// claimsCheck is the Kubernetes runtime's refusal once the store has opened, before it
+	// migrates: no stored claim may still carry a per-claim Sandbox locator of the layout before
+	// issue pods (store.HasLegacySandboxClaims). Nil under tmux, and for a replaced runtime.
+	claimsCheck func(ctx context.Context, st *store.Store) error
 	// modelFallback reads, once the gate has passed, whether the host's Oh My Pi falls back to
 	// another model (capabilities.ReadModelFallback), as the probe's OK line reports it for a pod:
 	// "on", "off", or "" when the read failed, which it logs and never refuses. nil under
@@ -396,12 +419,12 @@ type plan struct {
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
-// conns the stream listener, stream the address every agent's shim dials, tokens the workflow's
-// App tokens, nil without a workflow, and removable the tree's candidate function
-// (removableWorkspaces), which needs sup — created before this is called (openSupervision) — so
-// it cannot be built inside the factory itself; a runtime that does not provision workspaces in
-// its own pods ignores it.
-type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
+// listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
+// workflow's App tokens (nil without a workflow), st the store the runtime reads, and removable the
+// tree's candidate function (removableWorkspaces), which needs sup — created before this is called
+// (openSupervision) — so it cannot be built inside the factory itself; a runtime that does not
+// provision workspaces in its own pods ignores it.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -520,9 +543,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
-		opts.StreamAddress, opts.Conns = streamAddress, conns
+		opts.StreamAddress, opts.Conns = streamAddress, listener
 		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
@@ -693,7 +716,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, removableWorkspaces(st.Pool(), record.NewStore(), sup))
+	rt, err := p.newRuntime(supervising, listener, dial, apps, st, removableWorkspaces(st.Pool(), record.NewStore(), sup))
 	if err != nil {
 		cancel()
 		cancelStream()
@@ -970,6 +993,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:             tokens,
 		GitHubOwner:        githubOwner(cfg),
 		Grants:             grants,
+		Releaser:           s.supervisor.deps.Runtime,
+		Trees:              st,
 		ClaimReady:         claimReadyHook(keeper, claimReady),
 	})
 

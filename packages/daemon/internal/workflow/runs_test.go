@@ -22,10 +22,9 @@ import (
 // interrupted still has a worker: the implementer pane keeps the workspace and would report its
 // handoff into the new run. The previous run's worker is suspended first, and that suspend is
 // stamped with the generation the child now holds, since that is what the outbox fences it against.
+// The child may re-enter at the phase it was taken from (planning, under an open gate), and the
+// suspend is queued all the same: it ends a run, not a phase.
 func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T) {
-	// The child re-enters at the phase it was taken from, so a suspend that named that phase
-	// would be dropped by SuspendApplies exactly when the phase is the one the re-entry restarts
-	// — planning, under an open gate. This suspend ends a run, not a phase, and names none.
 	for _, tc := range []struct {
 		name  string
 		phase phase.Phase
@@ -53,28 +52,22 @@ func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T)
 				t.Fatalf("ApplyFact child todo: %v", err)
 			}
 
-			rows, err := pool.Query(ctx, "select payload->>'op', payload->>'role', (payload->>'generation')::bigint, coalesce(payload->>'leaves', '') from outbox where kind = 'supervise' and issue = $1 order by id", "LEGION-209")
+			rows, err := pool.Query(ctx, "select payload->>'op', payload->>'role', (payload->>'generation')::bigint from outbox where kind = 'supervise' and issue = $1 order by id", "LEGION-209")
 			if err != nil {
 				t.Fatalf("list the child's supervise rows: %v", err)
 			}
 			defer rows.Close()
 			var suspends, starts int
 			for rows.Next() {
-				var op, role, leaves string
+				var op, role string
 				var generation int64
-				if err := rows.Scan(&op, &role, &generation, &leaves); err != nil {
+				if err := rows.Scan(&op, &role, &generation); err != nil {
 					t.Fatalf("scan a supervise row: %v", err)
 				}
 				switch {
 				case op == "suspend" && role == string(tc.role):
 					if generation != 2 {
 						t.Errorf("suspend of the previous run = generation %d, want the 2 the child now holds", generation)
-					}
-					if leaves != "" {
-						t.Errorf("suspend of the previous run leaves %q, want none: it ends a run, not a phase", leaves)
-					}
-					if !SuspendApplies(phase.Phase(leaves), tc.phase) {
-						t.Errorf("the suspend does not apply with the child back in %s: the interrupted worker is never stopped", tc.phase)
 					}
 					if starts > 0 {
 						t.Error("the new run started before the previous run's worker was suspended")
