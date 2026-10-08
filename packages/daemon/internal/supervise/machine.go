@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // ClaimState is where a claim is in its life.
@@ -71,9 +72,11 @@ type Claim struct {
 	Issue      string
 	Role       claim.Role
 	Generation uint64
-	// Session is the Oh My Pi session id the agent registered as; SessionFile is the transcript it
-	// reported, the one value `--resume` takes. Both are written by the registration, and a claim
-	// that has them resumes that session on every relaunch and refuses any other.
+	// TreeEpoch is the durable lifecycle epoch this claim bound to before its first persistence.
+	// A cleanup reservation closes that epoch before a later claim/launch can write or run.
+	TreeEpoch uint64
+	// Session and SessionFile are the agent's reported session id and absolute transcript path.
+	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
 	// WorkspaceLost is a claim whose session was lost with the tree volume it lived on — the one
@@ -125,6 +128,12 @@ type Event interface{ isEvent() }
 // Store is the persistence a machine writes through. A claim and its pending delivery are
 // written separately: the delivery changes on every send, the claim far less often.
 type Store interface {
+	// AdmitClaim binds a new or reactivated claim to an open durable tree lifecycle and writes it
+	// in that same short transaction. A cleanup reservation refuses before runnable work exists.
+	AdmitClaim(ctx context.Context, c Claim) (Claim, error)
+	// CheckLaunch rechecks the bound lifecycle before a claim persists StateLaunching or calls the
+	// runtime; it returns the named cleanup wait without charging a launch failure.
+	CheckLaunch(ctx context.Context, c Claim) error
 	PutClaim(ctx context.Context, c Claim) error
 	PutDelivery(ctx context.Context, token claim.Token, d Delivery) error
 	// PutClaimAndDelivery writes both in one transaction: a confirmation records the claim and
@@ -270,7 +279,7 @@ func (e *RefusedError) Unwrap() error { return e.Err }
 // ErrDeliveryPending is a delivery refused because the claim already holds one: a wait, not a
 // fault — the claim takes the next task once its pending delivery's turn is over, so the caller
 // asks again later.
-var ErrDeliveryPending = errors.New("a delivery is already pending")
+var ErrDeliveryPending = wait.New("a delivery is already pending")
 
 // ErrRootStop is a stop of the tree's root claim that is not its tree's close, refused in every
 // state: the root ends only with its tree. The refusal adds what stops the root's process instead,
@@ -306,6 +315,11 @@ type Machine struct {
 	askFirst bool
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
+	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
+	// phase (Quiesce), nil for none; quiesced is the newest such start that has found the claim out
+	// of a turn. Both are memory only (Quiesce).
+	interrupt *interrupt
+	quiesced  int64
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -635,13 +649,18 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // first, so it is the one waited out. The boot token's hash is persisted before the process
 // starts, so the shim's first hello resolves. A launch the runtime or the spec refuses is a launch
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
-// only a start that succeeds forgets it.
+// only a start that succeeds forgets it. A launch the tree lifecycle refuses (checkLaunch) starts
+// nothing and is charged nothing.
 func (m *Machine) launch(ctx context.Context) error {
+	if err := m.checkLaunch(ctx); err != nil {
+		return err
+	}
 	m.letGo()
 	for {
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
+
 		m.claim.State = StateLaunching
 		if err := m.persist(ctx); err != nil {
 			return err
@@ -696,7 +715,7 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	if m.chargeDeath() {
 		return m.fail(ctx, "deaths with work outstanding ran out")
 	}
-	if observation.Kind == runtime.Gone && observation.WorkspaceLost && m.claim.SessionFile != "" {
+	if observation.Kind == runtime.Gone && observation.WorkspaceLost {
 		return m.relaunchFresh(ctx)
 	}
 	return m.relaunchAfterFailure(ctx)
@@ -775,13 +794,15 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it, no send talks to
-// it and no suspension is held for its turn any more, and the process the claim records, when it
-// records one, moves into previous — the claim no longer runs it (it was stopped, found dead, or
-// left behind), and the next launch of the same session waits it out.
+// it, no suspension is held for its turn and no turn of it is interrupted any more (the interrupt's
+// start finds it over, quiesced), and the process the claim records, when it records one, moves
+// into previous — the claim no longer runs it (it was stopped, found dead, or left behind), and the
+// next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.forgetSend()
 	m.held = nil
+	m.interruptOver()
 	if e := m.claim.Enrollment; e != nil {
 		m.revoke(*e)
 		m.claim.Enrollment = nil

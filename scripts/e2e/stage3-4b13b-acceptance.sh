@@ -34,9 +34,10 @@
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
-# The key command's record is read with this script's own reader: an ACCEPT_ROOT from before the
-# record has no reader to run.
-unserved_reader=$(cd "$(dirname "$0")" && pwd)/lib/model-gateway-unserved.sh
+# The key command's record is read with this script's own reader, and an agent's tool calls with this
+# script's own lib/omp-tool-calls.jq: an ACCEPT_ROOT from before either has none to run.
+script_lib=$(cd "$(dirname "$0")" && pwd)/lib
+unserved_reader=$script_lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
@@ -595,15 +596,19 @@ merger_summary() {
   jq -s -r '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
-# merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself.
+# merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
+# made any of the three ways Oh My Pi gives the model to call dispatch_message and envoy_publish
+# (lib/omp-tool-calls.jq's calls). Any publish counts; a message counts when its body starts with
+# READY, which in eval code is a string literal that starts with it.
 merger_self_posted() {
   local f
   f=$(claim_session_file "$1" merger) || return 1
-  jq -s -c '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-    | select(.type == "toolCall" and (.name == "dispatch_message" or .name == "envoy_publish" or
-        (.name == "write" and ((.arguments.path // "") | test("xd://(dispatch_message|envoy_publish)")))))
-    | select(.name == "envoy_publish" or ((.arguments.path // "") | test("envoy_publish")) or
-        ((.arguments.body // ((.arguments.content // "{}") | fromjson? // {} | .body) // "") | ltrimstr(" ") | startswith("READY")))
+  jq -s -c -L "$script_lib" 'include "omp-tool-calls";
+    [.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
+    | select(calls("dispatch_message") or calls("envoy_publish"))
+    | select(calls("envoy_publish") or
+        ((call_arguments.body // "") | tostring | ltrimstr(" ") | startswith("READY")) or
+        ((.arguments.code? // "") | tostring | test("[`\"\u0027]\\s*READY")))
     | {name, arguments}]' "$f"
 }
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }
@@ -1107,7 +1112,18 @@ pass
 
 # ---- 6. an early merge: pr-merged, and no READY for a merged PR ----------------------------------------
 begin early-merge-skips-ready
-gh -R "$repo" pr merge "${pr_of[$root2]}" --squash --delete-branch
+# "Early" is $root2's own workflow phase (merging, its merger held since retros above, never
+# released here), not GitHub's own merge computation: $root2's pull request targets
+# $scratch_base, which carries no ruleset, so merge_when_clean's wait here is only for GitHub to
+# finish computing this head's own mergeability (mergeStateStatus settles off its own UNKNOWN
+# moments after a push; nothing here is gated on a required check). CLEAN still means more than
+# "no ruleset is blocking it": GitHub's UNSTABLE is "mergeable despite a non-passing commit
+# status", so waiting for CLEAN rather than settling for UNSTABLE also confirms every check on
+# this head actually passed — which matters here, since $root2's retro push (this check's own
+# last push to it) runs the project's full CI. Nothing but the merger's own handoff_complete moves
+# $root2 toward a READY, which stays impossible for as long as it is held. The merge still lands
+# before any READY exists.
+merge_when_clean "$repo" "${pr_of[$root2]}" --squash --delete-branch
 until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$root2" architect "$(notice_needle pr-merged "$root2")"
 issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
 notice_line "$root2" architect "$(notice_needle pr-merged "$root2")" | head -1 >"$evidence/notice-pr-merged.jsonl"
@@ -1212,7 +1228,7 @@ begin merge-at-awaiting-merge-gives-no-pr-merged
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$merge_base" -f sha="$main_sha" >/dev/null
 gh -R "$repo" pr edit "${pr_of[$root1]}" --base "$merge_base" >/dev/null
 note "$repo#${pr_of[$root1]} retargeted to its own base $merge_base at main $main_sha"
-gh -R "$repo" pr merge "${pr_of[$root1]}" --squash --delete-branch
+merge_when_clean "$repo" "${pr_of[$root1]}" --squash --delete-branch
 wait_for_phase "$root1" production_check 600
 sleep 60
 n=$(notice_deliveries "$root1" architect "$(notice_needle pr-merged "$root1")")
