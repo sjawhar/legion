@@ -14,7 +14,7 @@ tags:
   - smoke-rig
   - LEGION_OMP_PATH
 date: 2026-09-12
-status: active
+status: superseded by LEGION-631 — the gh shim and `<state_dir>/worker-bin` are gone, so there is no worker-bin PATH entry to strip; a pane's PATH heads with `<state_dir>/bin` alone and its plain gh reads the role's App token from the gh files under GH_CONFIG_DIR
 module: packages/daemon
 related_issues:
   - "LEGION-21"

@@ -14,7 +14,7 @@ Do not request `isolated` subagent work or create another workspace: `LEGION_WOR
 
 ## GitHub operations
 
-Use `legion gh -- <gh arguments>` for GitHub operations. Never obtain or expose a token; the extension injects the session credential grant for `legion gh --`.
+Use plain `gh` for GitHub operations. `GH_CONFIG_DIR` names a read-only directory holding your role's GitHub App credential, which `gh` reads itself and `git` reads through `gh auth git-credential`; the daemon refreshes it in place, so it never expires under you. Never obtain, export, or expose a token, and never run `gh auth login` or `gh auth setup-git`: there is no login state to create. Legion never merges a pull request, and Legion's issues live on Dispatch, never on GitHub issues.
 
 ## Completion
 

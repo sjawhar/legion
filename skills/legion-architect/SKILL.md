@@ -292,7 +292,7 @@ fast-forward), and posts the before/after fingerprints; the tester re-runs the b
 the reviewer confirms and approves the new head by SHA (or continues its round if it had not
 approved); the daemon carries the issue on through retro to the merger, whose new READY packet the daemon posts.
 This merge happens only when GitHub reports `CONFLICTING`
-(`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
+(`gh pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
 wake — `phase-finished`, `catch-up`, `checks-red`, `review-stuck` — because a `CONFLICTING`
 PR gets no CI and no wake announces it. The moment you see it, tell the worker holding the issue's
 phase (`envoy_publish` to its role topic) to move the issue back to `implementing` with

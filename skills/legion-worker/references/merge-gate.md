@@ -25,7 +25,7 @@ voids it.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
   reviewed — always named by SHA — carrying every inline comment in that single
-  call: `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
+  call: `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
   with `commit_id`, `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (with the
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
@@ -95,7 +95,9 @@ review posted without a completion leaves the issue in reviewing until you finis
   `handoff_complete` with `ready: true`; the daemon posts it as a `dispatch_message` on the issue,
   publishes it to the project's merge queue role when one is set, and says on the issue when that
   role has no live holder. The READY packet names both the implementer's and tester's `E2E` lines;
-  a missing one is reported to the architect instead of completing. Legion never merges.
+  a missing one is reported to the architect instead of completing. Legion never merges: no
+  `gh pr merge`, no merge call through `gh api`, for any role; the human merges after READY, and
+  nothing but this rule stops a role's `gh` from merging.
 
 ## After the human merge
 

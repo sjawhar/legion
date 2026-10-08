@@ -11,7 +11,7 @@ tags:
   - pane-contract
   - LEGION_GRANT_FILE
 date: 2026-09-12
-status: active
+status: superseded by LEGION-631 — the gate stands (contract 16, `legion.daemonApiVersion`), but the skew example is stale, since gh and jj git push read the role's App token from the gh files under GH_CONFIG_DIR and never a grant, and GH_CONFIG_DIR with the emptied GH_TOKEN, GITHUB_TOKEN and GH_HOST are part of the pane contract
 module: packages/daemon, packages/contracts, packages/pi-envoy
 related_issues:
   - "LEGION-21"

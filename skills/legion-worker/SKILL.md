@@ -211,38 +211,35 @@ architect that log; do not accept it as a side effect. A wrong identity on your 
 other App or none, is a pane-environment problem to report to the architect, not something to
 pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
 Hazard 1).
-Your session receives the credential capability it needs; invoke GitHub through the
-credential helper:
+Your pane's `gh` and `git` already carry your role's GitHub identity; invoke GitHub with plain
+`gh`:
 
 ```bash
-legion gh -- <gh args…>
+gh <gh args…>
 ```
 
-Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
-(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/internal/runtime/workerbin/workerbin.go`)
-that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
-redeems a fresh token from your session's grant — identity is supplied per call, never stored.
-Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
-refuses `pr merge` (and a raw `gh api …/merge` or a GraphQL mutation) for every role: Legion never
-merges. It also refuses every GitHub-issue write — the `issue`
-subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `unpin`, `transfer`,
-`lock`, `unlock`, and `develop`, and any raw `gh api` call to an `/issues` path whose method is not
-GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
-comments live on that path too, so edit them with `gh pr comment`) — printing
-`Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`:
-Legion never reads or writes a GitHub issue. `pr comment`, `pr review`,
-`api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
-through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
-commands, each `github` tool call, and each `read`/`grep` of a `pr://` or `issue://` URL (and by
-the `legion` tool before its `handoff_complete`); never `cat`, `echo`, copy, or
-`export` it — `legion credential`, `legion gh`, `jj git push`, and `handoff_complete` read it
-themselves. The file is the pane's, not the command's, and a grant lives 60 seconds: a `task`
-subagent, an `eval` subprocess, or a background job in your pane reads the grant your last such
-call wrote, and a `github` tool `run_watch` keeps polling `gh` on the one written when the call
-began, so each succeeds only within 60 seconds of that call and 403s afterwards — a timing
-artifact, not a broken credential. Run credentialed commands from your own bash calls, and watch a
-run that may outlast a minute with `gh run watch` in bash, which redeems once and then runs on the
-token it got.
+How `gh` works in a worker pane. `GH_CONFIG_DIR` names a read-only directory holding gh's own
+`hosts.yml` (your role's GitHub App installation token, user `x-access-token`) and `config.yml`:
+`/var/run/legion/gh` in a Sandbox pod, a per-role volume projected into your container alone;
+`<state_dir>/secrets/<claim>-gh` on tmux. The `gh` on your `PATH` is the ordinary binary (the
+image's in a pod, the daemon's PATH's in a tmux pane) and reads that file on every call; the daemon
+wrote it when your pane started and rewrites it in place every minute from its cached lease, so it
+never expires under you, and `git` reads the same file through the clone's `credential.helper`
+(`!gh auth git-credential`). `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` are set empty so nothing
+outranks the file; `gh auth status` shows account `x-access-token`. Never run `gh auth login`,
+`gh auth setup-git`, `gh config set` or `gh alias set`: there is no login state to create, and the
+directory is read-only. Two rules nothing enforces: **Legion never merges** — no `gh pr merge`, no
+raw `gh api …/merge`, no merge mutation in `gh api graphql`, for any role — and **Legion's issues
+live on Dispatch, never on GitHub issues** — no `gh issue` write and no non-GET `gh api` call to
+an `/issues` path (pull-request conversation comments live on that path too; edit them with
+`gh pr comment`); use `dispatch_message` or `dispatch_comment` on your `LEGION_ISSUE`. The file
+`$LEGION_GRANT_FILE` names is a different credential: the session grant the `legion` commands that
+call the daemon present (`legion handoff complete`, through the `legion` tool's `handoff_complete`,
+and the reviewer's `legion threads resolve`). The extension writes it before each bash command
+that invokes `legion`, and the `legion` tool before its `handoff_complete`; nothing else mints
+one, `gh` and `git` never read it, and you never `cat`, `echo`, copy, or `export` it. A `task`
+subagent, an `eval` subprocess, or a background job in your pane inherits the same `GH_CONFIG_DIR`
+and so the same credential, for as long as it runs.
 
 **Other credentials your pod may already carry.** Before reporting that a read is unreachable,
 check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
@@ -270,7 +267,7 @@ for the retro's Dispatch message (`skill://legion-retro`):
 For example:
 
 ```bash
-legion gh -- pr comment <pr-number> \
+gh pr comment <pr-number> \
   --body $'Verification complete.\n\n<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->' \
   --repo <owner>/<repo>
 ```
@@ -297,13 +294,12 @@ The implementer opens the pull request. After its implementation commit and veri
 pushes the issue branch under this exact name with the one push procedure every role uses
 (*Every role pushes its own commits*, below).
 
-The provisioned issue workspace configures `credential.helper` with the daemon's absolute
-credential command, so `legion push` authenticates transparently through the same session
-capability. Never handle a token.
+The shared clone's `credential.helper` is `!gh auth git-credential`, so `legion push`
+authenticates as your role's App from the same file your `gh` reads. Never handle a token.
 
-Then open the pull request with `legion gh -- pr create`. The PR body **must** contain the
+Then open the pull request with `gh pr create`. The PR body **must** contain the
 line `Dispatch: <KEY>` — the daemon's fallback link from a PR to its Dispatch issue when the
-branch name alone is ambiguous. The credential helper and `legion gh` provide the GitHub
+branch name alone is ambiguous. Your pane's `gh` and `git` provide the GitHub
 identity; never export, fetch, or replace a token. Other phases advance the existing branch
 rather than creating a replacement bookmark or PR.
 
@@ -326,7 +322,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
 - **A red CI job** that failed on its own is re-run with
-  `legion gh -- run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
+  `gh run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
@@ -385,8 +381,8 @@ tests it wrote — push the issue branch with `legion push`, run from bash in yo
 cd -- "$LEGION_WORKSPACE" && legion push
 ```
 
-It pushes `@-` through the provisioned credential helper, which authenticates as your role's App
-(`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
+It pushes `@-` through the clone's `gh auth git-credential` helper, which authenticates as your
+role's App from your pane's `GH_CONFIG_DIR` (`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
 which pushes skip CI and which commit-message keywords it refuses. While the head commit carries
 `skip-checks: true`, a pull-request body edit alone starts no GitHub workflow run, so a check that
 re-judges the body re-runs on that head only after a later push; on a code head the same edit

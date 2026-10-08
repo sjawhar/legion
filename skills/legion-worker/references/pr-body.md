@@ -61,7 +61,7 @@ ledger the reviewer and merger check against GitHub. The implementer writes `Out
 `Change`, `Proven by`, and `Size` when the pull request opens, and keeps them true after every
 push; `Outcome` is a sentence a user of the repository would recognise, never "fix bug" or a file
 name, and `Why` ends with the Dispatch key, never a URL. The reviewer writes `Look at first` and
-`Not proven / risk` at each round, into the live body (`legion gh -- api
+`Not proven / risk` at each round, into the live body (`gh api
 repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... -F body=@body.md`);
 `Not proven / risk` copies every claim recorded as unproven before READY — the tester's
 `failures`, the reviewer's own review, any proof-check comment already on the pull request —

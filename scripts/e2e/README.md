@@ -17,7 +17,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
-| `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
+| `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone, and the built `legion threads resolve` runs as the implement App from the same files and the two App logins the daemon names on a pane. Devbox only |
 
 ## TestRealGitHubCredentialSurface
 
@@ -28,10 +28,11 @@ LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
 ```
 
 The test is intentionally gated because it calls GitHub as both installed Apps. It resolves each
-App key through its `private_key_command`, registers the implementer and reviewer claims through
-the actual API, and drives the binary it builds from this checkout. The test's temporary grant
-files, built binary, and clone directory are removed by Go's test cleanup; the GitHub operations
-are read-only except for locally cloning the smoke repository.
+App key through its `private_key_command`, mints each App's lease through the real token source,
+writes the gh files the daemon would render for a pane, and drives the real `gh` and the binary it
+builds from this checkout against them. The test's temporary gh directories, built binary, and
+clone directory are removed by Go's test cleanup; the GitHub operations are read-only except for
+locally cloning the smoke repository.
 
 
 ## stage1-skeleton.sh
@@ -319,14 +320,13 @@ it writes `done`, every status write on the issue is the daemon's, the freed slo
 waiting root, and the journal has the gate's changes request, the close, the linger, the slot
 release and the architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
-credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
-`<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
-on the command's one grant, and `gh pr merge` is refused. Then `idle-pr-read` has the implementer
-and the root architect each read the pull request through Oh My Pi's `read` tool (`pr://`), with
-no bash command first, once their last grant is over 60 s old — a grant's lifetime — and requires
-the read's own `Created:` line back, judged from the transcript: Oh My Pi serves the read by
-running `gh` with the environment it copied at its start, so this passes only when the pane named
-`LEGION_GRANT_FILE` from that start and the plugin minted a grant for the read itself (LEGION-262).
+credentials (`in-agent-credentials`): in one bash tool call of a real implementer pane, plain `gh`
+— the daemon's PATH's, with no Legion shim in front of it — authenticates as
+`legion-implementer[bot]` from the gh files the pane's `GH_CONFIG_DIR` names, a `task` subagent
+of that pane does the same with no bash command of the parent's first, since it inherits the same
+directory, and `gh auth status` names account `x-access-token`; nothing of the pane's redeems a
+grant for GitHub, so there is no `idle-pr-read` checkpoint, which proved a per-read grant mint
+(LEGION-262) that no longer exists.
 `notices-reach-architects-alone` reads every phase-worker session in the isolated profile (a
 session's role is its newest Envoy role claim) and fails on any workflow notice delivered to one:
 every notice kind is for the architect that owns its issue, on that architect's role topic, and the
@@ -362,10 +362,9 @@ held names the holder, says every minute how long it has waited, and fails after
 naming it. The lock is on an open descriptor, so a holder that dies or is killed frees it with no
 stale lock left behind.
 Each check is named in the transcript;
-seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
+negative controls demonstrate that the status-actor, held-worker, re-closed-gate
 and worker-notice assertions reject deliberately corrupted observations before the captured
-observations pass again (the idle read's three: its result refused as it was before LEGION-262, the
-read inside its previous grant's lifetime, and a bash command before it; the worker notice's: a copy
+observations pass again (the worker notice's: a copy
 of one phase-worker session with a `pr-blocked` delivery appended).
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
@@ -828,6 +827,8 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery, a `wait`, or a `read` of its `proc://` job, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-reviewed keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on a model the operator fixture's `overlay.yml` gives a role |
+| `github-credential` | plain `gh` as the role's App inside the pod, and isolation inside one pod: in tree 1's issue pod, the implementer's `gh` — the image's, with no Legion shim in front of it — authenticates as `legion-implementer[bot]` from the gh files its `GH_CONFIG_DIR` (`/var/run/legion/gh`, the read-only `gh-implementer` projection of its role Secret) holds, a `task` subagent of that session does the same with no bash command of the parent's first, since it inherits the directory, and `gh auth status` names account `x-access-token`; in the same pod a review-role container's `gh` is `legion-reviewer[bot]`, mounts no other role's gh volume, and holds no implement App token, as the implementer's holds no review App token |
+| `github-credential-refresh` | the hour boundary: past an installation token's hour from the pod's start, the implementer's `hosts.yml` holds a token other than the one first written (the daemon logged `sandbox runtime: github credential refreshed` for the sandbox and role, and the Secret's `github-hosts` key changed), its plain `gh` still authenticates as `legion-implementer[bot]`, and the token first written stayed valid until its own expiry: the new one landed at least 15 minutes before the old lapsed |
 | `idle-resident` | every finished worker of tree 1 still runs in the pod it first registered with, that pod Running, no Sandbox of tree 1 is Suspended while its issue is open, and the tree volume is bound |
 | `kill-launcher-resume` | once the merger runs, killing only its launcher PID 1 restarts that container and resumes the merger's session at a new process generation in the same pod; every peer container identity remains unchanged |
 | `fence` | a whole-pod deletion is never adopted. The merger resumes in a new pod UID; its former private boot token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |

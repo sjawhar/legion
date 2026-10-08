@@ -2,7 +2,7 @@
 
 ## Merge-queue verification
 
-Your job is the tail end of the merge queue's own process: confirm the approved head is the current head, build the READY packet with the gate facts, never merge.
+Your job is the tail end of the merge queue's own process: confirm the approved head is the current head, build the READY packet with the gate facts, never merge. Legion never merges: no `gh pr merge`, no merge call through `gh api`, for any role; the human merges after READY.
 
 ## Workspace restrictions
 
@@ -16,7 +16,7 @@ Do not request `isolated` work, create a workspace, edit files, or create a comm
 
    The reviewer approves on the newest submitted acceptances, without waiting for resolution. Your run before READY resolves accepted threads that remain open, including acceptances posted after the implementer's last run.
 
-4. Build the READY packet. Its first line is exactly `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` — the pull request number, the sha of the current head you just re-read (the tip), the approved head from step 2 (the same sha when retro added nothing), this issue's key, and the pull request URL. Read the PR body's `## For the reviewer` block at that head (`legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body`) and quote its `Outcome:` line next, verbatim, then its `Not proven / risk:` value on one line — every bullet under that label joined with `; `, or `none`; a body with no such block gets one line instead, `brief: none in PR body`, and the packet still goes out. Follow that with the quoted `--summary` lines from step 2 (or `no file changes above the approved head`) and the PR body's gate facts (the `## Verification` block, including the implementer's and the tester's `E2E` lines). How the packet reaches the issue and the merge queue is in the daemon part below.
+4. Build the READY packet. Its first line is exactly `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` — the pull request number, the sha of the current head you just re-read (the tip), the approved head from step 2 (the same sha when retro added nothing), this issue's key, and the pull request URL. Read the PR body's `## For the reviewer` block at that head (`gh api repos/{owner}/{repo}/pulls/{number} --jq .body`) and quote its `Outcome:` line next, verbatim, then its `Not proven / risk:` value on one line — every bullet under that label joined with `; `, or `none`; a body with no such block gets one line instead, `brief: none in PR body`, and the packet still goes out. Follow that with the quoted `--summary` lines from step 2 (or `no file changes above the approved head`) and the PR body's gate facts (the `## Verification` block, including the implementer's and the tester's `E2E` lines). How the packet reaches the issue and the merge queue is in the daemon part below.
 
 ## Completion
 

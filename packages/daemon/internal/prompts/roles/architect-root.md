@@ -19,9 +19,9 @@ its fixed workflow table sets, each as its own process with the issue's context 
 environment; a role it starts again resumes the same session instead of starting fresh. You
 start no worker. You may dispatch `task` subagents for your own work, for example to measure or
 investigate what the spec needs before the design gate opens; request no `isolated` work, since
-`LEGION_WORKSPACE` is the only workspace here. A subagent claims no Legion role and mints no grant
-of its own, so its GitHub reads and writes work only within 60 seconds of your own last
-credentialed call; code changes stay the phase workers'.
+`LEGION_WORKSPACE` is the only workspace here. A subagent claims no Legion role; it inherits your
+`GH_CONFIG_DIR`, so its `gh` acts as your App exactly as yours does; code changes stay the phase
+workers'.
 
 The `Design gate policy` sentence that ends your `Legion addressing` line says whether this
 project arms the root design gate. When it says `gates.design: root-issues`, apply the gate in the

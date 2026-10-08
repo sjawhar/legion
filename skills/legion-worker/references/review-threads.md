@@ -30,8 +30,9 @@ Every path it cites is in sjawhar/legion.
   implementer's reply is the thread's newest comment, which leaves it open: answer the thread
   again, then run the command again. Once the review is discarded, your `Accepted:` is the newest
   comment again, and running the command again closes the thread.
-  When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
-  When neither is set, add `--gh` to that command, which applies the fallback's rule below through
+  In a Legion pane (`LEGION_GRANT_FILE` is set), use `legion threads resolve --pr <number> --repo <owner>/<repo>`:
+  outside the reviewer's pane it acts as your role's App from the gh files under `GH_CONFIG_DIR`.
+  Outside a Legion pane, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
   GitHub credential and the fallback below.
   In a Legion pane, the **implementer** runs the command after every push that answers a review
@@ -39,8 +40,10 @@ Every path it cites is in sjawhar/legion.
   the `Threads` section. The output is then recorded against the head the reviewer will read, and
   nothing reads thread state before the implementer's completion. The command resolves each
   unresolved thread whose newest submitted comment is the opener's own `Accepted:` reply. On a
-  thread a bot account opened that is none of Legion's role Apps (the daemon names them, keyed by
-  App role), the Legion reviewer's `Accepted:` also closes it. GitHub cannot tell a CI bot, which
+  thread a bot account opened that is none of Legion's role Apps (`LEGION_IMPLEMENT_APP_LOGIN` and
+  `LEGION_REVIEW_APP_LOGIN` name them in every tree pane; the daemon's own route knows them for the
+  reviewer; with either unset, no thread counts as a bot's), the Legion reviewer's `Accepted:` also
+  closes it. GitHub cannot tell a CI bot, which
   never accepts, from a person whose `gh` is routed to an App, so the reviewer adjudicates such a
   finding, and it may accept one an App-routed person raised. The subject of a finding never
   closes it: the implementer's `Fixed in <commit>: …` or `Declined: …` answers a thread and closes
@@ -50,7 +53,7 @@ Every path it cites is in sjawhar/legion.
   bot's thread, so the ledger shows which) or `left open <url> — newest reply by <login> is …`
   naming why, and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one.
 
-  Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
+  Outside a Legion pane, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
   with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
 
   ```graphql
@@ -66,8 +69,8 @@ Every path it cites is in sjawhar/legion.
 
   Resolve only when the newest comment is submitted, its `author` is the opener's account (the same
   `__typename` and `login`: a login alone is a string anyone may register), and its `body`, after
-  removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
-  grant nothing names Legion's own App logins, so this route closes a bot's thread only on its
+  removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Outside a Legion pane nothing
+  names Legion's own App logins, so this route closes a bot's thread only on its
   opener's `Accepted:`: leave one the Legion reviewer accepted for the implementer's or merger's
   run in a pane, or report it. For each thread to resolve:
 

@@ -63,7 +63,7 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
 - `fork_point(main@origin | <head-sha>)` is the base the branch was cut from *at that head*:
   the old base for the pre-rebase head, the new base for the rebased one, so one command
   serves both sides. On a stacked PR substitute its base branch for `main`
-  (`legion gh -- pr view <n> --json baseRefName`).
+  (`gh pr view <n> --json baseRefName`).
 - A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
   workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a
   changed diff — never as unchanged.
@@ -82,7 +82,7 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
 
 Where each role gets its two heads: the implementer — the tip before and after its own rebase;
 the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
-its last submitted review (`legion gh -- api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login}'`)
+its last submitted review (`gh api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login}'`)
 and the new head; the merger never computes a fingerprint — it uses the `--summary` check in
 `skill://legion-worker/references/merge-gate.md`.
 

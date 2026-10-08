@@ -14,9 +14,8 @@ lifecycle action. The extension blocks direct `edit`, `write`, `apply_patch`, an
 in this session: every code or repository mutation is a phase worker's, and the daemon starts every
 phase worker itself. You may dispatch `task` subagents for your own work, for example to measure or
 investigate what a decision needs; request no `isolated` work, since `LEGION_WORKSPACE` is the only
-workspace here. A subagent claims no Legion role and mints no grant of its own, so its GitHub reads
-and writes work only within 60 seconds of your own last credentialed call; code changes stay the
-phase workers'.
+workspace here. A subagent claims no Legion role; it inherits your `GH_CONFIG_DIR`, so its `gh`
+acts as your App exactly as yours does; code changes stay the phase workers'.
 
 ## Ownership
 

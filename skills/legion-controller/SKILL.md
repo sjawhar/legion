@@ -16,16 +16,17 @@ The Legion extension registers this session with the daemon as the controller an
 `legion-<project>-controller` during session startup. Do not handle a wake unless that startup
 succeeded.
 
-The session carries no GitHub credential: its GitHub token variables are emptied, and both
-`legion gh -- <args>` and `legion threads resolve` are refused. The controller reads Dispatch and
+The session carries no GitHub credential: its GitHub token variables are emptied and its
+`GH_CONFIG_DIR` names a directory holding no login, so `gh` acts as nobody and `legion threads
+resolve` fails for want of a credential. The controller reads Dispatch and
 applies its controller capability with `legion status <KEY> <status>`; it never reads GitHub or
 merges a pull request.
 
 For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),
 `LEGION_DAEMON_URL`, `LEGION_PROJECT` (the daemon's project), `LEGION_STATE_DIR`, and `LEGION_GRANT_FILE`
-(an absolute path to a file only you can read, under a 0700 directory; the extension writes
-each command's grant there and every `bash` call is blocked without it) in its environment. Do
+(an absolute path to a file only you can read, under a 0700 directory; the extension writes a
+grant there before each `bash` command that invokes `legion`) in its environment. Do
 not set `LEGION_CONTROLLER=1` — that marker is the launched controller's own (`legion controller
 start`'s session, or the daemon's pod), and a session carrying it claims at startup. Then run:
 
@@ -34,8 +35,8 @@ start`'s session, or the daemon's pod), and a session carrying it claims at star
 ```
 
 The command checks that `LEGION_PROJECT` is the daemon's project, registers this session with the
-daemon, and claims the Envoy role for it before controller commands can act. From then on this session's
-shell commands are wrapped with a controller grant, but the grant holds no GitHub credential;
+daemon, and claims the Envoy role for it before controller commands can act. From then on a
+controller grant is minted before each of this session's `legion` shell commands, but the grant holds no GitHub credential;
 `legion status <KEY> <status>` works through the controller secret in this session's environment
 (`LEGION_CONTROLLER_SECRET` or its `_FILE`), not the grant — if it fails, that is the variable to check.
 The takeover moves the role and the daemon's recorded session id to this session. Never pass a
@@ -44,8 +45,8 @@ the role afterwards, so `/legion-claim-controller` is the manual override, not a
 a listener restart.
 
 Two limits of a takeover session. It caches the controller secret it started with: the next
-`legion controller start` mints a new secret, every `bash` call in the takeover session then fails
-with a 403 from the grant mint, and the fix is to start a fresh OMP with the new secret, not to
+`legion controller start` mints a new secret, every `legion` command in the takeover session then
+fails with a 403 from the grant mint, and the fix is to start a fresh OMP with the new secret, not to
 retry. And the role does not follow `/new` or `/fork` in a takeover session — without
 `LEGION_CONTROLLER=1` the new session is not a Legion session to the extension — so after either
 command run `/legion-claim-controller` again.
@@ -74,7 +75,7 @@ Under `controller: operator`, the default, the daemon launches no controller: th
 `legion controller start --config controller.yaml [--daemon-url <url>]` on
 their own machine, and you are that foreground OMP session. The command fetched a fresh controller
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
-(`~/.local/state/legion/<project>-controller` by default) beside the `gh` shim and the `legion`
+(`~/.local/state/legion/<project>-controller` by default) beside the `legion`
 launcher, and started you with `LEGION_CONTROLLER=1` and the controller's environment. The
 extension registers on `/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the

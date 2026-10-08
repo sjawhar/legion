@@ -132,11 +132,11 @@ head whose required check failed, so the tree stops at the merger.
    empty. `pipefail` makes a failed read fail the line (without it the line exits with `tee`'s
    status and leaves two empty files), and the parentheses keep it to that line, since your
    session's shell persists and a later `cmd | head` would exit 141 under it:
-   `cd -- "$LEGION_WORKSPACE" && ( set -o pipefail && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md ) && test -s <dir>/before.md`.
+   `cd -- "$LEGION_WORKSPACE" && ( set -o pipefail && gh api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md ) && test -s <dir>/before.md`.
    In `<dir>/body.md`, change the lines it carries for that content and add any it lacks where
    the instructions place them; other phases' lines stay as they wrote them.
 4. Write it back before the push:
-   `cd -- "$LEGION_WORKSPACE" && legion gh -- api --method PATCH repos/{owner}/{repo}/pulls/{number} -F body=@<dir>/body.md`.
+   `cd -- "$LEGION_WORKSPACE" && gh api --method PATCH repos/{owner}/{repo}/pulls/{number} -F body=@<dir>/body.md`.
    The checks the push starts read the body as it stands then; an edit after the push re-runs
    only a check that also starts on an edited body. Such a check re-runs now at the approved
    head, on a diff without your commit, and may fail there; READY reads the head your push makes.
@@ -150,7 +150,7 @@ Then push the commit with `legion push`. When the push is refused after step 4 w
 write `<dir>/before.md` back the same way before you report the refusal to the architect, so the
 body matches the head GitHub has. After the push, post one Dispatch message on
 the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
-issue, and the `gh` shim refuses every GitHub-issue write — naming the documents, the
+issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge. The message must carry this revived implementer's structured
 attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
