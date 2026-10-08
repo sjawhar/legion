@@ -127,46 +127,22 @@ func (r *liveRig) checkResources() error {
 	if err != nil {
 		return err
 	}
-	if pod.Spec.Affinity != nil {
-		return fmt.Errorf("pod %s carries an affinity, which no Legion pod asks for: %+v", name, pod.Spec.Affinity)
-	}
-	if pod.Status.QOSClass != corev1.PodQOSGuaranteed {
-		return fmt.Errorf("pod %s is %q, want %s", name, pod.Status.QOSClass, corev1.PodQOSGuaranteed)
-	}
 	want := liveResources()
+	byContainer := make(map[string]corev1.ResourceRequirements, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		byContainer[c.Name] = want[claim.Role(c.Name)]
+	}
+	init := want[root.role]
+	if err := guaranteedPod(pod, byContainer, &init); err != nil {
+		return fmt.Errorf("pod %s: %w", name, err)
+	}
 	var cpuSum, memorySum resource.Quantity
 	overrides, defaults := 0, 0
-	check := func(c corev1.Container, role claim.Role) error {
-		expected, ok := want[role]
-		if !ok {
-			return fmt.Errorf("container %s names no role the rig configured a reservation for", c.Name)
-		}
-		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-			request, limit := c.Resources.Requests[resourceName], c.Resources.Limits[resourceName]
-			reserved := expected.Requests[resourceName]
-			if request.IsZero() || limit.IsZero() {
-				return fmt.Errorf("container %s reserves no %s: requests %v, limits %v", c.Name, resourceName, c.Resources.Requests, c.Resources.Limits)
-			}
-			if request.Cmp(limit) != 0 {
-				return fmt.Errorf("container %s requests %s %s but is limited to %s; a reservation is one value as both", c.Name, resourceName, request.String(), limit.String())
-			}
-			if request.Cmp(reserved) != 0 {
-				return fmt.Errorf("container %s reserves %s %s, not the %s the rig configured for the %s", c.Name, resourceName, request.String(), reserved.String(), role)
-			}
-		}
-		return nil
-	}
 	for _, c := range pod.Spec.InitContainers {
-		if err := check(c, root.role); err != nil {
-			return fmt.Errorf("init container: %w", err)
-		}
 		note("runtime", "init container %s: cpu %s, memory %s, the %s's reservation, request = limit", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), root.role)
 	}
 	for _, c := range pod.Spec.Containers {
 		role := claim.Role(c.Name)
-		if err := check(c, role); err != nil {
-			return err
-		}
 		cpuSum.Add(*c.Resources.Limits.Cpu())
 		memorySum.Add(*c.Resources.Limits.Memory())
 		source := []string{}
@@ -215,6 +191,55 @@ func (r *liveRig) checkResources() error {
 		return fmt.Errorf("MemTotal in the pod is %d kB (%.2f GiB), not within 3%% of the containers' summed memory limits %s, the pod cgroup's limit as gVisor sizes the sandbox", memTotalKB, memTotal/(1<<30), memorySum.String())
 	}
 	note("operator", "exec %s -- nproc: %d = max(2, ceil(%s)); MemTotal %d kB, within 3%% of the summed memory limits %s", name, cpus, cpuSum.String(), memTotalKB, memorySum.String())
+	return nil
+}
+
+// guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity, its
+// qosClass is Guaranteed, and every container — the init containers included — reserves cpu and
+// memory with the request equal to the limit and equal to the reservation configured for it: want's
+// entry for each regular container by name, and init for every init container (nil when the pod has
+// none to hold). A container want does not name is a refusal: nothing a Legion pod runs is
+// unreserved.
+func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements, init *corev1.ResourceRequirements) error {
+	if pod.Spec.Affinity != nil {
+		return fmt.Errorf("carries an affinity, which no Legion pod asks for: %+v", pod.Spec.Affinity)
+	}
+	if pod.Status.QOSClass != corev1.PodQOSGuaranteed {
+		return fmt.Errorf("is %q, want %s", pod.Status.QOSClass, corev1.PodQOSGuaranteed)
+	}
+	check := func(c corev1.Container, expected corev1.ResourceRequirements, source string) error {
+		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			request, limit := c.Resources.Requests[resourceName], c.Resources.Limits[resourceName]
+			reserved := expected.Requests[resourceName]
+			if request.IsZero() || limit.IsZero() {
+				return fmt.Errorf("container %s reserves no %s: requests %v, limits %v", c.Name, resourceName, c.Resources.Requests, c.Resources.Limits)
+			}
+			if request.Cmp(limit) != 0 {
+				return fmt.Errorf("container %s requests %s %s but is limited to %s; a reservation is one value as both", c.Name, resourceName, request.String(), limit.String())
+			}
+			if request.Cmp(reserved) != 0 {
+				return fmt.Errorf("container %s reserves %s %s, not the %s configured for %s", c.Name, resourceName, request.String(), reserved.String(), source)
+			}
+		}
+		return nil
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if init == nil {
+			return fmt.Errorf("init container %s: the pod is expected to run none", c.Name)
+		}
+		if err := check(c, *init, "the launching role"); err != nil {
+			return fmt.Errorf("init container: %w", err)
+		}
+	}
+	for _, c := range pod.Spec.Containers {
+		expected, ok := want[c.Name]
+		if !ok {
+			return fmt.Errorf("container %s names no role a reservation is configured for", c.Name)
+		}
+		if err := check(c, expected, "the "+c.Name); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

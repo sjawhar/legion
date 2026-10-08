@@ -22,8 +22,8 @@ import (
 // write follows. The root keeps its phase, its linger stays unarmed, none of its claims is stopped,
 // and the architect is told which child left and how. What the child's claims get is the
 // status's: a child closed as done has every claim closed (issue_close) and its Sandbox released
-// with its volume (a releasing IssueSuspend), while one parked in backlog or triage has every
-// claim suspended and its Sandbox kept (a keeping IssueSuspend).
+// with its volume (a releasing IssueSuspend), while one parked in backlog, icebox or triage has
+// every claim suspended and its Sandbox kept (a keeping IssueSuspend).
 func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -35,6 +35,7 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 		{name: "signed off", fact: intake.SignOff{Issue: "LEGION-209"}, notice: "child-closed", op: "issue_close", release: true},
 		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", op: "issue_close", release: true},
 		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
+		{name: "moved to icebox", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "icebox", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 		{name: "moved to triage", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "triage", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

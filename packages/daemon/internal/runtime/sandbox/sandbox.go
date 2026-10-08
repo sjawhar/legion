@@ -728,10 +728,12 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // is that claim. known is every claim the daemon has not retired, a suspended one included
 // (knownClaims), so a retired controller's Sandbox goes and a suspended one's, which holds its
 // session, stays. Every delete runs under the pod's launch turn, so a launch that begins meanwhile
-// waits for the delete and then creates the Sandbox afresh, and is fenced to what its decision
-// read: an issue Sandbox's tree is read again under the turn, and the controller's Sandbox, whose
-// decision rests on known, read before the sweep, is deleted only as the store showed it
-// (deleteFenced). Every start writes the Sandbox its generation's address record
+// waits for the delete and then creates the Sandbox afresh, and is fenced to the Sandbox as the
+// decision read it, its uid and resourceVersion (deleteFenced): an issue Sandbox's tree is read
+// again under the turn, and a Sandbox written since the informer's snapshot — relabelled for a new
+// tree by a re-admitted issue's launch (ensureSandbox), which keeps its uid, volume and sessions,
+// or set Running — is kept as a conflict for the next sweep to judge on what it holds then.
+// Every start writes the Sandbox its generation's address record
 // (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
 // next sweep judges it on the claims known then. The image probe's Sandbox (labelled
 // legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
@@ -828,7 +830,12 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	if live {
 		return nil
 	}
-	if err := r.deleteFenced(ctx, name, metav1.Preconditions{UID: &uid}, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
+	// Fenced to the uid and resourceVersion the decision read: a re-admission of this issue that
+	// landed between the informer's snapshot and this turn relabelled the same Sandbox for its new
+	// tree (ensureSandbox) and may already run a pod in it; the uid alone would not tell.
+	version := u.GetResourceVersion()
+	fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
+	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
 		return fmt.Errorf("reconcile orphans: %w", err)
 	}
 	return nil

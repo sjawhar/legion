@@ -8,14 +8,25 @@ tags:
   - scheduling
   - production
 date: 2026-09-24
-status: active
+status: historical
 module: packages/daemon-go/internal/runtime/sandbox
 related_issues:
   - "LEGION-208"
+  - "LEGION-632"
 symptoms:
   - "a worker pod of a tree stays Pending with `1 Too many pods` and Karpenter's `unsatisfiable topology constraint for pod affinity, key=kubernetes.io/hostname`"
   - "a root pod that requests CPU stays Pending with `Insufficient cpu` on the node a child of its tree was placed on"
 ---
+
+> **[HISTORICAL]** Since LEGION-632 (2026-10-08) no two pods of a tree share a volume or a node:
+> each issue's pod owns its own `ReadWriteOnce` volume, carries no affinity or anti-affinity, and
+> every container reserves cpu and memory with request equal to limit, so the scheduler places a
+> pod by its reservation wherever the `legion` pool has room (`docs/kubernetes.md`, "Issue sizing:
+> one reservation per pod"). The remedy below — the pool's floor beside a required pod affinity to
+> the tree's own pods and anti-affinity against other trees' — is the layout this replaced; the
+> `manifest.go` `podTemplate` it names builds no affinity now. The lesson that stands: under
+> required colocation a resource request on a later pod strands it, which is why a reservation on
+> every pod and no affinity go together.
 
 # A Sandbox tree needs a node that fits it
 

@@ -2413,7 +2413,12 @@ released_lines() { log_lines "$released_msg" | jq -c --arg issue "$1" 'select(.i
 released=$(released_lines "$child1" | grep -c . || true)
 [ "$released" = 0 ] || fail "the daemon logged $child1's release before its done: $(released_lines "$child1" | head -1)"
 set_status "$child1" done
-child1_released() { [ -z "$(op get sandboxes,pvc -l "legion.dev/project=$run_label,legion.dev/issue=$child1" -o name)" ]; }
+# A gone-wait holds the read to its exit status: `[ -z "$(...)" ]` would take a failed read (an API
+# refusal, a throttle, op's timeout) for an empty answer and pass at once.
+child1_released() {
+  local out
+  out=$(op get sandboxes,pvc -l "legion.dev/project=$run_label,legion.dev/issue=$child1" -o name) && [ -z "$out" ]
+}
 until_true 600 "$child1's Sandbox and PVC to be gone after its done" child1_released
 at=$(date -u +%FT%TZ)
 root_mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') || fail "the operator could not read the root's Sandbox $root_pod"
@@ -2432,8 +2437,9 @@ note "at $at $child1 is done: its Sandbox and PVC are gone (kubectl get sandboxe
 note "the root $tree1 kept Sandbox $root_pod Running, PVC ${found%% *} Bound and pod uid $root_uid"
 set_status "$child2" backlog
 child2_parked() {
-  [ "$(op get sandbox "$child2_pod" -o jsonpath='{.spec.operatingMode}' 2>/dev/null)" = Suspended ] &&
-    [ -z "$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name 2>/dev/null)" ]
+  local mode pods
+  mode=$(op get sandbox "$child2_pod" -o jsonpath='{.spec.operatingMode}') && [ "$mode" = Suspended ] &&
+    pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name) && [ -z "$pods" ]
 }
 until_true 600 "$child2's Sandbox to be Suspended and its pod gone after its backlog" child2_parked
 assert_one_bound_pvc "$child2" " after its backlog"
@@ -2903,11 +2909,13 @@ for role in planner implementer tester reviewer; do
 done
 [ "$(issue_sandbox_modes "$tree1")" = Running ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' while its issue is open, want its one, Running"
 [ "$(issue_sandbox_modes "$child2")" = Suspended ] || fail "the parked child $child2's Sandboxes are '$(issue_sandbox_modes "$child2" | paste -sd ' ' -)', want its one, Suspended"
-[ -z "$(issue_sandbox_modes "$child1")" ] || fail "the done child $child1 still has a Sandbox: $(issue_sandbox_modes "$child1" | paste -sd ' ' -)"
+modes=$(issue_sandbox_modes "$child1") || fail "the operator could not read the done child $child1's Sandboxes"
+[ -z "$modes" ] || fail "the done child $child1 still has a Sandbox: $(paste -sd ' ' - <<<"$modes")"
 for issue in "$tree1" "$child2"; do
   assert_one_bound_pvc "$issue" ""
 done
-[ -z "$(issue_pvcs "$child1")" ] || fail "the done child $child1 still has a PVC: $(issue_pvcs "$child1" | paste -sd ' ' -)"
+gone=$(issue_pvcs "$child1") || fail "the operator could not read the done child $child1's PVCs"
+[ -z "$gone" ] || fail "the done child $child1 still has a PVC: $(paste -sd ' ' - <<<"$gone")"
 note "planner, implementer, tester and reviewer of $tree1 each run in their first process in one issue pod; its Sandbox is Running and its PVC Bound; $child2's Sandbox is Suspended with its PVC Bound; $child1 has neither"
 pass
 

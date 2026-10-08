@@ -80,10 +80,10 @@ type Request struct {
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
-// <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the shared clone every issue
-// workspace of the repository is a jj workspace of, <state>/repos/github.com/<owner>/<repo>. A
-// tree volume's init containers serialize on the file beside the clone, Clone + ".lock". Repo is
-// the repository.
+// <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the clone the workspace is a jj
+// workspace of, <state>/repos/github.com/<owner>/<repo> — under tmux the one every issue workspace
+// of the repository shares, under Kubernetes the issue pod's own on its own volume. Repo is the
+// repository.
 type Workspace struct {
 	Dir      string
 	Bookmark string
