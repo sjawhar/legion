@@ -1,0 +1,104 @@
+{
+  "completed": "2026-10-08T08:04:33.750383409Z",
+  "deviations": [
+    "Plan §4 T1.3 named a LEGION_ENVOY_PUBLISHERS=\u003cn\u003e count line beside the per-publisher lines; the simplify pass dropped the count, since the publisher lines are the count (len(answer.publishers)); an older-shape probe or the pane fakes print none and nothing is refused, as before.",
+    "Plan §4 T2.1 and T4.6 named the Dockerfile's header, publish-gate probe comment and pod-baseline sentence; per the architect (the root's PR edits the toolchain stages and the publish gate), the Dockerfile change is the plugin-install step and its adjacent comments alone. Two comment lines in the publish-gate step are now stale (they say 'discovery off' and quote the OK line without extensions=discovered); reported to the architect for the root's PR.",
+    "Plan §4 T4.5 said the fixture's operator overlay names compaction.remoteEndpoint; deploy/kubernetes/operator-route/overlay.yml names none, so live_operator_test.go's settings read appends a scratch operator overlay setting the endpoint after the agent's PI_CONFIG_FILES. Edited blind (no cluster here); compiles under go vet -tags e2e.",
+    "Plan §5 row 3a expected dev.autoqa = false as Oh My Pi's default; the fork's default is true (consent unset) — the planner's measurement still had PI_AUTO_QA=0 exported. The implementation follows the spec (the two environment defaults go); the figure is recorded as measured and reported to the architect.",
+    "Plan §4 T1.5 bootgate_test.go: the pane fakes were left unchanged (no publisher lines); the parser treats an absent count as no refusal rather than making the fakes print one."
+  ],
+  "discoveredComplexity": [
+    "scripts/e2e/stage4b-sandbox-tree.sh and internal/runtime/sandbox/live_operator_test.go are edited blind; stage4a's pod-baseline check and stage4b's argv check run on the devbox only."
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/runtime/sandbox/manifest.go (agentArgv drops --no-extensions; doc states the boundary)",
+    "packages/daemon/internal/runtime/sandbox/types.go, launcher.go (launcherCommand appends --warm-codegraph for every role but the controller), probe.go (judge requires the extensions=discovered mark)",
+    "packages/daemon/internal/runtime/sandbox/agent_argv_omp_test.go (now TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands), probe_test.go, manifest_test.go, controller_test.go, operatorpod_test.go, live_operator_test.go (e2e-tagged, edited blind)",
+    "packages/daemon/internal/daemon/bootgate.go (pod lane: discovery on, LEGION_PROMPT_ROOTS export kept, loadedTwice refusal from the probe's LEGION_ENVOY_PUBLISHER lines), probe.mjs, imageprobe_test.go, promptreferences_omp_test.go",
+    "packages/daemon/internal/bootprobe/bootprobe.go (OKLine gains extensions=discovered; ExtensionsDiscovered), bootprobe_test.go",
+    "packages/daemon/internal/workspace/codegraph.go (cross-process lease .codegraph/legion-warm.lock: O_EXCL create, 10 s mtime heartbeat, 60 s stale takeover by rename, SameFile-guarded release), codegraph_test.go",
+    "packages/daemon/internal/shim/shim.go (Config.WarmCodegraph, called once on the child's first frame), shim_test.go",
+    "packages/daemon/cmd/legion/worker_shim.go (--warm-codegraph, refused without LEGION_WORKSPACE), worker_shim_test.go, probe_image.go (doc), probe_image_test.go",
+    "packages/daemon/internal/podsafety/podsafety.go (overlay.yml and OverlayFile deleted; Apply writes TurnScopeOverlay under TurnScopeFile; baseline = PI_CONFIG_DIR, OMP_SESSION_STORAGE), turnscope.yml (comment), podsafety_test.go (re-aimed real-binary test TestARepositorysSettingsReachTheAgentUnderTheOperatorsAndTheTurnScopeHolds)",
+    "packages/daemon/internal/runtime/tmux/spawn.go (comment)",
+    "packages/daemon/docker/worker.Dockerfile (plugin-install step only: the two omp plugin install lines for pi-envoy and pi-legion removed; step comment and the OMP_PROFILE comment rewritten; header and publish-gate comments left to the root's PR per the architect)",
+    "docs/kubernetes.md (worker-image contents, pod disk/.codegraph, tree_volume sizing, issue-pod anatomy paragraph on the warm-up, Settings order, controller baseline sentence)",
+    "AGENTS.md (legion worker-shim line: --warm-codegraph and the --pod-safety clause)",
+    "scripts/e2e/stage4b-sandbox-tree.sh (the --no-extensions note is a fail check; overlay.yml -\u003e turnscope.yml in a comment), scripts/e2e/README.md (stage4a pod-baseline row)"
+  ],
+  "issue": "LEGION-629",
+  "openQuestions": [
+    "dev.autoqa defaults to true on the pinned fork (dev.autoqaConsent unset, push endpoint https://qa.omp.sh/v1/grievances) once PI_AUTO_QA=0 leaves the baseline; whether the operator's overlay should set dev.autoqa: false (the operator's lever the spec preserves) is the architect's/operator's call, not this change's.",
+    "Acceptance 2's daemon-launched figures (registration time, index time in a real issue pod) and acceptance 4's 'from the daemon' need stage4a/stage4b on a devbox against an image built from this branch (plan §7); the in-pod figures above are the proxies. The Worker Image workflow runs only for PRs against main.",
+    "Pre-existing, not this change's, observed in this pod on the #1752 base: internal/launcher's TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild and TestStartsAreIdempotentAndRefusedBeforeWriting fail under gVisor; GitHub's Tests run at 1687a7c1 passes them."
+  ],
+  "phase": "implement",
+  "proof": [
+    {
+      "command": "printf '{\"type\":\"get_state\",\"id\":\"1\"}\\n' | env -u LEGION_ROLE -u LEGION_ISSUE -u LEGION_TREE -u LEGION_BOOT_TOKEN_FILE -u LEGION_GRANT_FILE LEGION_TEST_MARKS=/tmp/lp629/marks-1abc /opt/omp/bin/omp --extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion --mode rpc --append-system-prompt 'LEGION-629 proof: answer nothing.'  (in /tmp/lp629/repo; frames parsed with bun: data.systemPrompt is an array of strings)",
+      "criterion": "Acceptance 1: a repository's .omp/extensions runs, both skills are listed to the agent, the .mcp.json server's tool is available (plan rows 1a-1c)",
+      "headSha": "1687a7c1c87415df2ca0c0068f0e17fe077cbd06",
+      "negativeControl": "The same argv with --no-extensions inserted: no marker file written (marks dir empty). A directory without the skills (/tmp/lp629/empty): neither skill line in systemPrompt and no skill:*probe* command. .mcp.json renamed away: no probe_echo line.",
+      "observed": "marker file /tmp/lp629/marks-1abc/extension written ('imported 2026-10-08T06:25:52.027Z'); the response frame's systemPrompt contains '- omp-probe-skill: A repository skill under .omp/skills…', '- claude-probe-skill: …', '\"probe_echo\" → `xd://mcp__probe_echo` — Echoes its input'; the available_commands_update frame lists skill:omp-probe-skill and skill:claude-probe-skill; exit 0, 2.9 s wall",
+      "surface": "This worker pod on the pinned Oh My Pi 18.6.0, the pod's exact argv against a scratch git repository (/tmp/lp629/repo: .omp/extensions/probe.ts writing a marker, .omp/skills/omp-probe-skill/SKILL.md, .claude/skills/claude-probe-skill/SKILL.md, .mcp.json naming `bun /tmp/lp629/mcp-probe.ts`, a stdio MCP server with one tool probe_echo), the pod's profile brought to the new image's shape (omp plugin uninstall @sjawhar/pi-envoy and @sjawhar/pi-legion; omp plugin list shows @bopstack/pi-codegraph@0.1.1 alone), LEGION_* role variables unset"
+    },
+    {
+      "command": "printf '{\"type\":\"get_state\",\"id\":\"1\"}\\n' | env -u LEGION_ROLE … /opt/omp/bin/omp --extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion --mode rpc --append-system-prompt … ; grep -nE 'bad\\.ts|extension instance loaded|Failed' ~/.omp/profiles/legion/logs/omp.2026-10-08.26325.log",
+      "criterion": "Acceptance 1 (plan row 1d): a repository extension that throws at import does not stop the agent, and both Legion plugins still load",
+      "headSha": "1687a7c1c87415df2ca0c0068f0e17fe077cbd06",
+      "negativeControl": "bad.ts removed: the next run's log has 0 'Failed to load extension' lines and 2 'extension instance loaded' lines.",
+      "observed": "The response frame was answered (exit 0, 3.1 s). The log: 'extension instance loaded' for file:///opt/legion/pi-envoy/dist/envoy.js and file:///opt/legion/pi-legion/dist/legion.js, then level error 'Failed to load extension' path /tmp/lp629/repo-bad/.omp/extensions/bad.ts error 'LEGION-629 row 1d: this repository extension throws at import'",
+      "surface": "The same pod argv in a second scratch repository /tmp/lp629/repo-bad whose .omp/extensions/bad.ts throws at import; the omp log under ~/.omp/profiles/legion/logs/"
+    },
+    {
+      "command": "env -u LEGION_ROLE -u LEGION_ISSUE -u LEGION_TREE -u LEGION_BOOT_TOKEN_FILE -u LEGION_GRANT_FILE LEGION_OMP_PATH=/opt/omp/bin/omp /tmp/lp629/legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --pod-safety --skip-agent-models --daemon-api-version 14",
+      "criterion": "Acceptance 4 (plan rows 1e, 4b in-pod proxy): legion probe-image passes with discovery on and marks its OK line extensions=discovered; each plugin loads once",
+      "headSha": "ea0bd82121c1a069aa304f7fb9e37b2e92488ffc",
+      "negativeControl": "With the two plugins linked back into the profile (omp plugin install /opt/legion/pi-envoy and … pi-legion, today's image shape): 'legion probe-image: pi-envoy loaded 2 times (file:///opt/legion/pi-envoy/dist/envoy.js?mtime=1791446426434, file:///opt/legion/pi-envoy/dist/envoy.js?mtime=1791446426497): the worker image's profile links it beside the explicit root /opt/legion/pi-envoy, so a pod would load it twice — build the worker image from this daemon's commit', exit 1; uninstalled again afterwards.",
+      "observed": "On the unlinked profile: 'probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped daemon-api-version=14', exit 0, 7.6 s. Re-run at ea0bd82121c1a069aa304f7fb9e37b2e92488ffc after the simplify pass with the same line.",
+      "surface": "This pod; the legion CLI built from the branch (go build -o /tmp/lp629/legion ./cmd/legion) against the pod's real Oh My Pi and plugin roots; this pod's installed pi-legion declares daemon API contract 14, hence --daemon-api-version 14"
+    },
+    {
+      "command": "the row 1a-1c command; bun parse of the response frame's systemPrompt",
+      "criterion": "Acceptance 2 (plan row 2a): the codegraph tool is available to the agent in a pod",
+      "headSha": "1687a7c1c87415df2ca0c0068f0e17fe077cbd06",
+      "negativeControl": "The same argv under a scratch profile with no plugin (OMP_PROFILE=scratch629, only the operator's models.yml copied in): systemPrompt has both repository skills but no 'xd://codegraph' line.",
+      "observed": "systemPrompt contains '- xd://codegraph — Code intelligence over an indexed knowledge graph. Explore source/call paths, read exact no…'",
+      "surface": "The row 1a-1c run under the real `legion` profile (pi-codegraph linked, the two Legion plugins unlinked)"
+    },
+    {
+      "command": "SMOKE_DIR=/tmp/lp629/clone /tmp/lp629/warm.test -test.run '^TestSmokeWarm$' -test.v  (polls `codegraph status --json` every 2 s); in parallel /tmp/lp629/omp-ready.sh /tmp/lp629/clone3 during-build, and before it /tmp/lp629/omp-ready.sh /tmp/lp629/clone3 no-build",
+      "criterion": "Acceptance 2 (plan rows 2b, 2c): the index is built within a stated number of minutes of launch and launch stays inside the registration deadline (in-pod proxies; the daemon-launched figures need the Sandbox runtime, plan §7)",
+      "headSha": "ea0bd82121c1a069aa304f7fb9e37b2e92488ffc",
+      "negativeControl": "A fresh clone whose .codegraph/legion-warm.lock another process holds (touched now): '[legion] codegraph warm-up for /tmp/lp629/clone2 skipped: another process holds /tmp/lp629/clone2/.codegraph/legion-warm.lock'; after 20 s initialized=false, index untouched, the holder's lease left in place (run at both heads).",
+      "observed": "WarmCodegraphIndexInBackground returned after 7.88 µs; codegraph status --json reported initialized=true, index.state=complete after 24.3 s; .codegraph/ 189 MB, fileCount 2002, no legion-warm.lock left. Pod argv start-to-ready: 0.68 s with no build, 1.12 s while that codegraph init ran (registration deadline 360 s). A 5-minute-old lease on a fresh clone (clone3) was taken over and the index completed in 25.9 s with no lease left (re-run at ea0bd821).",
+      "surface": "This pod (8 CPUs, no cpu.max quota), CodeGraph 1.5.0, a fresh `git clone` of this repository at 628b5530 (3,676 tracked files, 2,002 indexed) under /tmp/lp629/clone; the branch's workspace.WarmCodegraphIndexInBackground driven by a throwaway test injected with `go test -overlay` (never written into the workspace); the pod argv's start-to-ready time measured by reading its stdout for the ready frame"
+    },
+    {
+      "command": "omp config list in an empty directory and in /tmp/lp629/repo3 (whose .omp/config.yml sets compaction.remoteEndpoint: https://repository.example/compact and memory.backend: local) under that environment; omp config get compaction.remoteEndpoint --json with PI_CONFIG_FILES=\u003cturn-scope overlay\u003e:/tmp/lp629/operator.yml (setting compaction.remoteEndpoint: https://operator.example/compact)",
+      "criterion": "Acceptance 3 (plan rows 3a-3c): omp config list shows Oh My Pi's own defaults for the four settings, a repository .omp/config.yml setting one is honoured, and the operator's overlay still wins",
+      "headSha": "1687a7c1c87415df2ca0c0068f0e17fe077cbd06",
+      "negativeControl": ".omp/config.yml removed: compaction.remoteEndpoint = (not set), memory.backend = off. PI_CONFIG_FILES unset: omp config get compaction.remoteEndpoint --json reads the repository's https://repository.example/compact. Today's pod (podsafety-overlay.yml named first, PI_AUTO_QA=0): compaction.remoteEndpoint =  (string) pinned to the empty string and dev.autoqa = false.",
+      "observed": "Empty directory: compaction.remoteEndpoint = (not set) (string); memory.backend = off (off|local|hindsight|mnemopi|sharpshooter); images.urls.enabled = false (boolean); dev.autoqa = true (boolean); bash.autoBackground.enabled = false; async.enabled = false. dev.autoqa = true is the fork's own default (dev.autoqaConsent = unset); the plan's expected `false` for 3a was measured with today's PI_AUTO_QA=0 still exported — confirmed: PI_AUTO_QA=0 alone turns it false. Repository: compaction.remoteEndpoint = https://repository.example/compact (string); memory.backend = local (…); bash.autoBackground.enabled = false still. Operator overlay: value https://operator.example/compact. CI check (row 3d): go test ./internal/podsafety/ green, TestARepositorysSettingsReachTheAgentUnderTheOperatorsAndTheTurnScopeHolds on the real binary.",
+      "surface": "This pod's real Oh My Pi 18.6.0 under the environment the branch's podsafety.Apply produces (a throwaway `go test -overlay` driver ran Apply on the pod's environment with PI_CONFIG_FILES=/etc/legion-operator/overlay.yml: result PI_CONFIG_FILES=/tmp/lp629/state/podsafety-turnscope-overlay.yml:/etc/legion-operator/overlay.yml, PI_CONFIG_DIR=.omp, OMP_SESSION_STORAGE=file, no OTEL_SDK_DISABLED or PI_AUTO_QA; the overlay written 0444 holding only bash.autoBackground.enabled: false and async.enabled: false)"
+    },
+    {
+      "command": "GitHub: `Tests` run 37744944992 at 1687a7c1 (jobs lint, typecheck, test), `PR Title` run 37744945002; locally: gofmt -l, bunx biome check ., GOWORK= go vet -tags e2e ./..., go test -count=1 ./... per package (internal/daemon run test-by-test from one compiled binary so an environmental panic cannot abort the rest), bun test scripts/dispatch, bun test scripts/third-party-notices.test.ts",
+      "criterion": "Acceptance 4 (plan row 4c): bun test, go test ./..., bunx biome check pass",
+      "headSha": "1687a7c1c87415df2ca0c0068f0e17fe077cbd06",
+      "negativeControl": "The pre-change tree (628b5530, /tmp/lp629/clone) shows the same environmental failures (launcher tests, workspace-init holders, scripts/e2e/lib 73 fail), so none is this change's; the `Worker Image` workflow runs only for pull requests against main, so acceptance 4a's build-time probe runs once the PR is retargeted after #1752 merges (or the operator dispatches a build at this head).",
+      "observed": "GitHub `Tests` at 1687a7c1: lint, typecheck, test all success (`go test -count=1 ./...` included). Locally: gofmt, biome (exit 0) and vet clean; internal/daemon 235 ok / 18 environmental (15 Docker, 2 gVisor SigIgn, 1 jq pack) / 0 FAIL; every other package green except tests this pod cannot run — Postgres (LEGION_TEST_PG_DSN), Docker (testnats/natsauth/intake), python3 (internal/config), a C compiler (internal/supervise type-check), five TestWorkspaceInit* holder tests on a 30 s fifo deadline and two internal/launcher tests, each verified failing identically on the pre-change tree 628b5530 / 4bf8cf5e. bun test scripts/e2e/lib has 73 jq-missing failures here, identical on the pre-change tree.",
+      "surface": "GitHub Actions at the pushed head, and this pod's local lane"
+    }
+  ],
+  "schemaVersion": 1,
+  "subPlanningNeeded": false,
+  "trickyParts": [
+    "Oh My Pi de-duplicates extensions by absolute path, not realpath, and loads installed plugins before explicit ones: with discovery on, a plugin both linked into the profile and named by --extension loads twice (two module instances, two factory runs). The image therefore stops linking pi-envoy and pi-legion; the probe prints one LEGION_ENVOY_PUBLISHER line per Envoy entry that published and the pod lane refuses more than one; a re-linked pi-legion alone is undetectable (its load marker is one overwritten object), so the two links come and go together in the Dockerfile.",
+    "The pairing lever is an OK-line mark (extensions=discovered), not a DaemonAPIVersion bump: the daemon's probe pod refuses an image whose CLI predates the discovery-on lane, since such an image's profile links the plugins a pod of this daemon would load twice.",
+    "flock does not cross pods under gVisor, so the warm-up's cross-process guard is an O_EXCL lease file with a 10 s mtime heartbeat and a 60 s stale takeover by rename (exactly one of two contenders wins the rename). dirExists is computed before the lease's directory is created, since nextCodegraphStep's fallback reads an existing .codegraph/ as an index to repair. Release removes the file only when os.SameFile says it is still the one created, so a holder stalled past 60 s and taken over cannot delete its successor's lease.",
+    "The shim starts the warm-up on the child's first frame (Oh My Pi's ready, once extensions are loaded), guarded by a sync.Once; a SIGTERMed shim's codegraph child dies with the process group and the deferred release runs while the shim winds Oh My Pi down (cmd/legion uses signal.NotifyContext), so only a SIGKILLed holder leaves a lease, which the 60 s takeover handles.",
+    "get_state's data.systemPrompt is an array of strings on this Oh My Pi, not one string; the proof parser joins it. get_state.dumpTools lists only the built-ins, so the system prompt is the proof surface for extension and MCP tools, as the plan said.",
+    "This pod's installed pi-legion declares daemon API contract 14 while the branch's DaemonAPIVersion is 15 (from #1752), so the in-pod probe-image runs pass --daemon-api-version 14; the image built from this branch carries 15."
+  ]
+}
