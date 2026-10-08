@@ -173,7 +173,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
 		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
-		"BROKER_SERVICES=example-service",
+		"BROKER_SERVICES=example-service=system:serviceaccount:example:example-sa",
 	)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

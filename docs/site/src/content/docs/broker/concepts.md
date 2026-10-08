@@ -48,8 +48,7 @@ land on a session that is gone
 Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
 chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service rather than
-as a person: a session enrolled under a service's machine login is that service's, `legion-daemon`
-for the Legion daemon's pods.
+as a person; it records the service account the pod's projected token proved instead.
 
 ## Machine login
 
@@ -109,12 +108,20 @@ Who gets a secret follows from those two tags alone:
 
 A session is its owner's own when its operator is the owner: the owner approved the machine login
 it enrolled under. A pod has no operator, so a pod asking for a person's agent-tier secret sends it
-to that person for approval. An owner may also be a service the broker is configured with,
-`BROKER_SERVICES`. A service's own sessions are the sessions a launcher logged in as that service
-enrolls (the Legion daemon's pods, for `legion-daemon`). Its secrets go to them and to no one else,
-a person's own session included. A service's secret is agent tier, since no person approves it:
-the broker refuses one tagged `tier=human`, and one whose owner names a service it is not
-configured with.
+to that person for approval.
+
+An owner may also be a service the broker is configured with. `BROKER_SERVICES` binds each
+service's name to the Kubernetes service account its pods run as, for example
+`legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the pods
+that a launcher logged in as that service enrolled, and whose projected token proved that service
+account: the Legion daemon's worker pods, for `legion-daemon`. A machine login's service name is
+the machine's own claim, approved by whoever the login names, so the service account the cluster
+vouches for is what proves the service.
+
+A service's secrets go to its own sessions and to no one else. That includes a person's own
+session, and a pod run under another service account even when a launcher logged in as the service
+enrolled it. A service's secret is agent tier, since no person approves it: the broker refuses one
+tagged `tier=human`, and one whose owner names a service it is not configured with.
 
 One thing besides the tags changes what a session gets at once: a session's own person, its
 operator, who revokes a grant the session got without asking **withholds** its secrets from that

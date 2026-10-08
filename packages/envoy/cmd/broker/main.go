@@ -12,11 +12,13 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -71,7 +73,7 @@ func main() {
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	fatal(err)
 	fatal(st.Migrate(ctx))
-	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: cfg.Services}
+	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: slices.Sorted(maps.Keys(cfg.Services))}
 	var reader secrets.Reader
 	if fakeSecrets != "" {
 		local, err := secrets.LocalFromFile(fakeSecrets)
@@ -127,6 +129,7 @@ func main() {
 		Store: st, Policy: current, Secrets: reader,
 		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: enr.Replay,
+		Services: cfg.Services,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	mach := &machine.Service{

@@ -130,6 +130,10 @@ type Machine struct {
 	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
 	// live policy does not serve (rereadMissing); nil means DefaultMissRereads.
 	MissRereads *ratelimit.Limit
+	// Services are the registered services (BROKER_SERVICES), each name's service account: the
+	// subject a pod's projected token must have proved for its launcher's service to be its own
+	// (requester).
+	Services map[string]string
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once
@@ -156,17 +160,21 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 type enrollmentRow struct {
 	ID, Kind, Thumbprint string
 	// Operator is the person the session acts for, nil for a pod; Service is the service of the
-	// launcher credential that enrolled it, nil for a person's machine.
-	Operator, Service *string
-	RuntimeID, Slot   string
+	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's verified
+	// service account, nil for a box or host.
+	Operator, Service, Subject *string
+	RuntimeID, Slot            string
 }
 
 // requester is the enrollment as the policy sees it, read through q: the person it acts for (none
-// for a pod), the service whose launcher enrolled it (none for a person's machine), and the names
-// that person withheld from it (RevokeByApprover's withhold). A caller that decides for the session
-// reads it after locking the session's row, which RevokeByApprover holds while it withholds, so a
-// withhold either committed before the read or waits for the caller.
-func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Requester, error) {
+// for a pod), its service, and the names that person withheld from it (RevokeByApprover's
+// withhold). Its service is its launcher credential's only when it is a pod, that service is one
+// of services, and the pod's verified service account is the one services binds it to: a machine
+// login's service name is the machine's own claim, approved by whoever its login names, so the
+// account is what proves the service. Any other session has none. A caller that decides for the
+// session reads it after locking the session's row, which RevokeByApprover holds while it
+// withholds, so a withhold either committed before the read or waits for the caller.
+func (e enrollmentRow) requester(ctx context.Context, q querier, services map[string]string) (policy.Requester, error) {
 	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
 	if err != nil {
 		return policy.Requester{}, err
@@ -175,7 +183,11 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 	if err != nil {
 		return policy.Requester{}, err
 	}
-	return policy.Requester{Operator: deref(e.Operator), Service: deref(e.Service), Withheld: withheld}, nil
+	var service string
+	if subject, ok := services[deref(e.Service)]; ok && e.Kind == "pod" && e.Subject != nil && *e.Subject == subject {
+		service = *e.Service
+	}
+	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil
 }
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
@@ -245,7 +257,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	requester, err := enr.requester(ctx, tx)
+	requester, err := enr.requester(ctx, tx, m.Services)
 	if err != nil {
 		return Request{}, err
 	}
@@ -527,9 +539,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	if err := tx.QueryRow(ctx, `select e.revoked_at is null and e.lease_expires_at > now(), e.operator, c.service from enrollments e
+	if err := tx.QueryRow(ctx, `select e.revoked_at is null and e.lease_expires_at > now(), e.kind, e.operator, e.subject, c.service from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1 for share of e`, enrollmentID).
-		Scan(&live, &enr.Operator, &enr.Service); err != nil {
+		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service); err != nil {
 		return Decision{}, err
 	}
 	var requestID, state string
@@ -548,7 +560,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	if approve {
-		requester, err := enr.requester(ctx, tx)
+		requester, err := enr.requester(ctx, tx, m.Services)
 		if err != nil {
 			return Decision{}, err
 		}
@@ -827,10 +839,10 @@ func mayRevoke(login string, approver, operator *string) (allowed, asOperator bo
 // enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
-	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, e.thumbprint, e.runtime_id, e.slot from enrollments e
+	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id
 		where e.id=$1 and e.revoked_at is null and e.lease_expires_at > now()`, id).
-		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Thumbprint, &e.RuntimeID, &e.Slot)
+		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
 	return e, err
 }
 
@@ -898,7 +910,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version {
-		requester, err := enr.requester(ctx, m.Store.Pool)
+		requester, err := enr.requester(ctx, m.Store.Pool, m.Services)
 		if err != nil {
 			return Request{}, false, err
 		}

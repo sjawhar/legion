@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -47,14 +48,17 @@ type Config struct {
 	// Required. A secret under the prefix encrypted with any other key, the AWS-managed one
 	// included, is refused.
 	SecretsKMSKeyARN string
-	// BROKER_SERVICES: the registered services a secret's owner tag may name, whitespace-separated,
-	// each lowercase letters, digits and hyphens (at most 64) and not shared. A session proves its
-	// service through the launcher credential that enrolled it, the service its machine login was
-	// for (the Legion daemon's is legion-daemon, so its pods are legion-daemon's); a secret owned by
-	// a listed service goes at once to those sessions and is refused to every other. Unset, no
-	// service is registered, and a secret whose owner tag names one is refused as
-	// owner-tag-malformed.
-	Services []string
+	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
+	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
+	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
+	// service account (system:serviceaccount:<namespace>:<name>) is the one the service's pods run
+	// as. A session is the service's when a launcher logged in as the service enrolled it and it is
+	// a pod whose projected token proved it runs as that account. A machine login's service name is
+	// the machine's own claim, approved by whoever its login names, so the pod's verified service
+	// account is what proves the service. A secret owned by a listed service goes at once to those
+	// pods and is refused to every other session. Unset, no service is registered, and a secret
+	// whose owner tag names one is refused as owner-tag-malformed.
+	Services map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -111,6 +115,11 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 }
+
+// serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
+// carries: system:serviceaccount:<namespace>:<name>, the namespace a DNS label and the name a DNS
+// subdomain.
+var serviceAccountPattern = regexp.MustCompile(`^system:serviceaccount:[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?:[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?$`)
 
 // databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of
 // BROKER_DATABASE_PASSWORD, so the password itself never has to be pre-escaped by whoever sets the
@@ -173,11 +182,16 @@ func Load(getenv func(string) string) (Config, error) {
 	if !policy.ValidKeyARN(cfg.SecretsKMSKeyARN) {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
 	}
-	for _, service := range strings.Fields(getenv("BROKER_SERVICES")) {
-		if !record.ValidService(service) || service == policy.OwnerShared {
-			return Config{}, fmt.Errorf("BROKER_SERVICES must be service names of lowercase letters, digits and hyphens, at most 64 each, none of them %s, got %q", policy.OwnerShared, service)
+	for _, entry := range strings.Fields(getenv("BROKER_SERVICES")) {
+		name, subject, ok := strings.Cut(entry, "=")
+		_, duplicate := cfg.Services[name]
+		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) || duplicate {
+			return Config{}, fmt.Errorf("BROKER_SERVICES must be name=system:serviceaccount:<namespace>:<name> entries, each name lowercase letters, digits and hyphens, at most 64, not %s and given once, got %q", policy.OwnerShared, entry)
 		}
-		cfg.Services = append(cfg.Services, service)
+		if cfg.Services == nil {
+			cfg.Services = map[string]string{}
+		}
+		cfg.Services[name] = subject
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {

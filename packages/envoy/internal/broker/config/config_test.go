@@ -2,8 +2,9 @@
 package config
 
 import (
+	"maps"
 	"os"
-	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -112,33 +113,53 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 	}
 }
 
-// TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated service names,
-// none when unset, each one a name a machine login's service can take ([a-z0-9-]{1,64}) and not
-// the owner tag's own "shared", which an owner tag never names a service by; any other entry
-// refuses to start naming it, since the broker could never serve that service a secret.
+// TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
+// name=<service-account subject> entries, none when unset. A name is one a machine login's service
+// can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a subject is a Kubernetes
+// service account's (system:serviceaccount:<namespace>:<name>), the only subject a pod's projected
+// token can carry. An entry with no "=", an empty side, an invalid name or subject, or a name given
+// twice refuses to start naming the entry, since the broker could never serve that service a secret
+// or would have to pick one of two subjects.
 func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Services != nil {
-		t.Fatalf("Services = %q, want nil when BROKER_SERVICES is unset", cfg.Services)
+		t.Fatalf("Services = %v, want nil when BROKER_SERVICES is unset", cfg.Services)
 	}
 
 	e := validEnv()
-	e["BROKER_SERVICES"] = " example-service\tother-service\n"
+	e["BROKER_SERVICES"] = " example-service=system:serviceaccount:example:example-sa\tother-service=system:serviceaccount:other:other-sa\n"
 	cfg, err = Load(env(e))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"example-service", "other-service"}; !slices.Equal(cfg.Services, want) {
-		t.Fatalf("Services = %q, want %q", cfg.Services, want)
+	want := map[string]string{
+		"example-service": "system:serviceaccount:example:example-sa",
+		"other-service":   "system:serviceaccount:other:other-sa",
+	}
+	if !maps.Equal(cfg.Services, want) {
+		t.Fatalf("Services = %v, want %v", cfg.Services, want)
 	}
 
-	for _, bad := range []string{"Example-Service", "example_service", "ada@example.com", "shared", strings.Repeat("a", 65)} {
+	for _, bad := range []string{
+		"other-service",
+		"=system:serviceaccount:other:other-sa",
+		"other-service=",
+		"Other-Service=system:serviceaccount:other:other-sa",
+		"other_service=system:serviceaccount:other:other-sa",
+		"ada@example.com=system:serviceaccount:other:other-sa",
+		"shared=system:serviceaccount:other:other-sa",
+		strings.Repeat("a", 65) + "=system:serviceaccount:other:other-sa",
+		"other-service=other-sa",
+		"other-service=system:serviceaccount:other",
+		"other-service=system:serviceaccount:Other:other-sa",
+		"example-service=system:serviceaccount:example:another-sa",
+	} {
 		e := validEnv()
-		e["BROKER_SERVICES"] = "example-service " + bad
-		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") || !strings.Contains(err.Error(), bad) {
+		e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa " + bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
 			t.Errorf("BROKER_SERVICES with %q: err = %v, want a refusal naming BROKER_SERVICES and the entry", bad, err)
 		}
 	}

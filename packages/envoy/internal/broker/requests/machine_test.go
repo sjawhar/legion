@@ -33,8 +33,10 @@ const (
 	fixtureOperator = "sami@example.com"
 	// otherPerson owns ALICE_KEY.
 	otherPerson = "alice@example.com"
-	// fixtureService is the one registered service, which owns SERVICE_KEY.
+	// fixtureService is the one registered service, which owns SERVICE_KEY, and fixtureSubject the
+	// service account its pods run as.
 	fixtureService = "example-service"
+	fixtureSubject = "system:serviceaccount:example:example-sa"
 )
 
 // fixtureSecrets are the fixture's namespace secrets: DEEL_API_KEY, the operator's and human-tier,
@@ -94,11 +96,12 @@ func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operat
 	return insertEnrollment(t, st, kind, runtimeID, operator, nil, subject)
 }
 
-// newServiceEnrollment is newEnrollment for a pod a service's launcher enrolled: its launcher
-// credential names service and no operator, the shape the Legion daemon's machine login mints.
-func newServiceEnrollment(t *testing.T, st *store.Store, service, runtimeID string) (string, *ecdsa.PrivateKey) {
+// newServiceEnrollment is newEnrollment for a pod a service's launcher enrolled, running as the
+// service account subject: its launcher credential names service and no operator, the shape the
+// Legion daemon's machine login mints.
+func newServiceEnrollment(t *testing.T, st *store.Store, service, subject, runtimeID string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
-	return insertEnrollment(t, st, "pod", runtimeID, nil, &service, new("system:serviceaccount:legion:worker"))
+	return insertEnrollment(t, st, "pod", runtimeID, nil, &service, &subject)
 }
 
 // insertEnrollment inserts a launcher credential naming operator and service, and a live
@@ -128,9 +131,9 @@ func insertEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, ope
 }
 
 // newFixture opens a store on a fresh schema, loads the policy of fixtureSecrets with
-// fixtureService registered, and enrolls one live box session the operator runs. Returns the
-// Machine, that enrollment's id, its own signing key (for record.Sign), and the login
-// DEEL_API_KEY's records name as approver (its owner, the operator).
+// fixtureService registered, its pods running as fixtureSubject, and enrolls one live box session
+// the operator runs. Returns the Machine, that enrollment's id, its own signing key (for
+// record.Sign), and the login DEEL_API_KEY's records name as approver (its owner, the operator).
 func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ecdsa.PrivateKey, approver string) {
 	t.Helper()
 	st := storetest.Open(t)
@@ -146,6 +149,7 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 		Audience:   testAudience,
 		Skew:       time.Minute,
 		Replay:     replayer(st),
+		Services:   map[string]string{fixtureService: fixtureSubject},
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -386,17 +390,21 @@ func TestDenyOpensNoRecord(t *testing.T) {
 	}
 }
 
-// TestAServicesSecretGoesToThePodsItsLauncherEnrolledAlone pins who a registered service's secret
-// reaches: a pod enrolled under the service's launcher credential gets SERVICE_KEY at once, with a
-// grant and no record, and its value is released; once another secret's tags move the policy, the
-// grant still releases it and the same request reuses it, since the session is still the
-// service's. The operator's own host session, a pod no service's launcher enrolled, and a pod
-// another service's launcher enrolled are each denied it with no record. Nobody approved the
-// service pod's grant and it runs on no one's machine, so no person's grant list holds it.
-func TestAServicesSecretGoesToThePodsItsLauncherEnrolledAlone(t *testing.T) {
+// TestAServicesSecretGoesToItsOwnPodsAlone pins who a registered service's secret reaches: a pod
+// enrolled under the service's launcher credential and running as the service account the service
+// is registered with gets SERVICE_KEY at once, with a grant and no record, and its value is
+// released; once another secret's tags move the policy, the grant still releases it and the same
+// request reuses it, since the session is still the service's. A machine login's service name is
+// the machine's own claim, approved by whoever its login names, so the service account is what
+// proves the service: a pod under the service's login running as another account, a pod running
+// as the service's account under a login for a service the broker does not register, the
+// operator's own host session, and a pod no service's launcher enrolled are each denied it with no
+// record. Nobody approved the service pod's grant and it runs on no one's machine, so no person's
+// grant list holds it.
+func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
 	m, _, _, operator := newFixture(t)
 	ctx := context.Background()
-	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, "pod-"+t.Name())
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
 
 	granted, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it", "SERVICE_KEY"), "")
 	if err != nil || granted.State != "granted" || granted.GrantID == nil || granted.RecordID != nil {
@@ -413,16 +421,18 @@ func TestAServicesSecretGoesToThePodsItsLauncherEnrolledAlone(t *testing.T) {
 		t.Fatalf("Create(the service's pod) again after the policy moved = %+v, %v; want request %s reused", again, err, granted.ID)
 	}
 
+	impostor, impostorKey := newServiceEnrollment(t, m.Store, fixtureService, "system:serviceaccount:example:other-sa", "impostor-pod-"+t.Name())
+	unlisted, unlistedKey := newServiceEnrollment(t, m.Store, "unlisted-service", fixtureSubject, "unlisted-pod-"+t.Name())
 	host, hostKey := newEnrollment(t, m.Store, "host", "host-"+t.Name(), new(operator), nil)
-	plainPod, plainPodKey := newEnrollment(t, m.Store, "pod", "plain-pod-"+t.Name(), nil, new("system:serviceaccount:legion:worker"))
-	otherPod, otherPodKey := newServiceEnrollment(t, m.Store, "other-service", "other-pod-"+t.Name())
+	plainPod, plainPodKey := newEnrollment(t, m.Store, "pod", "plain-pod-"+t.Name(), nil, new(fixtureSubject))
 	for who, r := range map[string]struct {
 		enrollment string
 		key        *ecdsa.PrivateKey
 	}{
-		"the operator's host session":               {host, hostKey},
-		"a pod no service's launcher enrolled":      {plainPod, plainPodKey},
-		"a pod another service's launcher enrolled": {otherPod, otherPodKey},
+		"a pod under the service's login running as another account":       {impostor, impostorKey},
+		"a pod running as the service's account under an unlisted service": {unlisted, unlistedKey},
+		"the operator's host session":                                      {host, hostKey},
+		"a pod no service's launcher enrolled":                             {plainPod, plainPodKey},
 	} {
 		denied, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", "SERVICE_KEY"), "")
 		if err != nil || denied.State != "denied" || denied.GrantID != nil || denied.RecordID != nil {
@@ -1168,7 +1178,7 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 	ctx := context.Background()
 	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-other-"+t.Name(), new(otherOperator), nil)
 	podEnr, podKey := newEnrollment(t, m.Store, "pod", "pod-"+t.Name(), nil, new("system:serviceaccount:legion:worker"))
-	servicePodEnr, servicePodKey := newServiceEnrollment(t, m.Store, fixtureService, "service-pod-"+t.Name())
+	servicePodEnr, servicePodKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "service-pod-"+t.Name())
 	requesters := map[string]struct {
 		enrollment string
 		key        *ecdsa.PrivateKey

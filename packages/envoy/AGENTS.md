@@ -1938,10 +1938,13 @@ labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret,
 every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
 gives a secret created without a value no version, as Secrets Manager does); and
 an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
-`cmd/broker` fills from `BROKER_SERVICES`. A session's `policy.Requester.Service` is the `service`
-of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
-`requests.Machine`'s enrollment reads into `enrollmentRow.Service`), so a pod the Legion daemon's
-login enrolled is `legion-daemon`'s, and a service's secret goes at once to its sessions and to no
+`cmd/broker` fills with `BROKER_SERVICES`' names. A session's `policy.Requester.Service` is the
+`service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
+`requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
+and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
+to (`requests.Machine.Services`, `requester()`): a machine login's service name is the machine's
+claim, approved by whoever its `login_hint` names. So a `legion-worker` pod the Legion daemon's
+login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
 one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
@@ -2071,9 +2074,9 @@ the broker's own address, the request object's `aud` and the launcher proof's `h
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
 `BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
-`BROKER_SERVICES` (optional; the registered services an owner tag may name, whitespace-separated,
-each `record.ValidService`'s form and not `shared` — any other entry is refused naming it; unset,
-`Config.Services` is nil and no service is registered),
+`BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
+entries, each name `record.ValidService`'s form, not `shared` and given once — any other entry is
+refused naming it; unset, `Config.Services` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
