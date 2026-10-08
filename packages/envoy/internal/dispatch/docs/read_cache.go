@@ -37,17 +37,14 @@ type DocumentStamp struct {
 	Row     string
 }
 
-// readDocumentStamp is the room's DocumentStamp, read through q in one statement whose two lookups
-// are each on a primary key.
+// readDocumentStamp is the room's DocumentStamp, read through q in one statement, so the version
+// and the xmin of the row standing there are of one snapshot: the head as head reads it
+// (headVersion), then the row at it by its primary key.
 func readDocumentStamp(ctx context.Context, q Queryer, room string) (DocumentStamp, error) {
 	var stamp DocumentStamp
 	if err := q.QueryRow(ctx, `
 		select h.version, coalesce(u.xmin::text, '')
-		from (select coalesce(
-				(select ceiling from doc_checkpoints where artifact_id = $1),
-				(select max(version) from doc_updates where artifact_id = $1),
-				0
-			) as version) h
+		from (select `+headVersion+` as version) h
 		left join doc_updates u on u.artifact_id = $1 and u.version = h.version
 	`, room).Scan(&stamp.Version, &stamp.Row); err != nil {
 		return DocumentStamp{}, fmt.Errorf("read document stamp: %w", err)
