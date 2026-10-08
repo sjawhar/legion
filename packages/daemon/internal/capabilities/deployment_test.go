@@ -4,16 +4,18 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // satisfied is a kubernetes deployment that satisfies every deployment row, with its image probed.
 var satisfied = Deployment{
-	Runtime: "kubernetes", Probed: true, AgentSecrets: true, SecretsLogin: "issued", ModelFallback: "on",
+	Runtime: "kubernetes", Probed: true, AgentSecrets: true, SecretsLogin: "issued", ModelFallback: bootprobe.ModelFallbackOn,
 }
 
 // states is a report by capability.
@@ -73,12 +75,12 @@ func TestImageRowsAreUncheckedUntilAProbeReports(t *testing.T) {
 		"kubernetes, unprobed": {Deployment{Runtime: "kubernetes"}, "no probe has reported yet"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			for _, state := range tc.deployment.Report() {
-				row, _ := Lookup(string(state.Name))
+			report := tc.deployment.Report()
+			for i, row := range Table {
 				if row.Site != SiteImage {
 					continue
 				}
-				if state.Status != StatusUnchecked || state.Detail != tc.detail {
+				if state := report[i]; state.Status != StatusUnchecked || state.Detail != tc.detail {
 					t.Errorf("%s = %s (%s), want unchecked (%s)", state.Name, state.Status, state.Detail, tc.detail)
 				}
 			}
@@ -107,11 +109,11 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 		{"a decision on a satisfied row is moot", Deployment{Runtime: "kubernetes", Probed: true, AgentSecrets: true, SecretsLogin: "issued", Decided: decided}, Secrets, StatusPresent, "every pod is enrolled with the agent-secrets broker runtime.kubernetes.agent_secrets names, and the daemon's login is issued"},
 
 		{"fallback on", satisfied, ModelFallback, StatusPresent, "retry.modelFallback is true under the pod's Oh My Pi settings (read by the probe)"},
-		{"fallback off", Deployment{Runtime: "kubernetes", ModelFallback: "off"}, ModelFallback, StatusOpen, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
+		{"fallback off", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff}, ModelFallback, StatusOpen, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
 		{"fallback unread", Deployment{Runtime: "kubernetes"}, ModelFallback, StatusOpen, "not read: no probe has reported retry.modelFallback"},
-		{"fallback off on the host", Deployment{Runtime: "tmux", ModelFallback: "off"}, ModelFallback, StatusOpen, "retry.modelFallback is false under the host's Oh My Pi settings (read by the plugin gate)"},
+		{"fallback off on the host", Deployment{Runtime: "tmux", ModelFallback: bootprobe.ModelFallbackOff}, ModelFallback, StatusOpen, "retry.modelFallback is false under the host's Oh My Pi settings (read by the plugin gate)"},
 		{"fallback unread on the host", Deployment{Runtime: "tmux"}, ModelFallback, StatusOpen, "not read: the plugin gate could not read retry.modelFallback"},
-		{"a decided fallback gap", Deployment{Runtime: "kubernetes", ModelFallback: "off", Decided: decided}, ModelFallback, StatusDecided, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
+		{"a decided fallback gap", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff, Decided: decided}, ModelFallback, StatusDecided, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
 
 		{"tmux sets no limits", Deployment{Runtime: "tmux"}, ResourceLimits, StatusOpen, "the tmux runtime sets no requests or limits on a pane"},
 		{"every role reserved", satisfied, ResourceLimits, StatusPresent, "every role has CPU and memory requests and limits under runtime.kubernetes.resources"},
@@ -140,7 +142,7 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 // Open names the open deployment rows in Table order, and Log writes one warning per open row —
 // the gap and the line that records a decision, as attributes too — and nothing for the rest.
 func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
-	d := Deployment{Runtime: "kubernetes", Probed: true, ModelFallback: "on", Decided: map[Name]string{Secrets: "dispatch://LEGION-205 enrolls pods later"},
+	d := Deployment{Runtime: "kubernetes", Probed: true, ModelFallback: bootprobe.ModelFallbackOn, Decided: map[Name]string{Secrets: "dispatch://LEGION-205 enrolls pods later"},
 		RolesWithoutResources: []claim.Role{claim.RoleTester}}
 
 	if got, want := d.Open(), []Name{ResourceLimits}; !slices.Equal(got, want) {
@@ -167,6 +169,44 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 	three := Deployment{Runtime: "tmux"}
 	if got, want := three.Open(), []Name{Secrets, ModelFallback, ResourceLimits}; !slices.Equal(got, want) {
 		t.Errorf("Open() under an undecided tmux deployment = %v, want %v in Table order", got, want)
+	}
+}
+
+// OpenFromConfiguration is what `legion start --check-config` prints: the open rows the file alone
+// decides, each as Report renders it — secrets where no broker is configured, resource-limits where
+// a role lacks a reservation — and never a configured broker's secrets row, whose login boot
+// measures, nor model fallback, which the probe or the plugin gate reads.
+func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
+	lacking := []claim.Role{claim.RoleTester}
+	for _, tc := range []struct {
+		name       string
+		deployment Deployment
+		want       []Name
+	}{
+		{"no broker, a role lacking", Deployment{Runtime: "kubernetes", RolesWithoutResources: lacking}, []Name{Secrets, ResourceLimits}},
+		{"no broker, every role reserved", Deployment{Runtime: "kubernetes"}, []Name{Secrets}},
+		{"a broker whose login is not issued, a role lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, RolesWithoutResources: lacking}, []Name{ResourceLimits}},
+		{"a broker whose login is not issued, every role reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
+		{"fallback off alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackOff}, nil},
+		{"tmux", Deployment{Runtime: "tmux"}, []Name{Secrets, ResourceLimits}},
+		{"tmux, both decided", Deployment{Runtime: "tmux", Decided: map[Name]string{Secrets: "later", ResourceLimits: "one tree per node"}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.deployment.OpenFromConfiguration()
+			var names []Name
+			for _, state := range got {
+				names = append(names, state.Name)
+			}
+			if !slices.Equal(names, tc.want) {
+				t.Fatalf("OpenFromConfiguration() names %v, want %v", names, tc.want)
+			}
+			reported := states(tc.deployment.Report())
+			for _, state := range got {
+				if want := reported[state.Name]; !reflect.DeepEqual(state, want) {
+					t.Errorf("%s = %+v, want Report's %+v", state.Name, state, want)
+				}
+			}
+		})
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 )
 
 // stubBinaries are the binaries the image rows look for, each a stub answering what the checks
@@ -282,13 +284,34 @@ func TestCheckImageNeedsTheCodeGraphCLIAndItsPluginEnabled(t *testing.T) {
 	}
 }
 
-// The default profile's lock is under .omp itself.
+// The lock follows the profile root Oh My Pi resolves (ompdirs.ProfileRoot): the named profile's
+// under .omp/profiles, the default profile's under .omp itself; and a profile name Oh My Pi
+// refuses is the refusal, naming it.
 func TestPluginLockFollowsTheProfile(t *testing.T) {
-	if got, want := pluginLock([]string{"HOME=/home/legion", "OMP_PROFILE=legion"}), "/home/legion/.omp/profiles/legion/plugins/omp-plugins.lock.json"; got != want {
-		t.Errorf("pluginLock(legion) = %q, want %q", got, want)
+	if got, err := pluginLock([]string{"HOME=/home/legion", "OMP_PROFILE=legion"}, "/work"); err != nil || got != "/home/legion/.omp/profiles/legion/plugins/omp-plugins.lock.json" {
+		t.Errorf("pluginLock(legion) = %q, %v, want the legion profile's lock", got, err)
 	}
-	if got, want := pluginLock([]string{"HOME=/home/legion"}), "/home/legion/.omp/plugins/omp-plugins.lock.json"; got != want {
-		t.Errorf("pluginLock(default) = %q, want %q", got, want)
+	if got, err := pluginLock([]string{"HOME=/home/legion"}, "/work"); err != nil || got != "/home/legion/.omp/plugins/omp-plugins.lock.json" {
+		t.Errorf("pluginLock(default) = %q, %v, want the default profile's lock", got, err)
+	}
+	if _, err := pluginLock([]string{"HOME=/home/legion", "OMP_PROFILE=Work"}, "/work"); err == nil || !strings.HasPrefix(err.Error(), `Invalid OMP profile "Work"`) {
+		t.Errorf("pluginLock(Work) = %v, want Oh My Pi's refusal of the profile", err)
+	}
+}
+
+// A profile name Oh My Pi refuses leaves no lock to read: the codegraph row is missing with the
+// refusal as its detail, and the refusal names the row in CheckImage's error.
+func TestCheckImageReportsAProfileOhMyPiRefusesOnTheCodeGraphRow(t *testing.T) {
+	s := newStubs(t)
+
+	lines, err := CheckImage(context.Background(), s.image("OMP_PROFILE=Work"))
+
+	got := byName(lines)[CodeGraph]
+	if got.Status != missing || !strings.HasPrefix(got.Detail, `Invalid OMP profile "Work" in the environment Oh My Pi starts under.`) {
+		t.Errorf("codegraph line = %+v, want missing with Oh My Pi's refusal of the profile", got)
+	}
+	if err == nil || !strings.HasPrefix(err.Error(), `capability codegraph is missing: Invalid OMP profile "Work"`) {
+		t.Errorf("CheckImage = %v, want it to name codegraph with the refusal", err)
 	}
 }
 
@@ -344,9 +367,9 @@ func TestReadModelFallback(t *testing.T) {
 		img  Image
 		want string
 	}{
-		"off by default":                 {s.image(), "off"},
-		"on":                             {s.image("LEGION_TEST_FALLBACK_ON=1"), "on"},
-		"the launch is a shell fragment": {Image{Launch: "/usr/bin/env LEGION_TEST_FALLBACK_ON=1 " + s.omp, Env: s.image().Env, WorkDir: t.TempDir()}, "on"},
+		"off by default":                 {s.image(), bootprobe.ModelFallbackOff},
+		"on":                             {s.image("LEGION_TEST_FALLBACK_ON=1"), bootprobe.ModelFallbackOn},
+		"the launch is a shell fragment": {Image{Launch: "/usr/bin/env LEGION_TEST_FALLBACK_ON=1 " + s.omp, Env: s.image().Env, WorkDir: t.TempDir()}, bootprobe.ModelFallbackOn},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := ReadModelFallback(context.Background(), testCase.img)

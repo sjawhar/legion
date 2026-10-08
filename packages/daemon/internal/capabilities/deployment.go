@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
@@ -30,9 +31,10 @@ type Deployment struct {
 	// and memory requests and limits under runtime.kubernetes.resources, among claim.Roles and,
 	// under controller: daemon, claim.RoleController.
 	RolesWithoutResources []claim.Role
-	// ModelFallback is whether the pod's Oh My Pi falls back to another model, "on" or "off" as
-	// the probe's OK line reports it (bootprobe.ImageReport) or the plugin gate read it under
-	// tmux, and "" when nothing has read it.
+	// ModelFallback is whether the pod's Oh My Pi falls back to another model,
+	// bootprobe.ModelFallbackOn or bootprobe.ModelFallbackOff as the probe's OK line reports it
+	// (bootprobe.ImageReport) or the plugin gate read it under tmux, and "" when nothing has read
+	// it.
 	ModelFallback string
 }
 
@@ -82,7 +84,7 @@ func (d Deployment) Report() []State {
 		case SiteLive:
 			state.Status, state.Detail = StatusLive, liveDetail(row)
 		case SiteWithheld:
-			state.Status, state.Detail = StatusWithheld, row.Ruling+": "+row.Summary
+			state.Status, state.Detail = StatusWithheld, withheldDetail(row)
 		case SiteDeployment:
 			state = d.deployment(row.Name)
 		}
@@ -94,9 +96,21 @@ func (d Deployment) Report() []State {
 // Open is the deployment rows whose status is open, in Table order: the gaps with no decision.
 func (d Deployment) Open() []Name {
 	var open []Name
-	for _, state := range d.Report() {
-		if state.Status == StatusOpen {
-			open = append(open, state.Name)
+	for _, state := range d.openStates() {
+		open = append(open, state.Name)
+	}
+	return open
+}
+
+// OpenFromConfiguration is the open rows the configuration alone decides, in Table order, which
+// `legion start --check-config` prints: resource-limits, and secrets where no broker is configured.
+// The rest is boot's to measure — a configured broker's login, and model fallback, which the probe
+// or the plugin gate reads — so the check says nothing of them.
+func (d Deployment) OpenFromConfiguration() []State {
+	var open []State
+	for _, state := range d.openStates() {
+		if state.Name == ResourceLimits || (state.Name == Secrets && !d.AgentSecrets) {
+			open = append(open, state)
 		}
 	}
 	return open
@@ -104,11 +118,21 @@ func (d Deployment) Open() []Name {
 
 // Log writes one warning per open row: the gap and the legion.yaml line that records a decision.
 func (d Deployment) Log(log *slog.Logger) {
-	for _, state := range d.Report() {
-		if state.Status == StatusOpen {
-			log.Warn(state.OpenLine(), "capability", string(state.Name), "detail", state.Detail, "configLine", state.ConfigLine)
+	for _, state := range d.openStates() {
+		log.Warn(state.OpenLine(), "capability", string(state.Name), "detail", state.Detail, "configLine", state.ConfigLine)
+	}
+}
+
+// openStates is the open rows, in Table order: only a deployment row is ever open, and Decidable
+// names those in Table's order.
+func (d Deployment) openStates() []State {
+	var open []State
+	for _, name := range Decidable() {
+		if state := d.deployment(name); state.Status == StatusOpen {
+			open = append(open, state)
 		}
 	}
+	return open
 }
 
 // image is every image row's status: present once the probe passed, which checked each; unchecked
@@ -133,6 +157,9 @@ func liveDetail(row Capability) string {
 	}
 	return check + ": " + row.Summary
 }
+
+// withheldDetail is a withheld row's detail as CheckImage renders it: the ruling, the summary.
+func withheldDetail(row Capability) string { return row.Ruling + ": " + row.Summary }
 
 // deployment is one deployment row: its measurement, and the status that follows. A decision on a
 // row the deployment satisfies is moot — the measurement stands, and the row reads present.
@@ -177,9 +204,9 @@ func (d Deployment) measure(name Name) (bool, string) {
 			where, reader = "the host's Oh My Pi settings (read by the plugin gate)", "the plugin gate could not read"
 		}
 		switch d.ModelFallback {
-		case "on":
+		case bootprobe.ModelFallbackOn:
 			return true, "retry.modelFallback is true under " + where
-		case "off":
+		case bootprobe.ModelFallbackOff:
 			return false, "retry.modelFallback is false under " + where
 		default:
 			return false, "not read: " + reader + " retry.modelFallback"

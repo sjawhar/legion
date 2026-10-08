@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
-	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -188,7 +187,7 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
-// boot logs it with (configCapabilityGaps): a report, so the exit stays 0.
+// boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
 	paneNatsUser, daemonNatsUser := "", ""
@@ -207,27 +206,10 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
-	for _, gap := range configCapabilityGaps(cfg) {
+	for _, gap := range daemon.Deployment(cfg).OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
 	}
 	return 0
-}
-
-// configCapabilityGaps are the deployment capabilities the configuration alone leaves open, with
-// no decision recorded (daemon.Deployment, capabilities.Deployment.Report): the resource-limits
-// row, and the secrets row where no broker is configured. The rest is boot's to measure — a
-// configured broker's login, and model fallback, which the probe or the plugin gate reads — so the
-// check says nothing of them.
-func configCapabilityGaps(cfg config.Config) []capabilities.State {
-	deployment := daemon.Deployment(cfg)
-	var gaps []capabilities.State
-	for _, row := range deployment.Report() {
-		configured := row.Name == capabilities.ResourceLimits || (row.Name == capabilities.Secrets && !deployment.AgentSecrets)
-		if row.Status == capabilities.StatusOpen && configured {
-			gaps = append(gaps, row)
-		}
-	}
-	return gaps
 }
 
 // start runs a legion in this process until its context is done. The registry entry is this

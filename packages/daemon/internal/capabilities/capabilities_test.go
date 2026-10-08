@@ -71,13 +71,3 @@ func TestWithheldRowsCiteALegionRuling(t *testing.T) {
 		}
 	}
 }
-
-func TestLookupFindsARowByName(t *testing.T) {
-	row, ok := Lookup("eval-python")
-	if !ok || row.Name != EvalPython || row.Site != SiteImage {
-		t.Errorf("Lookup(eval-python) = %+v, %t, want the image row", row, ok)
-	}
-	if row, ok := Lookup("telepathy"); ok {
-		t.Errorf("Lookup(telepathy) = %+v, want none", row)
-	}
-}

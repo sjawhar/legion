@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
 )
 
@@ -100,15 +102,11 @@ func CheckImage(ctx context.Context, img Image) ([]Line, error) {
 				absent = append(absent, fmt.Sprintf("capability %s is missing: %s", row.Name, detail))
 			}
 		case SiteLive:
-			check := "checked live against a running pod"
-			if row.Ruling != "" {
-				check += " (" + row.Ruling + ")"
-			}
-			line.Status, line.Detail = live, check+": "+row.Summary
+			line.Status, line.Detail = live, liveDetail(row)
 		case SiteDeployment:
 			line.Status, line.Detail = reported, "the daemon reports it from the deployment's configuration: "+row.Summary
 		case SiteWithheld:
-			line.Status, line.Detail = withheld, row.Ruling+": "+row.Summary
+			line.Status, line.Detail = withheld, withheldDetail(row)
 		}
 		lines = append(lines, line)
 	}
@@ -119,9 +117,9 @@ func CheckImage(ctx context.Context, img Image) ([]Line, error) {
 }
 
 // ReadModelFallback runs `<Launch> config get retry.modelFallback --json` under img and answers
-// "on" or "off", the JSON's `value`: whether the pod's Oh My Pi, under the operator's
-// configuration, falls back to another model when the agent's own is unavailable. An error names
-// the command and its output.
+// bootprobe.ModelFallbackOn or bootprobe.ModelFallbackOff, the JSON's `value`: whether the pod's
+// Oh My Pi, under the operator's configuration, falls back to another model when the agent's own
+// is unavailable. An error names the command and its output.
 func ReadModelFallback(ctx context.Context, img Image) (string, error) {
 	const args = "config get retry.modelFallback --json"
 	command := img.Launch + " " + args
@@ -139,9 +137,9 @@ func ReadModelFallback(ctx context.Context, img Image) (string, error) {
 		return "", fmt.Errorf("%s printed no JSON object with a boolean value: %s", command, r.output())
 	}
 	if *answer.Value {
-		return "on", nil
+		return bootprobe.ModelFallbackOn, nil
 	}
-	return "off", nil
+	return bootprobe.ModelFallbackOff, nil
 }
 
 // evalJS: Oh My Pi is its JavaScript runtime, and the launch probes ran it.
@@ -198,7 +196,7 @@ func browser(ctx context.Context, img Image) (string, bool) {
 	case !filepath.IsAbs(path):
 		path = filepath.Join(img.WorkDir, path)
 	}
-	r := img.exec(ctx, path, "--version")
+	r := img.run(ctx, path, "--version")
 	if r.err != nil || r.exit != 0 {
 		return fmt.Sprintf("%s (%s) --version: %s", path, how, r.failure()), false
 	}
@@ -207,7 +205,8 @@ func browser(ctx context.Context, img Image) (string, bool) {
 
 // lsp: the language servers Oh My Pi's LSP tools start for Go, TypeScript and Python.
 func lsp(_ context.Context, img Image) (string, bool) {
-	return onPath(img, "gopls", "typescript-language-server", "pyright-langserver")
+	_, detail, ok := onPath(img, "gopls", "typescript-language-server", "pyright-langserver")
+	return detail, ok
 }
 
 // codeGraphPlugin is the Oh My Pi plugin that fronts the CodeGraph CLI.
@@ -223,8 +222,9 @@ func codeGraph(_ context.Context, img Image) (string, bool) {
 	} else {
 		why = append(why, "codegraph is not on PATH")
 	}
-	lock := pluginLock(img.Env)
-	if detail, ok := pluginEnabled(lock, codeGraphPlugin); ok {
+	if lock, err := pluginLock(img.Env, img.WorkDir); err != nil {
+		why = append(why, err.Error())
+	} else if detail, ok := pluginEnabled(lock, codeGraphPlugin); ok {
 		evidence = append(evidence, detail)
 	} else {
 		why = append(why, detail)
@@ -235,15 +235,15 @@ func codeGraph(_ context.Context, img Image) (string, bool) {
 	return strings.Join(evidence, "; "), true
 }
 
-// pluginLock is the profile's plugin lock, `plugins/omp-plugins.lock.json` under the profile
-// root Oh My Pi uses: `$HOME/.omp/profiles/$OMP_PROFILE`, or `$HOME/.omp` itself for the default
-// profile.
-func pluginLock(env []string) string {
-	root := filepath.Join(envValue(env, "HOME"), ".omp")
-	if profile := envValue(env, "OMP_PROFILE"); profile != "" {
-		root = filepath.Join(root, "profiles", profile)
+// pluginLock is the profile's plugin lock, `plugins/omp-plugins.lock.json` under the profile root
+// Oh My Pi, started under env in workDir, keeps its plugins in (ompdirs.ProfileRoot). The error is
+// Oh My Pi's own refusal of the profile env names, or no home directory to resolve under.
+func pluginLock(env []string, workDir string) (string, error) {
+	root, _, err := ompdirs.ProfileRoot(envMap(env), workDir)
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(root, "plugins", "omp-plugins.lock.json")
+	return filepath.Join(root, "plugins", "omp-plugins.lock.json"), nil
 }
 
 // pluginEnabled reads whether lock records name enabled, with the detail either way.
@@ -273,20 +273,21 @@ func pluginEnabled(lock, name string) (string, bool) {
 // toolchain: the generic toolchain on PATH, and `go version` running, since Go is the one of them
 // whose own toolchain download or GOTOOLCHAIN setting can make a present binary fail to run.
 func toolchain(ctx context.Context, img Image) (string, bool) {
-	detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv")
+	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv")
 	if !ok {
 		return detail, false
 	}
-	goBinary, _ := lookPath(img.Env, "go")
-	r := img.exec(ctx, goBinary, "version")
+	// paths are in the names' order, so the first is go's.
+	r := img.run(ctx, paths[0], "version")
 	if r.err != nil || r.exit != 0 {
 		return fmt.Sprintf("%s; go version: %s", detail, r.failure()), false
 	}
 	return fmt.Sprintf("%s; %s", detail, r.output()), true
 }
 
-// onPath is the verdict on every name being on img's PATH: where each is, or which are not.
-func onPath(img Image, names ...string) (string, bool) {
+// onPath is the verdict on every name being on img's PATH: where each found one is, in names'
+// order, and the detail — where each is, or which are not.
+func onPath(img Image, names ...string) ([]string, string, bool) {
 	var found, absent []string
 	for _, name := range names {
 		if path, ok := lookPath(img.Env, name); ok {
@@ -297,11 +298,11 @@ func onPath(img Image, names ...string) (string, bool) {
 	}
 	switch len(absent) {
 	case 0:
-		return "on PATH: " + strings.Join(found, ", "), true
+		return found, "on PATH: " + strings.Join(found, ", "), true
 	case 1:
-		return absent[0] + " is not on PATH", false
+		return found, absent[0] + " is not on PATH", false
 	}
-	return strings.Join(absent, ", ") + " are not on PATH", false
+	return found, strings.Join(absent, ", ") + " are not on PATH", false
 }
 
 // lookPath resolves name on env's PATH, as the pod's Oh My Pi would, rather than on this
@@ -325,13 +326,24 @@ func lookPath(env []string, name string) (string, bool) {
 // envValue is name's value in env, the last assignment winning as it does for the process env
 // starts, and "" when env holds none.
 func envValue(env []string, name string) string {
-	value := ""
-	for _, pair := range env {
-		if v, ok := strings.CutPrefix(pair, name+"="); ok {
-			value = v
+	prefix := name + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], prefix); ok {
+			return v
 		}
 	}
-	return value
+	return ""
+}
+
+// envMap is env as a process reads it: each NAME=value pair by name, the last assignment winning.
+func envMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, pair := range env {
+		if name, value, ok := strings.Cut(pair, "="); ok {
+			m[name] = value
+		}
+	}
+	return m
 }
 
 // ran is one command's run: its exit code, what it printed, and the error when it could not run
@@ -360,11 +372,6 @@ func (r ran) failure() string {
 // has it parsed, and exec replaces the shell with Oh My Pi, so a kill reaches it.
 func (img Image) launch(ctx context.Context, args string) ran {
 	return img.run(ctx, "sh", "-c", "exec "+img.Launch+" "+args)
-}
-
-// exec runs the executable at path with args.
-func (img Image) exec(ctx context.Context, path string, args ...string) ran {
-	return img.run(ctx, path, args...)
 }
 
 // run runs one command within commandTimeout, under img's environment, in its directory, in a

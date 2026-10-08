@@ -83,16 +83,6 @@ var Table = []Capability{
 	{ProductionIdentities, SiteWithheld, "acts under a production identity of its own", "dispatch://LEGION-551, dispatch://LEGION-205"},
 }
 
-// Lookup is the row name names, and whether there is one.
-func Lookup(name string) (Capability, bool) {
-	for _, row := range Table {
-		if string(row.Name) == name {
-			return row, true
-		}
-	}
-	return Capability{}, false
-}
-
 // Decidable is the SiteDeployment names in Table order: what a legion.yaml decided line may name,
 // and what the daemon measures from its deployment (Deployment.Report).
 func Decidable() []Name {
