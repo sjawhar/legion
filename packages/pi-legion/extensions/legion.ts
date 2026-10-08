@@ -301,6 +301,9 @@ const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
 /** The 4-hex tag that may end a `read` header, `#XXXX`. */
 const READ_HEADER_TAG = /#[0-9A-Fa-f]{4}$/u;
 
+/** A `conflict://` URL behind a prefix, `<prefix>:conflict://N`; the last `:conflict://` wins. */
+const PREFIXED_CONFLICT_URL = /^(.+):(conflict:\/\/.+)$/u;
+
 /** The path a pasted `read` header names (`unwrapHashlineHeaderPath`): `[path]` or `[path#XXXX]`
  * names `path` (a valid tag lets `path` hold a `#` of its own); any other shape is left as
  * written. */
@@ -314,10 +317,15 @@ function unwrapReadHeader(path: string): string {
   return target;
 }
 
-/** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. */
+/** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. The
+ * target is read as Oh My Pi's `write` routes it: the path inside a pasted `read` header, then
+ * the `conflict://` URL alone when a prefix stands before it (`recoverConflictUriPrefix`), which
+ * writes a workspace file whatever the prefix. */
 function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
   if (toolCall.toolName !== "write" || typeof toolCall.input.path !== "string") return undefined;
-  return NON_FILE_WRITE_URL.exec(unwrapReadHeader(toolCall.input.path))?.[1]?.toLowerCase();
+  const unwrapped = unwrapReadHeader(toolCall.input.path);
+  const target = PREFIXED_CONFLICT_URL.exec(unwrapped)?.[2] ?? unwrapped;
+  return NON_FILE_WRITE_URL.exec(target)?.[1]?.toLowerCase();
 }
 
 /** The refusal for the first of `rules` a tool call breaks, or undefined. commands is bash's own

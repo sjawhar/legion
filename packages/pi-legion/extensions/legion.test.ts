@@ -1534,8 +1534,8 @@ describe("Legion OMP extension", () => {
       // Every pane this loop boots classifies as a phase worker's, a sub-architect's "architect"
       // case included (its issue REPO-43 differs from its tree REPO-42), so the operation-log
       // guard, judged from the environment, answers. A root architect's pane gets the same
-      // guard; see "refuses a root architect's bash command that would rewrite the shared jj
-      // operation log".
+      // guard; see "lets the %s on %s use every tool, and refuses only an operation-log
+      // rewrite".
       expect(undo).toEqual({
         block: true,
         reason: expect.stringContaining("every Legion issue workspace shares"),
@@ -1586,6 +1586,9 @@ describe("Legion OMP extension", () => {
       { toolName: "bash", input: { command: "bun run dev", name: "web" } },
       { toolName: "write", input: { path: "proc://shell", content: "jj op log" } },
       { toolName: "write", input: { path: "proc://web/kill" } },
+      // A prefixed `conflict://` write is the workspace-file write Oh My Pi routes it to, not a
+      // service's stdin.
+      { toolName: "write", input: { path: "proc://shell:conflict://2", content: "jj undo" } },
       // A file's content is not run, so the plain-text rule leaves it alone.
       { toolName: "write", input: { path: "notes.md", content: "never run jj undo here" } },
     ];
@@ -1834,24 +1837,6 @@ describe("Legion OMP extension", () => {
     legionExtension(fixture.pi);
 
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
-  });
-  test("refuses a root architect's bash command that would rewrite the shared jj operation log", async () => {
-    const { toolCall, context } = await bootPane({
-      role: "architect",
-      issue: "REPO-42",
-      sessionId: "ses_policy_architect",
-    });
-
-    // LEGION-45: the root architect's pane carries the operation-log guard too.
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "architect-bash-jj", input: { command: "jj undo" } },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
   });
   test("refuses a root architect's own eval or service stdin that spells out an operation-log rewrite", async () => {
     // The operation-log rule bound to the root architect's pane refuses the architect's own

@@ -67,10 +67,6 @@ interface ToolResult {
 }
 
 interface Pane {
-  /** Every request the stand-in served: the model gateway's, the daemon's, and the listener's. */
-  readonly requests: Request[];
-  /** The Messages requests that were turns of the conversation, in order. */
-  readonly turns: () => Request[];
   /** One line per invocation of the stand-in `legion`: its arguments, then the grant it read. */
   readonly legionLog: () => Promise<string[]>;
   /** Every `tool_result` the host sent back to the gateway, in conversation order. */
@@ -304,8 +300,6 @@ async function runPane(
       (request) => request.path === "/anthropic/v1/messages" && !isSelfCheck(request)
     );
   return {
-    requests,
-    turns,
     legionLog: async () => {
       // No log file: the stand-in never ran.
       const text = await readFile(legionLog, "utf8").catch((error: NodeJS.ErrnoException) => {
