@@ -20,7 +20,8 @@ type Deployment struct {
 	// Runtime is the daemon's runtime, "tmux" or "kubernetes".
 	Runtime string
 	// Probed is whether the worker image passed the daemon's probe (kubernetes), whose log carries
-	// every image row's evidence; the image rows then read present.
+	// every image row's evidence; the image rows then read present, or installed where the row
+	// awaits a pod launch that loads what the image carries (Capability.Awaits).
 	Probed bool
 	// AgentSecrets is whether runtime.kubernetes.agent_secrets is configured.
 	AgentSecrets bool
@@ -38,10 +39,11 @@ type Deployment struct {
 	ModelFallback string
 }
 
-// The statuses a State carries: an image row is present (as a Line is) or unchecked, a live row
-// live, a withheld row withheld, and a deployment row present, decided or open.
+// The statuses a State carries: an image row is present or installed (as a Line is) or unchecked,
+// a live row live, a withheld row withheld, and a deployment row present, decided or open.
 const (
 	StatusPresent   = present
+	StatusInstalled = installed
 	StatusUnchecked = "unchecked"
 	StatusLive      = live
 	StatusWithheld  = withheld
@@ -70,17 +72,18 @@ func (s State) OpenLine() string {
 }
 
 // Report renders every row of Table, in its order. An image row is present once the image passed
-// the probe, else unchecked; a live row is live, naming its check; a withheld row carries its
-// ruling (both as CheckImage renders them); a deployment row is present when the deployment
-// satisfies it, decided when legion.yaml records a decision on it, and open otherwise, with the
-// line that records one.
+// the probe — installed where the row awaits a pod launch that loads what the image carries, the
+// sentence that says so after the probe's — else unchecked; a live row is live, naming its check;
+// a withheld row carries its ruling (both as CheckImage renders them); a deployment row is present
+// when the deployment satisfies it, decided when legion.yaml records a decision on it, and open
+// otherwise, with the line that records one.
 func (d Deployment) Report() []State {
 	states := make([]State, 0, len(Table))
 	for _, row := range Table {
 		state := State{Name: row.Name}
 		switch row.Site {
 		case SiteImage:
-			state.Status, state.Detail = d.image()
+			state.Status, state.Detail = d.image(row)
 		case SiteLive:
 			state.Status, state.Detail = StatusLive, liveDetail(row)
 		case SiteWithheld:
@@ -135,11 +138,15 @@ func (d Deployment) openStates() []State {
 	return open
 }
 
-// image is every image row's status: present once the probe passed, which checked each; unchecked
-// where nothing has — the tmux runtime runs the host's tools, which no probe checks, and a
-// kubernetes daemon's probe may not have reported yet.
-func (d Deployment) image() (string, string) {
+// image is one image row's status: present once the probe passed, which checked each — installed
+// where the row awaits a pod launch that loads what the probe proved the image carries, since the
+// report names what a worker lacks and no pod's agent has that tool yet; unchecked where nothing
+// has checked — the tmux runtime runs the host's tools, which no probe checks, and a kubernetes
+// daemon's probe may not have reported yet.
+func (d Deployment) image(row Capability) (string, string) {
 	switch {
+	case d.Probed && row.Awaits != "":
+		return StatusInstalled, "the image carries it (checked by the daemon's probe of the worker image, which passed); " + row.Awaits
 	case d.Probed:
 		return StatusPresent, "checked by the daemon's probe of the worker image, which passed"
 	case d.Runtime == "tmux":
@@ -149,9 +156,11 @@ func (d Deployment) image() (string, string) {
 	}
 }
 
-// liveDetail is a live row's detail as CheckImage renders it: the check, its issue, the summary.
+// liveDetail is a live row's detail as CheckImage renders it: the check still to run, its issue,
+// the summary. Nothing in the daemon runs a live check yet, so the row says the check is pending
+// rather than passed.
 func liveDetail(row Capability) string {
-	check := "checked live against a running pod"
+	check := "to be proved by a live check against a running pod"
 	if row.Ruling != "" {
 		check += " (" + row.Ruling + ")"
 	}

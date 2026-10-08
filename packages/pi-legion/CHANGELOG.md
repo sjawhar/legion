@@ -18,10 +18,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - `legion.daemonApiVersion` is 15 (LEGION-578). Contract 15 adds `capabilities` to
   `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
-  `status` (`present`, `unchecked`, `live`, `withheld`, `decided` or `open`), its `detail`, and on
-  an open row the `configLine` to write into `legion.yaml`. Install this release with a Go `legion`
-  built from the same commit; the daemon's image probe refuses a worker image whose plugin
-  declares 14.
+  `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its
+  `detail`, and on an open row the `configLine` to write into `legion.yaml`. Install this release
+  with a Go `legion` built from the same commit; the daemon's image probe refuses a worker image
+  whose plugin declares 14.
 - `legion.daemonApiVersion` is 14 (LEGION-592). Contract 14 adds the daemon-launched controller's
   pod, whose worker container carries `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`: this
   release registers it with the launch's boot token, where an earlier one reads it as the

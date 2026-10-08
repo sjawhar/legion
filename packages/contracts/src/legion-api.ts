@@ -213,13 +213,15 @@ const legionAgentSecretsLoginView = z.strictObject({
 });
 
 /** `api.CapabilityState` — one row of the deployment's capability report
- * (`capabilities.Deployment.Report`), in the table's order: `present`, `unchecked` (no probe has
- * checked the image row), `live` (a live check proves it), `withheld` (a ruling, cited in `detail`),
- * `decided` (the operator's reason in `decision`) or `open`, an open row carrying `configLine`, the
- * `legion.yaml` line that records a decision. A gap is reported here, never refused (contract 15). */
+ * (`capabilities.Deployment.Report`), in the table's order: `present`, `installed` (the image
+ * carries the row's tooling, but a pod's agent cannot use it yet; `detail` says why), `unchecked`
+ * (no probe has checked the image row), `live` (a live check is to prove it), `withheld` (a ruling,
+ * cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open row
+ * carrying `configLine`, the `legion.yaml` line that records a decision. A gap is reported here,
+ * never refused (contract 15). */
 const legionCapabilityState = z.strictObject({
   name: nonEmptyString,
-  status: z.enum(["present", "unchecked", "live", "withheld", "decided", "open"]),
+  status: z.enum(["present", "installed", "unchecked", "live", "withheld", "decided", "open"]),
   detail: nonEmptyString,
   decision: nonEmptyString.optional(),
   configLine: nonEmptyString.optional(),

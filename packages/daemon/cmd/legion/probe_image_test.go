@@ -180,10 +180,21 @@ func tableLines(stdout string) []string {
 	return lines
 }
 
+// imageStatus is the status an image row the image carries prints: present, or installed where
+// the row awaits a pod launch that loads what the image carries (codegraph, whose plugin a
+// `--no-extensions` pod never loads: capabilities.Capability.Awaits).
+func imageStatus(row capabilities.Capability) string {
+	if row.Awaits != "" {
+		return capabilities.StatusInstalled
+	}
+	return capabilities.StatusPresent
+}
+
 // As the worker image's build runs it, with no contract named, the command holds the image's plugin
 // to the contract this binary speaks, prints the capability table — one line per row of the
-// declared list, in its order, every image row present — and then the OK line the daemon's probe
-// Sandbox reads, carrying the capabilities and model-fallback marks.
+// declared list, in its order, every image row present but codegraph, which reads installed and
+// names what a pod's agent awaits — and then the OK line the daemon's probe Sandbox reads, carrying
+// the capabilities and model-fallback marks.
 func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
@@ -201,9 +212,14 @@ func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.
 		if prefix := "probe-image: capability " + string(row.Name) + ": "; !strings.HasPrefix(table[i], prefix) {
 			t.Errorf("capability line %d = %q, want row %s: the table's order", i, table[i], row.Name)
 		}
-		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": present (") {
-			t.Errorf("capability line %d = %q, want %s present", i, table[i], row.Name)
+		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": "+imageStatus(row)+" (") {
+			t.Errorf("capability line %d = %q, want %s %s", i, table[i], row.Name, imageStatus(row))
 		}
+	}
+	codegraph := "probe-image: capability codegraph: installed (" + filepath.Join(img.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + img.lock +
+		"; a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629))"
+	if !slices.Contains(table, codegraph) {
+		t.Errorf("table = %q, want the codegraph line %q", table, codegraph)
 	}
 	okLine := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
 	if want := strings.Join(table, "\n") + "\n" + okLine; stdout != want {
@@ -272,12 +288,12 @@ func TestProbeImageMarksTheOKLineWithTheModelFallbackItRead(t *testing.T) {
 }
 
 // A capability the image lacks fails the probe after the launch probes passed: the whole table is
-// printed, the rows that are present saying so, the missing row saying why; stderr names the
-// missing capability; exit 1; no OK line. Each image row is checked where it is checked: Python by
-// Oh My Pi's own answer — which, as in the image, says unavailable without a python3, and under
-// $LEGION_TEST_NO_PYTHON says so with python3 on PATH, so the row is the answer, not the PATH —
-// the browser by running what PUPPETEER_EXECUTABLE_PATH names, as Oh My Pi would, CodeGraph by
-// the profile's plugin lock, the toolchain by PATH.
+// printed, the rows the image carries saying so (present, or installed for codegraph), the missing
+// row saying why; stderr names the missing capability; exit 1; no OK line. Each image row is
+// checked where it is checked: Python by Oh My Pi's own answer — which, as in the image, says
+// unavailable without a python3, and under $LEGION_TEST_NO_PYTHON says so with python3 on PATH, so
+// the row is the answer, not the PATH — the browser by running what PUPPETEER_EXECUTABLE_PATH
+// names, as Oh My Pi would, CodeGraph by the profile's plugin lock, the toolchain by PATH.
 func TestProbeImageRefusesAnImageMissingACapability(t *testing.T) {
 	for name, testCase := range map[string]struct {
 		setup   func(t *testing.T, img image)
@@ -315,8 +331,8 @@ func TestProbeImageRefusesAnImageMissingACapability(t *testing.T) {
 				t.Errorf("stdout carries %d capability lines, want the whole table (%d) however many rows are missing", len(tableLines(stdout)), len(capabilities.Table))
 			}
 			for _, row := range capabilities.Table {
-				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": present (") {
-					t.Errorf("stdout = %q, want the %s row still present", stdout, row.Name)
+				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": "+imageStatus(row)+" (") {
+					t.Errorf("stdout = %q, want the %s row still %s", stdout, row.Name, imageStatus(row))
 				}
 			}
 		})

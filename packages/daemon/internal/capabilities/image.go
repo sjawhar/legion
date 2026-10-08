@@ -37,8 +37,8 @@ type Image struct {
 // Line is one printed row of the table.
 type Line struct {
 	Name Name
-	// Status is "present" or "missing" for an image row, "live", "reported" or "withheld" for
-	// the others.
+	// Status is "present", "installed" or "missing" for an image row, "live", "reported" or
+	// "withheld" for the others.
 	Status string
 	// Detail is the row's evidence: what was run and what it answered, the check that proves a
 	// live row, who reports a deployment row, or the ruling that withholds one.
@@ -47,11 +47,14 @@ type Line struct {
 
 // The statuses a Line carries.
 const (
-	present  = "present"
-	missing  = "missing"
-	live     = "live"
-	reported = "reported"
-	withheld = "withheld"
+	present = "present"
+	// installed is an image row whose check passed but whose tooling a pod's agent cannot use
+	// yet: the image carries it, and the row's Capability.Awaits says why no worker has it.
+	installed = "installed"
+	missing   = "missing"
+	live      = "live"
+	reported  = "reported"
+	withheld  = "withheld"
 )
 
 // String is the line as the probe prints it, and as the probe pod's log then carries it.
@@ -77,13 +80,16 @@ var imageChecks = map[Name]imageCheck{
 }
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
-// image rows present or missing with their evidence, live rows as live naming the check,
-// deployment rows as reported by the daemon, withheld rows with their ruling. It runs after the
-// launch probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those
-// probes, which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills.
-// err is nil when every image row is present; otherwise it names every missing one, so one
-// rebuild of the image fixes them all rather than the first alone. A ctx that ends ends the check
-// with an error wrapping ctx's.
+// image rows present or missing with their evidence — installed, the evidence then the sentence
+// that says why, where the check passed but the row awaits a launch that loads what the image
+// carries (Capability.Awaits) — live rows as live naming the check, deployment rows as reported by
+// the daemon, withheld rows with their ruling. It runs after the launch probes (daemon.ProbeImage)
+// passed: the eval-js and skills rows are present by those probes, which ran Oh My Pi — its own
+// JavaScript runtime — and resolved the prompt-named skills. err is nil when every image row's
+// check passed; otherwise it names every missing one, so one rebuild of the image fixes them all
+// rather than the first alone: an image lacking what an installed row awaits a launch for is as
+// refused as one lacking anything else. A ctx that ends ends the check with an error wrapping
+// ctx's.
 func CheckImage(ctx context.Context, img Image) ([]Line, error) {
 	lines := make([]Line, 0, len(Table))
 	var absent []string
@@ -96,10 +102,13 @@ func CheckImage(ctx context.Context, img Image) ([]Line, error) {
 				return lines, fmt.Errorf("capability check: %w", ctx.Err())
 			}
 			line.Status, line.Detail = missing, detail
-			if ok {
-				line.Status = present
-			} else {
+			switch {
+			case !ok:
 				absent = append(absent, fmt.Sprintf("capability %s is missing: %s", row.Name, detail))
+			case row.Awaits != "":
+				line.Status, line.Detail = installed, detail+"; "+row.Awaits
+			default:
+				line.Status = present
 			}
 		case SiteLive:
 			line.Status, line.Detail = live, liveDetail(row)
@@ -214,7 +223,9 @@ const codeGraphPlugin = "@bopstack/pi-codegraph"
 
 // codeGraph needs both halves: the CodeGraph CLI on PATH, and its plugin enabled in the profile's
 // plugin lock, where `omp plugin install` recorded it; a CLI without the plugin, or a plugin
-// disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once.
+// disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once. Both
+// passing proves the image carries the tool, not that a pod's agent loads it: the row's Awaits
+// says what that still needs, and CheckImage renders it installed.
 func codeGraph(_ context.Context, img Image) (string, bool) {
 	var evidence, why []string
 	if path, ok := lookPath(img.Env, "codegraph"); ok {

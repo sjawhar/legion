@@ -71,3 +71,26 @@ func TestWithheldRowsCiteALegionRuling(t *testing.T) {
 		}
 	}
 }
+
+// Exactly the codegraph row awaits a pod launch: its tooling is in the image, but a pod's agent is
+// launched `--no-extensions` and never loads the profile's plugin, so the row names the issue that
+// turns that on (dispatch://LEGION-629) rather than reading present. The sentence is an image
+// row's alone: a live, deployment or withheld row has nothing in the image to await a launch for.
+func TestOnlyTheCodeGraphRowAwaitsAPodLaunch(t *testing.T) {
+	var awaiting []Name
+	for _, row := range Table {
+		if row.Awaits == "" {
+			continue
+		}
+		awaiting = append(awaiting, row.Name)
+		if row.Site != SiteImage {
+			t.Errorf("row %s awaits %q at site %s, want only an image row to await a launch", row.Name, row.Awaits, row.Site)
+		}
+		if !strings.Contains(row.Awaits, "dispatch://LEGION-629") {
+			t.Errorf("row %s awaits %q, want it to name dispatch://LEGION-629", row.Name, row.Awaits)
+		}
+	}
+	if want := []Name{CodeGraph}; !slices.Equal(awaiting, want) {
+		t.Errorf("rows awaiting a launch = %v, want %v", awaiting, want)
+	}
+}

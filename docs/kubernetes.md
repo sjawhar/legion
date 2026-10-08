@@ -31,7 +31,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   explicit extensions, the Envoy plugin first, with discovery off;
 - `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
   CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
-  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`);
+  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`).
+  A pod's agent gets that tool once its launch loads profile plugins (dispatch://LEGION-629): with
+  discovery off, the profile's plugin does not load today, which the capability report's `codegraph`
+  row says ([The deployment's capability report](#the-deployments-capability-report));
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -129,6 +132,12 @@ running — and prints the table, one `probe-image: capability <name>: <status> 
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
 (`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
+An image row the image carries prints `present` with its evidence, but for `codegraph`, which prints
+`installed`: the CLI and the plugin are in the image, and a pod's agent gets the tool once its launch
+loads profile plugins (dispatch://LEGION-629; a pod runs `--no-extensions` with the Envoy and Legion
+plugins as its explicit extensions today, so the profile's plugin never loads). A live row prints
+`live` with the check still to prove it, a deployment row `reported`, a withheld row `withheld` with
+its ruling, and an image row the image lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
@@ -688,13 +697,18 @@ subscription never delivers).
 `packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
 every worker is a full agent), 19 rows, each checked at one site. The image rows (`eval-js`,
 `eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
-([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)); the live rows
-(`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) are
-proved against a running pod; the withheld rows carry the ruling that keeps them from every worker
-(`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`: dispatch://LEGION-200,
-Legion owns its dependencies; `production-identities`: dispatch://LEGION-551 and dispatch://LEGION-205);
-and the three deployment rows are the daemon's to measure from its own configuration, since no image or
-pod can show them:
+([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once
+the probe passed — but for `codegraph`, which reads `installed`: the CLI and plugin are in the image,
+and a pod's agent gets the tool once its launch loads profile plugins (dispatch://LEGION-629; a pod's
+agent runs `--no-extensions` today, so no worker has the tool yet, and the report's job is to name
+what a worker lacks); the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
+`dispatch-envoy-tools`, `github`) are to be proved by a live check against a running pod —
+dispatch://LEGION-633's integration check and dispatch://LEGION-629's checks, none of which runs
+yet, so each reads `live` with the check it awaits, never as proved; the withheld rows carry the ruling that keeps them from
+every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
+dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
+and dispatch://LEGION-205); and the three deployment rows are the daemon's to measure from its own
+configuration, since no image or pod can show them:
 
 - `secrets`: `runtime.kubernetes.agent_secrets` is configured and the daemon's broker login is
   `issued`. Under tmux it is open unless decided: no process is enrolled with the broker.
@@ -716,8 +730,9 @@ changed (the tick asks only when it wakes the controller — one registered, no 
 broker login reaching `issued` is the one change a running daemon sees), as `capability <name> is open: <detail>;
 to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
 --json` under `capabilities` (daemon API contract 15: every row as `{name, status, detail,
-decision?, configLine?}`, `status` one of `present`, `unchecked`, `live`, `withheld`, `decided` or
-`open`, the image rows `present` once the probe passed and `unchecked` before it or under tmux);
+decision?, configLine?}`, `status` one of `present`, `installed`, `unchecked`, `live`, `withheld`,
+`decided` or `open`, the image rows `present` once the probe passed — `codegraph` `installed`, as
+above — and `unchecked` before it or under tmux);
 the controller's `tick` notice, whose `openCapabilities` names the open rows so the day's report
 names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-config`, which prints
 after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a

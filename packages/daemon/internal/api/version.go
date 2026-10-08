@@ -54,7 +54,7 @@ package api
 //
 // 15: LEGION-578 -- api.State gains `capabilities`, the deployment's capability report
 // (capabilities.Deployment.Report): one row per capability of the table, each `present`,
-// `unchecked`, `live`, `withheld`, `decided` or `open`, an open row carrying the legion.yaml line
-// that records a decision. Never null, so a plugin built before it refuses the state, and the
-// bump is why the two never meet.
+// `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`, an open row carrying the
+// legion.yaml line that records a decision. Never null, so a plugin built before it refuses the
+// state, and the bump is why the two never meet.
 const DaemonAPIVersion = 15

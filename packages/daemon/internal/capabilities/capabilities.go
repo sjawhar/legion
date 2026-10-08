@@ -38,8 +38,8 @@ const (
 	// SiteImage is checked inside the worker image by `legion probe-image` (CheckImage): the
 	// image either carries what the capability needs or it does not.
 	SiteImage Site = "image"
-	// SiteLive is proved by a live check against a running pod: it needs a cluster, a model, or
-	// a service the image alone cannot show.
+	// SiteLive is to be proved by a live check against a running pod: it needs a cluster, a
+	// model, or a service the image alone cannot show. No such check runs yet; the row says so.
 	SiteLive Site = "live"
 	// SiteDeployment is decided by the deployment's legion.yaml, which the daemon reports: no
 	// image or pod can show it.
@@ -57,30 +57,42 @@ type Capability struct {
 	// Ruling is the dispatch://LEGION-<n> a withheld row cites; for a live row, the issue whose
 	// live check proves it (may be ""); "" otherwise.
 	Ruling string
+	// Awaits is, on an image row whose tooling the image carries but a pod's agent cannot use yet,
+	// the sentence that says so and names the issue whose landing changes that; "" otherwise. The
+	// report's job is to name what a worker lacks, so a tool the image carries but no pod loads is
+	// not present: CheckImage and Deployment.Report render such a row installed, with this sentence
+	// after the evidence, rather than present.
+	Awaits string
 }
+
+// codeGraphAwaits is why the codegraph row is installed, not present: a pod's agent is launched
+// `--no-extensions` with the Envoy and Legion plugins as its explicit extensions
+// (runtime/sandbox/manifest.go, agentArgv), so the profile's CodeGraph plugin never loads and no
+// worker has the tool until the launch loads profile plugins (LEGION-629).
+const codeGraphAwaits = "a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"
 
 // Table is every capability, in the order the probe prints them: the declared list, printed
 // whole. Image rows are checked by CheckImage; the others are rendered as what they are.
 var Table = []Capability{
-	{Subagents, SiteLive, "dispatches task subagents, each on the model its role configures", ""},
-	{EvalJS, SiteImage, "evaluates JavaScript in Oh My Pi's own runtime", ""},
-	{EvalPython, SiteImage, "evaluates Python through the interpreter `omp setup python` manages", ""},
-	{Browser, SiteImage, "drives a headless Chromium through the browser tools", ""},
-	{LSP, SiteImage, "reads diagnostics and symbols from the Go, TypeScript and Python language servers", ""},
-	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", ""},
-	{WebSearch, SiteLive, "searches the web through the web-search tool", ""},
-	{Skills, SiteImage, "loads the skills Legion's prompts name", ""},
-	{MCP, SiteLive, "reaches the MCP servers the deployment configures", ""},
-	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-629"},
-	{DispatchEnvoyTools, SiteLive, "reaches Dispatch and Envoy through the pi-envoy tools", ""},
-	{GitHub, SiteLive, "reads and writes GitHub through `legion gh` on its role's App", "dispatch://LEGION-631"},
-	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", ""},
-	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", ""},
-	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun and uv", ""},
-	{ResourceLimits, SiteDeployment, "runs within the CPU and memory the deployment's pod resources give it", ""},
-	{Network, SiteWithheld, "reaches beyond the pod's own network: the pod is the boundary", "dispatch://LEGION-5"},
-	{OperatorSetup, SiteWithheld, "installs or configures its own dependencies in the pod: Legion owns its dependencies", "dispatch://LEGION-200"},
-	{ProductionIdentities, SiteWithheld, "acts under a production identity of its own", "dispatch://LEGION-551, dispatch://LEGION-205"},
+	{Subagents, SiteLive, "dispatches task subagents, each on the model its role configures", "", ""},
+	{EvalJS, SiteImage, "evaluates JavaScript in Oh My Pi's own runtime", "", ""},
+	{EvalPython, SiteImage, "evaluates Python through the interpreter `omp setup python` manages", "", ""},
+	{Browser, SiteImage, "drives a headless Chromium through the browser tools", "", ""},
+	{LSP, SiteImage, "reads diagnostics and symbols from the Go, TypeScript and Python language servers", "", ""},
+	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", "", codeGraphAwaits},
+	{WebSearch, SiteLive, "searches the web through the web-search tool", "", ""},
+	{Skills, SiteImage, "loads the skills Legion's prompts name", "", ""},
+	{MCP, SiteLive, "reaches the MCP servers the deployment configures", "", ""},
+	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-629", ""},
+	{DispatchEnvoyTools, SiteLive, "reaches Dispatch and Envoy through the pi-envoy tools", "", ""},
+	{GitHub, SiteLive, "reads and writes GitHub through `legion gh` on its role's App", "dispatch://LEGION-631", ""},
+	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", "", ""},
+	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", "", ""},
+	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun and uv", "", ""},
+	{ResourceLimits, SiteDeployment, "runs within the CPU and memory the deployment's pod resources give it", "", ""},
+	{Network, SiteWithheld, "reaches beyond the pod's own network: the pod is the boundary", "dispatch://LEGION-5", ""},
+	{OperatorSetup, SiteWithheld, "installs or configures its own dependencies in the pod: Legion owns its dependencies", "dispatch://LEGION-200", ""},
+	{ProductionIdentities, SiteWithheld, "acts under a production identity of its own", "dispatch://LEGION-551, dispatch://LEGION-205", ""},
 }
 
 // Decidable is the SiteDeployment names in Table order: what a legion.yaml decided line may name,

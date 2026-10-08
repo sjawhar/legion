@@ -289,8 +289,9 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
 });
 
 // The state's capability report (contract 15): the golden carries a decided row with the operator's
-// reason and an open row with the legion.yaml line that records a decision, beside the present, live
-// and withheld rows, and the report is never absent from a state.
+// reason and an open row with the legion.yaml line that records a decision, beside the present,
+// installed (codegraph: the image carries the tooling, a pod's agent awaits the launch that loads
+// it), live and withheld rows, and the report is never absent from a state.
 test("the state golden carries the deployment's capability report", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -309,8 +310,14 @@ test("the state golden carries the deployment's capability report", () => {
       "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
     configLine: 'capabilities.decided.resource-limits: "<reason>"',
   });
+  expect(rows.codegraph).toEqual({
+    name: "codegraph",
+    status: "installed",
+    detail:
+      "the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)",
+  });
   const statuses = state.capabilities.map((row) => row.status);
-  for (const status of ["present", "live", "withheld", "decided", "open"] as const) {
+  for (const status of ["present", "installed", "live", "withheld", "decided", "open"] as const) {
     expect(statuses).toContain(status);
   }
 

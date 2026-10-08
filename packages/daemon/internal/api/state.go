@@ -49,7 +49,8 @@ type State struct {
 	Capabilities []CapabilityState `json:"capabilities"`
 }
 
-// CapabilityState is one row of that report. Status is "present", "unchecked", "live",
+// CapabilityState is one row of that report. Status is "present", "installed" (the image carries
+// the row's tooling, but a pod's agent cannot use it yet; Detail says why), "unchecked", "live",
 // "withheld", "decided" or "open"; Detail is the row's evidence whatever the status; Decision is
 // the operator's reason on a decided row; ConfigLine is, on an open row, the legion.yaml line
 // that records a decision (`capabilities.decided.<name>: "<reason>"`).

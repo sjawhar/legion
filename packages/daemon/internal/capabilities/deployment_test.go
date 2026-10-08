@@ -28,8 +28,9 @@ func states(report []State) map[Name]State {
 }
 
 // A deployment that satisfies everything, its image probed, renders every row of Table in its
-// order: the image rows present, the live and withheld rows as CheckImage renders them (the probe
-// pod's log and `legion state` then read alike), the deployment rows present, and nothing open.
+// order: the image rows present — codegraph installed, the one row that awaits a pod launch — the
+// live and withheld rows as CheckImage renders them (the probe pod's log and `legion state` then
+// read alike), the deployment rows present, and nothing open.
 func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 	report := satisfied.Report()
 
@@ -46,13 +47,16 @@ func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 			t.Errorf("row %d is %s, want %s: the table's order", i, state.Name, row.Name)
 		}
 		want := map[Site]string{SiteImage: StatusPresent, SiteLive: StatusLive, SiteDeployment: StatusPresent, SiteWithheld: StatusWithheld}[row.Site]
+		if row.Awaits != "" {
+			want = StatusInstalled
+		}
 		if state.Status != want {
 			t.Errorf("%s: status %q, want %q", row.Name, state.Status, want)
 		}
 		if (row.Site == SiteLive || row.Site == SiteWithheld) && state.Detail != line.Detail {
 			t.Errorf("%s: detail %q, want CheckImage's %q", row.Name, state.Detail, line.Detail)
 		}
-		if row.Site == SiteImage && state.Detail != "checked by the daemon's probe of the worker image, which passed" {
+		if row.Site == SiteImage && row.Awaits == "" && state.Detail != "checked by the daemon's probe of the worker image, which passed" {
 			t.Errorf("%s: detail %q, want the probe named", row.Name, state.Detail)
 		}
 		if state.Decision != "" || state.ConfigLine != "" {
@@ -61,6 +65,46 @@ func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 	}
 	if open := satisfied.Open(); open != nil {
 		t.Errorf("Open() = %v, want none", open)
+	}
+}
+
+// The codegraph row, once the probe passed, is installed, not present: the probe proved the image
+// carries the CLI and the plugin, and the detail says a pod's agent gets the tool only once its
+// launch loads profile plugins (dispatch://LEGION-629), since every pod is launched
+// `--no-extensions` today. Before a probe reports, it is unchecked like every other image row.
+func TestTheCodeGraphRowIsInstalledOnceProbedAndUncheckedBefore(t *testing.T) {
+	probed := states(satisfied.Report())[CodeGraph]
+	want := State{Name: CodeGraph, Status: StatusInstalled, Detail: "the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"}
+	if !reflect.DeepEqual(probed, want) {
+		t.Errorf("probed codegraph row = %+v, want %+v", probed, want)
+	}
+
+	unprobed := states(Deployment{Runtime: "kubernetes"}.Report())[CodeGraph]
+	if unprobed.Status != StatusUnchecked || unprobed.Detail != "no probe has reported yet" {
+		t.Errorf("unprobed codegraph row = %+v, want unchecked, no probe having reported", unprobed)
+	}
+}
+
+// A live row says its check is still to run: nothing in the daemon proves a live row against a
+// running pod yet, so the row reads as the pending check it is, naming the issue whose check will,
+// where one is named, and never as a check that passed.
+func TestLiveRowsSayTheirCheckIsPending(t *testing.T) {
+	report := states(satisfied.Report())
+	for _, row := range Table {
+		if row.Site != SiteLive {
+			continue
+		}
+		want := "to be proved by a live check against a running pod"
+		if row.Ruling != "" {
+			want += " (" + row.Ruling + ")"
+		}
+		want += ": " + row.Summary
+		if got := report[row.Name]; got.Status != StatusLive || got.Detail != want {
+			t.Errorf("%s = %s (%s), want live (%s)", row.Name, got.Status, got.Detail, want)
+		}
+	}
+	if got, want := report[RepositoryExtensions].Detail, "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries"; got != want {
+		t.Errorf("repository-extensions detail = %q, want %q", got, want)
 	}
 }
 
