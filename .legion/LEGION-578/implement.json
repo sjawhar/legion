@@ -1,12 +1,13 @@
 {
-  "completed": "2026-10-08T06:22:34.621943338Z",
+  "completed": "2026-10-08T07:56:36.12674173Z",
   "deviations": [
     "Scope narrowed by the architect (dispatch://LEGION-578 comment 38d3fcaa, envoy c5df61a4): Tasks 1, 2, 4, 6 and 8 of the plan are LEGION-630's, LEGION-631's and LEGION-629's; this pull request carries the image, the capability check, the deployment report, the example operator route and their docs. Recorded in .legion/LEGION-578/plan.json",
     "The image sets no PUPPETEER_EXECUTABLE_PATH (the plan's option (a)); Oh My Pi's own system-Chromium detection picks /usr/bin/chromium, and the variable stays the operator's",
     "capabilities.Deployment() of the design is capabilities.Decidable() (the type and the function could not share the name)",
     "legion start --check-config prints the secrets row only when no broker is configured: a configured broker's login is boot's fact, not the file's",
     "Under tmux the daemon reads retry.modelFallback through the plugin gate's environment after the gate passes (a Warn and 'not read' on failure), so the model-fallback row is measured on both runtimes rather than only by the probe pod",
-    "Stage 1's script gained an assertion that the running daemon's state carries the 19-row report with resource-limits open under tmux — the plan named Stage 1's daemon as where `legion state` shows the list"
+    "Stage 1's script gained an assertion that the running daemon's state carries the 19-row report with resource-limits open under tmux — the plan named Stage 1's daemon as where `legion state` shows the list",
+    "Round 1 answered the review: the stand-in fix, the three wording threads (each replied Fixed in f5037e0e), the contract change census the review asked for written into the PR body, and the reviewer structural findings recorded as the Fast-follow line (a cleanup pull request after the merge)"
   ],
   "discoveredComplexity": [
     "The worker image grows from 369 MiB to 1007 MiB compressed (the Debian layer 307 MiB, almost all Chromium's library closure; Go 64 MiB + gopls 20 MiB; Node's tree with the servers 66 MiB); the cold-node pull time is Stage 4a's to measure and this change moves no deadline",
@@ -29,7 +30,8 @@
     "deploy/kubernetes/daemon/legion.yaml.example (resources for every role, capabilities.decided.secrets), deploy/kubernetes/operator-route/overlay.yml (retry.modelFallback: true)",
     "skills/legion-controller/SKILL.md (the tick's openCapabilities), scripts/e2e/{controller-start-tmux.sh,stage1-skeleton.sh,README.md}",
     "docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md, AGENTS.md, docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-….md, packages/daemon/internal/notify/notify.go (comment)",
-    ".legion/LEGION-578/plan.json: the task list narrowed to the architect's scope"
+    ".legion/LEGION-578/plan.json: the task list narrowed to the architect's scope",
+    "Round 1 (f5037e0e): packages/pi-legion/scripts/grant-rig/daemon-standin.ts (capabilities: [] in the state literal contract 15 requires), packages/daemon/docker/worker.Dockerfile and docs/kubernetes.md (the build OK line reads model-fallback=on), AGENTS.md (legion state --json), packages/daemon/internal/daemon/daemon.go and docs/kubernetes.md (the re-log runs at the first controller tick after a change), packages/daemon/internal/runtime/sandbox/probe.go (why the 64 KiB read bound holds the OK line)"
   ],
   "issue": "LEGION-578",
   "openQuestions": [
@@ -54,6 +56,14 @@
       "negativeControl": "the tmux file plus `capabilities: { decided: { nonsense: \"x\" } }` → `legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits`, exit 1",
       "observed": "the shipped example: `Config OK: project=WIDGETS` alone, exit 0; without the merger's resources: the OK line then `capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"\u003creason\u003e\"`, exit 0; the tmux file: the OK line then the `secrets` (the tmux runtime enrolls no process with the secrets broker) and `resource-limits` (the tmux runtime sets no requests or limits on a pane) open lines, exit 0; with both decided: the OK line alone, exit 0. On a running daemon: CI's Stage 1 live proof (Tests run 37736231872, job test, `stage 1 e2e: PASS`) booted the daemon on a real Postgres and asserted `legion state --json` carries the 19-row `capabilities` report with resource-limits open and its configLine",
       "surface": "the built `legion` binary (`go build ./cmd/legion` at 00127cd3c61f) in a Legion worker pod, `legion start --check-config` on real configuration files: the shipped deploy/kubernetes/daemon/legion.yaml.example (with stub token files, a stub kubeconfig and LEGION_POSTGRES_DSN set) and a minimal tmux configuration"
+    },
+    {
+      "command": "bun scripts/grant-rig/daemon-standin.ts 0 \u003clog\u003e \u003cboot token file\u003e l12rig RIG-1 implementer, then GET http://127.0.0.1:\u003cport\u003e/legion/v1/state parsed with LegionStateResponse.safeParse",
+      "criterion": "Round 1, the reviewer blocking finding: the grant-rig stand-in daemon, a consumer of the strict LegionStateResponse outside the diff, starts and serves GET /legion/v1/state under contract 15",
+      "headSha": "f5037e0e7dba1d9479ce08d133012b83dc8fdf0e",
+      "negativeControl": "the same file with the `capabilities: [],` line deleted (the literal as it stood at c88a3502) → ZodError, code invalid_type at path capabilities, before any listening line: the reviewer reproduction",
+      "observed": "listening on http://127.0.0.1:62907; GET /legion/v1/state 200; parses: true; capabilities: []; phase: implementing; the log carries one {\"path\":\"/legion/v1/state\",\"status\":200} line",
+      "surface": "the stand-in daemon as the grant rig and the skill-scenario rig start it (packages/pi-legion/scripts/grant-rig/daemon-standin.ts), run as a child process with stdin closed in this worker pod; its phase read runs go run -overlay in packages/daemon on a HOME-provisioned Go 1.26.8"
     }
   ],
   "schemaVersion": 1,
