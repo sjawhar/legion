@@ -174,6 +174,7 @@ test("read-only admission preserves edits until a later read-write reload", asyn
     transport.hold();
     await transport.sever();
     await typeAtEnd(page, paragraph);
+    await waitForPersistedTyping(page, issue.primary_artifact_id, paragraph);
     await patchIssue(issue.key, { status: "done" });
     await page.reload();
     await transport.release();

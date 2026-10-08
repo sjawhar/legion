@@ -31,7 +31,7 @@ test("a read-only Hocuspocus admission signals a schema reload", () => {
 
 test("pending document labels describe retained, read-only, rebuilt, and unretained edits", () => {
   const retained = { count: 2, readOnly: false, rebuiltAt: undefined, stored: true };
-  expect(connectionLabel("offline", retained)).toBe(
+  expect(connectionLabel("offline", pendingNotice("offline", retained))).toBe(
     "offline · 2 edits saved in this browser, not sent yet."
   );
   expect(pendingNotice("connected", { ...retained, readOnly: true })).toBe(
@@ -43,5 +43,9 @@ test("pending document labels describe retained, read-only, rebuilt, and unretai
   expect(pendingNotice("connected", { ...retained, rebuiltAt: 0 })).toBe(
     `Edits saved in this browser at ${new Date(0).toLocaleString()} could not be applied: the document was rebuilt since.`
   );
-  expect(connectionLabel("connected", retained)).toBe("connected");
+  expect(pendingNotice("connected", retained)).toBeUndefined();
+  expect(connectionLabel("connected", pendingNotice("connected", retained))).toBe("connected");
+  expect(pendingNotice("offline", { ...retained, count: 1 })).toBe(
+    "1 edit saved in this browser, not sent yet."
+  );
 });

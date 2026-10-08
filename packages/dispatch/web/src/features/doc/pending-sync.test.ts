@@ -185,6 +185,46 @@ test("an acknowledgement of 0 clears nothing", async () => {
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
 });
 
+test("a SyncStatus frame that ends before its flag consumes no sent frame", async () => {
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const { artifact, sync, type } = await scripted();
+    sync.socketOpened();
+    sync.frameWritten(updateFrame(type("kept")));
+
+    await sync.frameReceived(frame(NAME, [8]));
+    await sync.frameReceived(syncStatusFrame(true));
+
+    expect(await rowsOf(artifact)).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(1);
+  } finally {
+    logged.mockRestore();
+  }
+});
+
+test("an Update frame whose length overruns the frame is refused, not read past its end", async () => {
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const { artifact, sync, type } = await scripted();
+    sync.socketOpened();
+    const whole = updateFrame(type("kept"));
+    // The frame cut two bytes short, handed over as a view into a larger buffer whose bytes past
+    // the cut are not the update's: its length prefix still claims the whole update.
+    const cut = whole.subarray(0, whole.length - 2);
+    const backing = new Uint8Array(whole.length + 16);
+    backing.set(cut);
+    sync.frameWritten(backing.subarray(0, cut.length));
+    sync.frameWritten(whole);
+
+    await sync.frameReceived(syncStatusFrame(true));
+
+    expect(await rowsOf(artifact)).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(1);
+  } finally {
+    logged.mockRestore();
+  }
+});
+
 test("a read-only first sync applies nothing and keeps the saved edits", async () => {
   const artifact = artifactId();
   const server = serverWith("shared", 100);

@@ -9,6 +9,10 @@ import type { PendingState, PendingSync } from "./pending-sync";
 const presenceColors = ["#0284c7", "#7c3aed", "#c2410c", "#047857", "#be123c", "#4338ca"] as const;
 
 export type ConnectionState = "connecting" | "connected" | "offline" | "failed";
+function savedEdits(count: number): string {
+  return count === 1 ? "1 edit" : `${count} edits`;
+}
+
 export function pendingNotice(
   connection: ConnectionState,
   pending: PendingState | undefined
@@ -20,24 +24,23 @@ export function pendingNotice(
     return `Edits saved in this browser at ${new Date(pending.rebuiltAt).toLocaleString()} could not be applied: the document was rebuilt since.`;
   }
   if (pending.readOnly && pending.count > 0) {
-    const edits = pending.count === 1 ? "1 edit" : `${pending.count} edits`;
-    return `${edits} saved in this browser can't be sent: this document is read-only.`;
+    return `${savedEdits(pending.count)} saved in this browser can't be sent: this document is read-only.`;
   }
   if (connection === "offline" || connection === "connecting") {
     if (!pending.stored) {
       return "Edits typed now will not survive a reload.";
     }
     if (pending.count > 0) {
-      const edits = pending.count === 1 ? "1 edit" : `${pending.count} edits`;
-      return `${edits} saved in this browser, not sent yet.`;
+      return `${savedEdits(pending.count)} saved in this browser, not sent yet.`;
     }
   }
   return undefined;
 }
 
+/** The connection's name, followed by the pending-edit notice when there is one. */
 export function connectionLabel(
   connection: ConnectionState,
-  pending: PendingState | undefined = undefined
+  notice: string | undefined = undefined
 ): string {
   let label: string;
   switch (connection) {
@@ -50,7 +53,6 @@ export function connectionLabel(
     default:
       label = connection;
   }
-  const notice = pendingNotice(connection, pending);
   return notice === undefined ? label : `${label} · ${notice}`;
 }
 

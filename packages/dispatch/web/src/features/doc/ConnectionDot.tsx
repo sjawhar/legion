@@ -26,8 +26,8 @@ export function ConnectionDot({
   connection: ConnectionState;
   pending: PendingState | undefined;
 }): ReactNode {
-  const label = connectionLabel(connection, pending);
   const notice = pendingNotice(connection, pending);
+  const label = connectionLabel(connection, notice);
   return (
     <span
       className={

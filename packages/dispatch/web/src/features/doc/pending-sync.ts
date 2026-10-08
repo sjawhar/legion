@@ -1,12 +1,5 @@
 import { MessageType } from "@hocuspocus/provider";
-import type { Decoder } from "lib0/decoding";
-import {
-  createDecoder,
-  readVarInt,
-  readVarString,
-  readVarUint,
-  readVarUint8Array,
-} from "lib0/decoding";
+import { createDecoder, type Decoder, readVarUint } from "lib0/decoding";
 import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
 import * as Y from "yjs";
 
@@ -57,12 +50,19 @@ function equals(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
-function skipVarUint8Array(decoder: Decoder): void {
+/**
+ * Reads one length-prefixed field as a view of the frame. lib0's own `readVarUint8Array` builds
+ * its view from the frame's backing buffer, so a frame that is a view into a larger buffer reads
+ * past its own end instead of failing; this refuses a field longer than what is left.
+ */
+function readField(decoder: Decoder): Uint8Array {
   const length = readVarUint(decoder);
+  const start = decoder.pos;
   decoder.pos += length;
   if (decoder.pos > decoder.arr.length) {
     throw new RangeError("truncated document sync frame");
   }
+  return decoder.arr.subarray(start, decoder.pos);
 }
 
 function covers(
@@ -301,17 +301,19 @@ export function startPendingSync({
       }
       try {
         const decoder = createDecoder(frame);
-        readVarString(decoder);
+        readField(decoder); // the document name
         if (readVarUint(decoder) !== MessageType.Sync) {
           return;
         }
         switch (readVarUint(decoder)) {
           case messageYjsSyncStep2:
-            skipVarUint8Array(decoder);
+            // A SyncStep2 is acknowledged as covering every row recorded so far, so only its
+            // bounds are checked; its content is never copied.
+            readField(decoder);
             sent.push({ kind: "step2", through: nextOrdinal });
             break;
           case messageYjsUpdate:
-            sent.push({ kind: "update", update: readVarUint8Array(decoder) });
+            sent.push({ kind: "update", update: readField(decoder) });
             break;
         }
       } catch (error) {
@@ -325,11 +327,12 @@ export function startPendingSync({
       let applied: boolean;
       try {
         const decoder = createDecoder(frame);
-        readVarString(decoder);
+        readField(decoder); // the document name
         if (readVarUint(decoder) !== MessageType.SyncStatus) {
           return;
         }
-        applied = readVarInt(decoder) === 1;
+        // The server writes the flag as a VarUint: 1 applied, 0 not applied.
+        applied = readVarUint(decoder) === 1;
       } catch (error) {
         console.error("Could not parse a document SyncStatus frame", error);
         return;
