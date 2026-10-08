@@ -103,7 +103,6 @@ var liveChecks = []liveCheck{
 // worker image's pull, which is what a first pod on an empty pool waits for.
 const (
 	liveBootTimeout   = 5 * time.Minute
-	liveBootIntervals = 3
 	liveGrace         = 15 * time.Second
 	liveProbeInterval = 10 * time.Second
 	liveAdoptTimeout  = time.Minute
@@ -731,7 +730,7 @@ func (r *liveRig) startRuntime() error {
 		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
 		Store: r.trees,
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
-		Agent: stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		Agent: stubAgent, BootTimeout: liveBootTimeout,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
 	}

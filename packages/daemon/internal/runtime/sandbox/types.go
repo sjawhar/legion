@@ -123,9 +123,6 @@ type Options struct {
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
-	// BootIntervals is the registration deadline in boot intervals; workspace-init's lock
-	// wait is sized from it (worker_boot_registration_deadline_intervals).
-	BootIntervals int
 	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release
 	// wait for a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
 	TerminationGrace time.Duration
@@ -142,15 +139,6 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
-	// Removable computes a tree's removable-workspace candidates (dispatch://LEGION-583):
-	// removableWorkspaces (internal/daemon/removable.go) states the candidate rule from the
-	// daemon's own claim store; relaunch also drops any candidate that still has a live pod of
-	// the tree, a second guarantee on different evidence (withoutLiveTreePods). relaunch calls
-	// this itself, after the tree's launch turn is held and its other pods have finished
-	// initializing, so the list a pod's manifest carries is as fresh as this launch can make it —
-	// never computed this far ahead that a relaunch's own waits could leave it stale.
-	// nil removes nothing (a narrow test that does not exercise it).
-	Removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 }
 
 // AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the

@@ -76,7 +76,6 @@ type Runtime struct {
 	agentSecrets                            *AgentSecrets
 	agent                                   []string
 	bootTimeout                             time.Duration
-	bootIntervals                           int
 	terminationGrace                        time.Duration
 	probeInterval                           time.Duration
 	adoptTimeout                            time.Duration
@@ -87,7 +86,6 @@ type Runtime struct {
 	launcherAuth                            launcherCredentials
 	now                                     func() time.Time
 	log                                     *slog.Logger
-	removable                               func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
@@ -106,11 +104,9 @@ type Runtime struct {
 	// observer is the running Observe, nil when none runs.
 	observer *observer
 	// podTurns serializes the relaunches, issue suspension, release and orphan deletion of one pod,
-	// keyed by its Sandbox's name (lockPod). Tree initialization stays separately serialized because
-	// child issue pods share the root's clone and PVC.
+	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
+	// other: each issue's pod provisions its own clone on its own volume.
 	podTurns map[string]chan struct{}
-	// trees serializes the launches of one tree's pods (relaunch.go, awaitTreeInitialized).
-	trees map[string]chan struct{}
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -151,11 +147,14 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 // rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
 // builds: its containers must be exactly the launcher roles of the kind its labels name
 // (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
-// controller's. So a per-claim Sandbox of the layout before issue pods (one worker container), the
-// controller Sandbox a daemon before issue pods made (role=controller, one worker container), a pod
-// missing a launcher, one with a container more, and a Sandbox whose labels name no kind are each
-// refused. The refusal names every one of them, each with its reason, and how many there are, so
-// an operator removes them all before the next boot rather than one per refused boot.
+// controller's, and it must own a volume of its own, the one claim template every Sandbox made now
+// carries (issueVolume). So a per-claim Sandbox of the layout before issue pods (one worker
+// container), the controller Sandbox a daemon before issue pods made (role=controller, one worker
+// container), a pod missing a launcher, one with a container more, a Sandbox whose labels name no
+// kind, and a Sandbox of the tree-volume layout before per-issue volumes (treeVolumeLayout: no
+// claim template, or the tree root's `tree` template, the controller's of that layout included) are
+// each refused. The refusal names every one of them, each with its reason, and how many there are,
+// so an operator removes them all before the next boot rather than one per refused boot.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -170,6 +169,8 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 		}
 		if reason := legacyIssueSandbox(object); reason != "" {
 			refused = append(refused, "legacy issue Sandbox "+object.GetName()+reason)
+		} else if reason := treeVolumeLayout(object); reason != "" {
+			refused = append(refused, "Sandbox "+object.GetName()+reason)
 		}
 	}
 	if len(refused) == 0 {
@@ -177,6 +178,32 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 	}
 	return fmt.Errorf("sandbox runtime: %d of project %s's Sandboxes are not pods this runtime builds; migrate or remove each before enabling issue pods: %s",
 		len(refused), project, strings.Join(refused, "; "))
+}
+
+// treeVolumeLayout is why object is a Sandbox of the tree-volume layout before per-issue volumes,
+// following its name in the census's refusal, or "" when it owns a volume of its own: every
+// Sandbox this runtime makes carries one claim template named issueVolume, where that layout gave
+// only the tree root's Sandbox a template, named `tree`, which every child of the tree mounted, and
+// its controller's Sandbox a `tree` template of its own. Such a Sandbox is never adopted: a child's
+// would fit no launch and be made again empty, and a root's volume holds every clone and workspace
+// of its tree, which only the drained cutover docs/kubernetes.md describes may take apart.
+func treeVolumeLayout(object unstructured.Unstructured) string {
+	const upgrade = "; it is of the tree-volume layout before per-issue volumes, so drain and remove it as docs/kubernetes.md's \"Upgrading a deployment with running trees\" says"
+	templates, found, err := unstructured.NestedSlice(object.Object, "spec", "volumeClaimTemplates")
+	if err != nil || !found || len(templates) == 0 {
+		return " owns no volume" + upgrade
+	}
+	for _, raw := range templates {
+		template, ok := raw.(map[string]any)
+		if !ok {
+			return " has an unreadable volume claim template" + upgrade
+		}
+		name, _, _ := unstructured.NestedString(template, "metadata", "name")
+		if name != issueVolume {
+			return fmt.Sprintf(" owns a volume claim template named %q, not %q", name, issueVolume) + upgrade
+		}
+	}
+	return ""
 }
 
 // legacyIssueSandbox is why object is not a pod this runtime builds, following its name in the
@@ -231,8 +258,6 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("no issue volume size: %s is not a positive quantity", opts.TreeVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
-	case opts.BootIntervals <= 0:
-		return refuse("the registration deadline must be a positive number of boot intervals")
 	case opts.Tokens == nil:
 		return refuse("no provisioning token source")
 	case opts.Store == nil:
@@ -285,11 +310,11 @@ func configure(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
+		bootTimeout: opts.BootTimeout, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
+		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		trees: map[string]chan struct{}{}, launchers: newLaunchers(),
+		launchers: newLaunchers(),
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}

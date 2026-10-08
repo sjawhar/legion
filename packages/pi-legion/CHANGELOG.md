@@ -16,6 +16,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion.daemonApiVersion` is 16. Contract 16 makes each issue's Agent Sandbox pod independent,
+  on a volume of its own (LEGION-632): the pod's `workspace-init provision` container no longer
+  carries `LEGION_REMOVABLE_WORKSPACES` or `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (the
+  removable-workspaces pass and the repository flock went with the shared tree volume), nor the
+  `LEGION_ROLE` and `LEGION_GENERATION` that seeded that pass, and `LEGION_EXPECT_TREE_VOLUME` is now
+  `LEGION_EXPECT_ISSUE_VOLUME`. A worker image built before 16 would act on a contract the daemon no
+  longer speaks, so the daemon's image probe refuses it; install this release with a Go `legion`
+  and a worker image built from the same commit.
 - `legion.daemonApiVersion` is 15. Contract 15 changes a Sandbox locator on the daemon's
   `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
   `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
@@ -41,7 +49,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 14 (LEGION-592, above; 15 since LEGION-462). The Envoy messaging and Dispatch tools every session loads are
+  release declares 14 (LEGION-592, above; 15 since LEGION-462, 16 since LEGION-632). The Envoy messaging and Dispatch tools every session loads are
   `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
   through the in-process interface the Envoy entry publishes (`@legion/pi-shared/interface`, version

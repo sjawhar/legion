@@ -24,12 +24,11 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite the manifest goldens this package pins")
 
-// goldenOptions are production's settings: the budgets a golden's lock wait and grace are read
-// from, a role's resources, and the Legion priority class.
+// goldenOptions are production's settings: the budgets a golden's grace is read from, a role's
+// resources, and the Legion priority class.
 func goldenOptions() Options {
 	opts := testOptions()
 	opts.BootTimeout = 120 * time.Second
-	opts.BootIntervals = 3
 	opts.TerminationGrace = 30 * time.Second
 	opts.Scheduling = Scheduling{PriorityClass: "legion"}
 	opts.Resources = map[claim.Role]corev1.ResourceRequirements{
@@ -758,85 +757,6 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			for _, name := range []string{fetchContainer, workerContainer} {
 				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
-				}
-			}
-		})
-	}
-}
-
-// LEGION_GENERATION reaches workspace-init's init container too, not only the worker process
-// (mainEnvironment's own, carried by the launcher's start command): workspace-init provision's own
-// candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates) reads it from its own
-// container's environment, and a value only the worker process carries would never reach it. The
-// fetch container, which never rotates anything, carries neither.
-func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := workerSpec(t)
-	spec.Generation = 7
-	pod := podOf(t, r, spec)
-	for name, c := range map[string]corev1.Container{
-		initContainer: containerNamed(t, pod, initContainer), "the worker process": workerOf(t, r, spec),
-	} {
-		got, set := envOf(c)["LEGION_GENERATION"]
-		if !set || got != "7" {
-			t.Errorf("%s's LEGION_GENERATION = %q (set: %t), want \"7\"", name, got, set)
-		}
-	}
-	if _, set := envOf(containerNamed(t, pod, fetchContainer))["LEGION_GENERATION"]; set {
-		t.Errorf("%s carries LEGION_GENERATION", fetchContainer)
-	}
-}
-
-// The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
-// container alone, as one JSON object carrying both the list and its notAfter together, never
-// the agent; a launch with none names none. relaunch is what calls setRemovable in production,
-// after the tree's launch turn is held; this reaches directly for podTemplate's own contract,
-// that it reads removableWorkspacesJSON off the launch, not spec.
-func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	notAfter := time.Now().Add(time.Hour)
-	wantCandidates, err := json.Marshal(runtime.RemovableWorkspacesPayload{
-		NotAfter:   notAfter,
-		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, tc := range map[string]struct {
-		candidates []runtime.RemovableWorkspace
-		want       string
-	}{
-		"candidates": {[]runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}}, string(wantCandidates)},
-		"none":       {nil, ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			l, err := r.prepare(workerSpec(t))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
-				t.Fatal(err)
-			}
-			pod := r.podTemplate(l).Spec
-			env := envOf(containerNamed(t, pod, initContainer))
-			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
-			if got != tc.want || set != (tc.want != "") {
-				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
-			}
-			for _, c := range slices.Concat([]corev1.Container{containerNamed(t, pod, fetchContainer)}, pod.Containers) {
-				if _, set := envOf(c)["LEGION_REMOVABLE_WORKSPACES"]; set {
-					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", c.Name)
-				}
-			}
-			for _, entry := range launcherCommand(l, r).Env {
-				if strings.HasPrefix(entry, "LEGION_REMOVABLE_WORKSPACES=") {
-					t.Errorf("the worker process's start command carries LEGION_REMOVABLE_WORKSPACES")
 				}
 			}
 		})

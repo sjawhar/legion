@@ -6,11 +6,10 @@ package api
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
-// `mainEnvironment`) — and `LEGION_REMOVABLE_WORKSPACES` on a pod's `workspace-init provision`
-// container (`initEnvironment`), which the image's own `legion` decodes strictly. The installed
-// plugin declares the number it was built against as `legion.daemonApiVersion` in its
-// `package.json`, and the boot gate (`internal/daemon/bootgate.go`) refuses to start unless the
-// two are equal.
+// `mainEnvironment`) — and the environment of a pod's `workspace-init provision` container
+// (`initEnvironment`), which the image's own `legion` reads. The installed plugin declares the
+// number it was built against as `legion.daemonApiVersion` in its `package.json`, and the boot
+// gate (`internal/daemon/bootgate.go`) refuses to start unless the two are equal.
 //
 // Bump rule: a change to any of these surfaces bumps this constant and the manifest field in the
 // same commit; `packages/contracts/fixtures/daemon-api/version.json`, written by this package's
@@ -55,4 +54,15 @@ package api
 // 15: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
 // issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
 // generation, with the incarnation `<pod uid>/<generation>`.
-const DaemonAPIVersion = 15
+//
+// 16: LEGION-632 -- each issue's pod is independent, on a volume of its own, so the pod's
+// `workspace-init provision` container no longer carries `LEGION_REMOVABLE_WORKSPACES` (the
+// removable-workspaces pass is gone with the shared tree volume), nor
+// `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (no two provisions share a repository, so the flock
+// and its wait are gone), nor the `LEGION_ROLE` and `LEGION_GENERATION` that seeded that pass's
+// candidate rotation; and `LEGION_EXPECT_TREE_VOLUME` is now `LEGION_EXPECT_ISSUE_VOLUME`. An image
+// built before 16 acts on a contract this daemon no longer speaks: it looks for the old name and so
+// never learns the volume must already hold the clone, provisioning a lost volume afresh instead of
+// exiting 3, and runs a lock and a removal pass against variables nothing sets; the image probe
+// pairs the daemon with an image built from this contract instead.
+const DaemonAPIVersion = 16

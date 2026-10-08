@@ -594,18 +594,6 @@
                 "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
-                "name": "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",
-                "value": "480"
-              },
-              {
-                "name": "LEGION_ROLE",
-                "value": "architect"
-              },
-              {
-                "name": "LEGION_GENERATION",
-                "value": "1"
-              },
-              {
                 "name": "XDG_CONFIG_HOME",
                 "value": "/home/legion/.config"
               },

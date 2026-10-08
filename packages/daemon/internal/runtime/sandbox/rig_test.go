@@ -72,7 +72,6 @@ func testOptions() Options {
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
 		BootTimeout:      2 * time.Second,
-		BootIntervals:    3,
 		TerminationGrace: 200 * time.Millisecond,
 		ProbeInterval:    time.Hour,
 		AdoptTimeout:     time.Minute,

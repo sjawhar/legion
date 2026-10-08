@@ -205,10 +205,10 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	}
 }
 
-// A controller launch takes no tree's launch turn and mints no provisioning token: it has no
-// repository, so a GitHub token source that would refuse every mint leaves it running. It writes
-// no provisioning Secret, only its one launcher's role Secret, and its boot token reaches its
-// launcher in the start command, as every role's does.
+// A controller launch mints no provisioning token: it has no repository, so a GitHub token source
+// that would refuse every mint leaves it running. It writes no provisioning Secret, only its one
+// launcher's role Secret, and its boot token reaches its launcher in the start command, as every
+// role's does.
 func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = refusingTokens{} }))
 	spec := controllerSpec(t)

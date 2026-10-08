@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -41,11 +40,10 @@ type podKind interface {
 	initVolumes(l launch) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(r *Runtime, l launch, credentialHelper string) []corev1.EnvVar
-	// readyNewPod readies what a new pod needs before relaunch writes its launcher Secrets and sets
-	// its Sandbox, s, running, and returns the release of what it holds meanwhile, which relaunch
-	// calls once it is done with the new pod. On an error it holds nothing: it has given back
-	// whatever it took, and returns no release.
-	readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandbox) (func(), error)
+	// provision readies what a new pod needs before relaunch writes its launcher Secrets and sets
+	// its Sandbox, s, running, under nothing but the pod's own launch turn: each pod works on a
+	// volume of its own, so no pod's provisioning waits on another's.
+	provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error
 }
 
 // podKindOf is the kind a Sandbox's labels name: an issue pod's carry legion.dev/issue, the project
@@ -176,66 +174,17 @@ func (issuePod) agentEnv(r *Runtime, l launch, credentialHelper string) []corev1
 	}
 }
 
-// readyNewPod takes the tree's launch turn and readies the pod under it (provision), then hands the
-// turn's release back, so relaunch holds the turn until its new pod is in the store, where the next
-// relaunch's wait sees it. A launch that cannot be readied gives the turn back itself and returns
-// the error: the next launch of the tree is never left waiting on a turn nobody holds.
-func (pod issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *sandbox) (func(), error) {
-	unlock, err := r.lockTree(ctx, l.spec.Tree)
-	if err != nil {
-		return nil, fmt.Errorf("take its tree's launch turn: %w", err)
-	}
-	if err := pod.provision(ctx, r, l, s); err != nil {
-		unlock()
-		return nil, err
-	}
-	return unlock, nil
-}
-
-// provision is what a new issue pod needs before it starts, run under the tree's launch turn: it
-// waits until no other pod of the tree is initializing (awaitTreeInitialized), reads whether
-// workspace-init must find the issue's volume holding retained sessions, lists the tree's removable
-// workspaces, mints the provisioning token for the repository's owner, and writes it to the pod's
-// init-only provisioning Secret.
+// provision is what a new issue pod needs before it starts: it reads whether workspace-init must
+// find the issue's volume holding retained sessions, mints the provisioning token for the
+// repository's owner, and writes it to the pod's init-only provisioning Secret. It waits on no
+// other pod: the issue's clone lives on the issue's own volume, which no other pod mounts.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	if err := r.awaitTreeInitialized(ctx, *l); err != nil {
-		return fmt.Errorf("wait for its tree's other pods to finish initializing: %w", err)
-	}
 	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" {
 		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
 		if err != nil {
 			return fmt.Errorf("read its issue's retained sessions: %w", err)
 		}
 		l.expectVolume = sessions
-	}
-	if r.removable != nil {
-		// Computed now, under the tree's launch turn, after every other pod of the tree has finished
-		// initializing: the latest moment before this pod's own manifest is written, so a sibling
-		// that became live in the time this launch spent waiting is not judged by a list that was
-		// already stale when this launch started (dispatch://LEGION-583). Only a launch that creates
-		// the issue pod reaches here: a role started in a running issue pod runs no init container,
-		// so it has no list to carry. That guarantee is this relaunch's own, though: a pod the
-		// Sandbox controller recreates on its own (eviction, node drain, a hand deletion) runs
-		// workspace-init from this same pod template, list included, without ever passing through
-		// here again. workspace-init closes that case itself: it refuses to act on this list unless
-		// its own fetch (fetchStartedFile) started no later than the notAfter stamped below, this
-		// launch's time plus initWaitSeconds (workspace_init.go's own removableWorkspacesEnv doc
-		// comment), since a recreated pod's fetch starts hours later, whatever its own clone then
-		// takes.
-		//
-		// removableWorkspaces states the candidate rule from the daemon's own claim store;
-		// withoutLiveTreePods below checks the pod itself, a second guarantee on different evidence:
-		// it cannot tell a claim whose fail persisted StateFailed despite its own suspendProcess
-		// erroring from one truly gone, so a candidate can still have a live, non-terminal pod of
-		// this tree right now.
-		candidates, err := r.removable(ctx, l.spec.Tree, l.spec.Issue)
-		if err != nil {
-			return fmt.Errorf("compute its tree's removable workspaces: %w", err)
-		}
-		notAfter := r.now().Add(time.Duration(r.initWaitSeconds()) * time.Second)
-		if err := l.setRemovable(r.withoutLiveTreePods(*l, candidates), notAfter); err != nil {
-			return fmt.Errorf("build its removable-workspaces list: %w", err)
-		}
 	}
 	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)
@@ -257,8 +206,8 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 // controllerPod is the project controller's pod (`controller: daemon`): the controller's launcher
 // alone, working in the root of a volume of its own, which its Sandbox owns, so a relaunch resumes
 // its session. It belongs to no tree and holds no repository credential: it provisions no
-// workspace, takes no tree's launch turn, and its one init container makes its sessions directory
-// and holds a resume to its session.
+// workspace, and its one init container makes its sessions directory and holds a resume to its
+// session.
 type controllerPod struct{}
 
 func (controllerPod) roles() []claim.Role { return []claim.Role{claim.RoleController} }
@@ -315,7 +264,5 @@ func (controllerPod) agentEnv(*Runtime, launch, string) []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
 }
 
-// readyNewPod readies nothing: the controller's pod belongs to no tree and provisions nothing.
-func (controllerPod) readyNewPod(context.Context, *Runtime, *launch, *sandbox) (func(), error) {
-	return func() {}, nil
-}
+// provision readies nothing: the controller's pod provisions no workspace and mints no token.
+func (controllerPod) provision(context.Context, *Runtime, *launch, *sandbox) error { return nil }

@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -139,33 +138,10 @@ type launch struct {
 	// checks the issue's volume, not a triggering role's transcript, and another role's stored
 	// session can also require the volume to hold what it left.
 	resumeFile string
-	// expectVolume and removableWorkspacesJSON are an issue pod's workspace-init inputs
-	// (initEnvironment), which the issue pod sets itself (issuePod.prepare, issuePod.readyNewPod).
-	// expectVolume is whether the issue's volume must already hold the clone or a retained
-	// session. removableWorkspacesJSON is the tree's removable-workspace candidates
-	// (Options.Removable), JSON-encoded together with their expiry, one object; "" when there are
-	// none. It is set last, under the tree's launch turn (setRemovable): prepare runs long before
-	// that turn is even requested, so a list this early could already be stale by the time a pod's
-	// manifest is actually written.
-	expectVolume            bool
-	removableWorkspacesJSON string
-}
-
-// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON as
-// runtime.RemovableWorkspacesPayload, called by an issue pod's readyNewPod with Options.Removable's
-// result and the launch time plus initWaitSeconds, once the tree's launch turn is held. The encoding
-// cannot fail (plain strings and a time.Time), but initEnvironment has no error to return, so a
-// refusal here is the relaunch's own to surface before it ever patches the Sandbox.
-func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
-	if len(candidates) == 0 {
-		return nil
-	}
-	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
-	if err != nil {
-		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
-	}
-	l.removableWorkspacesJSON = string(encoded)
-	return nil
+	// expectVolume is an issue pod's workspace-init input (initEnvironment), which the issue pod
+	// sets itself (issuePod.prepare, issuePod.provision): whether the issue's volume must already
+	// hold the clone or a retained session.
+	expectVolume bool
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -584,9 +560,9 @@ const (
 
 // uvPythonDir is issue's own directory under uvPythonRoot, named by the issue as a DNS label
 // (dnsName). uv serializes the installs into a directory with a file lock there, and a gVisor
-// pod's lock reaches no other pod (awaitTreeInitialized), so two pods first installing one Python
-// into a shared directory at once can each delete the other's interpreter. One directory per issue
-// keeps every other issue's pods out; only the pods of one issue share it.
+// pod's lock reaches no other pod, so two pods first installing one Python into a shared directory
+// at once could each delete the other's interpreter. One directory per issue keeps every other
+// issue's pods out; only the pods of one issue share it, and they share one volume.
 func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
@@ -606,59 +582,29 @@ func fetchEnvironment() []corev1.EnvVar {
 // provisioning every role of the issue pod shares. Its PATH is the image's alone, naming no
 // directory on the issue's volume, so the git and jj it resolves from PATH are never ones an agent
 // put there; it carries no tool-path variables, and it is never pointed at the provisioning token.
-// It gives shared provisioning the issue's storage expectation and never carries one role's session
-// path: a missing transcript must not prevent sibling launchers from starting. A relaunch after the
-// volume was lost names the ref the recreated workspace is recovered from; both are
-// workspace-init's alone, never the agent's. LEGION_ROLE and LEGION_GENERATION are l.spec.Role and
-// l.spec.Generation, the launch that creates the pod, read together by workspace-init provision's
-// own candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates): a generation alone
-// does not distinguish each role's own first launch of one issue, all at generation 1 — the copies
-// of both in mainEnvironment are each role child's, carried by its launcher's start command, so
-// workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is l.removableWorkspacesJSON, set by
-// setRemovable (called by issuePod.readyNewPod, after the daemon's candidate list is read, last,
-// under the tree's launch turn), one JSON object carrying both the list and notAfter (RFC 3339: the
-// launch time plus initWaitSeconds) together, so the two can never arrive apart; absent when the
-// daemon found none. notAfter is what bounds how long a pod the Sandbox controller recreates on its
-// own may still trust this same list, read by its own fresh workspace-fetch's start time rather
-// than wall-clock time at removal (dispatch://LEGION-583, cmd/legion/workspace_init.go's
-// removableWorkspacesEnv doc comment).
+// It gives shared provisioning the issue's storage expectation (LEGION_EXPECT_ISSUE_VOLUME: the
+// issue's volume must already hold the clone or a retained session) and never carries one role's
+// session path: a missing transcript must not prevent sibling launchers from starting. A relaunch
+// after the volume was lost names the ref the recreated workspace is recovered from; both are
+// workspace-init's alone, never the agent's. Nothing here sizes a wait on another pod: each issue
+// pod provisions its own clone on its own volume, so no two provisions share a repository.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
-	env := []corev1.EnvVar{
-		{Name: "PATH", Value: imagePath},
-		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
-		{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
-		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
-	}
+	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
 	if l.expectVolume {
-		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_TREE_VOLUME", Value: "true"})
+		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_ISSUE_VOLUME", Value: "true"})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
 	}
-	if l.removableWorkspacesJSON != "" {
-		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
-	}
 	return append(env, xdgEnvironment()...)
 }
 
-// initWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
-// shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
-// (intervals + 1). Under gVisor a pod's flock never reaches another pod, so what actually keeps
-// two pods from provisioning the shared clone at once is awaitTreeInitialized (relaunch.go): a
-// new pod is never created while an existing tree pod is still initializing. lockTree itself
-// holds the launch turn only until the new pod is in the store (relaunch.go, awaitNewPod) — well
-// before that pod's own init finishes — so this wait is a safety net for whatever can still race
-// around that ordering (a pod recreated outside the normal relaunch flow), not a budget this
-// package expects to actually exhaust.
-func (r *Runtime) initWaitSeconds() int64 {
-	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
-}
-
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
-// plus this same lock-wait budget, for whatever time a provisioning pod can still spend waiting on
-// another pod's flock before it even starts its own clone.
+// which is how much longer a launch may run before its agent starts while its pod's init containers
+// run. Provisioning from the feed onto the issue's own volume is local work and waits on no other
+// pod, so it shares the registration deadline's base bound as the agent's own boot does.
 func (r *Runtime) ProvisionBound() time.Duration {
-	return workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
+	return workspace.FetchTimeout
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells

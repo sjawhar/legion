@@ -192,7 +192,6 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		LaunchSecrets:    launchSecretNames(cfg, lookup),
 		ProvidersSecrets: providersSecrets(cfg, lookup),
 		BootTimeout:      cfg.WorkerBootTimeout,
-		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
 		ProbeInterval:    cfg.ProbeInterval,
 		AdoptTimeout:     cfg.SlowCommandTimeout,
@@ -316,13 +315,12 @@ func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
 
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's implement App as every pod's
-// provisioning token source and removable as its tree's removable-workspace candidates, and
-// registers its launcher acceptor on the stream listener. Boot has already run the cluster check
-// (plan.clusterCheck): Agent Sandbox is installed and no per-claim Sandbox of the layout before
-// issue pods remains.
+// provisioning token source, and registers its launcher acceptor on the stream listener. Boot has
+// already run the cluster check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a
+// layout before this one — per-claim pods, or issue pods on one tree volume — remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
-		opts.Conns, opts.StreamURL, opts.Store, opts.Removable = listener, address, st, removable
+	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
+		opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 		}

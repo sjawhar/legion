@@ -198,7 +198,7 @@ type guardedWorkspace struct {
 // guardWorkspace holds every refusal a jj command can reach, in order: the workspace and clone
 // layout components; the .jj a workspace command opens; the shared clone's .jj and .jj/repo; and
 // the workspace's .jj/repo pointer. Callers that will write a workspace path but not yet open jj
-// (Provision, Remove and RemoveFinished) pass requireJJ false: the same layout guard refuses a
+// (Provision and Remove) pass requireJJ false: the same layout guard refuses a
 // symlinked target before it creates, renames or removes anything outside the layout.
 //
 // jj 0.38 and later keep a repository's and a workspace's own configuration in the config home,

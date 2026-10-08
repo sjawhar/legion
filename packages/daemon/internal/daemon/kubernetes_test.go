@@ -553,7 +553,6 @@ func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.WorkerStopTimeout, cfg.WorkerBootTimeout, cfg.ProbeInterval, cfg.SlowCommandTimeout = 11*time.Second, 22*time.Second, 33*time.Second, 44*time.Second
-	cfg.WorkerBootRegistrationDeadlineIntervals = 5
 
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
@@ -575,9 +574,6 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 		if row.got != row.want {
 			t.Errorf("%s = %s, want %s", row.option, row.got, row.want)
 		}
-	}
-	if opts.BootIntervals != cfg.WorkerBootRegistrationDeadlineIntervals {
-		t.Errorf("sandbox BootIntervals = %d, want %d", opts.BootIntervals, cfg.WorkerBootRegistrationDeadlineIntervals)
 	}
 }
 
