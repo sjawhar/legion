@@ -86,10 +86,10 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		return nil
 	}
 	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.SlowCommandTimeout)
-	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
+	p.probe = func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error) {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
-			return fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
+			return bootprobe.ImageReport{}, fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
 		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
 			Contract: api.DaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,

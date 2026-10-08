@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -21,7 +23,11 @@ import (
 // load from those roots, pi-envoy publishing the interface pi-legion speaks, and Oh My Pi finds
 // every task agent and skill Legion's prompts name; and the session-storage setting refuses a
 // value it does not know, naming the variable. Asked for task agents, it resolves their models
-// too, unless told to skip them. With $LEGION_TEST_SEEN set, each run appends the environment it
+// too, unless told to skip them. It answers the capability check's two commands as this pod's omp
+// does: `setup python --check --json` says Python is available when python3 is on its PATH and
+// $LEGION_TEST_NO_PYTHON is unset, else `available: false` and exit 1; `config get
+// retry.modelFallback --json` says the setting is false, or true under $LEGION_TEST_FALLBACK_ON.
+// With $LEGION_TEST_SEEN set, each run appends the environment it
 // saw there: PI_CONFIG_FILES, whether the first overlay it names exists, and OTEL_SDK_DISABLED;
 // with $LEGION_TEST_KEY_SEEN, the provider key TEST_PROVIDER_KEY.
 func imageOmp(t *testing.T) string {
@@ -44,6 +50,14 @@ case "$*" in
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ] && [ -z "${LEGION_SKIP_AGENT_MODELS:-}" ]; then echo LEGION_AGENT_MODELS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_SKILLS:-}" ]; then echo LEGION_PROMPT_SKILLS=resolved >&2; fi ;;
 "models --no-extensions --extension "*" --json") echo LEGION_OMP_AGENTS=available >&2 ;;
+"setup python --check --json")
+  if [ -n "${LEGION_TEST_NO_PYTHON:-}" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo '{"available": false, "usingManagedEnv": false, "managedEnvPath": ""}'; exit 1
+  fi
+  echo '{"available": true}' ;;
+"config get retry.modelFallback --json")
+  if [ -n "${LEGION_TEST_FALLBACK_ON:-}" ]; then value=true; else value=false; fi
+  printf '{"key":"retry.modelFallback","value":%s,"type":"boolean"}\n' "$value" ;;
 *) echo "Invalid $OMP_SESSION_STORAGE for OMP_SESSION_STORAGE" >&2; exit 1 ;;
 esac
 `
@@ -53,24 +67,52 @@ esac
 	return path
 }
 
+// imageBinaries are the binaries the capability check's image rows look for, each stubbed on the
+// test's PATH: `go version` answers a Go version, `chromium --version` a Chromium one.
+var imageBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "chromium"}
+
+const imageBinary = `#!/bin/sh
+case "$1" in
+version) echo "go version go1.26.8 linux/amd64" ;;
+--version) echo "Chromium 141.0.0.0" ;;
+esac
+`
+
+// codeGraphLock is the plugin lock `omp plugin install` writes in the worker image, with the
+// CodeGraph plugin enabled.
+const codeGraphLock = `{"plugins":{"@bopstack/pi-codegraph":{"version":"0.1.1","enabledFeatures":null,"enabled":true}}}`
+
 // thisBinarysContract is the daemon API contract this binary speaks, as a manifest writes it.
 var thisBinarysContract = strconv.Itoa(api.DaemonAPIVersion)
 
-// image is the worker image's two plugin roots, which every probe-image run is given.
-type image struct{ legion, envoy string }
+// image is the worker image's two plugin roots, which every probe-image run is given, its bin of
+// stubbed binaries, first on PATH, and its profile's plugin lock.
+type image struct{ legion, envoy, bin, lock string }
 
 // flags are the run's two root flags, then extra.
 func (i image) flags(extra ...string) []string {
 	return append([]string{"--plugin-root", i.legion, "--envoy-plugin-root", i.envoy}, extra...)
 }
 
+// without removes a stubbed binary from the image's PATH.
+func (i image) without(t *testing.T, name string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(i.bin, name)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
-// links both plugins, the Legion manifest declaring contract, and LEGION_OMP_PATH set to omp. It
-// answers the plugin roots a pod loads.
+// links both plugins and whose plugin lock enables the CodeGraph plugin, the Legion manifest
+// declaring contract, LEGION_OMP_PATH set to omp, and a bin first on PATH stubbing every binary
+// the capability check's image rows look for. It answers the plugin roots a pod loads.
 func inImage(t *testing.T, contract, omp string) image {
 	t.Helper()
 	home := t.TempDir()
-	roots := image{legion: filepath.Join(home, "pi-legion"), envoy: filepath.Join(home, "pi-envoy")}
+	roots := image{
+		legion: filepath.Join(home, "pi-legion"), envoy: filepath.Join(home, "pi-envoy"), bin: t.TempDir(),
+		lock: filepath.Join(home, ".omp", "profiles", "legion", "plugins", "omp-plugins.lock.json"),
+	}
 	for _, plugin := range []struct{ name, root, manifest string }{
 		{"pi-legion", roots.legion, `{"name":"@sjawhar/pi-legion","version":"1.57.0","legion":{"daemonApiVersion":` + contract + `}}`},
 		{"pi-envoy", roots.envoy, `{"name":"@sjawhar/pi-envoy","version":"1.57.0"}`},
@@ -89,13 +131,26 @@ func inImage(t *testing.T, contract, omp string) image {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(roots.lock, []byte(codeGraphLock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range imageBinaries {
+		if err := os.WriteFile(filepath.Join(roots.bin, name), []byte(imageBinary), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_PROFILE", "legion")
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("LEGION_OMP_PATH", omp)
+	t.Setenv("PATH", roots.bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Chdir(t.TempDir())
 	return roots
 }
+
+// capabilityMarks are the OK line's marks after agent-models under a stubbed image whose omp
+// says model fallback is off.
+const capabilityMarks = " capabilities=checked model-fallback=off daemon-api-version="
 
 func probeImage(args ...string) (int, string, string) {
 	var stdout, stderr bytes.Buffer
@@ -103,9 +158,23 @@ func probeImage(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+// tableLines are stdout's lines before the NATS user line and the OK line: the capability table.
+// Each is one row of capabilities.Table, rendered by its Line, so stdout is split on the row shape.
+func tableLines(stdout string) []string {
+	var lines []string
+	for line := range strings.Lines(stdout) {
+		if strings.HasPrefix(line, "probe-image: capability ") {
+			lines = append(lines, strings.TrimSuffix(line, "\n"))
+		}
+	}
+	return lines
+}
+
 // As the worker image's build runs it, with no contract named, the command holds the image's plugin
-// to the contract this binary speaks and prints the OK line the daemon's probe Sandbox reads.
-func TestProbeImagePrintsTheOKLineWithThisBinarysContract(t *testing.T) {
+// to the contract this binary speaks, prints the capability table — one line per row of the
+// declared list, in its order, every image row present — and then the OK line the daemon's probe
+// Sandbox reads, carrying the capabilities and model-fallback marks.
+func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
 
@@ -114,8 +183,21 @@ func TestProbeImagePrintsTheOKLineWithThisBinarysContract(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("probe-image exited %d: %s", code, stderr)
 	}
-	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
-		t.Fatalf("stdout = %q, want %q", stdout, want)
+	table := tableLines(stdout)
+	if len(table) != len(capabilities.Table) {
+		t.Fatalf("stdout carries %d capability lines, want one per row (%d):\n%s", len(table), len(capabilities.Table), stdout)
+	}
+	for i, row := range capabilities.Table {
+		if prefix := "probe-image: capability " + string(row.Name) + ": "; !strings.HasPrefix(table[i], prefix) {
+			t.Errorf("capability line %d = %q, want row %s: the table's order", i, table[i], row.Name)
+		}
+		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": present (") {
+			t.Errorf("capability line %d = %q, want %s present", i, table[i], row.Name)
+		}
+	}
+	okLine := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
+	if want := strings.Join(table, "\n") + "\n" + okLine; stdout != want {
+		t.Fatalf("stdout = %q, want the table then the OK line %q", stdout, okLine)
 	}
 }
 
@@ -141,7 +223,7 @@ func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 
 	code, stdout, stderr := probeImage(img.flags("--omp", omp)...)
 
-	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed agent-models=resolved daemon-api-version="+thisBinarysContract+"\n" {
+	if code != 0 || !strings.HasSuffix(stdout, "\nprobe-image: OK ("+omp+") session-storage=probed agent-models=resolved"+capabilityMarks+thisBinarysContract+"\n") {
 		t.Fatalf("probe-image --omp = %d %q %q, want the OK line naming %s", code, stdout, stderr, omp)
 	}
 }
@@ -154,14 +236,87 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 
 	code, stdout, stderr := probeImage(img.flags("--skip-agent-models")...)
 
-	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=skipped daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
-		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want %q", code, stdout, stderr, want)
+	if want := "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=skipped" + capabilityMarks + thisBinarysContract + "\n"; code != 0 || !strings.HasSuffix(stdout, want) {
+		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want the OK line %q", code, stdout, stderr, want)
+	}
+}
+
+// The OK line's model-fallback mark is what the image's Oh My Pi answers for retry.modelFallback
+// under the probe's environment: off by default, on when the operator's configuration turns it on.
+func TestProbeImageMarksTheOKLineWithTheModelFallbackItRead(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	for mark, on := range map[string]bool{"off": false, "on": true} {
+		t.Run(mark, func(t *testing.T) {
+			if on {
+				t.Setenv("LEGION_TEST_FALLBACK_ON", "1")
+			}
+
+			code, stdout, stderr := probeImage(img.flags()...)
+
+			if want := " capabilities=checked model-fallback=" + mark + " daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || !strings.HasSuffix(stdout, want) {
+				t.Fatalf("probe-image = %d %q %q, want the OK line ending %q", code, stdout, stderr, want)
+			}
+		})
+	}
+}
+
+// A capability the image lacks fails the probe after the launch probes passed: the whole table is
+// printed, the rows that are present saying so, the missing row saying why; stderr names the
+// missing capability; exit 1; no OK line. Each image row is checked where it is checked: Python by
+// Oh My Pi's own answer — which, as in the image, says unavailable without a python3, and under
+// $LEGION_TEST_NO_PYTHON says so with python3 on PATH, so the row is the answer, not the PATH —
+// the browser by running what PUPPETEER_EXECUTABLE_PATH names, as Oh My Pi would, CodeGraph by
+// the profile's plugin lock, the toolchain by PATH.
+func TestProbeImageRefusesAnImageMissingACapability(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		setup   func(t *testing.T, img image)
+		missing []string
+	}{
+		"python3 off PATH":                         {func(t *testing.T, img image) { img.without(t, "python3") }, []string{"eval-python", "toolchain"}},
+		"Oh My Pi's Python unavailable":            {func(t *testing.T, img image) { t.Setenv("LEGION_TEST_NO_PYTHON", "1") }, []string{"eval-python"}},
+		"PUPPETEER_EXECUTABLE_PATH naming nothing": {func(t *testing.T, img image) { t.Setenv("PUPPETEER_EXECUTABLE_PATH", "/nonexistent/chromium") }, []string{"browser"}},
+		"the CodeGraph plugin not in the lock": {func(t *testing.T, img image) {
+			if err := os.WriteFile(img.lock, []byte(`{"plugins":{"@sjawhar/pi-legion":{"enabled":true}}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"codegraph"}},
+		"gopls off PATH": {func(t *testing.T, img image) { img.without(t, "gopls") }, []string{"lsp"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			omp := imageOmp(t)
+			img := inImage(t, thisBinarysContract, omp)
+			testCase.setup(t, img)
+
+			code, stdout, stderr := probeImage(img.flags()...)
+
+			if code != 1 || strings.Contains(stdout, "probe-image: OK") {
+				t.Fatalf("probe-image = %d %q %q, want exit 1 and no OK line", code, stdout, stderr)
+			}
+			for _, missing := range testCase.missing {
+				if !strings.Contains(stderr, "capability "+missing+" is missing: ") {
+					t.Errorf("stderr = %q, want it to name capability %s missing", stderr, missing)
+				}
+				if !strings.Contains(stdout, "probe-image: capability "+missing+": missing (") {
+					t.Errorf("stdout = %q, want the %s row saying missing", stdout, missing)
+				}
+			}
+			if len(tableLines(stdout)) != len(capabilities.Table) {
+				t.Errorf("stdout carries %d capability lines, want the whole table (%d) however many rows are missing", len(tableLines(stdout)), len(capabilities.Table))
+			}
+			for _, row := range capabilities.Table {
+				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": present (") {
+					t.Errorf("stdout = %q, want the %s row still present", stdout, row.Name)
+				}
+			}
+		})
 	}
 }
 
 // A probe pod's NATS_NKEY_SEED_FILE names the providers Secret's seed: the command names that seed's
-// user, by its public key alone, on the line before the OK line, for the daemon to compare with its
-// own; a seed that is not a user's is refused before any probe runs. Neither output carries a seed.
+// user, by its public key alone, on the line before the OK line and after the capability table,
+// for the daemon to compare with its own; a seed that is not a user's is refused before any probe
+// runs. Neither output carries a seed.
 func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
@@ -170,9 +325,9 @@ func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
 
 	code, stdout, stderr := probeImage(img.flags()...)
 
-	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"
-	if code != 0 || stdout != want || strings.Contains(stdout+stderr, seed) {
-		t.Fatalf("probe-image with a user seed = %d %q %q, want %q and no seed", code, stdout, stderr, want)
+	want := ")\nprobe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
+	if code != 0 || !strings.HasSuffix(stdout, want) || strings.Contains(stdout+stderr, seed) {
+		t.Fatalf("probe-image with a user seed = %d %q %q, want the table, then %q, and no seed", code, stdout, stderr, want)
 	}
 
 	account := testnats.Account(t)
@@ -220,7 +375,7 @@ func TestProbeImageWithAProviderEnvDirExportsTheKeysAsTheShimDoes(t *testing.T) 
 
 	code, stdout, stderr := probeImage(img.flags("--provider-env-dir", providers)...)
 
-	if code != 0 || !strings.HasPrefix(stdout, "probe-image: OK (") {
+	if code != 0 || !strings.Contains(stdout, "\nprobe-image: OK (") {
 		t.Fatalf("probe-image --provider-env-dir = %d %q %q, want the OK line", code, stdout, stderr)
 	}
 	raw, err := os.ReadFile(seen)
@@ -269,7 +424,7 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 			seen := filepath.Join(t.TempDir(), "seen")
 			t.Setenv("LEGION_TEST_SEEN", seen)
 			code, stdout, stderr := probeImage(tc.args...)
-			if code != 0 || !strings.HasPrefix(stdout, "probe-image: OK (") {
+			if code != 0 || !strings.Contains(stdout, "\nprobe-image: OK (") {
 				t.Fatalf("probe-image %v = %d %q %q, want the OK line", tc.args, code, stdout, stderr)
 			}
 			raw, err := os.ReadFile(seen)

@@ -111,21 +111,67 @@ const (
 // agentModelsMark carries one of those states on the OK line.
 const agentModelsMark = "agent-models="
 
+// capabilitiesMark is on the OK line once the probe has checked the capability list
+// (internal/capabilities, CheckImage) and found every image-site capability present: a CLI that
+// predates the check prints no such token, having checked none of them.
+const capabilitiesMark = "capabilities=checked"
+
+// modelFallbackMark carries, on the OK line, whether the image's Oh My Pi falls back to another
+// model under the operator's configuration (capabilities.ReadModelFallback): "on" or "off".
+const modelFallbackMark = "model-fallback="
+
 // OKLine is that line: the OMP invocation probed, the session-storage mark, the agent-models mark
-// (AgentModelsResolved or AgentModelsSkipped), and the daemon API contract the image's plugin
-// declared. The daemon's probe Sandbox passes the image only on a line that confirms the daemon's
-// own contract (ConfirmedContract) with the agents' models resolved (AgentModels).
-func OKLine(omp string, contract int, agentModels string) string {
-	return fmt.Sprintf("%s (%s) %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels, contract)
+// (AgentModelsResolved or AgentModelsSkipped), the capabilities mark, the model-fallback mark
+// ("on" or "off"), and the daemon API contract the image's plugin declared, last. The daemon's
+// probe Sandbox passes the image only on a line that confirms the daemon's own contract
+// (ConfirmedContract) with the agents' models resolved (AgentModels) and the capability list
+// checked (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its
+// ImageReport.
+func OKLine(omp string, contract int, agentModels, modelFallback string) string {
+	return fmt.Sprintf("%s (%s) %s %s%s %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels,
+		capabilitiesMark, modelFallbackMark, modelFallback, contract)
 }
 
+// ImageReport is what the daemon keeps of a passed probe's OK line.
+type ImageReport struct {
+	// ModelFallback is the line's model-fallback mark, "on" or "off": whether the image's Oh My
+	// Pi, under the operator's configuration, falls back to another model when an agent's own is
+	// unavailable.
+	ModelFallback string
+}
+
+// markThenContract ends an OK-line pattern after a mark: whatever later marks the line carries,
+// then the contract token last. A line from an older CLI carries fewer marks, and one from a
+// newer CLI may carry more, so no mark is anchored to its neighbours, only to the line's end.
+const markThenContract = `(?: .*)? daemon-api-version=[0-9]+$`
+
 // agentModelsState is the agent-models mark on an OK line.
-var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+) daemon-api-version=[0-9]+$`)
+var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+)` + markThenContract)
 
 // AgentModels is the agent-models state an OK line in output carries, and "" when output holds
 // none: no OK line, or one from a CLI that predates the agent-model check.
 func AgentModels(output string) string {
 	match := agentModelsState.FindStringSubmatch(output)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}
+
+// capabilitiesChecked is the capabilities mark on an OK line.
+var capabilitiesChecked = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + capabilitiesMark + markThenContract)
+
+// CapabilitiesChecked is whether an OK line in output carries the capabilities mark; false when
+// output holds none: no OK line, or one from a CLI that predates the capability check.
+func CapabilitiesChecked(output string) bool { return capabilitiesChecked.MatchString(output) }
+
+// modelFallbackState is the model-fallback mark on an OK line.
+var modelFallbackState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + modelFallbackMark + `(\S+)` + markThenContract)
+
+// ModelFallback is the model-fallback mark an OK line in output carries, and "" when the line
+// carries none: no OK line, or one from a CLI that predates the mark.
+func ModelFallback(output string) string {
+	match := modelFallbackState.FindStringSubmatch(output)
 	if match == nil {
 		return ""
 	}

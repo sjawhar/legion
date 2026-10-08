@@ -91,7 +91,7 @@ type overrides struct {
 	gate func(ctx context.Context) error
 	// probe stands in for the worker image probe when runtime is replaced under kubernetes: nil is
 	// none. With the Agent Sandbox runtime, the probe is always the real one.
-	probe func(ctx context.Context, rt runtime.Runtime) error
+	probe func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
@@ -226,7 +226,8 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		return err
 	}
 	if plan.probe != nil {
-		if err := plan.probe(ctx, s.runtime); err != nil {
+		report, err := plan.probe(ctx, s.runtime)
+		if err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
@@ -237,6 +238,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			}
 			return err
 		}
+		s.imageReport = report
 		// The probe waits out a cold node and an image pull, which the boot budget does not bound,
 		// as it does not bound the plugin gate: the work after the probe has a budget of its own.
 		var cancelAfterProbe context.CancelFunc
@@ -362,8 +364,9 @@ type plan struct {
 	// no host Oh My Pi, and for a replaced runtime without one.
 	gate func(ctx context.Context) error
 	// probe proves the runtime's worker image once the runtime is built and before the boot is
-	// recorded; nil under tmux, and for a replaced runtime without one.
-	probe       func(ctx context.Context, rt runtime.Runtime) error
+	// recorded, answering what its OK line reported of the image; nil under tmux, and for a
+	// replaced runtime without one.
+	probe       func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
 	clock       supervise.Clock
 	orphanSweep time.Duration
 	// controllerRetry is the controller keeper's first wait before it retries a failed controller.
@@ -544,6 +547,9 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
+	// imageReport is what the worker image's passed probe reported of the image, from its OK
+	// line (bootprobe.ImageReport); the zero report under tmux, where no image is probed.
+	imageReport bootprobe.ImageReport
 
 	cancel       context.CancelFunc
 	cancelStream context.CancelFunc
