@@ -592,8 +592,9 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 		), active as (
 			select
 				a.id::text,
+				-- An issue ask's ref is the SPA's item route; the bare issue page reads no ?ask=.
 				case
-					when i.key is not null then '/issues/' || i.key || '?ask=' || a.id::text
+					when i.key is not null then '/issues/' || i.key || '/asks/' || a.id::text
 					else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?ask=' || a.id::text
 				end as ref,
 				a.question,

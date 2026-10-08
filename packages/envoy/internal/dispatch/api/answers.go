@@ -115,9 +115,12 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.EditedAt = timestampPtr(editedAt)
+		// An issue ask's ref is the SPA's item route, which lands an anchored ask on its document
+		// and an unanchored one on its Conversation turn; the bare issue page reads no `?ask=`. A
+		// document ask's `?ask=` is its own item route.
 		if issueKey != nil {
 			row.Owner.Issue = &model.OpenAskIssue{Key: *issueKey, Title: *issueTitle}
-			row.Ref = "/issues/" + *issueKey + "?ask=" + row.AskID
+			row.Ref = "/issues/" + *issueKey + "/asks/" + row.AskID
 		} else {
 			row.Owner.Document = &model.OpenAskDocument{Project: *project, Slug: *slug, Name: *name}
 			row.Ref = "/projects/" + *project + "/documents/" + *slug + "?ask=" + row.AskID

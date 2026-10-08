@@ -724,7 +724,9 @@ export type OpenAskOwner =
 
 export interface OpenAsk {
   readonly id: string;
-  /** Relative Dispatch deep link to the ask's owner. */
+  /** Relative Dispatch deep link to the ask itself: `/issues/KEY/asks/ID` for an issue ask (the
+   *  item route, which selects an anchored ask on its document and focuses an unanchored one's
+   *  Conversation turn), `/projects/PROJECT/documents/SLUG?ask=ID` for a document ask. */
   readonly ref: string;
   readonly question: string;
   readonly kind: AskKind;
@@ -756,7 +758,7 @@ export interface MyAnswerRow {
   readonly kind: "answer" | "reply";
   readonly at: string;
   readonly ask_id: string;
-  /** Relative Dispatch deep link to the ask's owner. */
+  /** Relative Dispatch deep link to the ask itself, as on `OpenAsk.ref`. */
   readonly ref: string;
   readonly question: string;
   readonly ask_kind: AskKind;

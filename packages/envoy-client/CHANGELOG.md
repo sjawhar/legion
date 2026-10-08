@@ -148,6 +148,9 @@
 
 ### Fixed
 
+- `dispatch_open_asks` links an issue ask by its item route, `/issues/<KEY>/asks/<id>`, which
+  `dispatchRefFromUrl` reads back as the ask; the link it printed before named the issue alone
+  (LEGION-622).
 - `dispatch_doc_read` of an uploaded file or image returns the file's text at its latest or named
   version, after a line naming its type, version and size, where it failed with Dispatch's
   `artifact is not a document`: it asked `/text`, which answers a file 400 `NOT_DOCUMENT`. A file

@@ -1493,7 +1493,7 @@ describe("executeDispatchTool", () => {
         asks: [
           {
             id: "ask-1",
-            ref: "/issues/LEGION-1?ask=ask-1",
+            ref: "/issues/LEGION-1/asks/ask-1",
             question: releaseQuestion,
             kind: "question",
             urgency: "high",
@@ -1543,7 +1543,7 @@ describe("executeDispatchTool", () => {
         "2 unanswered asks you authored on active issues and project documents.",
         "",
         "Waiting on human (1):",
-        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1?ask=ask-1`,
+        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1/asks/ask-1`,
         "",
         "Waiting on agent (1):",
         "- 2h · OPS / Runbook · Which region? · http://dispatch.test/projects/OPS/documents/runbook?ask=ask-2",

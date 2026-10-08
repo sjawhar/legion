@@ -49,7 +49,7 @@ function answerRow(overrides: Partial<MyAnswerRow> = {}): MyAnswerRow {
     kind: "answer",
     owner: { issue: { key: "CORE-1", title: "Release train" } },
     question: "Which release path?",
-    ref: "/issues/CORE-1?ask=ask-1",
+    ref: "/issues/CORE-1/asks/ask-1",
     ...overrides,
   };
 }
@@ -116,7 +116,7 @@ test("lists the person's answers and replies newest first with time, owner, ques
         current: false,
         owner: { issue: { key: "CORE-3", title: "Billing" } },
         question: "Freeze billing?",
-        ref: "/issues/CORE-3?ask=ask-3",
+        ref: "/issues/CORE-3/asks/ask-3",
       }),
     ])
   );
@@ -139,8 +139,8 @@ test("lists the person's answers and replies newest first with time, owner, ques
     await waitFor(() => expect(within(first).getByText("Which release path?")).toBeTruthy());
     expect(within(first).getByText("Ship")).toBeTruthy();
     await waitFor(() => expect(within(first).getByText("Go now.")).toBeTruthy());
-    // An issue ask opens through its item route, as the Inbox row's owner link does: anchored, it
-    // lands on its document with the card selected; unanchored, on its Conversation turn.
+    // Open follows the server's ref, an issue ask's item route, as the Inbox row's owner link
+    // does: anchored, it lands on its document with the card selected; unanchored, on its turn.
     expect(within(first).getByRole("link", { name: "Open" }).getAttribute("href")).toBe(
       "/issues/CORE-1/asks/ask-1"
     );

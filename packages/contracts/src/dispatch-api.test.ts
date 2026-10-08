@@ -187,7 +187,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
         kind: "answer",
         at: answer.at,
         ask_id: ask.id,
-        ref: "/issues/CORE-1?ask=ask-1",
+        ref: "/issues/CORE-1/asks/ask-1",
         question: ask.question,
         ask_kind: ask.kind,
         ask_state: ask.state,

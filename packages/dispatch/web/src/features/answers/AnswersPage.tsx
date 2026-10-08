@@ -126,18 +126,9 @@ function AnswerRow({
         </p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
-        {/* An issue ask opens through its item route, which lands an anchored ask on its document
-            with the card selected and an unanchored one on its Conversation turn; the server's
-            `ref` (`/issues/KEY?ask=ID`) names the issue page, where nothing reads `?ask=`. A
-            document's `ref` is its own item route already. */}
-        <Link
-          className={`font-medium ${linkText} ${linkHoverText}`}
-          to={
-            "issue" in row.owner
-              ? buildIssuePath({ id: row.ask_id, key: row.owner.issue.key, kind: "ask" })
-              : row.ref
-          }
-        >
+        {/* The server's `ref` is the ask's own item route: an issue ask's lands an anchored ask on
+            its document with the card selected and an unanchored one on its Conversation turn. */}
+        <Link className={`font-medium ${linkText} ${linkHoverText}`} to={row.ref}>
           Open
         </Link>
         {changeable && !changing ? (

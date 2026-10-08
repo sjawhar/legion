@@ -115,8 +115,10 @@ func TestListMyAnswersReturnsOwnAnswersAndRepliesNewestFirst(t *testing.T) {
 		if row.Kind != "answer" || row.Answer == nil || !row.Current || row.Answer.User != "alice" {
 			t.Fatalf("answer row = %#v, want Alice current answer", row)
 		}
-		if row.Owner.Issue == nil || row.Ref != "/issues/"+row.Owner.Issue.Key+"?ask="+row.AskID {
-			t.Fatalf("answer owner/ref = %#v", row)
+		// An issue ask's ref is the SPA's item route: the bare issue page reads no `?ask=`, so a
+		// caller following `/issues/KEY?ask=ID` would land on the issue and not the ask.
+		if row.Owner.Issue == nil || row.Ref != "/issues/"+row.Owner.Issue.Key+"/asks/"+row.AskID {
+			t.Fatalf("answer owner/ref = %#v, want the ask's item route", row)
 		}
 	}
 	for _, row := range answers.Rows {
