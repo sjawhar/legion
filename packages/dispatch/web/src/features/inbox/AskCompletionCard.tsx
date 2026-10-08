@@ -70,7 +70,7 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
         Changed <Timestamp at={latest.at} />
       </p>
       <details className="mt-1">
-        <summary className={`cursor-pointer font-medium ${linkText} ${linkHoverText}`}>
+        <summary className={`cursor-pointer font-medium underline ${textPrimaryOnSuccessCallout}`}>
           {earlier.length === 1
             ? "Show 1 earlier answer"
             : `Show ${earlier.length} earlier answers`}
@@ -193,7 +193,7 @@ function AnsweredAsk({
       <AskAnswerHistory answers={answers} />
       {onChangeAnswer === undefined ? null : (
         <button
-          className={`mt-2 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
+          className={`mt-2 min-h-11 text-sm font-semibold underline ${textPrimaryOnSuccessCallout}`}
           onClick={onChangeAnswer}
           type="button"
         >

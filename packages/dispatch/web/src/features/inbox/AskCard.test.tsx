@@ -204,3 +204,25 @@ test("mode change opens the seeded form only when the viewer can change the answ
     readOnly.view.unmount();
   }
 });
+
+test("a compact card's change shows the seeded note, so nothing is sent unseen", async () => {
+  const mine = answeredAsk();
+  const { view } = renderCard(
+    <AskCard
+      ask={mine}
+      frame="block"
+      initialThread={thread(mine)}
+      thread="collapsed"
+      variant="compact"
+    />
+  );
+  try {
+    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    const note = (await view.findByLabelText("Your answer")) as HTMLTextAreaElement;
+    expect(note.value).toBe("First note");
+    expect(view.getByRole("button", { name: "Save answer" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});

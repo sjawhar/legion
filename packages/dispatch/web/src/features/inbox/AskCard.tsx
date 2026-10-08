@@ -208,6 +208,14 @@ export function AskCard({
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const [handlesOpen, setHandlesOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
+  // A change seeds the current answer's note; a compact card shows it rather than folding text
+  // the save would send behind its disclosure. Set while rendering the first changing render,
+  // React's pattern for state derived from a prop change, so the field is never hidden a frame.
+  const [seededFor, setSeededFor] = useState(false);
+  if (changing !== seededFor) {
+    setSeededFor(changing);
+    if (changing && variant === "compact" && answerText.trim() !== "") setOwnWordsOpen(true);
+  }
   // One page can host the same ask twice (a decision block and the margin sheet), so the
   // panel each control names is this instance's.
   const referencesPanelId = useId();
