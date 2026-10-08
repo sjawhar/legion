@@ -79,3 +79,29 @@ func TestPutDeliverySettingsRefusesWithoutGitHubAccess(t *testing.T) {
 		t.Fatalf("status = %d, body = %s, want 409 DELIVERY_SETTINGS_ACCESS", response.Code, response.Body.String())
 	}
 }
+
+func TestAgentPutsDeliverySettingsWithItsActor(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	handler, database := newArchitectureSourceServer(t, fake)
+
+	response := agentRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
+		"deploy_repo":             "acme/widgets",
+		"deploy_workflow_path":    ".github/workflows/deploy.yml",
+		"production_job_name":     "widgets-release / widgets-release",
+		"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
+		"population_authors":      []string{"octocat"},
+		"actor":                   map[string]string{"kind": "session", "id": "agent-delivery-put"},
+	}, "agent-token")
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent put delivery settings: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var actorID string
+	if err := database.Pool.QueryRow(t.Context(), `
+		select updated_by->>'id' from delivery_settings where singleton
+	`).Scan(&actorID); err != nil {
+		t.Fatalf("read delivery settings actor: %v", err)
+	}
+	if actorID != "agent-delivery-put" {
+		t.Fatalf("delivery settings actor = %q, want agent-delivery-put", actorID)
+	}
+}

@@ -436,11 +436,11 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	if err := r.awaitPaneCommand(ctx, report); err != nil {
-		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		return runtime.Locator{}, errors.Join(fmt.Errorf("spawn %s: %w", spec.Claim, err), r.killUnrecorded(ctx, report))
 	}
 	ticks, alive, err := r.startTicks(report.pid)
 	if err != nil {
-		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		return runtime.Locator{}, errors.Join(fmt.Errorf("spawn %s: %w", spec.Claim, err), r.killUnrecorded(ctx, report))
 	}
 	if !alive {
 		// The pane closes itself with its process; there is nothing left to record or reap.
@@ -462,7 +462,8 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 // copy of the server, which a probe reads as not running OMP; supervision takes that for a death
 // and relaunches the claim over its still-starting process (LEGION-274). A process that exits
 // meanwhile is left to the caller's identity read, which reports it; one still the server's copy
-// when the bound runs out is killed, so no process the daemon never recorded runs on.
+// when the bound runs out is an error, and the caller kills its pane (killUnrecorded), so no
+// process the daemon never recorded runs on.
 func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error {
 	deadline := time.Now().Add(r.commandTimeout)
 	for {
@@ -471,9 +472,6 @@ func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error
 			return err
 		}
 		if time.Now().After(deadline) {
-			if res, err := r.run(ctx, killPaneArgv(r.socket, report.pane)); err != nil || res.exitCode != 0 && !paneGoneStderr.MatchString(res.stderr) {
-				r.log.Warn("tmux runtime: could not kill a pane that never started its command", "pane", report.pane, "err", err, "stderr", res.stderr)
-			}
 			return fmt.Errorf("pane %s pid %d did not start its command within %s", report.pane, report.pid, r.commandTimeout)
 		}
 		select {
@@ -482,6 +480,21 @@ func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+// killUnrecorded kills report's pane after an error left its process unrecorded: no locator is
+// returned for it, so nothing else would end it (runtime.Runtime's Spawn and Resume). It runs even
+// once ctx has ended, since the caller's deadline may be what ended the launch. A pane already gone
+// is gone; any other failure is returned, so the launch error says the process may still run.
+func (r *Runtime) killUnrecorded(ctx context.Context, report paneReport) error {
+	res, err := r.run(context.WithoutCancel(ctx), killPaneArgv(r.socket, report.pane))
+	if err == nil && (res.exitCode == 0 || paneGoneStderr.MatchString(res.stderr)) {
+		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("tmux exited %d: %s", res.exitCode, strings.TrimSpace(res.stderr))
+	}
+	return fmt.Errorf("kill pane %s, whose process pid %d was never recorded: %w", report.pane, report.pid, err)
 }
 
 // refuseLiveIncarnation refuses a launch for a claim whose watched process still runs: one claim,

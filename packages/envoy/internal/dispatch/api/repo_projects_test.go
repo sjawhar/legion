@@ -46,31 +46,93 @@ func TestRepoProjectSettingsUpsertListAndDelete(t *testing.T) {
 		t.Fatalf("mappings after delete: got %#v", got)
 	}
 
-	forbidden := agentRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
-		"project": "CORE",
-	}, "agent-token")
-	if forbidden.Code != http.StatusForbidden {
-		t.Fatalf("agent upsert: status=%d body=%s", forbidden.Code, forbidden.Body.String())
-	}
-
 	missingProject := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/missing", map[string]string{
 		"project": "MISSING",
 	}, "alice")
 	if missingProject.Code != http.StatusNotFound {
 		t.Fatalf("upsert missing project: status=%d body=%s", missingProject.Code, missingProject.Body.String())
 	}
+}
 
-	for _, request := range []struct {
-		method string
-		target string
-	}{
-		{http.MethodGet, "/api/v1/settings/repo-projects"},
-		{http.MethodDelete, "/api/v1/settings/repo-projects/owner/repo"},
-	} {
-		response := agentRequest(t, handler, request.method, request.target, nil, "agent-token")
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("agent %s: status=%d body=%s", request.target, response.Code, response.Body.String())
-		}
+func TestAgentListsRepoProjectSettings(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "CORE",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("seed repository project mapping: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := agentRequest(t, handler, http.MethodGet, "/api/v1/settings/repo-projects", nil, "agent-token")
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent list repository projects: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := decodeBody[[]repoProjectResponse](t, response); len(got) != 1 || got[0] != (repoProjectResponse{Repo: "owner/repo", Project: "CORE"}) {
+		t.Fatalf("agent listed mappings: got %#v", got)
+	}
+}
+
+func TestAgentPutsRepoProjectSettingsWithItsActor(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := agentRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]any{
+		"project": "CORE",
+		"actor":   map[string]string{"kind": "session", "id": "agent-repo-project-put"},
+	}, "agent-token")
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent upsert repository project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var actorID string
+	if err := database.Pool.QueryRow(t.Context(), `
+		select created_by->>'id' from repo_projects where repo = 'owner/repo'
+	`).Scan(&actorID); err != nil {
+		t.Fatalf("read repository project actor: %v", err)
+	}
+	if actorID != "agent-repo-project-put" {
+		t.Fatalf("repository project actor = %q, want agent-repo-project-put", actorID)
+	}
+}
+
+func TestAgentDeletesRepoProjectSettingsWithItsActor(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "CORE",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("seed repository project mapping: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := agentRequest(t, handler, http.MethodDelete, "/api/v1/settings/repo-projects/owner/repo", map[string]any{
+		"actor": map[string]string{"kind": "session", "id": "agent-repo-project-delete"},
+	}, "agent-token")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("agent delete repository project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var actorID string
+	if err := database.Pool.QueryRow(t.Context(), `
+		select actor->>'id'
+		from events
+		where type = 'settings.repo_project.updated' and payload->>'deleted' = 'true'
+		order by id desc
+		limit 1
+	`).Scan(&actorID); err != nil {
+		t.Fatalf("read repository project deletion actor: %v", err)
+	}
+	if actorID != "agent-repo-project-delete" {
+		t.Fatalf("repository project deletion actor = %q, want agent-repo-project-delete", actorID)
 	}
 }
 
