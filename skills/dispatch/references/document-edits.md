@@ -200,6 +200,6 @@ an existing paragraph is the question that should become a decision.
 
 An ask block has two ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and
 taken bare by `move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after`
-anchors), and the ask id, which `dispatch open-asks`, the dashboard's `?ask=` link, `dispatch read`
-and `dispatch comment --reply-to-ask` use. They differ; `dispatch://KEY/ask/<block-id>` answers
-`not found`.
+anchors), and the ask id, which `dispatch open-asks`, the dashboard's ask links (`/asks/<id>`,
+`?ask=`), `dispatch read` and `dispatch comment --reply-to-ask` use. They differ;
+`dispatch://KEY/ask/<block-id>` answers `not found`.

@@ -436,6 +436,8 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "comment.created": [
     event("comment.created", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
     event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }),
+    // A reply on a project document's ask: the replier's answers page lists it.
+    event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }, documentOwner),
     event("comment.created", { id: "comment-1", anchor: null }, documentOwner),
     // A comment that replies to no ask but cites one: the Inbox row carrying that ask's count
     // moves, so the subtraction cannot apply, and only that ask's rows refresh.
@@ -610,6 +612,18 @@ function rollupAdditions(incoming: Event): unknown[][] {
   return [];
 }
 
+/** The person's answers page (`["me", "answers"]`) lists every answer and every reply on an ask,
+ *  so the two events that write one refresh it; the query exists only while the page is open. */
+function answersPageAdditions(incoming: Event): unknown[][] {
+  if (incoming.type === "ask.answered") {
+    return [["me", "answers"]];
+  }
+  if (incoming.type === "comment.created" && mainPayloadString(incoming, "ask_id") !== undefined) {
+    return [["me", "answers"]];
+  }
+  return [];
+}
+
 /** The targets the server named on this event; an event from before the field carries none. */
 function changedTargets(incoming: Event): { [key: string]: unknown }[] {
   const payload: unknown = incoming.payload;
@@ -661,7 +675,7 @@ test.each(
   const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
   // The rows a cited node's count sits on are appended once: a key the baseline already
   // refreshes is not repeated, which is what puts the Inbox back after the subtraction.
-  const base = [...kept, ...rollupAdditions(incoming)];
+  const base = [...kept, ...rollupAdditions(incoming), ...answersPageAdditions(incoming)];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
   // Which rows refresh is the contract; the order they are queued in and whether a key is

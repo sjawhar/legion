@@ -326,7 +326,7 @@ permission you already hold, an API that replaces the click. One ask per item, `
 when work is stopped on it; while it is open, keep working on everything that is not.
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
-answering a clarification, whose turn a reply gives), see
+answering a clarification, whose turn a reply gives, an answer the human changes), see
 [Asks after they open](skill://dispatch/references/asks.md).
 
 ## Architecture components

@@ -196,6 +196,18 @@ func (c *Conn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
+// Abort asks OMP to end its running turn and returns on OMP's answer, which it gives once the
+// agent is idle. The turn's agent_end can still follow the answer on the wire, so the TurnEnd event
+// is what says the turn is over. A refusal is a *RefusedError; every other failure is transport.
+func (c *Conn) Abort(ctx context.Context) error {
+	if err := c.Negotiate(ctx); err != nil {
+		return err
+	}
+	id := rand.Text()
+	_, err := c.call(ctx, shimwire.Abort{ID: id}, id, "")
+	return err
+}
+
 // Shutdown asks the shim to end OMP: SIGTERM, then SIGKILL once the shim's grace runs out. The
 // shim acts on the frame itself and answers nothing (internal/shim); whether the process ended is
 // the runtime's to observe.

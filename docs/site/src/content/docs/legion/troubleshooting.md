@@ -185,11 +185,11 @@ legion status <KEY> backlog --config legion.yaml --operator-token-file operator-
 legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
 ```
 
-To see why the launches failed, read the pod's logs:
+To see why the launches failed, read the failed role's container log in the issue's pod:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY>
-kubectl -n legion logs <pod> -c worker
+kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
@@ -209,7 +209,7 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
   Nothing is registered before a refusal, so every later attempt refuses the same way until the
   repository is fixed. Run the commands it names from a shell in one of the tree's running pods
-  (`kubectl -n legion exec -it <pod> -c worker -- sh`).
+  (`kubectl -n legion exec -it <pod> -c architect -- sh`).
 - **The tree volume was lost.** The daemon logs
   `supervise: the tree volume was lost with the session; relaunching a fresh session`. The agent
   comes back as a new session in a new workspace, which holds `.legion/<issue>/workspace-recovered.json`

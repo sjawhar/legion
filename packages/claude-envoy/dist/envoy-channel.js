@@ -36284,6 +36284,12 @@ var askEventPayloadFields = {
   question: exports_external.string().optional(),
   options: exports_external.array(exports_external.object({ label: exports_external.string().optional() })).optional(),
   answer: exports_external.object({ selected: exports_external.array(exports_external.string()).nullish(), text: exports_external.string().nullish() }).nullish(),
+  previous_answer: exports_external.object({
+    user: exports_external.string().optional(),
+    selected: exports_external.array(exports_external.string()).nullish(),
+    text: exports_external.string().nullish(),
+    at: exports_external.string().optional()
+  }).nullish(),
   anchor: exports_external.object({
     quote: exports_external.string().optional(),
     mark_id: exports_external.string().optional(),
@@ -38625,9 +38631,15 @@ function dispatchCompact(event, comment) {
       };
       break;
     }
-    case "ask.answered":
-      record2 = { ...record2, answer: askAnswerText(ask.data.answer) };
+    case "ask.answered": {
+      const previousAnswer = ask.data.previous_answer;
+      record2 = {
+        ...record2,
+        answer: askAnswerText(ask.data.answer),
+        ...previousAnswer === null || previousAnswer === undefined ? {} : { previous_answer: askAnswerText(previousAnswer) }
+      };
       break;
+    }
     case "ask.resolved": {
       const resolved = askResolutionText(ask.data.resolution);
       record2 = resolved === undefined ? record2 : { ...record2, resolved };

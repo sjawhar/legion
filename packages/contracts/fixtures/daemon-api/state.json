@@ -43,10 +43,13 @@
             "locator": {
               "runtime": "sandbox",
               "claim": "legion-legion-legion-208-implementer",
-              "incarnation": "c41a8d3e-5b62-4f18-9d07-1e3a6c94b2f5",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
               "sandbox": {
                 "namespace": "legion",
-                "name": "legion-legion-legion-208-implementer"
+                "name": "legion-legion-legion-208",
+                "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+                "container": "implementer",
+                "generation": 5
               }
             }
           },
@@ -59,10 +62,13 @@
             "locator": {
               "runtime": "sandbox",
               "claim": "legion-legion-legion-208-planner",
-              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
               "sandbox": {
                 "namespace": "legion",
-                "name": "legion-legion-legion-208-planner"
+                "name": "legion-legion-legion-208",
+                "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+                "container": "planner",
+                "generation": 2
               }
             }
           },

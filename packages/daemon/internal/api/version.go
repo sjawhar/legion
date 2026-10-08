@@ -52,8 +52,12 @@ package api
 // controller, throws for want of `LEGION_CONTROLLER_SECRET`, and never registers, so the image probe
 // must refuse such an image rather than leave the controller's keeper relaunching it forever.
 //
-// 15: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// 15: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
+// issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
+// generation, with the incarnation `<pod uid>/<generation>`.
+//
+// 16: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
 // its shell, which the Envoy plugin puts on the pane's PATH, rather than the `dispatch_*` tools it
 // no longer registers: a daemon and a plugin from either side of that change would hand agents
 // instructions for a surface they lack.
-const DaemonAPIVersion = 15
+const DaemonAPIVersion = 16

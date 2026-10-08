@@ -226,9 +226,10 @@ review and the merge-gate sequence by the daemon's table.
 
 Retro is mandatory for every issue that passed review, before merge, and the daemon runs it: when
 the reviewer's approval ends the review round, it moves the issue to `retro` and starts the
-implementer on it, resuming the same agent from its session (a worker is suspended when its phase
-ends, never after an idle window). You start nothing for it. Never `envoy_publish` to a finished
-worker's role topic to start retro: a suspended role is not running to receive it.
+implementer on it, in the same agent's session, which stayed live after its phase ended (every
+started role stays live until its issue closes). You start nothing for it. Never `envoy_publish` to
+the implementer's role topic to start retro: the daemon's start is what records which role owns
+the task.
 
 Wait for the implementer to report its durable retro result. Retro output is
 `docs/solutions/`, the PR body content the repository's instructions derive from the pull

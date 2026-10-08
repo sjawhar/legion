@@ -207,6 +207,28 @@ describe("renderInbound dispatch events", () => {
     }
   });
 
+  test("renders a changed answer with the answer it replaced", () => {
+    const rendered = renderInbound(
+      dispatchEvent("ask.answered", {
+        ...answeredAsk,
+        answer: { ...answeredAsk.answer, selected: ["MCP"], text: null },
+        previous_answer: { ...answeredAsk.answer, user: "sami" },
+      }),
+      reader
+    );
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(decoded.envoy.dispatch).toEqual({
+      owner: "DSP-1",
+      type: "ask.answered",
+      actor: { kind: "session", id: "session-1" },
+      ask: "dispatch://DSP-1/ask/ask-1",
+      question: apiQuestion,
+      answer: "MCP",
+      previous_answer: "JSON - Use JSON HTTP.",
+    });
+  });
+
   test("preserves an anchor document in delivered ask events", () => {
     const anchorArtifact = { name: "Spec", primary: true, project: "DSP", slug: "spec" };
     const rendered = renderInbound(

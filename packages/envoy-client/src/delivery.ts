@@ -584,9 +584,17 @@ function dispatchCompact(
       };
       break;
     }
-    case "ask.answered":
-      record = { ...record, answer: askAnswerText(ask.data.answer) };
+    case "ask.answered": {
+      const previousAnswer = ask.data.previous_answer;
+      record = {
+        ...record,
+        answer: askAnswerText(ask.data.answer),
+        ...(previousAnswer === null || previousAnswer === undefined
+          ? {}
+          : { previous_answer: askAnswerText(previousAnswer) }),
+      };
       break;
+    }
     case "ask.resolved": {
       const resolved = askResolutionText(ask.data.resolution);
       record = resolved === undefined ? record : { ...record, resolved };

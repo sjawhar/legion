@@ -40,6 +40,20 @@ banner like an ask that waits on you. The Inbox says `Nothing needs you` only wh
 and no credential request. An open Inbox picks up a new request, or one that is no longer pending,
 within moments on its own - no reload needed.
 
+### Asks grouped by issue
+
+When an issue or a document has more than one ask in a section, its asks sit together under one
+header that names the issue or document and how many asks it has, for example
+`CORE-12 Release train · 3 asks`. The group sits where that issue's first ask in the section would,
+so the order between issues is unchanged. An issue with one ask in a section has no header.
+
+When the same issue also has asks in another section, the header ends with a link such as
+`2 more waiting on agents` or `1 more later`. Choose it to jump to those asks, opening **Later**
+first if it is folded. The headers are labels only: `j` and `k` move from ask to ask.
+
+The list does not move under a moving pointer. If the Inbox refreshes while your pointer travels
+across it, the rows stay put until the pointer rests, leaves the list, or you click.
+
 ### Mine and Everyone
 
 Every issue has an assignee: the person who answers its asks. The **Mine · Everyone** switch picks
@@ -96,6 +110,31 @@ the issue's Conversation tab.
 If the agent edits the question while you are answering, the card loads the new wording, keeps your
 text, and clears your pick. Pick again so your answer matches the question you read. If someone
 answered or closed the ask before you, the card says so and offers no retry.
+
+### Changing your answer
+
+An answer you gave stays yours to change. Its card shows **Change answer**, to you and nobody
+else. Choose it and the form opens with your current pick and note filled in; change them and
+choose **Save answer**, or **Cancel** to keep the answer you had. Approvals have no Change answer:
+record a new review on the document instead.
+
+The agent that asked receives the new answer as it received the first, with the answer it
+replaces. Every earlier answer stays on the ask: the card reads `Changed <time>` and **Show 1
+earlier answer** lists the earlier ones, oldest first. In a document decision, the decision block
+is rewritten with the new answer.
+
+If someone changed the answer after you opened the card, Dispatch keeps theirs and shows it, so
+you can decide again from the current answer.
+
+### Answered by you
+
+**Answered by you**, beside the Inbox heading, opens a page of every answer you gave and every
+reply you wrote on an ask, newest first. Each row shows when, the issue or document, the question,
+and your answer or reply. **Open** takes you to the ask: an ask on a document opens that document
+with the ask selected, and any other opens its turn in the issue's Conversation. An answer that is
+no longer the ask's current one reads **Changed since**. Your current answers have **Change
+answer**, which opens the ask's card under the row; after you save, the new answer heads the list
+and the card stays open with both answers.
 
 ### Ask back
 

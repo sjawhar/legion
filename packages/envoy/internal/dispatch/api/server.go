@@ -629,6 +629,20 @@ func (s *server) requireActor(w http.ResponseWriter, r *http.Request, supplied *
 	return actor, true
 }
 
+// decodeOptionalJSON decodes the request body into dst when the request carries one, so a route
+// whose body is optional (a cookie caller sends none; a bearer names its session in `actor`)
+// accepts both. It writes the decode error and returns false on a malformed body.
+func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	if err := decodeJSON(r, dst); err != nil {
+		s.writeHandlerError(w, err)
+		return false
+	}
+	return true
+}
+
 func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, present, err := s.optionalActor(r)
 	if err != nil {

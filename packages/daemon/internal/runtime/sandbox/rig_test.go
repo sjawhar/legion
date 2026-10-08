@@ -1,12 +1,17 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +35,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 const (
@@ -43,6 +49,8 @@ var (
 	rootToken   = claim.Token("legion-legion-legion-208-architect")
 	workerToken = claim.Token("legion-legion-legion-208-tester")
 	otherToken  = claim.Token("legion-legion-legion-208-reviewer")
+	// childToken is a role of another issue of the same tree: its own issue pod.
+	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
 // testOptions are the options every test starts from: production's shape, with budgets short
@@ -51,6 +59,7 @@ func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
 		Project:      testProject,
+		Store:        newTreeStore(),
 		Image:        testImage,
 		StorageClass: "gp2",
 		TreeVolume:   resource.MustParse("20Gi"),
@@ -78,6 +87,37 @@ type staticTokens struct{}
 
 func (staticTokens) Token(_ context.Context, owner string) (string, error) {
 	return "ghs_provision_" + owner, nil
+}
+
+// treeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
+// unless closed says its cleanup confirmed, and a tree recorded sessions only when sessions says
+// so.
+type treeStore struct {
+	mu               sync.Mutex
+	closed, sessions map[string]bool
+}
+
+func newTreeStore() *treeStore {
+	return &treeStore{closed: map[string]bool{}, sessions: map[string]bool{}}
+}
+
+func (s *treeStore) TreeHasSessions(_ context.Context, _, tree string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[tree], nil
+}
+
+func (s *treeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed[tree], nil
+}
+
+// close records tree's cleanup as confirmed: what the tree left behind is then an orphan.
+func (s *treeStore) close(tree string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed[tree] = true
 }
 
 // testSpec is a launch of the claim on the tree, with its prompt files under dir.
@@ -113,6 +153,10 @@ func workerSpec(t *testing.T) runtime.SpawnSpec {
 	return testSpec(t, workerToken, claim.RoleTester, testTree)
 }
 
+func childSpec(t *testing.T) runtime.SpawnSpec {
+	return testSpec(t, childToken, claim.RoleImplementer, "LEGION-209")
+}
+
 // action is one API request either fake saw, in the one order both saw them.
 type action struct {
 	verb, resource, subresource, name string
@@ -142,6 +186,8 @@ type rig struct {
 	kube  *kubefake.Clientset
 	conns *fake.Conns
 	now   atomic.Pointer[time.Time]
+	// store is the runtime's in-memory durable state, unless an option handed it another.
+	store *treeStore
 
 	mu      sync.Mutex
 	actions []action
@@ -157,6 +203,12 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
+
+	// commands are what each role's fake launcher was sent, in order; wanted are the roles whose
+	// fake launcher connects again whenever their issue gets a new pod.
+	commandsMu sync.Mutex
+	commands   map[claim.Token][]shimwire.Frame
+	wanted     map[claim.Token]bool
 }
 
 type rigOption func(*rig, *Options)
@@ -244,6 +296,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	for _, option := range options {
 		option(g, &opts)
 	}
+	g.store, _ = opts.Store.(*treeStore)
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -282,15 +335,27 @@ func newDynamic(t *testing.T, objects ...*unstructured.Unstructured) *dynamicfak
 }
 
 // generationTracker stores what a Sandbox patch leaves as the API server does for a CRD with a
-// status subresource, as the Sandbox's is: with metadata.generation bumped, in the same write,
-// hence one watch event. The fake's tracker leaves the generation alone.
+// status subresource, as the Sandbox's is: with metadata.generation bumped when the patch changed
+// its spec, in the same write, hence one watch event, and left alone when it changed only metadata
+// (an annotation). The fake's tracker leaves the generation alone.
 type generationTracker struct{ k8stesting.ObjectTracker }
 
 func (t generationTracker) Patch(gvr schema.GroupVersionResource, obj k8sruntime.Object, ns string, opts ...metav1.PatchOptions) error {
-	if object, err := metaOf(obj); err == nil && gvr == sandboxGVR {
+	if object, err := metaOf(obj); err == nil && gvr == sandboxGVR && t.specChanged(gvr, obj, ns, object.GetName()) {
 		object.SetGeneration(object.GetGeneration() + 1)
 	}
 	return t.ObjectTracker.Patch(gvr, obj, ns, opts...)
+}
+
+// specChanged is whether obj, a patch's result, holds another spec than the stored object.
+func (t generationTracker) specChanged(gvr schema.GroupVersionResource, obj k8sruntime.Object, ns, name string) bool {
+	stored, err := t.ObjectTracker.Get(gvr, ns, name)
+	if err != nil {
+		return true
+	}
+	before, isBefore := stored.(*unstructured.Unstructured)
+	after, isAfter := obj.(*unstructured.Unstructured)
+	return !isBefore || !isAfter || !reflect.DeepEqual(before.Object["spec"], after.Object["spec"])
 }
 
 // advance moves the runtime's clock.
@@ -423,21 +488,64 @@ func (g *rig) createPod(s *sandbox) {
 	}
 	if g.autoStart.Load() {
 		pod.Spec.NodeName = "ip-192-0-2-7"
-		pod.Status = runningStatus()
+		pod.Status = runningStatusOf(pod.Spec)
 	}
+	// A new pod's role launchers are new processes, bound to its exact UID. The runtime waits
+	// for their first state instead of treating the previous pod's connection as current.
+	g.commandsMu.Lock()
+	var reconnect []claim.Token
+	for token := range g.wanted {
+		if SandboxName(token) == s.Name {
+			reconnect = append(reconnect, token)
+		}
+	}
+	g.commandsMu.Unlock()
 	_ = g.kube.Tracker().Add(pod)
+	for _, token := range reconnect {
+		g.connect(token)
+	}
 }
 
+// runningStatus is a Running issue pod's status: workspace-init done and every role launcher
+// running.
 func runningStatus() corev1.PodStatus {
-	return corev1.PodStatus{
+	containers := make([]corev1.Container, 0, len(claim.Roles))
+	for _, role := range claim.Roles {
+		containers = append(containers, corev1.Container{Name: string(role)})
+	}
+	return runningStatusOf(corev1.PodSpec{Containers: containers})
+}
+
+// runningStatusOf is the status of a pod of spec once Running: workspace-init done and each of its
+// containers running.
+func runningStatusOf(spec corev1.PodSpec) corev1.PodStatus {
+	status := corev1.PodStatus{
 		Phase: corev1.PodRunning,
 		InitContainerStatuses: []corev1.ContainerStatus{{
 			Name: initContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
 		}},
-		ContainerStatuses: []corev1.ContainerStatus{{
-			Name: mainContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}},
 	}
+	for _, c := range spec.Containers {
+		status.ContainerStatuses = append(status.ContainerStatuses, corev1.ContainerStatus{
+			Name: c.Name, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		})
+	}
+	return status
+}
+
+// reportLauncher registers a connected launcher for token reporting state, without a connection
+// to drive: the observation mapping reads only the reported state.
+func (g *rig) reportLauncher(token claim.Token, state shimwire.LauncherState) {
+	g.t.Helper()
+	pod := g.pod(SandboxName(token))
+	if pod == nil {
+		g.t.Fatal("cannot report launcher state without its pod")
+	}
+	s := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	s.mu.Lock()
+	s.state = state
+	close(s.ready)
+	s.mu.Unlock()
 }
 
 // pod is the pod named name in the tracker, or nil.
@@ -495,11 +603,112 @@ func (g *rig) eventually(what string, ok func() bool) {
 // spawn launches spec and fails the test on an error.
 func (g *rig) spawn(spec runtime.SpawnSpec) runtime.Locator {
 	g.t.Helper()
+	g.launcher(spec.Claim)
 	loc, err := g.r.Spawn(g.ctx, spec)
 	if err != nil {
 		g.t.Fatalf("spawn %s: %v", spec.Claim, err)
 	}
 	return loc
+}
+
+// launcher is the test rig's role-private launcher connection. It models only the launcher
+// protocol — one child generation at a time, a stop of another generation refused — and records
+// every command: child shims and their agent events remain the fake Conns this rig already owns.
+func (g *rig) launcher(token claim.Token) {
+	g.t.Helper()
+	g.commandsMu.Lock()
+	if g.wanted == nil {
+		g.wanted = map[claim.Token]bool{}
+	}
+	g.wanted[token] = true
+	g.commandsMu.Unlock()
+	g.r.launchers.mu.Lock()
+	_, exists := g.r.launchers.sessions[token]
+	g.r.launchers.mu.Unlock()
+	if exists || g.pod(SandboxName(token)) == nil {
+		return
+	}
+	g.connect(token)
+}
+
+// connect is one fake launcher process's connection for token, replacing any earlier one.
+func (g *rig) connect(token claim.Token) { g.connectRunning(token, 0) }
+
+// connectRunning is a fake launcher connection for token whose launcher already runs generation
+// running (0 for none), as one that survived a daemon restart reports its child at once.
+func (g *rig) connectRunning(token claim.Token, running uint64) {
+	server, client := net.Pipe()
+	pod := g.pod(SandboxName(token))
+	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	g.t.Cleanup(func() { _ = client.Close() })
+	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
+	go func() {
+		writer := shimwire.NewWriter(client)
+		first := shimwire.LauncherState{}
+		if running != 0 {
+			first.Child = &shimwire.LauncherChild{Generation: running, PID: 42}
+		}
+		_ = writer.WriteFrame(first)
+		reader := bufio.NewReader(client)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			frame, err := shimwire.Decode(line)
+			if err != nil {
+				return
+			}
+			g.commandsMu.Lock()
+			if g.commands == nil {
+				g.commands = map[claim.Token][]shimwire.Frame{}
+			}
+			g.commands[token] = append(g.commands[token], frame)
+			g.commandsMu.Unlock()
+			switch command := frame.(type) {
+			case shimwire.LauncherStart:
+				if running != 0 {
+					_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d is still running", running)})
+					continue
+				}
+				running = command.Generation
+				_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation})
+				_ = writer.WriteFrame(shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: command.Generation, PID: 42}})
+			case shimwire.LauncherStop:
+				if running != 0 && running != command.Generation {
+					_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("generation %d is running, not %d", running, command.Generation)})
+					continue
+				}
+				stopped := running
+				running = 0
+				_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, OK: true})
+				state := shimwire.LauncherState{}
+				if stopped != 0 {
+					state.LastExit = &shimwire.LauncherExit{Generation: stopped, Code: 143, Signal: "terminated"}
+				}
+				_ = writer.WriteFrame(state)
+			}
+		}
+	}()
+}
+
+// issueLaunchers connects a fake launcher for every role of token's issue.
+func (g *rig) issueLaunchers(token claim.Token) {
+	g.t.Helper()
+	issue, _, ok := token.Cut()
+	if !ok {
+		g.t.Fatalf("%s names no role", token)
+	}
+	for _, sibling := range claim.Roles {
+		g.launcher(claim.Token(issue + "-" + string(sibling)))
+	}
+}
+
+// sent is every command token's fake launcher received.
+func (g *rig) sent(token claim.Token) []shimwire.Frame {
+	g.commandsMu.Lock()
+	defer g.commandsMu.Unlock()
+	return slices.Clone(g.commands[token])
 }
 
 // sandboxObject is a Sandbox as the API would hold it, for a test's starting state.
@@ -535,27 +744,56 @@ func podObject(name, uid, ownerUID string, labels map[string]string, status core
 	return pod
 }
 
-// claimLabels are the labels a claim's objects carry.
-func claimLabels(role claim.Role) map[string]string {
-	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree, labelRole: string(role)}
+// claimLabels are the labels an issue's shared Sandbox carries.
+func claimLabels(_ claim.Role) map[string]string {
+	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
 }
 
-// sandboxLocator is a recorded locator of the claim at uid.
+// sandboxLocator is a recorded role process locator in its claim's pod.
 func sandboxLocator(token claim.Token, uid string) runtime.Locator {
+	role, ok := token.Role()
+	if !ok {
+		panic("test token has no role")
+	}
+	container := string(role)
 	return runtime.Locator{
-		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: uid,
-		Sandbox: &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token)},
+		Runtime:     runtime.RuntimeSandbox,
+		Claim:       token,
+		Incarnation: runtime.SandboxIncarnation(uid, 1),
+		Sandbox:     &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token), PodUID: uid, Container: container, Generation: 1},
 	}
 }
 
-// patchOps decodes a JSON patch body.
+// patchOps decodes a JSON patch body. A role's address record (recordAddresses) is the one merge
+// patch the runtime sends a Sandbox, and holds no operations.
 func patchOps(t *testing.T, body string) []map[string]any {
 	t.Helper()
+	if addressRecordPatch(body) {
+		return nil
+	}
 	var ops []map[string]any
 	if err := json.Unmarshal([]byte(body), &ops); err != nil {
 		t.Fatalf("patch %q: %v", body, err)
 	}
 	return ops
+}
+
+// addressRecordPatch is whether a Sandbox patch body is a role's address record alone: a merge
+// patch of metadata, which changes nothing of the pod.
+func addressRecordPatch(body string) bool {
+	var patch struct {
+		Metadata struct {
+			UID         string            `json:"uid"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(body), &patch); err != nil || len(patch.Metadata.Annotations) != 1 {
+		return false
+	}
+	for key := range patch.Metadata.Annotations {
+		return strings.HasPrefix(key, "legion.dev/addresses-")
+	}
+	return false
 }
 
 // modePatched reports whether a patch body sets operatingMode to mode.

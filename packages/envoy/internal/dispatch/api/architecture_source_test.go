@@ -280,6 +280,81 @@ func TestArchitectureSourcePutGetListAndDelete(t *testing.T) {
 	}
 }
 
+func TestAgentListsArchitectureSources(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"legion/arch": "read"}}
+	handler, _ := newArchitectureSourceServer(t, fake)
+	createTestProject(t, handler, "CORE")
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/architecture-source", map[string]string{
+		"repo": "legion/arch", "branch": "main",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("seed architecture source: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := agentRequest(t, handler, http.MethodGet, "/api/v1/settings/architecture-sources", nil, "agent-token")
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent list architecture sources: status=%d body=%s", response.Code, response.Body.String())
+	}
+	got := decodeBody[[]architectureSourceResponse](t, response)
+	if len(got) != 1 || got[0].Project != "CORE" || got[0].Repo != "legion/arch" {
+		t.Fatalf("agent listed architecture sources: got %#v", got)
+	}
+}
+
+func TestAgentPutsArchitectureSourceWithItsActor(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"legion/arch": "read"}}
+	handler, database := newArchitectureSourceServer(t, fake)
+	createTestProject(t, handler, "CORE")
+
+	response := agentRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/architecture-source", map[string]any{
+		"repo":   "legion/arch",
+		"branch": "main",
+		"actor":  map[string]string{"kind": "session", "id": "agent-architecture-put"},
+	}, "agent-token")
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent put architecture source: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var actorID string
+	if err := database.Pool.QueryRow(t.Context(), `
+		select created_by->>'id' from architecture_sources where project_key = 'CORE'
+	`).Scan(&actorID); err != nil {
+		t.Fatalf("read architecture source actor: %v", err)
+	}
+	if actorID != "agent-architecture-put" {
+		t.Fatalf("architecture source actor = %q, want agent-architecture-put", actorID)
+	}
+}
+
+func TestAgentDeletesArchitectureSourceWithItsActor(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"legion/arch": "read"}}
+	handler, database := newArchitectureSourceServer(t, fake)
+	createTestProject(t, handler, "CORE")
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/architecture-source", map[string]string{
+		"repo": "legion/arch", "branch": "main",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("seed architecture source: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := agentRequest(t, handler, http.MethodDelete, "/api/v1/projects/CORE/architecture-source", map[string]any{
+		"actor": map[string]string{"kind": "session", "id": "agent-architecture-delete"},
+	}, "agent-token")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("agent delete architecture source: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var actorID string
+	if err := database.Pool.QueryRow(t.Context(), `
+		select actor->>'id'
+		from events
+		where type = 'settings.architecture_source.updated' and payload->>'deleted' = 'true'
+		order by id desc
+		limit 1
+	`).Scan(&actorID); err != nil {
+		t.Fatalf("read architecture source deletion actor: %v", err)
+	}
+	if actorID != "agent-architecture-delete" {
+		t.Fatalf("architecture source deletion actor = %q, want agent-architecture-delete", actorID)
+	}
+}
+
 func TestArchitectureSourceAccessFailuresAnswer409(t *testing.T) {
 	fake := &fakeGitHubApp{installations: map[string]string{"legion/noread": "none"}}
 	handler, _ := newArchitectureSourceServer(t, fake)
