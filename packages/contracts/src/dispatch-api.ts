@@ -671,6 +671,8 @@ export interface InboxThread {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
+  /** Every answer, oldest first; always empty on an Inbox row because the row is open. */
+  readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
 }
@@ -722,7 +724,9 @@ export type OpenAskOwner =
 
 export interface OpenAsk {
   readonly id: string;
-  /** Relative Dispatch deep link to the ask's owner. */
+  /** Relative Dispatch deep link to the ask itself: `/issues/KEY/asks/ID` for an issue ask (the
+   *  item route, which selects an anchored ask on its document and focuses an unanchored one's
+   *  Conversation turn), `/projects/PROJECT/documents/SLUG?ask=ID` for a document ask. */
   readonly ref: string;
   readonly question: string;
   readonly kind: AskKind;
@@ -747,6 +751,31 @@ export interface OpenAsksResponse {
   readonly waiting_on_human: number;
   readonly waiting_on_agent: number;
   readonly asks: OpenAsk[];
+}
+
+/** One answer or ask reply written by the caller on `GET /api/v1/me/answers`. */
+export interface MyAnswerRow {
+  readonly kind: "answer" | "reply";
+  readonly at: string;
+  readonly ask_id: string;
+  /** Relative Dispatch deep link to the ask itself, as on `OpenAsk.ref`. */
+  readonly ref: string;
+  readonly question: string;
+  readonly ask_kind: AskKind;
+  readonly ask_state: Ask["state"];
+  readonly edited_at: string | null;
+  readonly owner: OpenAskOwner;
+  readonly answer?: AskAnswer;
+  /** True when an answer row's answer is still the ask's current answer. */
+  readonly current: boolean;
+  readonly reply?: { readonly id: string; readonly body: string };
+}
+
+export interface MyAnswersResponse {
+  readonly rows: MyAnswerRow[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
 }
 
 export interface AskOption {
@@ -795,6 +824,12 @@ export type IssueEventPayload = Issue & ReferenceChangesPayload;
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
  *  graph. */
 export type AskEventPayload = Ask & ReferenceChangesPayload;
+
+/** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
+ *  one; the asker and every follower receive it as they received the first. */
+export type AskAnsweredEventPayload = AskEventPayload & {
+  readonly previous_answer?: AskAnswer;
+};
 
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
@@ -1611,7 +1646,10 @@ export type DispatchEvent =
       readonly type: "ask.handed_back";
       readonly payload: AskEventPayload;
     })
-  | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: AskEventPayload })
+  | (DispatchEventBase & {
+      readonly type: "ask.answered";
+      readonly payload: AskAnsweredEventPayload;
+    })
   | (DispatchEventBase & {
       readonly type: "ask.resolved";
       readonly payload: AskEventPayload & {
@@ -1850,6 +1888,8 @@ export interface AnswerAskInput {
   readonly text?: string;
   /** The ask's `edited_at` value when the human reviewed the current wording. */
   readonly expected_edited_at: string | null;
+  /** The current answer's `at` when its answerer changes it; absent for a first answer. */
+  readonly expected_answer_at?: string | null;
 }
 
 export interface ResolveAskInput {
@@ -1958,6 +1998,8 @@ export interface AskRead {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
+  /** Every answer, oldest first; a restored document block does not repeat its answer here. */
+  readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
 }
@@ -2193,6 +2235,14 @@ const askEventPayloadFields = {
   options: z.array(z.object({ label: z.string().optional() })).optional(),
   answer: z
     .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
+    .nullish(),
+  previous_answer: z
+    .object({
+      user: z.string().optional(),
+      selected: z.array(z.string()).nullish(),
+      text: z.string().nullish(),
+      at: z.string().optional(),
+    })
     .nullish(),
   anchor: z
     .object({

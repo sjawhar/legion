@@ -113,7 +113,7 @@ function reply(body: string): Comment {
 }
 
 function threadRead(of: Ask, replies: Comment[] = []): AskRead {
-  return { ask: of, edits: [], followers: [], replies };
+  return { ask: of, answers: [], edits: [], followers: [], replies };
 }
 
 // The block reaches the API only through the shared card; each test says what the server answers.
