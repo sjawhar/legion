@@ -1,47 +1,62 @@
 {
-  "codeHead": "c88a350269562dea2e671dba89ca543282038e81",
-  "completed": "2026-10-08T07:35:35.677602725Z",
+  "codeHead": "57cf6a6269daa3959d65be00a089ea1eb2a3c00b",
+  "completed": "2026-10-08T08:49:34.159119396Z",
   "critical": 0,
   "important": 1,
   "issue": "LEGION-578",
   "keyFindings": [
     {
-      "description": "An unchanged consumer breaks: the stand-in daemon builds its GET /legion/v1/state document with a literal and parses it at module load with LegionStateResponse.parse; contract 15 makes `capabilities` a required member of that strict object (packages/contracts/src/legion-api.ts:233-241), the literal has none, so the parse throws before the stand-in binds its port. Reproduced with the repo's own schema from packages/pi-legion (safeParse → invalid_type at path capabilities; with `capabilities: []` it parses). Breaks the grant rig (scripts/grant-rig/README.md procedure) and the skill-scenario rig (scripts/skill-scenarios/rig.sh:673), neither of which CI starts (run.test.ts imports helpers only). Fix: add `capabilities: [],` to the STATE literal — the daemon's MarshalJSON emits [] for an empty report (internal/api/state.go).",
-      "file": "packages/pi-legion/scripts/grant-rig/daemon-standin.ts:53",
+      "description": "The capability report misstates a worker capability: the `codegraph` row is an image row whose check proves the CLI on PATH and @bopstack/pi-codegraph enabled in the profile lock, so the probe table prints `capability codegraph: present` and `legion state --json` renders `codegraph: present (checked by the daemon's probe of the worker image, which passed)` — while every worker pod's agent is launched `--no-extensions --extension \u003cenvoy\u003e --extension \u003clegion\u003e` (runtime/sandbox/manifest.go:275; bootgate.go:280 probes the same lane), so the profile plugin never loads and no worker has a codegraph tool until LEGION-629 turns discovery on (the spec's own audit measured this: 'no pod has the tool'). A report whose job is to name what a worker lacks instead of the worker finding out mid-task cannot say present for that row. Fix, implementer's choice of shape: the row's probe line and its `legion state` row must say what was proved (the CLI and the enabled plugin in the image) and that a pod's agent gets the tool only once the pod's launch loads profile plugins (dispatch://LEGION-629), and must not read as a worker capability already present — e.g. a status other than present for the worker-facing row, or a detail that carries the dependency on both surfaces, with the docs/kubernetes.md row and the table's rendering tests following. The lasting fix (discovery on / a third --extension) stays LEGION-629's.",
+      "file": "packages/daemon/internal/capabilities/capabilities.go:70, image.go:218-236, deployment.go:141-150",
       "severity": "important"
     },
     {
-      "description": "Both say the image build's OK line reads `model-fallback=off`; it reads `on`: Oh My Pi 18.6.0 defaults retry.modelFallback to true and the build runs with no operator overlay (Worker Image runs 37736231904 and 37737281790 printed `model-fallback=on`; the tester's documentationFeedback). Carry the wording fix in the corrective push.",
-      "file": "docs/kubernetes.md:130, packages/daemon/docker/worker.Dockerfile:566",
+      "description": "A live row renders as `checked live against a running pod` and the docs say the live rows 'are proved against a running pod', but nothing in this diff runs a live check: `live` is a site label. For repository-extensions the capability is disabled at this head by the same --no-extensions. Word it as the pending check it is ('to be proved by a live check against a running pod (LEGION-629)') and change the docs sentence.",
+      "file": "packages/daemon/internal/capabilities/deployment.go:153-159, docs/kubernetes.md:691-693",
       "severity": "minor"
     },
     {
-      "description": "`legion state` is said to carry the capability report; the text renderer (cmd/legion/main.go runState) prints no capabilities — only `legion state --json` does. Say `--json`.",
-      "file": "AGENTS.md:61",
+      "description": "57cf6a62's comments (at the architect's request) describe LEGION-629's lane as present fact — plugins never linked into the profile, discovery on, an OK line carrying extensions=discovered — while this head links both plugins at step 3 (491-492), probes with --no-extensions and prints no extensions mark; the file contradicts itself and docs/kubernetes.md:130. Nothing machine-reads the comments. The architect chose it to keep #1848's hunk conflict-free; recorded in Not proven / risk. A future-tense clause ('after LEGION-629 (#1848): …') would be accurate and equally conflict-free — the architect's call.",
+      "file": "packages/daemon/docker/worker.Dockerfile:14-16, 30, 556, 568",
       "severity": "minor"
     },
     {
-      "description": "No `## Contract change census` for a diff that adds refusals and a required field at process boundaries: api.State.capabilities required by the strict plugin reader (rolled out by the daemonApiVersion 15 bump both sides), the probe pod's refusal of an OK line without capabilities=checked (probe.go:509), legion probe-image exit 1 on a missing image capability (the Worker Image build gate), capabilities.decided.\u003cunknown\u003e refused (config.go:928), bootprobe.OKLine and sandbox.ProbeImage signatures. The reviewer enumerated the consumers (review body); the implementer writes the census into the body with the search commands so the next round re-runs them.",
-      "file": "pull request body",
+      "description": "Still says `legion.daemonApiVersion` is 'currently 14' after the bump to 15; nothing pins the README. Say 15 or drop the number.",
+      "file": "packages/pi-legion/README.md:20",
+      "severity": "minor"
+    },
+    {
+      "description": "The new comment says maxDetail caps a capability line's detail; it caps only a command's quoted output inside the detail (image.go:66-68, oneLine), so the longest line is ~450-500 bytes and 100 of them ~50 KB — still inside the 64 KiB LimitReader, and a passing pod's log is ~21 lines, so the conclusion holds; reword the arithmetic.",
+      "file": "packages/daemon/internal/runtime/sandbox/probe.go:47-50",
+      "severity": "minor"
+    },
+    {
+      "description": "'compile-time' is wrong for the three hold_test.go sites that compared []record.OutboxPayload with slices.Equal: an interface type is comparable, so they compiled and would panic at run time; CI's test run is the check there. Reword.",
+      "file": "pull request body, Contract change census row 5",
       "severity": "minor"
     }
   ],
-  "minor": 3,
+  "minor": 5,
   "phase": "review",
-  "reviewedHead": "d067eef71910ccdfb9bff70c7eb9d52867e56d08",
-  "reviewerSmoke": "branch binary built in this pod (go build ./cmd/legion at d067eef7, go vet clean): probe-image on this pod's pre-change image from a scratch dir printed the 19-row table and exited 1 naming eval-python, browser, lsp, toolchain; legion start --check-config on the shipped example → Config OK alone, exit 0; without the merger's resources → the resource-limits open line, exit 0; capabilities.decided.nonsense → refused naming secrets, model-fallback or resource-limits, exit 1; go test ./internal/{capabilities,bootprobe,ompdirs,api,record} ok (config's TestLoadAcceptsPrivateKeyCommandWithUnpaddedBase64Output fails only for want of python3 on this pod's image, as recorded); Oh My Pi 18.6.0's bundle read: PUPPETEER_EXECUTABLE_PATH first, else google-chrome-stable, google-chrome, chromium, chromium-browser, chrome on PATH before any download — the image.go browser row's order holds; the Dockerfile's GO_SHA256 matches the go.dev tarball downloaded here",
-  "round": 1,
+  "previousRound": {
+    "finding": "daemon-standin.ts state literal lacked capabilities — fixed in f5037e0e and verified: the stand-in parses and listens; three wording threads accepted on GitHub (4216703476, 4216703878, 4216704175)",
+    "head": "4aac2a501f4cbbefd1995b8cd0c5114c91feed1c",
+    "review": 5453289786
+  },
+  "reviewedHead": "a14b713a3231b4cf0214830e0dfb9f069bac5cde",
+  "round": 2,
   "schemaVersion": 1,
-  "securityLine": "Security: supply-chain — Go 1.26.8 pinned by ARG + SHA-256 d0f743b3… checked with the other archives before unpack (worker.Dockerfile:62, 282-285; re-downloaded here, sum matches); gopls go install golang.org/x/tools/gopls@v0.23.0 in golang:1.26.8-alpine (worker.Dockerfile:218); typescript 5.9.3 / typescript-language-server 6.0.1 / pyright 1.1.414 exact npm pins with registry integrity, no lockfile, no --ignore-scripts (worker.Dockerfile:82-84, 293 — hardening); chromium, python3, curl, wget from trixie, the suite as pin (worker.Dockerfile:431); no Action or base-image digest changed. untrusted-input — the probe runs binaries resolved from the pod's env (PATH, PUPPETEER_EXECUTABLE_PATH, the operator's runtime.kubernetes.pod.env) with exec, no shell on the value (image.go:181-199, 381-401), quoted output capped at 300 chars (image.go:68); Launch is shell-parsed under sh -c (image.go:373-375) from the probe's own --omp/LEGION_OMP_PATH, no outside party. sandbox — probe log tail 50→100 lines (probe.go:48) under the same 64 KiB cap (probe.go:439); no manifest, capability or network policy changed. authz — capabilities.decided is a new key of the operator's own legion.yaml (config.go:928-971); no route, grant or tool changed. agent-def — skills/legion-controller/SKILL.md and AGENTS.md gain report-the-gap text read against the code; neither touches a reviewer or tester prompt. No secret, prompt or transport surface.",
+  "securityLine": "Security: authz — new refusal checks (probe.go:512 the capabilities mark, config.go:928-971 an unknown or blank decision, probe_image.go:166-179 exit 1) but no authorization boundary; GET /legion/v1/state is unauthenticated before and after (api/server.go stateRoute) and its body now carries the operator's decision reasons, the broker login state word and the unreserved-role list — hardening, no new exploit path. supply-chain — Go 1.26.8 pinned by ARG + SHA-256 d0f743b3… checked before unpack (worker.Dockerfile:62, 282-285); gopls go install @v0.23.0 under golang:1.26.8-alpine; typescript 5.9.3 / typescript-language-server 6.0.1 / pyright 1.1.414 exact npm pins, no lockfile, no --ignore-scripts (worker.Dockerfile:293; on the Fast-follow line); Debian trixie packages with the suite as pin. untrusted-input — the probe execs binaries resolved from the pod's env (PATH, PUPPETEER_EXECUTABLE_PATH) with exec and no shell on the value (image.go:181-199, 381-401), output capped at 300 chars; OK-line marks anchored ^…$ with (?m) and newline-free details, so a table row cannot forge an OK line. sandbox — probe log tail 50→100 lines under the same 64 KiB cap; no manifest, capability or network policy changed. agent-def — skills/legion-controller/SKILL.md and AGENTS.md gain report-the-gap text; no reviewer or tester prompt touched. No secret, prompt or transport surface.",
   "thermonuclear": {
-    "codeQuality": "no correctness defect; structural: daemon.go 990→1089 and config.go 988→1067 lines (split daemon/capabilities.go, config/capabilities.go), bootprobe.ImageReport threaded through 21 zero returns instead of a field on bootprobe.Outcome, OpenFromConfiguration's hardcoded name list vs measure's provenance, two row types and two renderers for one table (Line/State), duplicated stub fixtures across probe_image_test.go and image_test.go, a fourth bespoke lookPath",
-    "deepReview": "no High; one Medium (daemon-standin.ts), Lows: probe log tail 100 lines under the unchanged 64 KiB front-truncating LimitReader (probe.go:48,439), the re-log of open gaps rides only a tick that queues a controller notice (admit.go:238-249) while daemon.go:627-631 and docs claim 'on change', a failed ReadModelFallback refuses the image in the probe pod where tmux reports 'not read' (probe_image.go:175-179 vs daemon.go:505-512), tmux boots WARN twice forever unless decided; hardening: npm install without --ignore-scripts and without a lockfile (worker.Dockerfile:293)",
-    "head": "d067eef71910ccdfb9bff70c7eb9d52867e56d08"
+    "codeQuality": "no code defect, no structural regression; the Dockerfile comments judged Medium documentation-correctness (contradict the file's own RUN lines, bootgate.go's --no-extensions, and docs/kubernetes.md:28-31,130); nothing (operatorpod_test.go, check-image-trigger-paths.sh, check-plugin-names.sh, install-jj/uv actions) reads the comments",
+    "deepReview": "one Medium (the codegraph row), three Low (live-row wording; the probe pod refusing on a failed ReadModelFallback, unaddressed and undocumented since round 1 — now in Not proven / risk; the Dockerfile's LEGION-629 comments), three Minor (README contract 14, probe.go arithmetic, census row 5); census searches re-run at head match the body's lists exactly; round-1 answers verified (stand-in parses; model-fallback=on wording; daemon.go/docs re-log wording; AGENTS.md --json); hardening: npm install without --ignore-scripts/lockfile (on the Fast-follow line), GET /legion/v1/state unauthenticated before and after with a wider body",
+    "head": "a14b713a3231b4cf0214830e0dfb9f069bac5cde"
   },
   "verdict": "changes_requested",
   "verifiedOnGitHub": {
-    "checks": "c88a3502: Tests 37737281734 (lint, typecheck, test), PR Title 37737281751/37738294575/37741600507, Worker Image 37737281790 build, Docs 37737281731, Legion Envoy and Contracts 37737281740 — all success; d067eef7 carries the skip-checks trailer, 0 check runs, checksVerdict green carried",
-    "proofLines": "E2E (implementer) at 00127cd3 (Worker Image run 37736231904, in-pod negative control) and E2E (tester) at c88a3502 (the published image's rootfs, PUPPETEER_EXECUTABLE_PATH negative control) both present; Stage 4a PASS at c88a3502 on sha256:f4b446c8… reported by the operator lane (dispatch://LEGION-578/comment/474f51f1-8d82-467a-ae65-e862a6128a50)",
-    "threads": "0 review threads, 0 reviews before this round"
+    "census": "re-run at a14b713a: row 1 hits legion-api.ts/.test.ts, daemon-client.ts:23,249, daemon-standin.ts:33,55,67, stage3-devbox-workflow.sh:1125; row 2 the eight files listed; row 4 the example and docs/kubernetes.md:480; row 6 the six files listed — every hit listed with a disposition",
+    "checks": "required set on main (rules/branches/main): lint, typecheck, test, pr-title. 57cf6a62: Tests 37747748246, PR Title 37747748259/37748673933, Docs 37747748271, Worker Image 37747748264 success (Legion Envoy and Contracts 37747748258 cancelled, superseded). 7f91903b (the implementer's handoff push, CI in full): Tests 37748718801, PR Title 37748718643/37749653855, Docs 37748718859, Worker Image 37748718876 success; Legion Envoy and Contracts 37748718784 still in progress on its envoy-go/dispatch jobs, none required. a14b713a carries skip-checks; checksVerdict green carried.",
+    "proofLines": "E2E (implementer) at 00127cd3 plus the round-1 stand-in proof at f5037e0e; E2E (tester) at c88a3502 plus the round-1 stand-in and plugin-client proofs at 7f91903b; both with surface, run, observation, head and negative control",
+    "threads": "3 threads, all mine, each answered Fixed in f5037e0e by the implementer and verified in the diff; each now carries my `Accepted: fixed in f5037e0e — …` as its newest comment (4216703476, 4216703878, 4216704175); 0 resolved (the implementer's threads resolve closes them)"
   }
 }
