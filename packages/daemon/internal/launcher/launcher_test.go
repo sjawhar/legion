@@ -40,7 +40,10 @@ func TestLauncherChild(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(strconv.Itoa(child.Process.Pid)+" "+seen), 0o600); err != nil {
 		os.Exit(4)
 	}
-	select {}
+	// Wait on the descendant rather than block in select{}: a goroutine parked forever with nothing
+	// else outstanding is the Go runtime's deadlock, fatal under gVisor, while a blocking wait is not.
+	_ = child.Wait()
+	os.Exit(0)
 }
 
 // rig is one launcher under test and the daemon end of its connection.
