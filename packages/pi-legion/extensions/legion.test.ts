@@ -44,6 +44,9 @@ const natsConnections: {
   /** The connection dies: every subscription's iterator ends, as nats.js ends them. */
   readonly drop: () => void;
 }[] = [];
+/** One ordered log of two kinds of event a test cares about seeing in order: `sendUserMessage`
+ * (createPi's stub pushes here too) and `subscribe:<subject>` (below). Reset in beforeEach. */
+const eventOrder: string[] = [];
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
@@ -71,6 +74,7 @@ mock.module("nats", () => ({
       isClosed: () => connection.closed,
       publish: () => undefined,
       subscribe: (subject: string) => {
+        eventOrder.push(`subscribe:${subject}`);
         connection.subjects.push(subject);
         const ended = Promise.withResolvers<void>();
         endings.push(ended.resolve);
@@ -142,6 +146,7 @@ const environmentKeys = [
   "ENVOY_NATS_URL",
   "ENVOY_URL",
   "LEGION_CONTROLLER",
+  "LEGION_CONTROLLER_START_MESSAGE",
   "LEGION_CONTROLLER_SECRET",
   "LEGION_DAEMON_URL",
   "LEGION_BOOT_TOKEN",
@@ -212,6 +217,7 @@ afterEach(async () => {
   // test's bootstrapped session would make the next test's transcript look like a subagent's.
   resetEnvoyPluginInterfaceForTests();
   natsConnections.splice(0);
+  eventOrder.length = 0;
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
@@ -245,6 +251,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
+  readonly sentUserMessages: string[];
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
   readonly title: HostTitle;
@@ -255,6 +262,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
+  const sentUserMessages: string[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
   const activeTools = ["read", "task", "wait"];
@@ -283,7 +291,15 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       discriminatedUnion: () => ({}),
     },
     sendMessage: (message) => sentMessages.push(message),
-    sendUserMessage: () => undefined,
+    sendUserMessage: (content) => {
+      if (typeof content !== "string") {
+        throw new Error(
+          "createPi's sendUserMessage stub tracks string content only; no legion.test.ts fixture call sends ContentBlock[] (images)"
+        );
+      }
+      sentUserMessages.push(content);
+      eventOrder.push("sendUserMessage");
+    },
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },
@@ -316,7 +332,17 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   // `bindEnvoy: false` lets a test bind legion.ts before envoy.ts, so the two extensions'
   // handlers for one session event run in the opposite order to the manifest's.
   if (options.bindEnvoy !== false) envoyExtension(pi as never);
-  return { commands, handlers, tools, sentMessages, entries, activeTools, title, pi };
+  return {
+    commands,
+    handlers,
+    tools,
+    sentMessages,
+    sentUserMessages,
+    entries,
+    activeTools,
+    title,
+    pi,
+  };
 }
 
 /** One SessionManager per pane, exactly as OMP hands it out: `/new` mutates the manager the
@@ -2892,6 +2918,9 @@ async function launchedController(options: {
   readonly order?: "envoy.ts" | "legion.ts";
   /** The daemon's answer to every `/legion/v1/grants`, in place of a minted grant. */
   readonly grant?: () => Response;
+  /** LEGION_CONTROLLER_START_MESSAGE, the text `legion controller start` carries for the
+   * extension to send as the session's first turn; a fixed literal unless a test says otherwise. */
+  readonly startMessage?: string;
   /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
    * replaced by `daemonProject`: `state.json` unless a test names another. */
   readonly stateFixture?: string;
@@ -2900,6 +2929,7 @@ async function launchedController(options: {
   readonly registration: Record<string, unknown>;
   readonly grantFile: string;
   readonly requests: DaemonRequest[];
+  readonly sentUserMessages: string[];
   readonly exits: number[];
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
@@ -2934,6 +2964,8 @@ async function launchedController(options: {
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_PROJECT = project;
   process.env.LEGION_STATE_DIR = stateDir;
+  process.env.LEGION_CONTROLLER_START_MESSAGE =
+    options.startMessage ?? "Legion controller start: follow skill://legion-controller";
   process.env.LEGION_GRANT_FILE = grantFile;
 
   const requests: DaemonRequest[] = [];
@@ -3037,6 +3069,7 @@ async function launchedController(options: {
     registration,
     grantFile,
     requests,
+    sentUserMessages: fixture.sentUserMessages,
     exits,
     tools: fixture.tools,
     commands: fixture.commands,
@@ -3081,11 +3114,166 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
   });
 
+  // LEGION-392's race: Oh My Pi's own positional-argument first message can lose the session's one
+  // first-turn slot to an Envoy notice. The extension now sends the start message itself, right
+  // after the role claim and before the live wake subscription opens (claim() in
+  // controller-session.ts: claimEnvoyRole, then pi.sendUserMessage, then subscribeLegionNotice —
+  // no await between the send and the claim it follows, so nothing scheduled after the claim can
+  // run first), so nothing can race it.
+  test("sends LEGION_CONTROLLER_START_MESSAGE as the session's first turn once its claim succeeds, before the controller-topic subscribe opens", async () => {
+    const topic = "notifications.legion.omp.controller";
+    const controller = await launchedController({
+      sessionId: "ses_controller_start",
+      startMessage: "Legion controller start: follow skill://legion-controller's start procedure",
+    });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_start")
+    );
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller's start procedure",
+    ]);
+    // The real ordering guarantee: the send precedes the subscribe that opens the live wake
+    // channel a notice could otherwise race it on.
+    expect(eventOrder.indexOf("sendUserMessage")).toBeGreaterThanOrEqual(0);
+    expect(eventOrder.indexOf(`subscribe:${topic}`)).toBeGreaterThan(
+      eventOrder.indexOf("sendUserMessage")
+    );
+  });
+
+  // The start message is read and validated before anything that mutates daemon-side state
+  // (registerController, which replaces the running controller's session; claimEnvoyRole, which
+  // takes its role): a missing value refuses here, leaving the previous controller, if any, still
+  // running and still registered.
+  test("a launched claim with LEGION_CONTROLLER_START_MESSAGE unset refuses and makes no /legion/v1/claims/register request", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_no_start_message" });
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_no_start_message")
+      )
+    ).rejects.toThrow("LEGION_CONTROLLER_START_MESSAGE is required for Legion");
+
+    expect(
+      controller.requests.filter((request) => request.path === "/legion/v1/claims/register")
+    ).toEqual([]);
+    expect(controller.sentUserMessages).toEqual([]);
+  });
+
+  // startMessageSent, not controllerSessionID, gates the send: a claim that throws after sending
+  // (here, the controller-topic subscribe) never reaches the controllerSessionID assignment at
+  // the end of claim(), so a guard keyed on controllerSessionID would send a second time on retry.
+  // Forcing the subscribe itself to throw (rather than a connect envoy.ts's own session_start
+  // handler retries quietly in the background) needs the same technique the subscription-opening
+  // tests below use: close the connection envoy.ts already opened eagerly, from the
+  // registration's own callback, so ensureConnection() inside subscribe() dials again — only then
+  // does a rejected dial reach subscribeNotice uncaught.
+  test("a claim whose controller-topic subscribe throws, then retried, sends one start message in total", async () => {
+    let subscribeAttempts = 0;
+    const controller = await launchedController({
+      sessionId: "ses_controller_subscribe_retry",
+      register: () => {
+        const live = natsConnections.find(
+          (candidate) => candidate.name === "omp-ses_controller_subscribe_retry"
+        );
+        if (live !== undefined) live.closed = true;
+        natsConnectGates.set("omp-ses_controller_subscribe_retry", async () => {
+          subscribeAttempts += 1;
+          if (subscribeAttempts === 1) throw new Error("nats: connection refused");
+        });
+        return undefined;
+      },
+    });
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_subscribe_retry")
+      )
+    ).rejects.toThrow("nats: connection refused");
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+
+    // Retried in the same session and process: /legion-claim-controller re-enters claim()
+    // directly, as a lost-claim recovery would.
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_subscribe_retry"));
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
+  // Reading LEGION_CONTROLLER_START_MESSAGE is gated on `launched` (a `legion controller start`
+  // launch, never a hand-started takeover), checked on a process that has made no prior claim at
+  // all: `startMessageSent` alone would not catch a dropped `launched &&` here, since it starts
+  // `false` the same way a genuine first launch does.
+  test("a hand-started takeover with no prior claim in this process sends no start message of its own", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_takeover_only" });
+    // No session_start: this process's controllerSession has made no claim yet. A hand-started
+    // takeover carries no controller marker.
+    delete process.env.LEGION_CONTROLLER;
+    delete process.env.LEGION_ROLE;
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_takeover_only"));
+
+    expect(controller.sentUserMessages).toEqual([]);
+  });
+
+  test("a hand-started takeover sends no start message of its own: the operator's own session speaks for itself", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_takeover_pane" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_takeover_pane")
+    );
+    delete process.env.LEGION_CONTROLLER;
+    delete process.env.LEGION_ROLE;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_takeover_hand"));
+
+    // One send, from the fresh launch; the hand-started takeover added none.
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
+  test("a session switch (/new, /resume) does not resend the start message: only a fresh process launch does", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_switch_before" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_switch_before")
+    );
+    await controller.handlers.get("session_switch")?.(
+      {},
+      controller.context("ses_controller_switch_after", "/tmp/ses_controller_switch_after.jsonl")
+    );
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
   // `controller: daemon`: the pod carries its launch's boot token, never a capability fetched over
   // the operator's bearer. The session registers with that token and, holding the role and the
   // topic, reports ready, which is when the daemon hands it the start message. The state it reads
   // first is the daemon's own while that daemon holds the controller's claim (internal/projection's
-  // golden), which the plugin's strict client parses.
+  // golden), which the plugin's strict client parses. The pod carries no
+  // LEGION_CONTROLLER_START_MESSAGE, and the session sends no start message of its own: the
+  // daemon's delivery at ready is its one start message.
   test("a controller the daemon launched registers with its boot token, then reports ready once it holds the role", async () => {
     const controller = await launchedController({
       sessionId: "ses_controller_pod",
@@ -3094,6 +3282,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
     await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
     try {
       await controller.handlers.get("session_start")?.(
@@ -3127,6 +3316,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ]);
     const paths = controller.requests.map((request) => request.path);
     expect(paths.indexOf("/v1/roles/set")).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
+    expect(controller.sentUserMessages).toEqual([]);
     expect(controller.exits).toEqual([]);
   });
 

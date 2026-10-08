@@ -58,10 +58,10 @@ same session instead of starting fresh. You start no worker.
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's
-`READY`: the daemon starts the implementer on it once the reviewer approves. A worker is
-suspended when its phase ends and resumed from its session when the daemon starts its role again;
-an `envoy_publish` to a suspended role reaches no running session. After the merge lands, the
-daemon starts the implementer once more for the production check: it drives the changed path in
+`READY`: the daemon starts the implementer on it once the reviewer approves. Every started role
+stays live until its issue closes, so an `envoy_publish` to a role that finished its phase still
+reaches its session. After the merge lands, the daemon starts the implementer once more for the
+production check: it drives the changed path in
 production and records it on the pull request and the issue. Sign off only after the implementer's
 production report exists. A tester completion that rejects the implementer's proof goes back to
 the implementer by the daemon's table; a worker that reports no surface reaches the changed path

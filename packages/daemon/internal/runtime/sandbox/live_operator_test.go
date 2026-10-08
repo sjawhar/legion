@@ -126,9 +126,9 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
 // podsafety): the baseline overlay on the pod's state volume is PI_CONFIG_FILES' first element,
 // ahead of the operator's; each baseline variable the operator left unset is set, and the
-// operator's own are kept; the shim itself runs on the operator's value alone. Then the image's Oh
-// My Pi, under the agent's environment, reads remote compaction off in a repository whose
-// .omp/config.yml turns it on.
+// operator's own are kept; the shim itself (the agent's parent; the container's PID 1 is its
+// launcher) runs on the operator's value alone. Then the image's Oh My Pi, under the agent's
+// environment, reads remote compaction off in a repository whose .omp/config.yml turns it on.
 func (r *liveRig) checkPodBaseline() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -146,7 +146,11 @@ func (r *liveRig) checkPodBaseline() error {
 	if err != nil {
 		return err
 	}
-	shim, err := r.procEnviron(root, "1")
+	shimPid, err := r.shimPid(root, pid)
+	if err != nil {
+		return err
+	}
+	shim, err := r.procEnviron(root, shimPid)
 	if err != nil {
 		return err
 	}
@@ -167,9 +171,9 @@ func (r *liveRig) checkPodBaseline() error {
 		note("operator", "/proc/%s/environ (the agent): %s=%s", pid, name, agent[name])
 	}
 	if shim["PI_CONFIG_FILES"] != operatorOverlays {
-		return fmt.Errorf("the shim (pid 1) has PI_CONFIG_FILES=%q, want the operator's %q alone", shim["PI_CONFIG_FILES"], operatorOverlays)
+		return fmt.Errorf("the shim (pid %s) has PI_CONFIG_FILES=%q, want the operator's %q alone", shimPid, shim["PI_CONFIG_FILES"], operatorOverlays)
 	}
-	note("operator", "/proc/1/environ (the shim): PI_CONFIG_FILES=%s, the operator's alone", shim["PI_CONFIG_FILES"])
+	note("operator", "/proc/%s/environ (the shim): PI_CONFIG_FILES=%s, the operator's alone", shimPid, shim["PI_CONFIG_FILES"])
 	mode, err := r.exec(root, "stat", "-c", "%a", overlay)
 	if err != nil {
 		return err
@@ -219,7 +223,7 @@ func (r *liveRig) procEnviron(c *liveClaim, pid string) (map[string]string, erro
 
 // provider-key: the root's shim hands its agent the providers Secret's key (--provider-env-dir) and
 // never holds it: the agent's environment carries the Secret's value under the variable
-// provider_keys names, and the shim's (pid 1) carries no such variable.
+// provider_keys names, and the shim's (the agent's parent) carries no such variable.
 func (r *liveRig) checkProviderKey() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -242,7 +246,11 @@ func (r *liveRig) checkProviderKey() error {
 	if err != nil {
 		return err
 	}
-	shim, err := r.procEnviron(root, "1")
+	shimPid, err := r.shimPid(root, pid)
+	if err != nil {
+		return err
+	}
+	shim, err := r.procEnviron(root, shimPid)
 	if err != nil {
 		return err
 	}
@@ -251,9 +259,9 @@ func (r *liveRig) checkProviderKey() error {
 	}
 	note("operator", "/proc/%s/environ (the agent): %s equals secret %s's key %s (%d bytes, not printed)", pid, liveProviderKey, secret, liveProvidersSecretKey, len(value))
 	if held, ok := shim[liveProviderKey]; ok {
-		return fmt.Errorf("the shim (pid 1) holds %s (%d bytes), want the agent's environment alone to", liveProviderKey, len(held))
+		return fmt.Errorf("the shim (pid %s) holds %s (%d bytes), want the agent's environment alone to", shimPid, liveProviderKey, len(held))
 	}
-	note("operator", "/proc/1/environ (the shim): no %s", liveProviderKey)
+	note("operator", "/proc/%s/environ (the shim): no %s", shimPid, liveProviderKey)
 	return nil
 }
 
@@ -266,6 +274,17 @@ func (r *liveRig) agentPid(c *liveClaim) (string, error) {
 	}
 	if pid == "" || strings.ContainsAny(pid, " \n") {
 		return "", fmt.Errorf("the pod runs %q stub agents, want one pid", pid)
+	}
+	return pid, nil
+}
+
+// shimPid is the pid of the `legion worker-shim` that started the agent at pid agent, its parent.
+// A role container's PID 1 is its `legion launcher`, which starts a shim for each generation.
+func (r *liveRig) shimPid(c *liveClaim, agent string) (string, error) {
+	const findShim = `parent=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$1/status") && tr '\0' '\n' <"/proc/$parent/cmdline" | grep -qx worker-shim && echo "$parent"`
+	pid, err := r.exec(c, "sh", "-c", findShim, "shim", agent)
+	if err != nil {
+		return "", fmt.Errorf("the agent's (pid %s) parent is no legion worker-shim: %w", agent, err)
 	}
 	return pid, nil
 }

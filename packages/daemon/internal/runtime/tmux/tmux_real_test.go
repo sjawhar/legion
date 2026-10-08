@@ -390,6 +390,11 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
+func (c *stubConn) Abort(ctx context.Context) error {
+	_, err := c.request(ctx, func(id string) shimwire.Frame { return shimwire.Abort{ID: id} })
+	return err
+}
+
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
 
 func (c *stubConn) Sequence() uint64 { return c.seq }

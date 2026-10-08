@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -87,12 +88,12 @@ func testSpec() runtime.SpawnSpec {
 	}
 }
 
-// The pane's -e pairs, in the one order: the pairs every Legion pane carries, the grant file the
-// pi-legion extension writes before each command that
-// redeems a grant, the XDG base directories under `<state_dir>/home` explicitly, the caller's own
-// variables sorted, then one `<NAME>_FILE` pointer per secret — the boot token's first. PATH is
-// never a pair: tmux would discard it (LEGION-91); the shell command exports it. No secret value is
-// in any pair.
+// The pane's -e pairs, in the one order: the pairs every Legion pane carries, PI_CONFIG_FILES
+// naming the turn-scoping overlay writeTurnScopeOverlay writes under the state directory, the
+// grant file the pi-legion extension writes before each command that redeems a grant, the XDG base
+// directories under `<state_dir>/home` explicitly, the caller's own variables sorted, then one
+// `<NAME>_FILE` pointer per secret — the boot token's first. PATH is never a pair: tmux would
+// discard it (LEGION-91); the shell command exports it. No secret value is in any pair.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
 	in := PaneInputs{
@@ -117,6 +118,7 @@ func TestPanePairs(t *testing.T) {
 		"-e", "ENVOY_NATS_URL=nats://a:4222,nats://b:4222",
 		"-e", "ENVOY_URL=http://127.0.0.1:9020",
 		"-e", "PI_SHELL_PREFIX=" + shellprefix.For("/state/worker-bin", "/state/bin"),
+		"-e", "PI_CONFIG_FILES=/state/" + podsafety.TurnScopeFile,
 		"-e", "GIT_TERMINAL_PROMPT=0",
 		"-e", "LEGION_GRANT_FILE=/state/secrets/legion-omp-legion-43-tester-grant",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
@@ -139,6 +141,29 @@ func TestPanePairs(t *testing.T) {
 		if strings.HasPrefix(pair, "ENVOY_NATS_URL=") {
 			t.Errorf("an unconfigured NATS still produced %q", pair)
 		}
+	}
+}
+
+// PaneVariables (and launch, the same way) writes the turn-scoping overlay under the state
+// directory, read-only, and names it in PI_CONFIG_FILES — the one settings overlay a pane gets at
+// all — so Quiesce's own promise holds under tmux too (LEGION-462).
+func TestPaneVariablesNamesAndWritesTheTurnScopeOverlay(t *testing.T) {
+	stateDir := t.TempDir()
+	spec := testSpec()
+	variables, err := PaneVariables(spec, PaneInputs{StateDir: stateDir}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "PI_CONFIG_FILES=" + filepath.Join(stateDir, podsafety.TurnScopeFile)
+	if !slices.Contains(variables, want) {
+		t.Errorf("a pane's variables = %q, want %q among them", variables, want)
+	}
+	got, err := os.ReadFile(filepath.Join(stateDir, podsafety.TurnScopeFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, podsafety.TurnScopeOverlay) {
+		t.Errorf("the turn-scope overlay on disk = %q, want %q", got, podsafety.TurnScopeOverlay)
 	}
 }
 
