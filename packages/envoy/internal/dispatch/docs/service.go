@@ -817,10 +817,9 @@ func settlementsUnconfirmed(cause error, owed map[string]bool, rooms []string) e
 // rooms again, so the next document read starts from what the database now holds.
 //
 // Nothing in production calls it. It exists so the browser-test harness can truncate its
-// database between scenarios without racing a settlement midway through its own transaction:
-// a settlement locks the document's owner row and then reads artifact_versions, while TRUNCATE
-// takes an exclusive lock on every table in its own order, and PostgreSQL resolves the crossing
-// by aborting one of them (LEGION-168).
+// database between scenarios with every document the previous scenario had open already
+// written: a settlement still running would write to tables the truncate has just emptied, or
+// wait on the truncate's locks and fail once it commits.
 func (s *Service) Quiesce(ctx context.Context) error {
 	s.quiescing.Store(true)
 	defer s.quiescing.Store(false)

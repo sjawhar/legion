@@ -88,7 +88,7 @@ e2e's `run-server.sh` sets the flag so the web client's reconnect-from-lastId pa
 without seeding thousands of events to trip the SSE replay cap. `POST
 /api/v1/artifacts/_test/quiesce` closes every live document, flushing each through the store, and
 waits for the settlements in flight, leaving the service able to load documents again; `e2e/seed.ts`
-calls it before truncating so its `TRUNCATE` cannot cross lock order with a settlement. `POST
+calls it before truncating so no document the previous scenario had open writes after the truncate. `POST
 /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed tree the document-repair
 browser test uses.
 

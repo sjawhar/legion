@@ -75,48 +75,81 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
   await sql(`UPDATE issues SET created_by = 'null'::jsonb WHERE key = ${sqlLiteral(issueKey)}`);
 }
 
-// The DO block waits for every other session to leave its transaction. That is a barrier, not a
-// fix: the server's document settlements run on their own timers, so one can open a transaction
-// after the check and before TRUNCATE takes its locks. resetDatabase closes that by quiescing
-// the document service first.
+// TRUNCATE locks its tables one at a time, in its own order, waiting for each while it holds the
+// ones before it. A transaction that reads two of those tables in another order can close a cycle
+// with it (the Inbox reads asks before comments, the sidebar issues before user_issue_state), and
+// PostgreSQL breaks the cycle by aborting one side: the reset, or a server request or sweep. Such
+// a transaction can start at any moment: a page an earlier scenario left open refetches whenever
+// the live stream tells it to, and the server runs its own sweeps on timers. So before the
+// TRUNCATE, the reset takes ACCESS EXCLUSIVE on every table the TRUNCATE empties: the tables it
+// names, and every table whose foreign keys reach them, which CASCADE empties too. It never waits
+// while it holds one of those locks. Each try takes them all with NOWAIT; when one is held, the
+// try lets go of every lock it took and waits for that one table alone, holding nothing, so the
+// wait cannot close a cycle. Once it holds them all, nothing else touches those tables until
+// COMMIT; the TRUNCATE's other locks are on the tables' own sequences, which only an insert into
+// one of those tables advances. A table still held after 5 s fails the reset, naming the
+// transactions that hold it.
 
 async function resetDatabaseOnce(): Promise<void> {
   await sql(
+    "BEGIN",
+    // Bounds each wait for one held table; the loop's own deadline bounds the whole step.
+    "SET LOCAL lock_timeout = '1s'",
     `DO $$
-      DECLARE open_transactions text;
+      DECLARE
+        targets regclass[];
+        target regclass;
+        contended regclass;
+        holders text;
+        deadline timestamptz := clock_timestamp() + interval '5 seconds';
       BEGIN
-        FOR attempt IN 1..500 LOOP
-          -- pg_stat_activity is cached per transaction; without this the loop rereads its
-          -- first snapshot.
-          PERFORM pg_stat_clear_snapshot();
-          SELECT string_agg(format('%s (%s)', left(regexp_replace(query, '\\s+', ' ', 'g'), 120), state), '; ')
-            INTO open_transactions
-            FROM pg_stat_activity
-            WHERE datname = current_database()
-              AND backend_type = 'client backend'
-              AND pid <> pg_backend_pid()
-              AND state <> 'idle';
-          EXIT WHEN open_transactions IS NULL;
-          PERFORM pg_sleep(0.01);
+        WITH RECURSIVE truncated(rel) AS (
+          SELECT unnest(ARRAY[${tables.map(sqlLiteral).join(", ")}]::regclass[])
+          UNION
+          SELECT c.conrelid::regclass
+            FROM pg_constraint c JOIN truncated ON c.confrelid = truncated.rel
+            WHERE c.contype = 'f'
+        )
+        SELECT array_agg(rel ORDER BY rel::text) INTO targets FROM truncated;
+        LOOP
+          -- A failed try rolls back this block, releasing every lock it took.
+          BEGIN
+            IF contended IS NOT NULL THEN
+              target := contended;
+              EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', target);
+            END IF;
+            FOREACH target IN ARRAY targets LOOP
+              EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE NOWAIT', target);
+            END LOOP;
+            EXIT;
+          EXCEPTION WHEN lock_not_available THEN
+            contended := target;
+          END;
+          IF clock_timestamp() >= deadline THEN
+            SELECT string_agg(DISTINCT format('%s %s by %s (%s)', l.relation::regclass, l.mode,
+                     left(regexp_replace(a.query, '\\s+', ' ', 'g'), 120), a.state), '; ')
+              INTO holders
+              FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+              WHERE l.granted AND l.pid <> pg_backend_pid() AND l.relation = ANY (targets::oid[]);
+            RAISE EXCEPTION 'could not lock the tables to truncate within 5 s; held: %',
+              coalesce(holders, 'by nobody now, after waiting on ' || contended);
+          END IF;
         END LOOP;
-        IF open_transactions IS NOT NULL THEN
-          RAISE EXCEPTION 'server transactions still open after 5 s: %', open_transactions;
-        END IF;
       END
     $$`,
     `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
     // The people the scenarios act as, as if each had signed in: the only assignable names.
-    "INSERT INTO people (email) VALUES ('alice'), ('bob')"
+    "INSERT INTO people (email) VALUES ('alice'), ('bob')",
+    "COMMIT"
   );
 }
 
 /**
  * Truncates every table, after the server has closed every live document and finished the
- * settlements in flight. A settlement locks its document's owner row and then reads
- * artifact_versions, while TRUNCATE takes an exclusive lock on every table in its own order;
- * with both running PostgreSQL breaks the cycle by aborting one of them (LEGION-168), which is
- * either a failed reset or a settlement that dies mid-scenario. Quiescing first leaves the
- * server with nothing to run, so the two never overlap. It also clears the fake Envoy, whose
+ * settlements in flight, so the documents the previous scenario had open finish writing before
+ * the truncate rather than failing against the emptied tables after it. The truncate cannot
+ * deadlock with whatever else still reaches the database (the comment above resetDatabaseOnce).
+ * It also clears the fake Envoy, whose
  * process-local subscriptions outlive a database truncate and otherwise match recycled issue keys,
  * and the fake broker, whose seeded credential requests would otherwise reach every later row's
  * Inbox; those resets wait on nothing in the database, so they run beside the quiesce and truncate,

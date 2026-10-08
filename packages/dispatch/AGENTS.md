@@ -828,8 +828,8 @@ fixture state in one object that the reset replaces whole, so a field added to i
 rest. These Envoy fixture helpers run
 for local and deployed targets. The fake GitHub's `seedFakeGithub` remains unavailable to a deployed
 target and skips the test that calls it. A fixture call follows `resetDatabase()` rather than running
-beside it in a `Promise.all`: a reset left running would overlap the next test's, and each waits out
-the other's open transaction. It also holds the Agents page the keyboard specs share: `seedAgents`
+beside it in a `Promise.all`: the reset empties whatever lands before it finishes, and a reset left
+running would overlap the next test's. It also holds the Agents page the keyboard specs share: `seedAgents`
 (the Planner and Reviewer sessions, both listed, and two open issues for the picker) and
 `openAgents`, which waits for the page's heading before a key is pressed, since the keymap binds
 only once sign-in resolves. A session a shared helper seeds, as these two are, carries no
@@ -888,11 +888,15 @@ it waits for the spec's decision block to be indexed, so `inboxRows` is exact wh
 
 `e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
 (`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every
-live document and waits for the settlements in flight: a settlement locks its document's owner
-row and then reads `artifact_versions`, while `TRUNCATE` takes an exclusive lock on every table
-in its own order, and the two crossing is a PostgreSQL deadlock that kills either the reset or
-the settlement. With no live room and no armed settlement timer the two cannot overlap, so the
-reset does not retry. It still waits for any open server transaction before truncating. For a
+live document and waits for the settlements in flight, so the documents the previous scenario had
+open finish writing before the truncate rather than failing against the emptied tables after it.
+`TRUNCATE` locks its tables one at a time, in its own order, so a transaction that reads two of
+them in another order can close a cycle with it, and PostgreSQL aborts one side: a settlement
+(which locks its document's owner row and then reads `artifact_versions`), a request from a page an
+earlier scenario left open, or one of the server's own sweeps. So the reset first takes
+`ACCESS EXCLUSIVE` on every table the truncate empties, and never waits while it holds one (the
+comment above `resetDatabaseOnce` says how), so the truncate cannot deadlock and the reset does
+not retry. A table still held after 5 s fails the reset, naming each holder's query. For a
 deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
 bearer-seeded API calls. Every SQL statement the harness runs, `seed.ts`'s and
 `failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that database
@@ -905,15 +909,16 @@ to Postgres as a setting, which refuses the connection, so the harness server ne
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
 is up, without evaluating `e2e/api.ts`.
 
-That reset is also the one rig failure that presents as a code failure. Any other process holding
-a non-idle connection to the test database — most often a Dispatch server from an earlier run
-still listening on `DISPATCH_E2E_PORT` — keeps a client backend out of `idle`, so the wait above
-never clears and `resetDatabase` throws in `beforeEach`. Because it throws in the hook, **every**
-spec in the file reports failed, each carrying the `psql … DO $$` wait loop in its message, which
-reads as a catastrophic regression in the change under test. Recognise that shape as the rig: kill
-whatever holds the port and run again. With reuse off a run cannot reach that shape through the
-port at all, and this paragraph is where the harness-port rule lives — `README.md` and the
-`docs/solutions` learning point here rather than restating it.
+That reset is also the one rig failure that presents as a code failure. A transaction that holds
+one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
+a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, makes
+`resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
+reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
+which reads as a catastrophic regression in the change under test. Recognise that shape as the
+rig: stop whatever holds those tables (most often whatever holds the port) and run again. With
+reuse off a run cannot reach that shape through the port at all, and this paragraph is where the
+harness-port rule lives — `README.md` and the `docs/solutions` learning point here rather than
+restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
 `9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
@@ -938,7 +943,7 @@ the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own
 `DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
 the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
-new port, so that server's live rooms stay open for the `TRUNCATE` to deadlock against. Reuse is
+new port, so that server's live rooms stay open across the truncate. Reuse is
 opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: unset or empty
 starts this run's own servers, and any other value is refused at config load naming the variable
 and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
