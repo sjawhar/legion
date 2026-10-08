@@ -615,8 +615,8 @@ func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (mo
 }
 
 // modelBlockPath is path as the API carries it, in entries of its own. Its table position's row,
-// column, header and cells are shared with path, which BlockPaths shares across a table's paths;
-// nothing writes them.
+// column, header and cells are shared with path, which BlockPaths shares across a table's paths and
+// the read cache across every read of one stored head (documentRead); nothing writes them.
 func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 	out := model.BlockPath{ID: path.ID, Type: path.Type, Path: make([]model.BlockPathEntry, len(path.Path))}
 	for index, entry := range path.Path {

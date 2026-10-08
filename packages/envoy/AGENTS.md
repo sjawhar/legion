@@ -423,13 +423,19 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 A read whose caller holds no transaction fork and whose server holds no resident room reads the
 stored document through a rendering cache. The cache is keyed by `doc_updates`' stored head
 (version plus the head row's transaction id), so an append, prune and re-append, rebuild, delete
-or compaction cannot serve an older rendering; every cold read checks that head. Its entry carries
-the canonical markdown, document token, block ranges/tokens and block paths, is immutable after
-construction, and is bounded by a weighted LRU. Concurrent misses of one head share one bounded
-document fold, while a request that ends leaves that fold running for the other callers. A
-document outside the schema stores no rendering and keeps the tree/error behavior each read had
-before. Websocket admission still uses `loadTree`, because it needs the raw stored update to
-preload the room.
+or compaction cannot serve an older rendering; every cold read checks that head, which it reads
+with the same SQL as the store's own head (`headVersion`). Its entry carries the canonical
+markdown, document token, block ranges/tokens and block paths, is immutable after construction,
+and is bounded by a weighted LRU of 256 MiB (`documentReadBudget`). An entry's weight counts every
+string and slice it holds, and a table's cells, header texts and row and column ordinals once
+however many paths share them; `TestADocumentReadWeighsAboutTheHeapItHolds` holds it within
+0.97-1.25x of the heap an entry holds. A read hands out a copy of the blocks and of a path's
+entries, which callers write, and shares a table's descendant ids and a path's table position with
+every later read of that head, which no caller writes (`documentRead`). Concurrent misses of one
+head share one bounded document fold, while a request that ends leaves that fold running for the
+other callers. A document outside the schema stores no rendering and keeps the tree/error behavior
+each read had before. Websocket admission still uses `loadTree`, because it needs the raw stored
+update to preload the room.
 
 A read of a resident room outside a write never walks the live tree. It reads the room as of one
 moment under its document lock (`readLive`): the replica the room's update observer keeps

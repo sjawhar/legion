@@ -64,7 +64,10 @@ var coldReadTimeout = 60 * time.Second
 // documentRead is everything the four reads of a document no room holds answer (Text,
 // TextWithToken, TextWithBlocks and BlockPath), rendered from one tree of one stored state, the
 // state stamp names. Nothing writes it once it is built: a read hands out its strings, a copy of
-// its blocks (a caller writes References into its slice) and a copy of a path's entries.
+// its blocks (a caller writes References into its slice) and a copy of a path's entries. A table
+// block's DescendantIDs and a path's table position (its Row, Column, Header and Cells) are handed
+// out as they are, shared with every later read of the same stored head, so no caller may write
+// through them; none does, and copying them would cost every hit an allocation for a table's size.
 type documentRead struct {
 	artifactID string
 	stamp      DocumentStamp
@@ -112,9 +115,9 @@ func (r *documentReads) get(artifactID string, stamp DocumentStamp) *documentRea
 
 // put stores read as its document's rendering in place of any it held, then drops the least
 // recently read renderings until the cache's weight is within its budget. A rendering heavier than
-// an eighth of the budget is not stored, and the one it replaces goes. A rendering of an older
-// stamp than the one it replaces, from a slow fold, costs the next read a miss, never a stale read:
-// get compares stamps.
+// an eighth of the budget is not stored, and the one it replaces goes. put does not compare stamps:
+// a slow fold of an older stamp can replace a newer rendering, which costs the next read a refold,
+// never a stale read, since get serves an entry only at the stamp its caller just read.
 func (r *documentReads) put(read *documentRead) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -138,31 +141,75 @@ func (r *documentReads) removeLocked(element *list.Element) {
 }
 
 // Overheads documentRead.weight counts beside the bytes its strings and slices hold: the entry's
-// own struct with its list element and map entry, and each path's map entry.
+// own struct with its list element and its slot in the cache's map; and a path's slot in the paths
+// map, its key and value and the slot's control byte, at the load a map's table holds just after it
+// grows (7/16 of its slots), so no map is counted as holding fewer slots than it allocated.
+// TestADocumentReadWeighsAboutTheHeapItHolds (read_cache_weight_test.go) holds the weight they make
+// within 0.97-1.25x of the heap a read holds. The LEGION-530 replay measured the cache's heap at
+// 1.04-1.14x its weight under production's documents, at d91051ba, before a table's headers, its
+// ordinals and a block's DescendantIDs were counted
+// (dispatch://LEGION-530/artifact/replay-before-after-md).
 const (
 	readEntryOverhead = int64(unsafe.Sizeof(documentRead{})) + 128
-	readPathOverhead  = 64
+	readPathOverhead  = (int64(unsafe.Sizeof("")+unsafe.Sizeof(pmdoc.BlockPath{})) + 1) * 16 / 7
 )
 
-// measure is the bytes the rendering's strings and slices hold, and its fixed overheads. A string
-// several of them share, such as a block id that is a path's key and its block's id, is counted
-// where each holds it. A table's position, which every block in one cell shares, is counted for
-// each, and a row's cells' opening words once, on the row's own path.
+// measure is the bytes the rendering's strings and slices hold, and its fixed overheads. A block id
+// is counted where each part of the rendering holds it - a block, a path's key, a table's list of
+// the blocks it holds - but not again on the path entries that name it. Storage that paths share
+// is counted once however many share it (tablePositionsWeight).
 func (read *documentRead) measure() int64 {
 	weight := readEntryOverhead + int64(len(read.artifactID)+len(read.stamp.Row)+len(read.markdown)+len(read.token))
+	weight += int64(cap(read.blocks)) * int64(unsafe.Sizeof(model.ArtifactBlock{}))
 	for _, block := range read.blocks {
-		weight += int64(unsafe.Sizeof(block)) + int64(len(block.ID)+len(block.Type)+len(block.Token)) +
-			int64(len(block.DescendantIDs))*int64(unsafe.Sizeof(""))
-	}
-	for id, path := range read.paths {
-		weight += readPathOverhead + int64(len(id)+len(path.Type)) + int64(len(path.Path))*int64(unsafe.Sizeof(pmdoc.BlockPathEntry{}))
-		if path.Table == nil {
-			continue
+		weight += int64(len(block.ID)+len(block.Type)+len(block.Token)) + int64(cap(block.DescendantIDs))*int64(unsafe.Sizeof(""))
+		for _, id := range block.DescendantIDs {
+			weight += int64(len(id))
 		}
-		weight += int64(unsafe.Sizeof(pmdoc.TablePosition{}))
-		if path.Table.Row != nil && path.Table.Column == nil {
-			for _, cell := range path.Table.Cells {
-				weight += int64(unsafe.Sizeof(cell)) + int64(len(cell))
+	}
+	positions := make(map[*pmdoc.TablePosition]struct{})
+	for id, path := range read.paths {
+		weight += readPathOverhead + int64(len(id)+len(path.Type)) + int64(cap(path.Path))*int64(unsafe.Sizeof(pmdoc.BlockPathEntry{}))
+		if path.Table != nil {
+			positions[path.Table] = struct{}{}
+		}
+	}
+	return weight + tablePositionsWeight(positions)
+}
+
+// tablePositionsWeight is the bytes the distinct table positions hold, each once however many paths
+// share it (every block in a cell shares its cell's), and the storage they point into, each once
+// however many positions point at it (pmdoc.BlockPaths shares it within a table): a row's cells'
+// opening words, a header's text and its slot in the table's array of headers, and the slots of the
+// table's array of ordinals that Row and Column point at.
+func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {
+	weight := int64(len(positions)) * int64(unsafe.Sizeof(pmdoc.TablePosition{}))
+	cells := make(map[*string]struct{})
+	headers := make(map[*string]struct{})
+	ordinals := make(map[*int]struct{})
+	for position := range positions {
+		if len(position.Cells) > 0 {
+			if _, seen := cells[&position.Cells[0]]; !seen {
+				cells[&position.Cells[0]] = struct{}{}
+				weight += int64(cap(position.Cells)) * int64(unsafe.Sizeof(""))
+				for _, cell := range position.Cells {
+					weight += int64(len(cell))
+				}
+			}
+		}
+		if header := position.Header; header != nil {
+			if _, seen := headers[header]; !seen {
+				headers[header] = struct{}{}
+				weight += int64(unsafe.Sizeof("")) + int64(len(*header))
+			}
+		}
+		for _, ordinal := range [...]*int{position.Row, position.Column} {
+			if ordinal == nil {
+				continue
+			}
+			if _, seen := ordinals[ordinal]; !seen {
+				ordinals[ordinal] = struct{}{}
+				weight += int64(unsafe.Sizeof(0))
 			}
 		}
 	}
