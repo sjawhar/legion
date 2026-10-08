@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -402,24 +401,6 @@ func (s issueLaunchSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.S
 	}, nil
 }
 
-// lockedBuffer is a log sink read while the runtime's goroutines may still write it.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 // A child closed as done gives its volume back at once while its parent keeps running: the close's
 // issue_close rows retire the child's claims with their sessions dropped, and its issue_suspend row,
 // a releasing one, foreground-deletes the child's Sandbox — taking the PVC it owns with it, with no
@@ -465,7 +446,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	)
 	server := httptest.NewServer(api)
 	t.Cleanup(func() { cancel(); server.Close() })
-	logs := &lockedBuffer{}
+	logs := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	runtimeCtx, stopRuntime := context.WithCancel(ctx)
 	t.Cleanup(stopRuntime)

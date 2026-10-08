@@ -495,10 +495,13 @@ type jsonPatchOp struct {
 	Value any    `json:"value"`
 }
 
+// labelPatchEscape escapes a label key as an RFC 6901 JSON pointer token: `~` as `~0`, `/` as `~1`.
+var labelPatchEscape = strings.NewReplacer("~", "~0", "/", "~1")
+
 // labelPatchPath is the JSON pointer of one of a Sandbox's labels, its key escaped as RFC 6901
 // requires (`~` as `~0`, then `/` as `~1`): an `add` there sets the label, replacing its value.
 func labelPatchPath(key string) string {
-	return "/metadata/labels/" + strings.NewReplacer("~", "~0", "/", "~1").Replace(key)
+	return "/metadata/labels/" + labelPatchEscape.Replace(key)
 }
 
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's

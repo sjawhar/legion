@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -644,13 +645,7 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	block.Resources = DefaultResources()
 	for role, set := range file.Kubernetes.Resources {
 		settled := block.Resources[role]
-		if set.CPU != "" {
-			settled.CPU = set.CPU
-		}
-		if set.Memory != "" {
-			settled.Memory = set.Memory
-		}
-		block.Resources[role] = settled
+		block.Resources[role] = RoleResources{CPU: cmp.Or(set.CPU, settled.CPU), Memory: cmp.Or(set.Memory, settled.Memory)}
 	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
 	return nil
@@ -801,8 +796,9 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 // role, and the controller, whose pod a daemon under `controller: daemon` launches
 // (resolveControllerLaunch refuses its key otherwise). A role's entry sets `cpu`, `memory`, both,
 // or neither; what it leaves out is "" here and the default once settled (resolveKubernetes). The
-// keys of the earlier shape — a role's `requests` and `limits` mappings, and `ephemeral_storage`
-// inside them — are known so that each is refused naming the shape that replaced it.
+// keys of the earlier shape are known so that each is refused naming the shape that replaced it: a
+// role's `requests` and `limits` mappings, and `ephemeral_storage` as a direct member of the role's
+// entry, where an operator flattening the earlier shape would put it.
 func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	const key = kubernetesKey + ".resources"
 	if value == nil {

@@ -43,10 +43,7 @@ func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T)
 		t.Fatalf("census of a current controller pod and issue pod = %v, want none", err)
 	}
 
-	workflow := make([]string, 0, len(claim.Roles))
-	for _, role := range claim.Roles {
-		workflow = append(workflow, string(role))
-	}
+	workflow := workflowContainers()
 	issue := claimLabels(claim.RoleArchitect)
 	controller := map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
 	for label, tc := range map[string]struct {

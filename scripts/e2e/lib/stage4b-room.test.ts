@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { runJq } from "./run-jq";
+import { defaults } from "./stage4b-reservations";
 
 // Stage 4b's capacity reads (lib/stage4b-room.jq): the reservation an issue pod carries under the
 // run's overrides and defaults, how many of the run's pods the legion pool can place now, and
@@ -9,16 +10,6 @@ import { runJq } from "./run-jq";
 const lib = join(import.meta.dir);
 const include = 'include "stage4b-room";';
 const GiB = 1073741824;
-// The daemon's default reservations (config.DefaultResources), summing to 3 CPU and 12 GiB a pod.
-const defaults = {
-  architect: { cpu: "250m", memory: "1Gi" },
-  planner: { cpu: "250m", memory: "1Gi" },
-  implementer: { cpu: "750m", memory: "3Gi" },
-  tester: { cpu: "750m", memory: "3Gi" },
-  reviewer: { cpu: "750m", memory: "3Gi" },
-  merger: { cpu: "250m", memory: "1Gi" },
-  controller: { cpu: "1", memory: "4Gi" },
-};
 // The run's overrides (stage4b-sandbox-tree.sh's override_cpu and override_memory over the
 // defaults): 2.95 CPU and 12 GiB a pod.
 const overridden = {

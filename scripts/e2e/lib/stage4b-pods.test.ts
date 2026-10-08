@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
+import { defaults } from "./stage4b-reservations";
 
 // Stage 4b's reads of a pod's addresses and reservations: the pod shape's --connect rule and its
 // reservation rule (shape_problems, with record_stream and lib/stage4b-pods.jq), and the
@@ -37,17 +38,6 @@ const golden = JSON.parse(
 );
 // The issue pod's role containers, in the order the runtime builds them (claim.Roles).
 const roles = ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
-// The daemon's default reservations (config.DefaultResources, packages/daemon/internal/config/
-// kubernetes.go), which the golden pod carries: the run's run_resources when it overrides none.
-const defaults: Record<string, { cpu: string; memory: string }> = {
-  architect: { cpu: "250m", memory: "1Gi" },
-  planner: { cpu: "250m", memory: "1Gi" },
-  implementer: { cpu: "750m", memory: "3Gi" },
-  tester: { cpu: "750m", memory: "3Gi" },
-  reviewer: { cpu: "750m", memory: "3Gi" },
-  merger: { cpu: "250m", memory: "1Gi" },
-  controller: { cpu: "1", memory: "4Gi" },
-};
 const goldenStream = "tcp://192.0.2.250:13371";
 // A moved stream: a restart on the run's other port, so the worker stream takes the API's.
 const movedStream = "tcp://192.0.2.250:13370";

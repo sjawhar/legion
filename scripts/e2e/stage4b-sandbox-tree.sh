@@ -586,18 +586,25 @@ set_back_by_daemon() {
   ' "$1" >/dev/null
 }
 # issue_pod ISSUE prints ISSUE's Running pod: each issue has one pod of its own, labelled with its
-# key, and the caller supplies the role container it means to inspect or run in.
+# key, and the caller supplies the role container it means to inspect or run in. A tree's key is
+# its root issue's, so a read of the root never lands in a child's pod: each child runs in a pod of
+# its own.
 issue_pod() {
   op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$1" --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null | grep .
 }
-# tree_pod TREE prints the Running pod of TREE's root issue, whose key is the tree's. A tree's
-# children run in pods of their own (issue_pod), so a read of the root never lands in one of them.
-tree_pod() { issue_pod "$1"; }
 # issue_sandbox_modes ISSUE prints the operating mode of each Sandbox labelled with ISSUE, the CRD's
 # default Running for one that sets none.
 issue_sandbox_modes() {
   op get sandboxes -l "legion.dev/project=$run_label,legion.dev/issue=$1" -o json | jq -r '.items[] | .spec.operatingMode // "Running"'
+}
+# assert_one_bound_pvc ISSUE CONTEXT fails unless ISSUE has exactly one PVC and it is Bound, and
+# leaves the row in $found, whose first field is the PVC's name. Called at top level, never in a
+# command substitution: fail must end the run, not a subshell.
+assert_one_bound_pvc() {
+  found=$(issue_pvcs "$1") || fail "the operator could not read $1's PVCs"
+  [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] ||
+    fail "$1's PVCs$2 are '${found:-none}', want its one, Bound"
 }
 pod_exec() {
   local pod=$1 role=$2
@@ -645,7 +652,7 @@ pair_dispatch() {
 pair_text() {
   local pod
   [ -n "$pair_session" ] || return 1
-  pod=$(tree_pod "$tree1") || return 1
+  pod=$(issue_pod "$tree1") || return 1
   pod_exec "$pod" reviewer cat -- "$pair_session"
 }
 # pair_settled: the reviewer dispatched both agents and each dispatch has an outcome: a refused call,
@@ -653,7 +660,7 @@ pair_text() {
 pair_settled() {
   local text agent ids id pod
   text=$(pair_text) || return 1
-  pod=$(tree_pod "$tree1") || return 1
+  pod=$(issue_pod "$tree1") || return 1
   for agent in $pair_agents; do
     ids=$(pair_dispatch "$agent" <<<"$text" | jq -r '
       if (.calls | length) == 0 then "none"
@@ -675,7 +682,7 @@ record_pair() {
   local pod text agent
   [ -z "$pair_recorded" ] || return 0
   text=$(pair_text) || return 1
-  pod=$(tree_pod "$tree1") || return 1
+  pod=$(issue_pod "$tree1") || return 1
   mkdir -p "$evidence/review-pair"
   printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl"
   op exec "$pod" -c reviewer -- tar -C "$(dirname "$pair_session")" -cf - "$(basename "$pair_session" .jsonl)" 2>/dev/null |
@@ -2340,9 +2347,7 @@ done
 note "at $at the three pods are Running, none with an affinity"
 pvcs=
 for issue in "$tree1" "$child1" "$child2"; do
-  found=$(issue_pvcs "$issue") || fail "the operator could not read $issue's PVCs"
-  [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] ||
-    fail "the PVCs labelled legion.dev/issue=$issue are '${found:-none}', want exactly one, Bound"
+  assert_one_bound_pvc "$issue" ""
   pvcs+="${pvcs:+ }${found%% *}"
   note "[operator] $issue: PVC ${found%% *} Bound (by legion.dev/issue=$issue)"
 done
@@ -2413,8 +2418,7 @@ until_true 600 "$child1's Sandbox and PVC to be gone after its done" child1_rele
 at=$(date -u +%FT%TZ)
 root_mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') || fail "the operator could not read the root's Sandbox $root_pod"
 [ -z "$root_mode" ] || [ "$root_mode" = Running ] || fail "the root's Sandbox $root_pod is $root_mode after $child1's release, want Running"
-found=$(issue_pvcs "$tree1") || fail "the operator could not read $tree1's PVCs"
-[ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] || fail "the root's PVCs after $child1's release are '${found:-none}', want its one, Bound"
+assert_one_bound_pvc "$tree1" " after $child1's release"
 uid_now=$(op get pod "$root_pod" -o jsonpath='{.metadata.uid}') || fail "the root's pod $root_pod could not be read after $child1's release"
 [ "$uid_now" = "$root_uid" ] || fail "the root's pod $root_pod changed from uid $root_uid to $uid_now across $child1's release"
 released=$(released_lines "$child1" | grep -c . || true)
@@ -2432,8 +2436,7 @@ child2_parked() {
     [ -z "$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name 2>/dev/null)" ]
 }
 until_true 600 "$child2's Sandbox to be Suspended and its pod gone after its backlog" child2_parked
-found=$(issue_pvcs "$child2") || fail "the operator could not read $child2's PVCs"
-[ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] || fail "$child2's PVCs after its backlog are '${found:-none}', want its one, Bound"
+assert_one_bound_pvc "$child2" " after its backlog"
 note "at $(date -u +%FT%TZ) $child2 is in backlog: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound (kept until the tree closes)"
 pass
 
@@ -2902,8 +2905,7 @@ done
 [ "$(issue_sandbox_modes "$child2")" = Suspended ] || fail "the parked child $child2's Sandboxes are '$(issue_sandbox_modes "$child2" | paste -sd ' ' -)', want its one, Suspended"
 [ -z "$(issue_sandbox_modes "$child1")" ] || fail "the done child $child1 still has a Sandbox: $(issue_sandbox_modes "$child1" | paste -sd ' ' -)"
 for issue in "$tree1" "$child2"; do
-  found=$(issue_pvcs "$issue") || fail "the operator could not read $issue's PVCs"
-  [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] || fail "$issue's PVCs are '${found:-none}', want its one, Bound"
+  assert_one_bound_pvc "$issue" ""
 done
 [ -z "$(issue_pvcs "$child1")" ] || fail "the done child $child1 still has a PVC: $(issue_pvcs "$child1" | paste -sd ' ' -)"
 note "planner, implementer, tester and reviewer of $tree1 each run in their first process in one issue pod; its Sandbox is Running and its PVC Bound; $child2's Sandbox is Suspended with its PVC Bound; $child1 has neither"
@@ -3619,8 +3621,7 @@ at=$(date -u +%FT%TZ)
 [ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' after its nodes were released ($releases), want its one, Suspended"
 [ "$(issue_sandbox_modes "$child2")" = Suspended ] || fail "the parked child $child2's Sandboxes are '$(issue_sandbox_modes "$child2" | paste -sd ' ' -)' after tree 1's nodes were released, want its one, Suspended"
 for issue in "$tree1" "$child2"; do
-  found=$(issue_pvcs "$issue") || fail "the operator could not read $issue's PVCs"
-  [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] || fail "$issue's PVCs are '${found:-none}' after tree 1's nodes were released ($releases), want its one, Bound"
+  assert_one_bound_pvc "$issue" " after tree 1's nodes were released ($releases)"
 done
 note "at $at: $releases; the Sandboxes of $tree1 and $child2 are Suspended, each PVC Bound ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
 pass
@@ -3640,7 +3641,7 @@ set_status "$tree1" todo
 lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
 on_tree "$tree1" until_true 900 "the re-admitted tree 1 to report its issue's volume lost and relaunch a fresh architect" lost_seen
 on_tree "$tree1" wait_for_worker "$tree1" architect
-pod=$(tree_pod "$tree1")
+pod=$(issue_pod "$tree1")
 recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
 lost=$(log_lines "$lost_msg" | wc -l)
