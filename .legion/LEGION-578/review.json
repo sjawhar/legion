@@ -1,58 +1,51 @@
 {
-  "approvedBefore": {
-    "head": "96a3949f08e5e8916492f40f6e933b1cd834270e",
-    "review": 5454722232
-  },
-  "codeHead": "7721ffa08d91cfe6ba0aaa8f38df94cceba12556",
-  "completed": "2026-10-08T22:45:24.47578384Z",
+  "codeHead": "f98f84e70f5b0a2c4d77210ad5c6043a2a4a3458",
+  "completed": "2026-10-08T23:08:03.611692253Z",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "issue": "LEGION-578",
-  "keyFindings": [
+  "keyFindings": [],
+  "minor": 0,
+  "phase": "review",
+  "previousRounds": [
     {
-      "description": "The 15→16 renumber's sentence sweep is incomplete, and the repository's own rule for a renumber (docs/solutions/legion/daemon-api-contract-collision-renumber-…md:103-110) puts the sweep in the renumber's commit. Five published or agent-read sentences still name 15 for this branch's shape: the plugin README says the gate wants 15 (the npm README of a package declaring 16); the LEGION-462 upgrade runbook offers an operator two numbers ('15 for the shared issue pod, 16 once the capability report lands beside it') where every checkout that carries the sentence is at 16, and an operator who takes 15 is refused by 409/boot gate after the runbook's destructive steps; the CHANGELOG's Unreleased section says 'needs this release beside a daemon at 15' (main's LEGION-462 text, now a forward claim about the release being cut at 16 — keep the entry's opening verbatim, fix only that clause); and two retro notes record the capabilities shape at 15, one stating '15, which no release had shipped' — false now, 8.3.0 shipped 15 without capabilities, which is why this round renumbered. Fix: 16 at each (the runbook may instead point at the file alone), one commit.",
-      "file": "packages/pi-legion/README.md:20; docs/kubernetes.md:609-611; packages/pi-legion/CHANGELOG.md:29; docs/solutions/daemon/a-capability-row-reports-what-a-worker-can-do-not-what-the-image-contains-LEGION-578.md:46-47; docs/solutions/legion/a-strict-schemas-new-required-field-is-censused-across-every-parser-rigs-and-stand-ins-included-LEGION-578.md:41",
-      "severity": "important"
+      "finding": "daemon-standin.ts state literal lacked capabilities — fixed in f5037e0e",
+      "head": "4aac2a501f4cbbefd1995b8cd0c5114c91feed1c",
+      "review": 5453289786,
+      "round": 1
     },
     {
-      "description": "sameNotices exists only because noticeRows returns a non-nil empty slice (:304) while the table's want is nil; `var payloads []record.OutboxPayload` and plain reflect.DeepEqual (as admit/slot_free_test.go:78-88 and outbox_lifecycle_test.go:608 do) deletes the helper. Fast-follow.",
-      "file": "packages/daemon/internal/workflow/hold_test.go:289-293,304",
-      "severity": "minor"
+      "finding": "the codegraph row rendered present while every pod runs --no-extensions — fixed in 7fa314e3",
+      "head": "d592c6994e532cfdecd9f6d30d63efa18c6c309e",
+      "review": 5454073762,
+      "round": 2
     },
     {
-      "description": "The 16 entry carries a four-line renumber narrative and a 97-character filename where entries 8-15 are one line of shapes; the story lives in the solutions doc, the CHANGELOG and the PR body. Fast-follow.",
-      "file": "packages/daemon/internal/api/version.go:63-66",
-      "severity": "minor"
+      "finding": "approved",
+      "head": "96a3949f08e5e8916492f40f6e933b1cd834270e",
+      "review": 5454722232,
+      "round": 3
     },
     {
-      "description": "`record.OutboxPayload(died)` is a dead conversion under reflect.DeepEqual(any, any). Fast-follow.",
-      "file": "packages/daemon/internal/daemon/outbox_lifecycle_test.go:629",
-      "severity": "minor"
-    },
-    {
-      "description": "Line anchors drifted with the merge (manifest.go:275→290, daemon.go:505-512→528-535, daemon.go:576-577→597-598, README.md:549→561, docs/kubernetes.md:480→674, legion-api.ts:233-241→242); Size is 76 files +4490/−777; census row 5 should name outbox_lifecycle_test.go. The reviewer re-anchored its own lines; the implementer's in the corrective push.",
-      "file": "pull request body",
-      "severity": "minor"
+      "finding": "conflict round after the forward merge of main (fingerprint changed): the 15→16 renumber's sentence sweep left five sentences at 15 — fixed in f98f84e7",
+      "head": "256a856be8be476d5f93df33aaa99e40f4cf0754",
+      "review": 5463772787,
+      "round": 4
     }
   ],
-  "kind": "conflict round: a forward merge of main@origin after the approval at 96a3949f; fingerprint 6f7ff644cfefc7e3… at 96a3949f → 7e9df573456cb5fa… at f31c7586, changed (the 15→16 contract renumber, the merge resolutions in daemon.go/kubernetes.go/live_test.go/hold_test.go, 7721ffa0's two notice-comparison fixes), so a new round with the thermonuclear pair, not a confirmation",
-  "minor": 4,
-  "phase": "review",
-  "reviewedHead": "f31c758610ea07c089e5db93e4f41c02f4cf539c",
-  "reviewerSmoke": "pod relaunched before this round; Go 1.26.8 reprovisioned under $HOME; the merged binary built at f31c7586: go vet of internal/daemon, workflow, api, runtime/sandbox and cmd/legion clean; go test ./internal/{capabilities,api,bootprobe} ok; probe-image with no contract named refuses this pod's plugin naming `contract 14; this daemon requires 16`; with --daemon-api-version 14 the 19-row table prints",
-  "round": 4,
+  "reviewedHead": "2b98e2286fc1bb10230f3dbf8f08bdd37d8c8814",
+  "round": 5,
+  "roundFive": "the delta since the round-4 head f31c7586 is prose only: jj diff --from 256a856b --to 2b98e228 '~(.legion | glob:\"**/*.md\")' is empty; f98f84e7 replaces the five stale literals with pointers at the DaemonAPIVersion constant / the package.json entry (README:18-20, docs/kubernetes.md:609-610, CHANGELOG:29-30, the two docs/solutions notes) and keeps LEGION-462's own 15 verbatim; grep for 'contract 15|currently 15|to 15|at 15' across those five files finds nothing",
   "schemaVersion": 1,
-  "securityLine": "Security: authz — the one gate this round changes is the daemon API contract equality, tightened 15→16 (api/version.go:67); the operator bearer and boot-token checks still precede it (api/controller.go:67-71, 126-128); the newly refused caller is a pi-legion at 15 (the released 8.3.0), answered 409 naming both numbers or a named image/boot refusal (probe.go:503-505, bootgate.go:393-395); nothing newly permitted. agent-def — the eight docs/solutions notes are narrative, read by agents through skill://legion-oracle, which is why two stale contract-15 sentences are a finding; no reviewer skill, role prompt or .omp config is touched. No secret, untrusted-input, prompt, supply-chain, sandbox or transport surface in this round's delta; the branch's standing rows stand as reviewed in rounds 1-3.",
+  "securityLine": "Security: no sensitive surface in this round's delta (five prose sentences pointing at the DaemonAPIVersion constant instead of a literal); the branch's standing rows stand as reviewed in rounds 1-4 (authz: the contract gate tightened 15→16 behind the operator-bearer and boot-token checks; supply-chain: Go SHA-256 and gopls pinned, npm exact pins on the Fast-follow line, trixie suite as pin; untrusted-input: binaries exec'd from the pod env with no shell on the value, OK-line marks anchored; sandbox: probe log tail under the same 64 KiB bound; agent-def: controller skill and AGENTS.md additive, docs/solutions narrative now accurate).",
   "thermonuclear": {
-    "codeQuality": "the code merge sound; two documentation correctness items (README:20, kubernetes.md:609-611), sameNotices as a structural simplification, version.go narrative and CHANGELOG wrap as wording",
-    "deepReview": "no High or Medium; the merge resolution is correct (main's clusterCheck/claimsCheck beside the branch's probe signature and modelFallback, boot order intact; kubernetes.go identical to main's but the probe's return type; live_test.go keeps runtimeOptions with main's startRuntime and SetLauncherResolver; the probe pod is a bare container so the second probe-only runtime in image-probe-capability-negative needs no launcher resolver and cannot hijack the shared listener; the probe Sandbox is still deleted on every path); the test fix is a faithful slices.Equal replacement and the comparability hazard is fully swept; the renumber is complete at every declaration site, main's 15 entry byte-identical; LEGION-462 semantics hold (resources per role container at manifest.go:400 matching claim.Roles; the pod still launches --no-extensions at manifest.go:290; LEGION-462 touched none of probe.go, operatorpod.go, worker.Dockerfile, bootprobe, capabilities, config/kubernetes.go; the baseline's new keys are none the branch reads); census hit sets unchanged; Lows: the five stale-15 sentences above, the Stage 4a evidence predating the renumber (now in Not proven / risk)",
-    "head": "f31c758610ea07c089e5db93e4f41c02f4cf539c"
+    "head": "f31c758610ea07c089e5db93e4f41c02f4cf539c",
+    "note": "the pair ran at f31c7586 (round 4); the code at 2b98e228 is byte-identical to it, so its verdict stands: the merge resolution, the test fix and the renumber sound, no High or Medium; the round-4 Lows were the five sentences now fixed and the Stage 4a evidence predating the renumber (recorded in Not proven / risk)"
   },
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "verifiedOnGitHub": {
-    "checks": "required set lint, typecheck, test, pr-title green at 8842783b (Tests 37851654514, PR Title 37851654393/37851722592/37853227131); Worker Image 37851654704 (OK line daemon-api-version=16) and Docs 37851654380 success; Legion Envoy and Contracts 37851656584 in progress on jobs the base does not require; f31c7586 carries skip-checks; the daemon's checksVerdict green carried",
-    "fingerprint": "computed per skill://legion-worker/references/conflicts-and-rewrites.md: 6f7ff644cfefc7e356a0fd627fce8b327dfdd75da14ca4902945e3b4bd0fb679 at 96a3949f (fork point ae1f44b7) → 7e9df573456cb5fa1ebcb8beb348ad1079ef193885e99711c369d3549c192e08 at f31c7586 (fork point 41c4d814); changed",
-    "proofLines": "E2E (implementer) at 00127cd3, f5037e0e, 7fa314e3 and 7721ffa0 (the merged gate refusing a 14 plugin and requiring 16; the 8.3.0 tarball at 15 without capabilities); E2E (tester) at c88a3502, 7f91903b, c8044d34 and 8842783b (probe-image at 16, Worker Image 37851654704's OK line, Stage 1 on real Postgres with the plugin reader, the two merge-fixed tests on Postgres, main@origin's schema refusing the merged state); the rebase comment 6069741108 and its follow-up 6069960415 on the pull request",
-    "threads": "7 threads, all mine, each with my Accepted: as its newest comment; the three round-1 threads resolved; round 2's four await the implementer's threads resolve (the body says left open as of 7fa314e3); no new thread this round before this review"
+    "checks": "required set lint, typecheck, test, pr-title green at c5e41f1b (Tests 37856652428, PR Title 37856652441/37857454690); Docs 37856652443 success; Worker Image 37856652444 and Legion Envoy and Contracts 37856652440 in progress, neither required; 2b98e228 carries skip-checks; checksVerdict green",
+    "proofLines": "E2E (implementer) through 7721ffa0 and E2E (tester) through 8842783b stand (no code changed since); the tester's round-4 handoff drove the sweep's sentences",
+    "threads": "13 threads, all mine: 7 resolved with my Accepted (rounds 1-2); the six round-4 threads each answered Fixed in f98f84e7 (or Declined, fast-follow for the hold_test.go simplification) by the implementer, verified in the diff, and each now carries my Accepted as its newest comment (4225040977, 4225041124, 4225041254, 4225041391, 4225041598, 4225041724)"
   }
 }
