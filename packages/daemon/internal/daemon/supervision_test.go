@@ -1110,7 +1110,7 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 
 	testwait.Eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
 		r, w := d.claim(root), d.claim(worker)
-		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Session == "" && w.Session == ""
+		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Locator != nil && r.Session == "" && w.Session == ""
 	})
 	if fresh := lastLaunch(t, rt, root); fresh.ResumeSessionFile != "" || fresh.WorkspaceRecoveredFrom != "legion/LEGION-1" {
 		t.Errorf("the root relaunched with %+v, want a fresh session recovering legion/LEGION-1", fresh)
@@ -1142,7 +1142,7 @@ func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
 
 	testwait.Eventually(t, "the relaunch", func() bool {
 		c := d.claim(token)
-		return c.Generation == 2 && c.State == string(supervise.StateLaunching)
+		return c.Generation == 2 && c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
 	if relaunched := lastLaunch(t, rt, token); relaunched.ResumeSessionFile == "" {
 		t.Errorf("relaunched with %+v, want the recorded session resumed", relaunched)

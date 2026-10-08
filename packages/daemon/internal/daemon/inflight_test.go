@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // stopBound is the share of a pod's 30-second termination grace a daemon's stop may take: a third,
@@ -26,13 +27,15 @@ const stopBound = 10 * time.Second
 // stallingRuntime is the fake runtime, except that once stalling is set every launch waits in the
 // runtime as an Agent Sandbox relaunch waits on a busy cluster — for the previous pod to go, for the
 // tree's other pods to finish workspace-init, for the new pod — far longer than a pod's grace: a
-// relaunch on the production cluster took 169 s on 2026-10-08. The wait ends with the launch's
-// context, as every Sandbox wait does, unless ignoresContext makes it a call that answers to none;
-// release, at the test's end, ends it either way.
+// relaunch on the production cluster took 169 s on 2026-10-08. Once stallsSuspend is set every
+// suspension waits the same way, as a Sandbox suspension waits out its pod's termination grace.
+// The wait ends with the call's context, as every Sandbox wait does, unless ignoresContext makes it
+// a call that answers to none; release, at the test's end, ends it either way.
 type stallingRuntime struct {
 	*fake.Runtime
 	ignoresContext bool
 	stalling       atomic.Bool
+	stallsSuspend  atomic.Bool
 	entered        chan claim.Token
 	release        chan struct{}
 }
@@ -59,6 +62,18 @@ func (r *stallingRuntime) Resume(ctx context.Context, prev *runtime.Locator, spe
 		return runtime.Locator{}, err
 	}
 	return r.Runtime.Resume(ctx, prev, spec)
+}
+
+func (r *stallingRuntime) Suspend(ctx context.Context, loc runtime.Locator) error {
+	if r.stallsSuspend.Load() {
+		r.entered <- loc.Claim
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("suspend %s: %w", loc.Claim, ctx.Err())
+		case <-r.release:
+		}
+	}
+	return r.Runtime.Suspend(ctx, loc)
 }
 
 func (r *stallingRuntime) stall(ctx context.Context, token claim.Token) error {
@@ -263,5 +278,51 @@ func TestTheOperatorListingAnswersWhileRelaunchesWaitOnTheCluster(t *testing.T) 
 					token, c.State, c.Generation, c.Locator)
 			}
 		}
+	}
+}
+
+// A daemon told to stop while its boot relaunches a launch the previous daemon left unrecorded
+// stops inside the same bound, boot included: the boot's relaunches run one after another before
+// the API serves, each waiting in the runtime, and the stop cuts them short as it cuts any
+// decision short (LEGION-650).
+func TestRunStopsInsideAPodGraceWhileItsBootRelaunchesAnUnfinishedLaunch(t *testing.T) {
+	cfg := testConfig(t)
+	project, _ := claim.ProjectToken(cfg.Project)
+	token, _ := claim.NewToken(project, "LEGION-4", claim.RoleReviewer)
+	putClaim(t, cfg, supervise.Claim{
+		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
+		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
+	})
+	writePrompt(t, cfg, token)
+	rt := newStallingRuntime(t, false)
+	rt.stalling.Store(true)
+	logs := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, cfg, slog.New(slog.NewJSONHandler(logs, nil)), fakeRuntime(rt, &built{})) }()
+	select {
+	case <-rt.entered:
+	case err := <-done:
+		t.Fatalf("run returned %v before its boot relaunched the unfinished launch; log:\n%s", err, logs)
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the boot never relaunched the unfinished launch; log:\n%s", logs)
+	}
+
+	mark := len(logs.String())
+	began := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(stopBound):
+		t.Fatalf("run had not returned %s after its context was cancelled mid-boot; it logged:\n%s", stopBound, logs.String()[mark:])
+	}
+	t.Logf("stopped in %s while its boot relaunched %s", time.Since(began), token)
+	logsStopping(t, logs.String()[mark:])
+	if stopped := lastBootStopped(t, cfg); stopped == nil {
+		t.Fatalf("the boot was not stamped stopped; the stop logged:\n%s", logs.String()[mark:])
 	}
 }

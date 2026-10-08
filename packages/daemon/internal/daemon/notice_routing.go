@@ -222,13 +222,19 @@ func claimTookRole(state supervise.ClaimState) bool {
 // supervisedClaim is token's claim as this daemon supervises it, or the zero Claim, whose state is
 // "", when it does not supervise it. It is the machine's View, which never waits on a decision in
 // flight: the outbox runs one row at a time, and an architect's relaunch can hold its machine for
-// minutes while the runtime waits out its pods.
+// minutes while the runtime waits out its pods. A claim whose process that decision is stopping
+// holds its role no longer and reads as suspended, where a stop leaves a claim that goes on, so no
+// notice goes to a session being stopped.
 func (r *outbox) supervisedClaim(token claim.Token) supervise.Claim {
 	machine, ok := r.supervisor.Machine(token)
 	if !ok {
 		return supervise.Claim{}
 	}
-	return machine.View()
+	c := machine.View()
+	if c.Stopping {
+		c.State = supervise.StateSuspended
+	}
+	return c
 }
 
 // claimState is the state of token's claim, or "" when this daemon does not supervise it.

@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -264,6 +265,56 @@ func TestANoticeIsRoutedWhileItsArchitectLaunches(t *testing.T) {
 	}
 	if _, delivered := publisher.snapshot(); len(delivered) != 1 || delivered[0].topic != architectTopic(t, "LEGION-1") {
 		t.Fatalf("notice publishes = %+v, want one to the launching architect's role topic", delivered)
+	}
+}
+
+// A sub-architect whose suspension is in the runtime holds its role no longer: a notice of its
+// issue's child goes up to the tree's root, as it would once the suspension returned, never to the
+// session being stopped. The routing reads the claim without waiting on the suspension, so it must
+// read the stop in flight from the claim itself (LEGION-650).
+func TestANoticeIsNotRoutedToASubArchitectBeingSuspended(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, fakeRuntime := newOutboxSupervisor(t, "legion", t.TempDir())
+	rt := newStallingRuntime(t, false)
+	rt.Runtime = fakeRuntime
+	sup.deps.Runtime = rt
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	sub := architectClaim(t, sup, "LEGION-2", supervise.StateQueued)
+	sup.deps.Conns.(*fake.Conns).Register(sub, fake.NewConn())
+	machine, _ := sup.Machine(sub)
+	ctx := context.Background()
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: sub}); err != nil {
+		t.Fatalf("spawn the sub-architect: %v", err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: sub, Generation: generation},
+		supervise.RequestRegister{Claim: sub, Generation: generation, Session: "ses-sub", SessionFile: "/tmp/sub.jsonl"},
+		supervise.RequestReady{Claim: sub, Generation: generation, Session: "ses-sub"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	rt.stallsSuspend.Store(true)
+	go func() {
+		_ = machine.Handle(ctx, supervise.RequestSuspend{Claim: sub, Reason: "its issue left its phase"})
+	}()
+	select {
+	case <-rt.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sub-architect's suspension never reached the runtime")
+	}
+	publisher := &holderPublisher{}
+	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-3", record.Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing}, time.Now()))
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion"}
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("execute the notice: %v", err)
+	}
+	if _, delivered := publisher.snapshot(); len(delivered) != 1 || delivered[0].topic != architectTopic(t, "LEGION-1") {
+		t.Fatalf("notice publishes = %+v, want one to the root's role topic, none to the sub-architect being suspended", delivered)
 	}
 }
 

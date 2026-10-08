@@ -53,18 +53,21 @@ const (
 	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
 	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
-	// stopBudget bounds the daemon's stop from the moment it begins (supervision.halt) until it
-	// stamps its boot: the API's drain, the workflow's end, and the end of every claim's decision in
-	// flight, whose runtime calls the stop cancels. Work still running then — a call into a process
-	// that does not answer — is not waited on: the process exits once the boot is stamped, and the
-	// next boot re-adopts each process a claim records and relaunches each launch left unrecorded.
-	// drainTimeout bounds the API's drain, which starts with the stop and ends inside its budget, so
-	// a drain that runs out is reported as its own error. stampTimeout bounds the stamp, and
-	// storeCloseTimeout the store's close after it. The budget, the stamp and the close together
-	// stay well inside the 30 seconds a pod is given between SIGTERM and SIGKILL.
+	// stopBudget bounds the daemon's stop from the moment it begins (supervision.halt, at the
+	// signal, whether the daemon is serving or its boot is still supervising the stored claims)
+	// until it stamps its boot: the API's drain, the workflow's end, and the end of every claim's
+	// decision in flight, the boot's relaunches of unfinished launches included, whose runtime calls
+	// the stop cancels. Work still running then — a call into a process that does not answer — is
+	// not waited on: the process exits once the boot is stamped, and the next boot re-adopts each
+	// process a claim records and relaunches each launch left unrecorded. drainTimeout bounds the
+	// API's drain, which starts with the stop and ends inside its budget, so a drain that runs out
+	// is reported as its own error. stampTimeout bounds the stamp, and storeCloseTimeout the store's
+	// close after it. The budget, the stamp and the close together stay inside the 30 seconds a pod
+	// is given between SIGTERM and SIGKILL. Before the boot is recorded a signal ends the daemon
+	// through each boot step's own bounds, as Run says.
 	stopBudget        = 10 * time.Second
 	drainTimeout      = 8 * time.Second
-	stampTimeout      = 5 * time.Second
+	stampTimeout      = 10 * time.Second
 	storeCloseTimeout = 2 * time.Second
 	// streamSocket is the worker stream's unix socket under the state directory: the one address
 	// every pane's shim dials under tmux (decision 2 — no configuration key).
@@ -310,6 +313,11 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
+	// From here a signal halts supervision at once, so a boot still relaunching the launches the
+	// previous daemon left unfinished (supervision.start) is cut short like any decision in flight,
+	// and the stop's budget runs from the signal.
+	halting := context.AfterFunc(ctx, s.halt)
+	defer halting()
 	superviseErr := s.start(boot)
 	if superviseErr == nil && workflow != nil {
 		superviseErr = workflow.replayTerminal(boot, s.claims)
@@ -358,9 +366,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		deadline.Stop()
 	}
 
-	// The stop cancelled the store queries in flight, and a connection one of them ran on can go
-	// back to the pool unusable; the stamp runs on a connection opened after them.
-	st.Pool().Reset()
 	stamp, cancelStamp := context.WithTimeout(context.WithoutCancel(ctx), stampTimeout)
 	defer cancelStamp()
 	stopErr := st.StopBoot(stamp, bootID, time.Now().UTC())

@@ -111,6 +111,10 @@ type Claim struct {
 	// SuspensionHeld is whether a suspension is held for the agent's turn (holdSuspension). It is
 	// memory only: Machine.Claim reports it, and the store never writes it.
 	SuspensionHeld bool
+	// Stopping is whether the decision in flight is stopping the claim's process — a suspension
+	// or a release in the runtime (suspendProcess, release) — which View reports while the claim
+	// still shows the state it is leaving. It is memory only, and the store never writes it.
+	Stopping bool
 }
 
 // treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
@@ -324,8 +328,9 @@ type Machine struct {
 	idle       *sync.Cond
 	// view is the claim View reports: published under mu as each locked section ends and at every
 	// write of the claim (persist), and read without mu, so a reader never waits on a decision in
-	// flight.
-	view atomic.Pointer[Claim]
+	// flight. stopping is whether that decision is stopping the claim's process (Claim.Stopping).
+	view     atomic.Pointer[Claim]
+	stopping bool
 }
 
 type sending struct {
@@ -516,7 +521,16 @@ func (m *Machine) View() Claim {
 func (m *Machine) publish() {
 	c := copyClaim(m.claim)
 	c.SuspensionHeld = m.held != nil
+	c.Stopping = m.stopping
 	m.view.Store(&c)
+}
+
+// stoppingProcess marks the claim's process as being stopped, for View, until the runtime call
+// that stops it returns; the end of the decision publishes what it left. The caller holds mu.
+func (m *Machine) stoppingProcess() func() {
+	m.stopping = true
+	m.publish()
+	return func() { m.stopping = false }
 }
 
 // unlock ends a locked section that may have changed the claim: it publishes the claim, then
@@ -779,6 +793,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 // runs. It is the one place the machine hands the runtime a claim to end, so the claim is taken
 // once, from the claim the machine holds, for the operator's stop, the tree's close, and an exit.
 func (m *Machine) release(ctx context.Context) error {
+	defer m.stoppingProcess()()
 	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
 		return fmt.Errorf("release %s: %w", m.claim.Token, err)
 	}
@@ -789,7 +804,10 @@ func (m *Machine) release(ctx context.Context) error {
 // counterpart for a claim that goes on — and lets the stopped process go, for the next launch of
 // the same session to wait out. A suspension that fails leaves the claim holding its process.
 func (m *Machine) suspendProcess(ctx context.Context) error {
-	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+	stopped := m.stoppingProcess()
+	err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator)
+	stopped()
+	if err != nil {
 		return err
 	}
 	m.letGo()
