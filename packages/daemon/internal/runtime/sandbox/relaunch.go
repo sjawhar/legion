@@ -58,7 +58,7 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // has its workspace's provisioning token minted, the controller's pod needs nothing. A workflow
 // claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
 // cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
-func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (loc runtime.Locator, retErr error) {
 	l, err := r.prepare(spec)
 	if err != nil {
 		return runtime.Locator{}, err
@@ -67,6 +67,24 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
 	}
 	r.forget(spec.Claim)
+	// Machine.launch has moved prev out of its claim before calling Resume, and forget above has
+	// removed it from this runtime's watch. An error from here must therefore leave no child of this
+	// role running unrecorded: clean up its child, or the child an ambiguous start may have begun,
+	// on every error. The defer uses retErr only as the error it must return; it never calls a
+	// function through a named result or a mutable release function. stopUnrecordedRoleChild discovers
+	// the child at return time from the launcher state.
+	var (
+		pod         *corev1.Pod
+		startIssued bool
+	)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if stopErr := r.stopUnrecordedRoleChild(context.WithoutCancel(ctx), spec.Claim, prev, pod, startIssued, spec.Generation); stopErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("stop its unrecorded role child: %w", stopErr))
+		}
+	}()
 	release, err := r.lockPod(ctx, l.name)
 	if err != nil {
 		return fail("take its pod's launch turn", err)
@@ -76,7 +94,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if err != nil {
 		return fail("ensure its sandbox", err)
 	}
-	pod := r.storedPod(s.Name)
+	pod = r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	replace := s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
@@ -124,7 +142,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			return fail("bind its role launchers to the new pod", err)
 		}
 	}
-	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
+	loc = r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
 	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
 	defer cancel()
 	ended, err := r.awaitRoleLauncher(starting, loc)
@@ -149,11 +167,50 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if err := r.recordAddresses(starting, s, spec.Role, spec.Generation); err != nil {
 		return fail("record the addresses its generation is handed", err)
 	}
+	startIssued = true
 	if err := r.launchers.start(starting, spec.Claim, string(pod.UID), launcherCommand(l, r)); err != nil {
 		return fail("start through its authenticated launcher", err)
 	}
 	r.join(loc)
 	return loc, nil
+}
+
+// stopUnrecordedRoleChild stops the child of token's launcher in either pod its failing relaunch
+// could have left it: prev's pod, which Machine had recorded before Resume, and pod, the pod this
+// relaunch reached or made. Every such child belongs to this role, never a sibling, and is
+// unrecorded once relaunch has failed. A stop is bounded even when the launch caller's context has
+// expired. When the prior child, or a child a start may have begun, has disconnected first, its stop
+// is still attempted at its generation so the returned launch error says the runtime could not end
+// it, rather than silently leaving it a zombie.
+func (r *Runtime) stopUnrecordedRoleChild(
+	ctx context.Context, token claim.Token, prev *runtime.Locator, pod *corev1.Pod, startIssued bool, generation uint64,
+) error {
+	candidates := map[string]uint64{}
+	if prev != nil && prev.Sandbox != nil && (pod == nil || string(pod.UID) == prev.Sandbox.PodUID) {
+		candidates[prev.Sandbox.PodUID] = prev.Sandbox.Generation
+	}
+	if pod != nil && startIssued {
+		if _, already := candidates[string(pod.UID)]; !already {
+			candidates[string(pod.UID)] = generation
+		}
+	}
+	var errs []error
+	for uid, expected := range candidates {
+		state, connected := r.launchers.state(token, uid)
+		switch {
+		case connected && state.Child == nil:
+			continue
+		case connected && state.Child != nil:
+			expected = state.Child.Generation
+		}
+		stopping, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
+		err := r.launchers.stop(stopping, token, uid, r.stopFrame(expected))
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pod %s generation %d: %w", uid, expected, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, error) {

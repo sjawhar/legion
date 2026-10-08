@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -1042,6 +1044,133 @@ func editSecret(g *rig, name string, edit func(*corev1.Secret)) {
 	if err := g.kube.Tracker().Update(corev1.SchemeGroupVersion.WithResource("secrets"), next, testNamespace); err != nil {
 		g.t.Fatal(err)
 	}
+}
+
+// A transient binding read after a live role's Machine let its previous locator go must not leave
+// that previous child outside both the Machine and the runtime: Machine retries the ordinary
+// Resume error until its launch-failure budget runs out, then persists the claim Failed. The child
+// it started at generation 1 must already be stopped by then; neither a failed claim nor the
+// runtime's forgotten watch may leave it acting.
+func TestAFailedLauncherBindingReadNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	machine, store := supervisedSandboxMachine(t, g, spec)
+	g.launcher(spec.Claim)
+	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
+		t.Fatalf("initial Spawn: %v", err)
+	}
+	first := machine.Claim().Locator
+	if first == nil {
+		t.Fatal("initial Spawn left the Machine without a locator")
+	}
+	for _, event := range []supervise.Event{
+		supervise.StreamHello{Claim: spec.Claim, Generation: 1},
+		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: resumeSession},
+		supervise.RequestReady{Claim: spec.Claim, Generation: 1, Session: "ses-tester"},
+	} {
+		if err := machine.Handle(g.ctx, event); err != nil {
+			t.Fatalf("%T for generation 1: %v", event, err)
+		}
+	}
+	if got := machine.Claim().State; got != supervise.StateReady {
+		t.Fatalf("initial role state = %s, want ready", got)
+	}
+
+	secret := roleSecretName(first.Sandbox.Name, claim.RoleTester)
+	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() == secret {
+			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+		}
+		return false, nil, nil
+	})
+	err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *first, Kind: runtime.StaleAddress, At: rigNow,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "read its pod's launcher bindings") {
+		t.Fatalf("StaleAddress = %v, want the binding-read failure", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
+		t.Fatalf("claim after the persistent failures = %+v, want failed with three launch failures and no locator", got)
+	}
+	if recorded, found := g.r.recorded(spec.Claim); found {
+		t.Errorf("runtime still records %s after the failed claim", recorded.Incarnation)
+	}
+	state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+	if !connected || state.Child != nil {
+		t.Fatalf("the failed claim left launcher connected=%t child=%+v, want no child", connected, state.Child)
+	}
+	if stored := store.claim; stored.State != supervise.StateFailed || stored.Locator != nil {
+		t.Errorf("stored claim after failure = %+v, want failed with no locator", stored)
+	}
+}
+
+// supervisedSandboxMachine is a Machine over the rig's real Sandbox runtime, rather than the
+// runtime fake most Machine tests use. Its in-memory Store and no-timer Clock are enough for this
+// lifecycle: no task is sent and no deadline fires while the test drives the Machine directly.
+func supervisedSandboxMachine(t *testing.T, g *rig, spec runtime.SpawnSpec) (*supervise.Machine, *supervisedSandboxStore) {
+	t.Helper()
+	c := supervise.Claim{
+		Token: spec.Claim, Project: spec.Project, Tree: spec.Tree, Issue: spec.Issue, Role: spec.Role, State: supervise.StateQueued,
+	}
+	store := &supervisedSandboxStore{claim: c}
+	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
+		Runtime: g.r, Conns: g.conns, Store: store, Specs: sandboxMachineSpecs{spec: spec}, Clock: sandboxMachineClock{},
+		Log:    slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
+		Timeouts: supervise.Timeouts{
+			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour,
+		},
+	}, c)
+	if err != nil {
+		t.Fatalf("new Machine: %v", err)
+	}
+	return machine, store
+}
+
+type sandboxMachineSpecs struct{ spec runtime.SpawnSpec }
+
+func (s sandboxMachineSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
+	return s.spec, nil
+}
+
+type sandboxMachineClock struct{}
+
+func (sandboxMachineClock) Now() time.Time { return rigNow }
+
+func (sandboxMachineClock) AfterFunc(time.Duration, func()) supervise.Cancel {
+	return sandboxMachineCancel{}
+}
+
+type sandboxMachineCancel struct{}
+
+func (sandboxMachineCancel) Stop() bool { return true }
+
+type supervisedSandboxStore struct{ claim supervise.Claim }
+
+func (s *supervisedSandboxStore) AdmitClaim(_ context.Context, c supervise.Claim) (supervise.Claim, error) {
+	s.claim = c
+	return c, nil
+}
+
+func (*supervisedSandboxStore) CheckLaunch(context.Context, supervise.Claim) error { return nil }
+
+func (s *supervisedSandboxStore) PutClaim(_ context.Context, c supervise.Claim) error {
+	s.claim = c
+	return nil
+}
+
+func (*supervisedSandboxStore) PutDelivery(context.Context, claim.Token, supervise.Delivery) error {
+	return nil
+}
+
+func (s *supervisedSandboxStore) PutClaimAndDelivery(_ context.Context, c supervise.Claim, _ supervise.Delivery) error {
+	s.claim = c
+	return nil
+}
+
+func (s *supervisedSandboxStore) RetireDelivery(_ context.Context, c supervise.Claim, _ string) error {
+	s.claim = c
+	return nil
 }
 
 // A Running patch the server applied but whose answer never arrived (a client timeout) is as

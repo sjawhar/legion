@@ -316,7 +316,8 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 // pod an older runtime made (one worker container, no launchers) or one whose binding never landed
 // is replaced rather than trusted. Any other failure to read a Secret, such as a timeout, a
 // throttled request or a server error, proves nothing about the pod: it is returned, so only the
-// launch that read it fails, and the pod and every role running in it are left as they are.
+// launch that read it fails. When that launch resumes a role, relaunch stops the role's previous
+// child before returning the error; the pod and every other role running in it are left as they are.
 func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
 	for _, role := range roles {
 		name := roleSecretName(s.Name, role)
