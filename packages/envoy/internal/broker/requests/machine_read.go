@@ -54,8 +54,8 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	if set := m.Policy.Get(); policyVersion != set.Version {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.Services)
+	if set := m.Policy.Get(); policyVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
 			return nil, time.Time{}, err
 		}

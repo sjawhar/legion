@@ -43,8 +43,8 @@ const (
 // needs the operator's approval whoever asks; ALICE_KEY, another person's agent-tier secret, needs
 // alice's approval for the operator's session; AUTO_TOKEN, the operator's agent-tier secret, is
 // automatic for the operator's session; SHARED_KEY, shared and human-tier, needs anyone's approval;
-// SERVICE_KEY, the registered service's, goes at once to the pods its launcher enrolled
-// (newServiceEnrollment) and is denied to every other session.
+// SERVICE_KEY, the registered service's, goes at once to the pods its launcher enrolled running as
+// fixtureSubject (newServiceEnrollment) and is denied to every other session.
 func fixtureSecrets() []secrets.LocalSecret {
 	return []secrets.LocalSecret{
 		policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"),
@@ -141,15 +141,15 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store:      st,
-		Policy:     policytest.Current(t, local, fixtureService),
-		Secrets:    secrets.AWS{Client: local},
-		MaxGrant:   time.Hour,
-		PendingTTL: 12 * time.Hour,
-		Audience:   testAudience,
-		Skew:       time.Minute,
-		Replay:     replayer(st),
-		Services:   map[string]string{fixtureService: fixtureSubject},
+		Store:           st,
+		Policy:          policytest.Current(t, local, fixtureService),
+		Secrets:         secrets.AWS{Client: local},
+		MaxGrant:        time.Hour,
+		PendingTTL:      12 * time.Hour,
+		Audience:        testAudience,
+		Skew:            time.Minute,
+		Replay:          replayer(st),
+		ServiceAccounts: map[string]string{fixtureService: fixtureSubject},
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -1144,9 +1144,10 @@ func TestRevokingARevokedGrantWritesNoSecondAuditRow(t *testing.T) {
 }
 
 // TestEveryRequesterIsDecidedByOwnerAndTier drives the policy's whole table through Create: the
-// owner's own session, another person's session, a pod and a pod the service's launcher enrolled
-// each ask for a person's agent-tier and human-tier secret, a shared agent-tier and human-tier
-// secret, and a service's secret. A request that needs approval writes a record naming the
+// owner's own session, another person's session, a pod, and a pod the service's launcher enrolled
+// running as fixtureSubject each ask for a person's agent-tier and human-tier secret, a shared
+// agent-tier and human-tier secret, and a service's secret. A request that needs approval writes a
+// record naming the
 // approver and reaches that approver's pending list: another person's session or a pod asking for
 // a person's agent-tier secret is an approval request to its owner. The service's pod is a pod
 // with no operator to every secret but the service's own, which it alone gets at once.
@@ -1257,5 +1258,27 @@ func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
 	}
 	if pending, err := m.PendingForApprover(ctx, "carol@example.com"); err != nil || len(pending) != 0 {
 		t.Fatalf("PendingForApprover(carol) after bob decided = %+v, %v, want nothing", pending, err)
+	}
+}
+
+// TestAServiceGrantStopsWhenItsServiceAccountChanges pins that a grant of a service's secret is
+// re-checked on every use, not only once the policy's version moves: the registered service
+// accounts are not in the version, so once BROKER_SERVICES binds the service to another account the
+// pod's grant releases nothing and its next request is denied rather than reusing the grant.
+func TestAServiceGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+	granted, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it", "SERVICE_KEY"), "")
+	if err != nil || granted.State != "granted" || granted.GrantID == nil {
+		t.Fatalf("Create(the service's pod) = %+v, %v; want granted", granted, err)
+	}
+	m.ServiceAccounts = map[string]string{fixtureService: "system:serviceaccount:example:other-sa"}
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values after the service's account changed = %v, %v; want ErrGrantNotLive", values, err)
+	}
+	again, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it again", "SERVICE_KEY"), "")
+	if err != nil || again.ID == granted.ID || again.State != "denied" || again.GrantID != nil {
+		t.Fatalf("Create after the service's account changed = %+v, %v; want a new request, denied, not request %s reused", again, err, granted.ID)
 	}
 }

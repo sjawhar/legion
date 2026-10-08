@@ -135,9 +135,9 @@ type Requester struct {
 	// Operator is the email of the person whose machine login the session enrolled under; empty
 	// for a pod.
 	Operator string
-	// Service is the registered service the session proved it is: a session proves its service
-	// through the launcher credential that enrolled it, the service its machine login was for (the
-	// Legion daemon's pods are legion-daemon's). Empty for a session no service's login enrolled.
+	// Service is the service of the machine login that enrolled the session, set only when the
+	// session is a pod whose verified service account is the one BROKER_SERVICES binds that service
+	// to (requests.enrollmentRow.requester); empty otherwise.
 	Service string
 	// Withheld is the names the session's operator withheld from it by revoking a grant of them
 	// the session got without asking (requests.Machine.RevokeByApprover). Evaluate answers each as
@@ -154,6 +154,13 @@ type Decision struct {
 	Approver string
 	// Source is the secret's ARN.
 	Source string
+}
+
+// ServiceOwned reports whether the set serves name as a registered service's secret. Who is a
+// service's own session rests on BROKER_SERVICES' accounts, which are not in Version, so a caller
+// re-checks a grant of such a name on every use rather than only once Version moves.
+func (s *Set) ServiceOwned(name string) bool {
+	return s.Secrets[name].kind == ownerService
 }
 
 // Evaluate answers r's ask for name. A name the set does not serve is ErrUnknownSecret. A name

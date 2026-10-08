@@ -1910,8 +1910,8 @@ authenticates the enrollment chooses the slot; a session's proof cannot enroll a
 while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
-ALREADY_ENROLLED`, and the policy never sees the slot or the service account: a pod is a requester
-with no operator, and with its launcher credential's service. Migration 0007 is forward-only: an
+ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose
+service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
 older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
 two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 `internal/broker/policy` decides who may have which
@@ -1942,7 +1942,7 @@ an owner tag naming a service is refused as malformed unless `Loader.Services` l
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
-to (`requests.Machine.Services`, `requester()`): a machine login's service name is the machine's
+to (`requests.Machine.ServiceAccounts`, `requester()`): a machine login's service name is the machine's
 claim, approved by whoever its `login_hint` names. So a `legion-worker` pod the Legion daemon's
 login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
 one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
@@ -2076,7 +2076,7 @@ proves the caller is Dispatch, and Dispatch vouches for the approving login each
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
 entries, each name `record.ValidService`'s form, not `shared` and given once — any other entry is
-refused naming it; unset, `Config.Services` is nil and no service is registered),
+refused naming it; unset, `Config.ServiceAccounts` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is

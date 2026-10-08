@@ -73,7 +73,7 @@ func main() {
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	fatal(err)
 	fatal(st.Migrate(ctx))
-	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: slices.Sorted(maps.Keys(cfg.Services))}
+	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
 	var reader secrets.Reader
 	if fakeSecrets != "" {
 		local, err := secrets.LocalFromFile(fakeSecrets)
@@ -125,13 +125,7 @@ func main() {
 
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
-	reqMachine := &requests.Machine{
-		Store: st, Policy: current, Secrets: reader,
-		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
-		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: enr.Replay,
-		Services: cfg.Services,
-	}
-	reqMachine.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
+	reqMachine := newRequestMachine(cfg, st, current, reader, enr.Replay)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
@@ -223,4 +217,18 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 		return nil
 	}
 	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", publicURL)
+}
+
+// newRequestMachine builds the requests.Machine the broker decides every secret request with, from
+// its configuration: the grant lifetime, the audience and skew every request object is checked
+// against, and the service accounts that prove a pod is a registered service's.
+func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, reader secrets.Reader, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
+	m := &requests.Machine{
+		Store: st, Policy: current, Secrets: reader,
+		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
+		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
+		ServiceAccounts: cfg.ServiceAccounts,
+	}
+	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
+	return m
 }

@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -51,6 +53,29 @@ func TestPortZeroPublicURLIsFineForALocalRun(t *testing.T) {
 func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 	if err := refusePortZeroPublicURLInProduction("https://broker.invalid", ""); err != nil {
 		t.Fatalf("a real BROKER_PUBLIC_URL: want nil, got %v", err)
+	}
+}
+
+// TestTheRequestMachineCarriesTheServiceAccounts pins the one place the broker hands
+// BROKER_SERVICES' accounts to the request decisions: the Machine newRequestMachine builds from a
+// config holds the config's ServiceAccounts, without which no pod is ever a service's.
+func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
+	cfg, err := config.Load(func(name string) string {
+		return map[string]string{
+			"BROKER_DATABASE_URL":        "postgres://unused",
+			"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
+			"BROKER_UI_TOKEN":            "ui-token",
+			"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
+			"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa",
+		}[name]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newRequestMachine(cfg, nil, nil, nil, nil)
+	if want := map[string]string{"example-service": "system:serviceaccount:example:example-sa"}; !maps.Equal(m.ServiceAccounts, want) {
+		t.Fatalf("request Machine's ServiceAccounts = %v, want %v", m.ServiceAccounts, want)
 	}
 }
 

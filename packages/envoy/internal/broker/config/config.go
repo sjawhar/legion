@@ -58,7 +58,7 @@ type Config struct {
 	// account is what proves the service. A secret owned by a listed service goes at once to those
 	// pods and is refused to every other session. Unset, no service is registered, and a secret
 	// whose owner tag names one is refused as owner-tag-malformed.
-	Services map[string]string
+	ServiceAccounts map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -184,14 +184,14 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	for _, entry := range strings.Fields(getenv("BROKER_SERVICES")) {
 		name, subject, ok := strings.Cut(entry, "=")
-		_, duplicate := cfg.Services[name]
+		_, duplicate := cfg.ServiceAccounts[name]
 		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) || duplicate {
 			return Config{}, fmt.Errorf("BROKER_SERVICES must be name=system:serviceaccount:<namespace>:<name> entries, each name lowercase letters, digits and hyphens, at most 64, not %s and given once, got %q", policy.OwnerShared, entry)
 		}
-		if cfg.Services == nil {
-			cfg.Services = map[string]string{}
+		if cfg.ServiceAccounts == nil {
+			cfg.ServiceAccounts = map[string]string{}
 		}
-		cfg.Services[name] = subject
+		cfg.ServiceAccounts[name] = subject
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {

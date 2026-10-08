@@ -130,10 +130,10 @@ type Machine struct {
 	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
 	// live policy does not serve (rereadMissing); nil means DefaultMissRereads.
 	MissRereads *ratelimit.Limit
-	// Services are the registered services (BROKER_SERVICES), each name's service account: the
-	// subject a pod's projected token must have proved for its launcher's service to be its own
-	// (requester).
-	Services map[string]string
+	// ServiceAccounts are the registered services' accounts (BROKER_SERVICES): for each service
+	// name, the subject a pod's projected token must have proved for its launcher's service to be
+	// its own (requester).
+	ServiceAccounts map[string]string
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once
@@ -257,7 +257,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	requester, err := enr.requester(ctx, tx, m.Services)
+	requester, err := enr.requester(ctx, tx, m.ServiceAccounts)
 	if err != nil {
 		return Request{}, err
 	}
@@ -560,7 +560,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	if approve {
-		requester, err := enr.requester(ctx, tx, m.Services)
+		requester, err := enr.requester(ctx, tx, m.ServiceAccounts)
 		if err != nil {
 			return Decision{}, err
 		}
@@ -909,12 +909,12 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 	if err := m.Store.Pool.QueryRow(ctx, `select rules_version, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&rulesVersion, &decidedBy); err != nil {
 		return Request{}, false, err
 	}
-	if rulesVersion != set.Version {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.Services)
-		if err != nil {
-			return Request{}, false, err
-		}
-		granted, err := requestedSecrets(ctx, m.Store.Pool, id)
+	granted, err := requestedSecrets(ctx, m.Store.Pool, id)
+	if err != nil {
+		return Request{}, false, err
+	}
+	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
 			return Request{}, false, err
 		}
@@ -938,6 +938,13 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		}
 	}
 	return r, true, nil
+}
+
+// anyServiceOwned reports whether set serves any of granted as a service's secret, whose grant is
+// re-checked on every use: who is a service's own session rests on BROKER_SERVICES' accounts,
+// which the policy's version does not cover (policy.Set.ServiceOwned).
+func anyServiceOwned(set *policy.Set, granted []requestedSecret) bool {
+	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.ServiceOwned(g.name) })
 }
 
 func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approver string, lifetime time.Duration) (string, error) {

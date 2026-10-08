@@ -125,8 +125,8 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Services != nil {
-		t.Fatalf("Services = %v, want nil when BROKER_SERVICES is unset", cfg.Services)
+	if cfg.ServiceAccounts != nil {
+		t.Fatalf("ServiceAccounts = %v, want nil when BROKER_SERVICES is unset", cfg.ServiceAccounts)
 	}
 
 	e := validEnv()
@@ -139,8 +139,8 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 		"example-service": "system:serviceaccount:example:example-sa",
 		"other-service":   "system:serviceaccount:other:other-sa",
 	}
-	if !maps.Equal(cfg.Services, want) {
-		t.Fatalf("Services = %v, want %v", cfg.Services, want)
+	if !maps.Equal(cfg.ServiceAccounts, want) {
+		t.Fatalf("ServiceAccounts = %v, want %v", cfg.ServiceAccounts, want)
 	}
 
 	for _, bad := range []string{
