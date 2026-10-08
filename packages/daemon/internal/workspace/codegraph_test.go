@@ -733,6 +733,54 @@ func TestATakeoverLeavesAFreshLeaseThatReusedTheStaleOnesInode(t *testing.T) {
 	}
 }
 
+// TestAStalledHoldersReleaseLeavesItsSuccessorsLeaseAtTheSameInode: the other half of the inode
+// hazard above. A holder stalled past warmLeaseStale is taken over, and its successor's fresh
+// lease sits at the same path — on the tree volume (v9fs), with the inode the stalled holder's
+// file had (measured in the LEGION-629 tester pod: the successor's lease read os.SameFile with the
+// one it replaced, and the pre-fix release removed it from under the successor's build). A holder
+// knows its lease by the token it wrote, never by the file's identity: the stalled holder's
+// release leaves a lease carrying another token in place, and the successor's own release removes
+// it. The successor's lease is built here from the stalled holder's by a hard link, so it has the
+// same inode on every filesystem rather than only where the allocator hands the number back.
+func TestAStalledHoldersReleaseLeavesItsSuccessorsLeaseAtTheSameInode(t *testing.T) {
+	dir := t.TempDir()
+	lease := filepath.Join(dir, ".codegraph", warmLeaseName)
+	if err := os.Mkdir(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	releaseA, heldA := acquireWarmLease(dir, lease)
+	if !heldA {
+		t.Fatal("A did not take the free lease")
+	}
+	// A stalls past the stale threshold and B takes over: B's fresh lease at the path, another
+	// token in it, the inode A's file had.
+	kept := lease + ".kept"
+	for _, err := range []error{os.Link(lease, kept), os.Remove(lease), os.Link(kept, lease), os.Remove(kept)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(lease, []byte("the-successors-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	successor, err := os.Stat(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseA()
+	current, err := os.Stat(lease)
+	if err != nil {
+		t.Fatalf("the stalled holder's release removed its successor's live lease: %v", err)
+	}
+	if !os.SameFile(successor, current) {
+		t.Fatal("the lease at the path is not the successor's after the stalled holder's release")
+	}
+	if body, err := os.ReadFile(lease); err != nil || string(body) != "the-successors-token" {
+		t.Fatalf("the successor's lease reads %q (%v) after the stalled holder's release, want its token untouched", body, err)
+	}
+}
+
 // TestWarmCodegraphIndexStillInitializesAFreshWorkspaceWhenStatusFails: the lease lives under
 // `.codegraph/`, so the warm-up makes that directory before `status` runs, and nextCodegraphStep's
 // fallback for a `status` that failed reads an existing directory as an index to repair. A
