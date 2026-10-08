@@ -40,7 +40,7 @@ func TestEveryRoomStateHolderKeepsADetachedState(t *testing.T) {
 			},
 		},
 		{
-			name: "unsettled authors",
+			name: "unsettled latest edit source",
 			hold: func(_ *Service, state *roomState) { state.unsettled = true },
 		},
 		{
@@ -61,8 +61,9 @@ func TestEveryRoomStateHolderKeepsADetachedState(t *testing.T) {
 			release: func(state *roomState) { state.durableAppends.Store(0) },
 		},
 		{
-			name: "version awaiting commit",
-			hold: func(_ *Service, state *roomState) { state.pendingVersions[1] = versionPending{} },
+			name:    "in-flight credit",
+			hold:    func(_ *Service, state *roomState) { state.inflight[1] = &inflightCredit{seq: 1} },
+			release: func(state *roomState) { delete(state.inflight, 1) },
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

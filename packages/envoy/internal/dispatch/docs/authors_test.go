@@ -710,18 +710,21 @@ func TestARefusedGrowthDoesNotLeaveACarriedAskAuthorPending(t *testing.T) {
 	}
 }
 
-// A settlement that writes its version (writeVersionTx, which remembers a pending-authors
-// capture under that version's number, rememberPendingVersion) and then fails before its own
-// commit - settlement runs no Ledger.Commit/Discard of its own to release it, since its ledger's
-// tx is nil and it is its own transaction's commit that releases the capture (commitVersion,
-// called directly once that commit succeeds) - abandons through a path that must discard what it
-// remembered rather than leave it behind (LEGION-503).
+// A settlement that writes its version and deletes the pending authors it lists, and then fails
+// before its own commit, takes nothing out of them: its transaction rolls back, so alice is still
+// owed, and it marked no in-flight credit consumed. The next settlement lists her.
 func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
-	editAsPeer(t, service, artifactID, replaceRun("First.", "First, edited."))
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, edited."))
+	waitForLandedAppends(t, service, artifactID)
+	owed := pendingAuthorRows(t, service.store, artifactID)
+	if !slices.Equal(owed, []model.Actor{alice}) {
+		t.Fatalf("pending authors before the settlement = %+v, want alice", owed)
+	}
 
 	injected := false
 	service.afterSettleVersionWrite = func(room string) error {
@@ -736,86 +739,22 @@ func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t
 		t.Fatal("settlement never reached the window after its version write")
 	}
 
+	if after := pendingAuthorRows(t, service.store, artifactID); !slices.Equal(after, owed) {
+		t.Errorf("pending authors after an abandoned settlement = %+v, want %+v unchanged", after, owed)
+	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	leaked := len(state.pendingVersions)
-	state.mu.Unlock()
-	if leaked != 0 {
-		t.Errorf("pendingVersions holds %d entr(y/ies) after an abandoned settlement, want none: its own version write must not leave a trace behind", leaked)
+	for seq, record := range state.inflight {
+		if record.consumed {
+			t.Errorf("in-flight credit %d is consumed after an abandoned settlement, want none", seq)
+		}
 	}
+	state.mu.Unlock()
 
 	service.afterSettleVersionWrite = nil
 	settleCurrentGeneration(t, service, artifactID)
 	requireLatestVersionMarkdown(t, service, artifactID, "First, edited.\n\nSecond.\n")
-}
-
-// evictRoom's forced path (unlike releaseIfUnusedLocked's normal one) forgets a state regardless
-// of unusedLocked - an unrelated room failure or Quiesce can run while a settlement's version
-// write has just remembered a capture (rememberPendingVersion) and not yet committed. That
-// capture must not be lost with the forgotten state: the next lockState for the same room, which
-// creates a fresh one, carries it forward (forgetLocked, lookUpState), so a version number this
-// settlement's own commit will still try to release (commitVersionLocked) is not orphaned
-// (LEGION-513).
-func TestAnEvictedStatesOrphanedVersionCaptureSurvivesIntoTheNextFreshState(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
-	settleCurrentGeneration(t, service, artifactID)
-	editAsPeer(t, service, artifactID, replaceRun("First.", "First, edited."))
-
-	injectedEviction := false
-	service.afterSettleVersionWrite = func(room string) error {
-		if room == artifactID && !injectedEviction {
-			injectedEviction = true
-			if err := service.Evict(context.Background(), artifactID); err != nil {
-				t.Errorf("force the concurrent eviction: %v", err)
-			}
-		}
-		return nil
-	}
-	settleCurrentGeneration(t, service, artifactID)
-	if !injectedEviction {
-		t.Fatal("settlement never reached the window after its version write")
-	}
-	service.afterSettleVersionWrite = nil
-
-	fresh := service.room(artifactID)
-	fresh.mu.Lock()
-	carried := len(fresh.pendingVersions)
-	fresh.mu.Unlock()
-	if carried == 0 {
-		t.Fatalf("the fresh state after the forced eviction holds no pendingVersions, want the orphaned capture carried forward from the evicted state")
-	}
-}
-
-// An orphanedVersions entry a forced eviction stashed, whose document never reloads to claim it,
-// does not survive forever: once it is older than the settle delay, sweepOrphanedVersions - run
-// on RunSettlementResumption's own interval - drops it (Simplify's finding, LEGION-513). A direct
-// probe of the sweep's own age logic: the room this models never actually reloads to consume the
-// stash itself, which a real eviction's document eventually does (TestAnEvictedStatesOrphanedVersionCaptureSurvivesIntoTheNextFreshState
-// covers that path).
-func TestOrphanedVersionsOlderThanTheSettleDelayAreSwept(t *testing.T) {
-	service, _ := newTestService(t)
-	service.settle = time.Hour
-	var fakeNow atomic.Value
-	fakeNow.Store(time.Now())
-	service.now = func() time.Time { return fakeNow.Load().(time.Time) }
-
-	room := "a-document-that-never-reloads"
-	service.orphanedVersions.Store(room, orphanedVersion{
-		versions:  map[int]versionPending{1: {}},
-		stashedAt: service.now(),
-	})
-
-	// Younger than the settle delay: the sweep must not drop it yet.
-	service.sweepOrphanedVersions()
-	if _, stashed := service.orphanedVersions.Load(room); !stashed {
-		t.Fatal("the sweep dropped an orphan younger than the settle delay")
-	}
-
-	fakeNow.Store(service.now().Add(service.settle + time.Second))
-	service.sweepOrphanedVersions()
-	if _, stashed := service.orphanedVersions.Load(room); stashed {
-		t.Fatal("the sweep kept an orphan older than the settle delay, want it dropped")
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, alice) {
+		t.Fatalf("the settlement's version lists %+v, want alice", authors)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"runtime"
 	"strings"
@@ -836,7 +837,7 @@ func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
 			settleCurrentGeneration(t, service, artifactID)
 
 			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
-			if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+			if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
 				t.Fatalf("pending authors = %v, want none (reader %v changed nothing)", pending, reader)
 			}
 		})
@@ -901,7 +902,7 @@ func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
 				settleCurrentGeneration(t, service, artifactID)
 
 				assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 0)
-				if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+				if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
 					t.Fatalf("pending authors = %v, want none (a mark is not content)", pending)
 				}
 			})
@@ -988,15 +989,24 @@ func TestAReaderIsNoAuthorOfAnAgentsVersion(t *testing.T) {
 	}
 }
 
-func pendingAuthors(service *Service, artifactID string) []model.Actor {
+// pendingAuthors is every author the document owes a version: the room's in-flight credits no
+// committed version has listed and its durable pending authors. F is read first: a credit that
+// lands in between commits to R before it leaves F, so the R read that follows holds it.
+func pendingAuthors(t *testing.T, service *Service, artifactID string) []model.Actor {
+	t.Helper()
+	owed := make(map[string]model.Actor)
 	state := service.room(artifactID)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	authors := make(map[string]model.Actor, len(state.pending))
-	for key, entry := range state.pending {
-		authors[key] = entry.actor
+	for _, record := range state.unconsumedInflightLocked(state.creditSeq.Load()) {
+		maps.Copy(owed, record.authors)
 	}
-	return actorSlice(authors)
+	state.mu.Unlock()
+	durable, err := readPendingAuthors(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's pending authors: %v", err)
+	}
+	maps.Copy(owed, durable)
+	return actorSlice(owed)
 }
 
 // setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
@@ -2440,7 +2450,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 		close(settled)
 	}()
 	waitForDatabaseLock(t, service.store)
-	service.recordActor(artifactID, second)
+	service.recordActor(t, artifactID, second)
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release document lock: %v", err)
 	}
@@ -2514,6 +2524,13 @@ func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, up
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
+func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	if s.appendErr != nil {
+		return 0, s.appendErr
+	}
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+}
+
 type failingBackfillVersionedStore struct {
 	VersionedStore
 	err error
@@ -2549,20 +2566,12 @@ func (s *blockingFirstAppendStore) AppendUpdate(ctx context.Context, room string
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if s.blocked.CompareAndSwap(false, true) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
-}
-
-func (s *blockingFirstAppendStore) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit []byte, creditSeq uint64) (persistence.Version, error) {
-	if s.blocked.CompareAndSwap(false, true) {
-		close(s.entered)
-		<-s.release
-	}
-	return s.VersionedStore.(creditedUpdateStore).AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit, creditSeq)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
 // room is the state the service holds for room now, created when it holds none, for a test to read
@@ -2573,12 +2582,27 @@ func (s *Service) room(name string) *roomState {
 	return state
 }
 
-// recordActor makes actor a pending author of room's next version, and its latest editor, as the
-// room's update observer does (creditContentChange).
-func (s *Service) recordActor(room string, actor model.Actor) {
+// recordActor makes actor a pending author of room's next version, and its latest editor, as a
+// landed browser edit does: a durable pending author, written under the document's advisory lock
+// (AppendUpdateWithCredit), and the room's latest edit source.
+func (s *Service) recordActor(t *testing.T, room string, actor model.Actor) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin recording %s: %v", actor.ID, err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		t.Fatalf("lock the document to record %s: %v", actor.ID, err)
+	}
+	if err := upsertPendingAuthors(ctx, tx, room, map[string]model.Actor{actorKey(actor): actor}); err != nil {
+		t.Fatalf("record %s as a pending author: %v", actor.ID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s as a pending author: %v", actor.ID, err)
+	}
 	state := s.lockState(room)
-	state.creditSeq.Add(1)
-	state.creditPendingLocked(actorKey(actor), actor, state.creditSeq.Load())
 	state.lastActor = new(actor)
 	state.unsettled = true
 	s.unlockState(room, state)

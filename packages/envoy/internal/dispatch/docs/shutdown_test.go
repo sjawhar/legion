@@ -482,12 +482,12 @@ type heldStore struct {
 
 func (s *heldStore) let() { s.once.Do(func() { close(s.release) }) }
 
-func (s *heldStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if room == s.room && s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
 // appendGate pairs the channel a burstStore closes once an append reaches it with the channel a
@@ -505,7 +505,7 @@ func (g *appendGate) let() { g.once.Do(func() { close(g.release) }) }
 // Shutdown drains the room, including ones recorded only after its room scan. Once armed, each
 // call consumes the next gate in order; a call past the gates a test supplied is not held. This
 // duplicates heldStore's single-gate shape rather than nesting two heldStores (outer(inner(...))):
-// heldStore.AppendUpdateWithClass calls through to its wrapped store inside the same call its gate
+// heldStore.AppendUpdateWithCredit calls through to its wrapped store inside the same call its gate
 // guards, so an outer heldStore's gate would fire a second time on the first append once the inner
 // one releases it and the call reaches the outer wrapper on its way through - a spurious second
 // hold on the first append rather than a hold on the second.
@@ -518,7 +518,7 @@ type burstStore struct {
 	next  int
 }
 
-func (s *burstStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if room == s.room && s.armed.Load() {
 		s.mu.Lock()
 		var gate *appendGate
@@ -532,5 +532,5 @@ func (s *burstStore) AppendUpdateWithClass(ctx context.Context, room string, upd
 			<-gate.release
 		}
 	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }

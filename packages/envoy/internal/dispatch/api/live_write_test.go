@@ -592,16 +592,8 @@ type recordingVersionedStore struct {
 	updates chan struct{}
 }
 
-func (s *recordingVersionedStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	version, err := s.PgVersioned.AppendUpdateWithClass(ctx, room, update, contentChanged)
-	if err == nil {
-		s.signal()
-	}
-	return version, err
-}
-
-func (s *recordingVersionedStore) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit []byte, creditSeq uint64) (persistence.Version, error) {
-	version, err := s.PgVersioned.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit, creditSeq)
+func (s *recordingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *docs.UpdateCredit) (persistence.Version, error) {
+	version, err := s.PgVersioned.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 	if err == nil {
 		s.signal()
 	}
