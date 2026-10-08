@@ -163,6 +163,16 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 			t.Errorf("BROKER_SERVICES with %q: err = %v, want a refusal naming BROKER_SERVICES and the entry", bad, err)
 		}
 	}
+
+	// One service account bound to two names would make a pod on it whichever service its login
+	// claims, and a login's service name is the machine's own claim, so each account proves one
+	// service only.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "a=system:serviceaccount:x:y b=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") ||
+		!strings.Contains(err.Error(), "system:serviceaccount:x:y") || !strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
+		t.Errorf("BROKER_SERVICES binding one account to two names: err = %v, want a refusal naming the account and both names", err)
+	}
 }
 
 // TestLoadRefusesTheRulesFileVariables pins that a deployment still configured for the rules file

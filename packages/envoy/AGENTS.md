@@ -2076,8 +2076,9 @@ proves the caller is Dispatch, and Dispatch vouches for the approving login each
 `BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
-entries, each name `record.ValidService`'s form, not `shared` and given once — any other entry is
-refused naming it; unset, `Config.ServiceAccounts` is nil and no service is registered),
+entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
+to one name — any other entry is refused naming it, and an account given twice names both; unset,
+`Config.ServiceAccounts` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is

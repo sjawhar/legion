@@ -52,12 +52,13 @@ type Config struct {
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
 	// service account (system:serviceaccount:<namespace>:<name>) is the one the service's pods run
-	// as. A session is the service's when a launcher logged in as the service enrolled it and it is
-	// a pod whose projected token proved it runs as that account. A machine login's service name is
-	// the machine's own claim, approved by whoever its login names, so the pod's verified service
-	// account is what proves the service. A secret owned by a listed service goes at once to those
-	// pods and is refused to every other session. Unset, no service is registered, and a secret
-	// whose owner tag names one is refused as owner-tag-malformed.
+	// as, and each account is bound to one service only. A session is the service's when a launcher
+	// logged in as the service enrolled it and it is a pod whose projected token proved it runs as
+	// that account. A machine login's service name is the machine's own claim, approved by whoever
+	// its login names, so the pod's verified service account is what proves the service, and an
+	// account bound to two names would prove neither. A secret owned by a listed service goes at
+	// once to those pods and is refused to every other session. Unset, no service is registered,
+	// and a secret whose owner tag names one is refused as owner-tag-malformed.
 	ServiceAccounts map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
@@ -182,12 +183,17 @@ func Load(getenv func(string) string) (Config, error) {
 	if !policy.ValidKeyARN(cfg.SecretsKMSKeyARN) {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
 	}
+	boundTo := map[string]string{}
 	for _, entry := range strings.Fields(getenv("BROKER_SERVICES")) {
 		name, subject, ok := strings.Cut(entry, "=")
 		_, duplicate := cfg.ServiceAccounts[name]
 		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) || duplicate {
 			return Config{}, fmt.Errorf("BROKER_SERVICES must be name=system:serviceaccount:<namespace>:<name> entries, each name lowercase letters, digits and hyphens, at most 64, not %s and given once, got %q", policy.OwnerShared, entry)
 		}
+		if other, shared := boundTo[subject]; shared {
+			return Config{}, fmt.Errorf("BROKER_SERVICES binds the service account %s to both %q and %q; each account proves one service, so bind it to one", subject, other, name)
+		}
+		boundTo[subject] = name
 		if cfg.ServiceAccounts == nil {
 			cfg.ServiceAccounts = map[string]string{}
 		}
