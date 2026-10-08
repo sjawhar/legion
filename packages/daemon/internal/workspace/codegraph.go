@@ -20,8 +20,14 @@ import (
 
 // codegraphTimeout bounds each codegraph invocation independently. The warm-up runs only in the
 // background, so nothing waits on it; a first index of a large repository (tens of thousands of
-// files) takes longer than Provision's own command budget.
-const codegraphTimeout = 30 * time.Minute
+// files) takes longer than Provision's own command budget. codegraphStopGrace is how long a
+// codegraph child whose context ended has to leave on its SIGTERM before it is killed and the
+// invocation returns: a shim's warm-up ends with the shim's Oh My Pi (WarmCodegraphIndex), and the
+// shim waits on it, so this grace bounds how long after its agent a shim exits.
+const (
+	codegraphTimeout   = 30 * time.Minute
+	codegraphStopGrace = 5 * time.Second
+)
 
 // codegraphEmptyLockGrace is how long an empty `.codegraph/codegraph.lock` still counts as held,
 // either side of now. CodeGraph's FileLock takes the lock with one `fs.writeFileSync(lockPath,
@@ -37,12 +43,14 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // warmLeaseHeartbeat is how often a warm-up holding `.codegraph/legion-warm.lock` sets the lease's
 // mtime to now, and warmLeaseStale is how old that mtime may be before another process reads the
 // holder as dead and takes the lease over: six missed heartbeats, so a holder stalled through one
-// slow tick or a filesystem hiccup keeps its lease, while a dead one (a shim killed outright
-// mid-build, a pod that went away; a SIGTERMed shim's `codegraph` child dies with its process group
-// and the deferred release runs while the shim winds its Oh My Pi down) leaves a lease that a
-// warm-up within the minute still reads as live and skips, and the first one after that takes over.
-// The lease is the one cross-process guard here; everything else is this process's. `warming` is a
-// map in this process.
+// slow tick or a filesystem hiccup keeps its lease, while a dead one leaves a lease that a warm-up
+// within the minute still reads as live and skips, and the first one after that takes over. A
+// holder releases its lease on every exit it can see: the warm-up's deferred release runs once its
+// codegraph child has ended, and the one process that runs a warm-up and may exit before it, a
+// role's shim, ends the warm-up and waits for that release before it exits (WarmCodegraphIndex),
+// so a stopped generation leaves no lease. Only a holder killed outright (SIGKILL, a pod that went
+// away, a node lost) leaves one, and the minute is what it costs. The lease is the one
+// cross-process guard here; everything else is this process's. `warming` is a map in this process.
 // nextCodegraphStep lets a live CodeGraph lock veto a repair but not an `init`: an uninitialized
 // workspace has no `codegraph.lock` to read, so two processes that both find it uninitialized would
 // both run `init`. codegraphLockHeldByLiveProcess judges liveness by PID, which another
@@ -72,22 +80,33 @@ var warming sync.Map
 // once per workspace per process rather than on every later spawn.
 var indexed sync.Map
 
-// WarmCodegraphIndexInBackground starts warmCodegraphIndex for dir in its own goroutine and
+// WarmCodegraphIndexInBackground starts WarmCodegraphIndex for dir in its own goroutine and
 // returns at once, so no launch ever waits on an index build; a second call for a directory whose
 // warm-up is still running in this process does nothing, and one running in another process is
-// what the lease settles (warmLeaseHeartbeat). A long-lived process calls it: the daemon's host
-// provisioning for tmux panes (internal/daemon/outbox.go) and a role's `legion worker-shim
-// --warm-codegraph` once Oh My Pi is spawned (internal/shim's Config.WarmCodegraph). The pod init
-// container still builds no index: it runs on the pod's registration path and its goroutines die
-// with it.
+// what the lease settles (warmLeaseHeartbeat). The daemon's host provisioning for tmux panes
+// (internal/daemon/outbox.go) calls it: the daemon outlives any build. The pod init container
+// builds no index: it runs on the pod's registration path and its goroutines die with it.
 func WarmCodegraphIndexInBackground(dir string) {
 	if _, busy := warming.LoadOrStore(dir, struct{}{}); busy {
 		return
 	}
 	go func() {
 		defer warming.Delete(dir)
-		warmCodegraphIndex(context.Background(), dir)
+		WarmCodegraphIndex(context.Background(), dir)
 	}()
+}
+
+// WarmCodegraphIndex is the warm-up a caller waits on: it returns once the build it started has
+// ended and the workspace's lease is released, and ctx ending ends the build (its codegraph child
+// is SIGTERMed, then killed after codegraphStopGrace) rather than the other way round. A role's
+// `legion worker-shim --warm-codegraph` runs it under the shim's own lifetime (internal/shim's
+// Config.WarmCodegraph): once its Oh My Pi has exited the shim ends the warm-up and waits for it,
+// so a stop mid-build — the launcher's SIGTERM to the role's whole process group, which ends Oh My
+// Pi and the codegraph child at once — never leaves the lease behind for the role's relaunch to
+// read as a live build. The index such a stop leaves partial is repaired by the next warm-up
+// (nextCodegraphStep: initialized, not complete, no live CodeGraph lock → `index`).
+func WarmCodegraphIndex(ctx context.Context, dir string) {
+	warmCodegraphIndex(ctx, dir)
 }
 
 // warmCodegraphIndex builds a workspace's codegraph index before any worker needs it: the tester's
@@ -145,6 +164,10 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 	}
 	defer release()
 	status, err := runCodegraph(ctx, codegraphPath, dir, "status", "--json")
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s ended with its process before `codegraph status` finished\n", dir)
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
@@ -174,6 +197,10 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 		subcommand = "index"
 	}
 	result, err := runCodegraph(ctx, codegraphPath, dir, subcommand)
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s ended with its process before `codegraph %s` finished; the next launch's warm-up repairs the index\n", dir, subcommand)
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
@@ -412,13 +439,19 @@ func codegraphEnvironment() []string {
 }
 
 // runCodegraph runs one codegraph subcommand in dir, bounded by codegraphTimeout, with
-// codegraphEnvironment's minimal, explicit environment — never the caller's full environment.
+// codegraphEnvironment's minimal, explicit environment — never the caller's full environment. ctx
+// ending, or the timeout, SIGTERMs the child (CodeGraph 1.5.0 leaves within about two seconds of
+// one, its SQLite closed) and kills it after codegraphStopGrace; either way Run returns once the
+// child is reaped, so a caller waiting on the warm-up is never held longer than that grace past
+// the end of its context.
 func runCodegraph(ctx context.Context, codegraphPath, dir string, args ...string) (codegraphResult, error) {
 	bounded, cancel := context.WithTimeout(ctx, codegraphTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(bounded, codegraphPath, args...)
 	cmd.Dir = dir
 	cmd.Env = codegraphEnvironment()
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = codegraphStopGrace
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

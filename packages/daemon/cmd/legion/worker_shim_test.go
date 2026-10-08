@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -164,7 +165,8 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 // does) and LEGION_WORKSPACE set, the shim starts and, once the agent has written its first line,
 // builds that workspace's CodeGraph index in the background: `codegraph status --json` on the
 // workspace, then `init` on one never initialized. The agent's own exit status is still the
-// shim's, and the build never holds it up.
+// shim's, and the build never holds it up — here the agent waits for the build, since a warm-up
+// ends with the agent (the test below), and the shim returns the moment both are done.
 func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing.T) {
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "s")
@@ -187,33 +189,22 @@ func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	workspaceDir := t.TempDir()
 	t.Setenv("LEGION_WORKSPACE", workspaceDir)
+	codegraphLog := filepath.Join(dir, "codegraph.log")
 
 	daemon := acknowledgeHello(ln)
 
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"legion", "worker-shim",
 		"--connect", "unix://" + socket, "--boot-token-file", token, "--warm-codegraph",
-		"--", "sh", "-c", `echo '{"type":"fake_ready"}'; exit 7`}, &stdout, &stderr)
+		"--", "sh", "-c", `echo '{"type":"fake_ready"}'; while ! grep -qs '^init$' "$0"; do sleep 0.01; done; exit 7`, codegraphLog}, &stdout, &stderr)
 	if code != 7 {
 		t.Fatalf("exit %d, want the child's 7; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
 	}
 	if err := <-daemon; err != nil {
 		t.Fatalf("the daemon side: %v", err)
 	}
-	codegraphLog := filepath.Join(dir, "codegraph.log")
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		calls := logLines(t, codegraphLog)
-		if len(calls) >= 2 {
-			if calls[0] != "status --json" || calls[1] != "init" {
-				t.Fatalf("codegraph calls = %v, want status --json then init on the workspace", calls)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the shim never warmed the workspace's index; codegraph calls: %v; stdout: %s", calls, stdout.String())
-		}
-		time.Sleep(20 * time.Millisecond)
+	if calls := logLines(t, codegraphLog); !slices.Equal(calls, []string{"status --json", "init"}) {
+		t.Fatalf("codegraph calls = %v, want status --json then init on the workspace; stdout: %s", calls, stdout.String())
 	}
 }
 

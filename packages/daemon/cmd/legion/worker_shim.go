@@ -25,9 +25,12 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // which the Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose
 // workspace the daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has
 // no workspace — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the
-// background once Oh My Pi has started (shim.Config.WarmCodegraph). On a relaunch the warm-up runs
-// again: `codegraph status` on the volume's existing index answers complete and nothing runs, or
-// an index an earlier build left partial is repaired as workspace.nextCodegraphStep decides.
+// background once Oh My Pi has started (shim.Config.WarmCodegraph), and a stop before the build
+// ends — the launcher's SIGTERM to the role's process group, which ends Oh My Pi and the codegraph
+// child together — ends the warm-up with Oh My Pi: the shim exits only once the build's lease is
+// released, so the role's relaunch is never told a live build holds it. On a relaunch the warm-up
+// runs again: `codegraph status` on the volume's existing index answers complete and nothing runs,
+// or an index an earlier build left partial is repaired as workspace.nextCodegraphStep decides.
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
@@ -120,7 +123,7 @@ func workerShimConfig(set map[string]bool, connect, bootTokenFile, providerEnvDi
 		Grace:        shim.DefaultGrace,
 	}
 	if warmCodegraph {
-		cfg.WarmCodegraph = workspace.WarmCodegraphIndexInBackground
+		cfg.WarmCodegraph = workspace.WarmCodegraphIndex
 	}
 	return cfg, nil
 }

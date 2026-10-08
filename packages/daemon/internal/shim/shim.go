@@ -49,6 +49,11 @@ const (
 	drainTimeout = time.Second
 	// adoptionWaitDelay bounds the wait for jj's stderr once jj has been killed at its budget.
 	adoptionWaitDelay = time.Second
+	// warmUpDrain bounds Run's wait for an in-flight CodeGraph warm-up once the shim's loop has
+	// ended: the warm-up ends its codegraph child on that same context within its own stop grace
+	// (workspace.runCodegraph), so this is only a backstop against a wait that would otherwise
+	// outlive the launcher's stop grace, under which the shim's exit still reaches the daemon.
+	warmUpDrain = 10 * time.Second
 )
 
 // Clock is the time the shim waits on: the backoff between dials and the grace before a kill.
@@ -77,13 +82,17 @@ type Config struct {
 	// AgentSecrets is the pod's enrollment with the secrets broker (agentsecrets.go); nil on a
 	// tmux pane, which is never enrolled.
 	AgentSecrets *AgentSecrets
-	// WarmCodegraph, when set, is called once with the workspace the shim's LEGION_WORKSPACE
+	// WarmCodegraph, when set, is started once with the workspace the shim's LEGION_WORKSPACE
 	// names, on the first line the wrapped process writes: Oh My Pi's `ready` frame comes once its
 	// extensions are loaded and its RPC loop serves, so the index build the pod needs starts
-	// behind the launch, never on it (workspace.WarmCodegraphIndexInBackground; `legion
-	// worker-shim --warm-codegraph`). Nil on a tmux pane, whose workspace the daemon warms itself,
-	// and on the controller, which has no workspace: nothing runs.
-	WarmCodegraph func(dir string)
+	// behind the launch, never on it (`legion worker-shim --warm-codegraph`,
+	// workspace.WarmCodegraphIndex). It runs in its own goroutine under a context the shim ends
+	// when its loop ends — the wrapped process has exited — and it must return once that context
+	// ends, its build stopped and its lease released, since Run waits for it (bounded by
+	// warmUpDrain) before returning the agent's exit status: a stop mid-build then leaves no lease
+	// behind for the role's relaunch to read as a live build. Nil on a tmux pane, whose workspace
+	// the daemon warms itself, and on the controller, which has no workspace: nothing runs.
+	WarmCodegraph func(ctx context.Context, dir string)
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -114,6 +123,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	s.loop, s.stop = context.WithCancel(context.Background())
 	defer s.stop()
 	defer s.renewers.Wait() // the renewer, if one was started, is a child of s.loop and ends with it
+	defer s.drainWarmUp()   // run returns only once s.loop has ended, which ends the warm-up's build
 	go s.watch(ctx)
 	return s.run()
 }
@@ -149,8 +159,10 @@ type shim struct {
 	renewers sync.WaitGroup
 
 	// warmed guards cfg.WarmCodegraph: called on the child's first line and never again, not for
-	// a later frame and not when a redialled connection finds the child already running.
-	warmed sync.Once
+	// a later frame and not when a redialled connection finds the child already running. warmUps
+	// is that one goroutine, which Run waits for (drainWarmUp) before returning.
+	warmed  sync.Once
+	warmUps sync.WaitGroup
 
 	once sync.Once
 	code int
@@ -389,8 +401,10 @@ func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 }
 
 // warmCodegraph starts cfg.WarmCodegraph for the workspace LEGION_WORKSPACE names, once the
-// wrapped process has written its first line (pump). The command refuses --warm-codegraph without
-// the variable (cmd/legion/worker_shim.go), so an empty value here is a Config built by hand.
+// wrapped process has written its first line (pump), under s.loop: the warm-up's build ends when
+// the shim's loop does, and Run waits for its return (drainWarmUp). The command refuses
+// --warm-codegraph without the variable (cmd/legion/worker_shim.go), so an empty value here is a
+// Config built by hand.
 func (s *shim) warmCodegraph() {
 	if s.cfg.WarmCodegraph == nil {
 		return
@@ -400,7 +414,29 @@ func (s *shim) warmCodegraph() {
 		s.log.Printf("[worker-shim] no CodeGraph warm-up: LEGION_WORKSPACE is unset")
 		return
 	}
-	go s.cfg.WarmCodegraph(dir)
+	s.warmUps.Add(1)
+	go func() {
+		defer s.warmUps.Done()
+		s.cfg.WarmCodegraph(s.loop, dir)
+	}()
+}
+
+// drainWarmUp waits for the warm-up warmCodegraph started, if any, to return — its codegraph
+// child ended by s.loop's end, its lease released — before Run returns the agent's exit status,
+// so a role stopped mid-build leaves no lease its relaunch would read as a live build. The wait is
+// bounded by warmUpDrain: a warm-up still running past it is logged and left, and the shim's exit
+// still reaches the daemon inside the launcher's stop grace.
+func (s *shim) drainWarmUp() {
+	drained := make(chan struct{})
+	go func() {
+		s.warmUps.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(warmUpDrain):
+		s.log.Printf("[worker-shim] the CodeGraph warm-up is still running %v after the wrapped process exited; leaving it", warmUpDrain)
+	}
 }
 
 // reap waits for the wrapped process, lets the pump forward what it wrote before exiting, and

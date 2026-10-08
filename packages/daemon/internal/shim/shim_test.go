@@ -557,7 +557,7 @@ func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
 		return slices.Clone(warmed)
 	}
 	cfg := config(t, path, child)
-	cfg.WarmCodegraph = func(dir string) {
+	cfg.WarmCodegraph = func(_ context.Context, dir string) {
 		mu.Lock()
 		defer mu.Unlock()
 		warmed = append(warmed, dir)
@@ -620,6 +620,52 @@ func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
 			t.Fatalf("a shim with no hook said something of a warm-up; log:\n%s", sh.log)
 		}
 	})
+}
+
+// The shim ends with its child, and the warm-up ends with the shim: once the child has exited the
+// warm-up's context is ended — the build it started stops on that — and Run returns the child's
+// status only once the warm-up has returned, so the lease the warm-up releases on its way out is
+// gone before the launcher reads the shim as exited. A role stopped mid-build (the launcher's one
+// SIGTERM to the whole group) otherwise left `.codegraph/legion-warm.lock` behind, and its relaunch
+// within the minute read a live build and skipped its own.
+func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7")
+	var mu sync.Mutex
+	var ended, returned time.Time
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = func(ctx context.Context, _ string) {
+		<-ctx.Done()
+		mu.Lock()
+		ended = time.Now()
+		mu.Unlock()
+		// What a real warm-up does here: its codegraph child ends on the same context, it logs the
+		// end and releases the lease. That takes time the shim must wait out.
+		time.Sleep(300 * time.Millisecond)
+		mu.Lock()
+		returned = time.Now()
+		mu.Unlock()
+	}
+	clock := newClock()
+	sh := run(t, cfg, clock)
+	p := daemon.accept(t)
+	p.open(t)
+
+	p.send(t, shimwire.Shutdown{})
+	clock.next(t, grace)
+	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
+	}
+	exited := time.Now()
+	mu.Lock()
+	defer mu.Unlock()
+	if ended.IsZero() {
+		t.Fatalf("the warm-up's context never ended; log:\n%s", sh.log)
+	}
+	if returned.IsZero() || returned.After(exited) {
+		t.Fatalf("Run returned at %s with the warm-up still running (it returned at %s); log:\n%s", exited.Format(time.StampMilli), returned.Format(time.StampMilli), sh.log)
+	}
 }
 
 // A daemon that refuses the hello — closing the stream, as it does for an unknown or stale boot
