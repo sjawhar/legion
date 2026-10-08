@@ -165,9 +165,13 @@ export function AnswersPage(): ReactNode {
     return <p className={dangerText}>Could not load your answers: {answers.error.message}</p>;
   }
   const rows = answers.data.pages.flatMap((page) => page.rows);
-  // The card belongs to the ask, under the first row that names it: after a change that is the
-  // new answer's row, so the card the person is looking at stays mounted where they are.
-  const cardRow = changingAsk === null ? -1 : rows.findIndex((row) => row.ask_id === changingAsk);
+  // The card belongs to the ask, under the first answer row that names it: after a change that is
+  // the new answer's row, so the card the person is looking at stays mounted where they are. A
+  // reply the person wrote on the same ask can sort above it, and is never the card's row.
+  const cardRow =
+    changingAsk === null
+      ? -1
+      : rows.findIndex((row) => row.kind === "answer" && row.ask_id === changingAsk);
 
   return (
     <section aria-label="Answered by you">

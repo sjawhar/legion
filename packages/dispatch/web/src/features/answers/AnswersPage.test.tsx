@@ -224,6 +224,55 @@ test("Show more appends the next page", async () => {
   }
 });
 
+test("Change answer opens its card under the answer row, not a newer reply on the same ask", async () => {
+  // The viewer answered, then replied on the same ask: the reply sorts above the answer, and
+  // the card belongs under the answer whose Change answer opened it.
+  const listMyAnswers = spyOn(api, "listMyAnswers").mockResolvedValue(
+    page([
+      {
+        ask_id: "ask-1",
+        ask_kind: "question",
+        ask_state: "answered",
+        at: "2026-10-08T05:00:00Z",
+        current: false,
+        edited_at: null,
+        kind: "reply",
+        owner: { issue: { key: "CORE-1", title: "Release train" } },
+        question: "Which release path?",
+        ref: "/issues/CORE-1/asks/ask-1",
+        reply: { body: "Is Hold safer?", id: "comment-9" },
+      },
+      answerRow(),
+    ])
+  );
+  const ask = answeredAsk(shipAnswer);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    answers: [shipAnswer],
+    ask,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
+  const { view } = renderPage();
+  try {
+    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    expect(await view.findByRole("button", { name: "Save answer" })).toBeTruthy();
+    const card = view.container.querySelector<HTMLElement>('[data-answer-card="ask-1"]');
+    if (card === null) throw new Error("Change answer opened no card");
+    const above = card.previousElementSibling as HTMLElement | null;
+    if (above === null) throw new Error("the card has no row above it");
+    expect(above.dataset.answerRow).toBe("ask-1");
+    expect(within(above).queryByText("Replied:")).toBeNull();
+    expect(within(above).getByText("Ship")).toBeTruthy();
+    // The answer row whose card is open offers no second Change answer.
+    expect(view.queryByRole("button", { name: "Change answer" })).toBeNull();
+  } finally {
+    view.unmount();
+    listMyAnswers.mockRestore();
+    getAsk.mockRestore();
+  }
+});
+
 test("a row's Change answer opens the seeded form; after Save the row and the card show the change", async () => {
   const holdAnswer: AskAnswer = {
     at: "2026-10-08T04:00:00Z",
