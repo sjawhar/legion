@@ -1,0 +1,155 @@
+{
+  "completed": "2026-10-08T04:00:28.71574702Z",
+  "concerns": [
+    "Dropping --no-extensions alone double-loads pi-envoy and pi-legion (measured: two module instances, two factory runs) because the image's profile links both; the plan unlinks them in the Dockerfile and adds a publishers-count refusal to the pod lane plus an OK-line mark (extensions=discovered) so a daemon of this commit refuses an older image.",
+    "Acceptance 2's daemon-launched figures and acceptance 4's 'from the daemon' cannot be produced from a pod; stage4a (image-probe, pod-baseline) and stage4b edits ship blind and need a named human on a devbox before READY, else the implementer's post-merge production check records them.",
+    "Spec departure: the fence test agent_argv_omp_test.go is rewritten into the acceptance-1 regression test instead of deleted; the architect decides.",
+    "The spec names packages/daemon/AGENTS.md as guidance; the file does not exist, the root AGENTS.md governs.",
+    "flock does not cross pods under gVisor (manifest.go, initWaitSeconds comment), so the warm-up uses an O_EXCL lease with mtime heartbeat and rename takeover; on #1752 the contenders are the six role containers sharing an issue pod workspace and a draining pod overlapping its replacement.",
+    "The spec builds on #1752: every file:line in the plan is at legion/LEGION-462-issue-pod head 7e054d2e; the pod overlay there carries two turn-scoping keys (bash.autoBackground, async) that Quiesce depends on and that stay, so the overlay machinery (OverlayFile-\u003eTurnScopeFile, LEGION_STATE_DIR) stays while the four settings and two env defaults go.",
+    "The planner did not make the #1752 merge (six overlapping files; a conflict is the implementer to resolve in the one merge commit); the planner handoff sits on the daemon-created branch tip."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "answer": "T1.4: bootprobe.OKLine gains extensions=discovered, Runtime.judge refuses an OK line without it; no contract bump.",
+        "finding": "A DaemonAPIVersion bump is not covered by version.go's rule and would make every tmux pane's plugin stale; the repository's pattern is an OK-line mark."
+      },
+      {
+        "answer": "T1.3/T1.4: the Envoy publishers count is the pod lane's forward refusal (no pi-shared wire change); the OK-line mark is the pairing.",
+        "finding": "A double-load refusal in the image's probe cannot see an older image (it runs the image's own probe-image), so it is a forward fence, not the pairing lever."
+      },
+      {
+        "answer": "T2.1-2: natives ride on the pi-codegraph install (the build proves it), Dockerfile comments, docs/kubernetes.md 26-34 and 59-60, one line for a human debugging in a pod.",
+        "finding": "Unlinking pi-envoy/pi-legion from the profile changes the natives-download trigger, the lockfile contents, bare in-pod omp, and docs that name the links."
+      },
+      {
+        "answer": "T2.3 records it and refuses it: the image probe would stop certifying the two roots by path; explicit roots and an unlinked profile are one decision.",
+        "finding": "The alternative (drop the explicit flags, load from the profile as a pane does) is cheaper and foreclosed only by the spec's sentence."
+      },
+      {
+        "answer": "T1.2 keeps roots and export, rewrites every text; T1.5 lists probe_test.go:569.",
+        "finding": "LEGION_PROMPT_ROOTS must stay once the profile stops carrying the plugins; lane texts say 'discovery off'; probe_test.go:569 asserts one of them."
+      },
+      {
+        "answer": "T1.5 and T4.4 name each with what it becomes (pod arm before the pane glob; roots at $3/$5).",
+        "finding": "probe_image_test.go, worker_shim_test.go, imageprobe_test.go's arm order and $4/$6 roots, promptreferences_omp_test.go's pod rows all break."
+      },
+      {
+        "answer": "Section 6 departure 1: rewritten as the positive test; the architect decides; the fallback is spelled out.",
+        "finding": "Deleting agent_argv_omp_test.go throws away the one CI-runnable proof of acceptance 1's first clause, which its control already contains."
+      },
+      {
+        "answer": "Measured: omp config list exists; section 2 records the exact default lines; T4.4 re-aims the test as the CI check; section 5 rows 3a-3d.",
+        "finding": "Acceptance 3's omp config list had no evidence and 'Oh My Pi defaults' no values; the podsafety real-binary test already proves the three clauses."
+      },
+      {
+        "answer": "T3.1: a cross-pod lease (O_EXCL file, mtime heartbeat 10 s, stale at 60 s, rename takeover), since flock does not cross pods under gVisor.",
+        "finding": "The shim warm-up has no cross-process interlock; two first launches on one workspace both run codegraph init, which corrupts the SQLite database."
+      },
+      {
+        "answer": "T3.2: start on the child's first frame (ready); no setpriority (a no-op under gVisor); extension and daemon-frame placements refused with reasons; both figures from one launch.",
+        "finding": "Placement right after spawn competes with registration for CPU; two alternatives exist."
+      },
+      {
+        "answer": "T3.6: 185 MB per workspace recorded; docs/kubernetes.md 'What stays on the pod's disk' and the tree_volume note.",
+        "finding": "The index's cost on the shared tree volume is unstated."
+      },
+      {
+        "answer": "T3.1: the pin stays; codegraph.go's doc is extended.",
+        "finding": "The spec's permission to delete the init-container codegraph pin does not fit the shim placement."
+      },
+      {
+        "answer": "T3.3-5: --warm-codegraph on tree pods only, refused without LEGION_WORKSPACE, relaunch re-runs the warm-up against the existing index.",
+        "finding": "The warm flag must be absent on the controller pod and every pane; behaviour without LEGION_WORKSPACE and on relaunch is unstated."
+      },
+      {
+        "answer": "On #1752 the turn-scoping overlay is still composed into PI_CONFIG_FILES, so the name stays a baseline name and the collision row stays (T4.3).",
+        "finding": "Removing PI_CONFIG_FILES from podsafety.Variables() legalises a provider key of that name."
+      },
+      {
+        "answer": "T4.1: one sentence defining it; package and flag names kept with the churn list; rename offered as a Fast-follow.",
+        "finding": "What --pod-safety is for after the cut, and whether to rename it."
+      },
+      {
+        "answer": "Section 3 states the boundary and cites LEGION-220 and the parent spec's approved text; manifest.go's sentence is rewritten.",
+        "finding": "The change moves a trust boundary (repository code runs with the pod's credentials) that two documents still state the other way."
+      },
+      {
+        "answer": "Section 5 row 1d measures it in the scratch repository with a negative control.",
+        "finding": "A repository extension that throws now reaches the launch path; its failure mode is unmeasured."
+      },
+      {
+        "answer": "Section 5 table says who proves each row; section 7 escalates stage4a/4b to a human the architect names.",
+        "finding": "Acceptance 4's two halves and acceptance 2's daemon-launched figures cannot be discharged by the implementer."
+      },
+      {
+        "answer": "Section 5 row 2b: initialized true and index.state complete within N minutes, N from the in-pod measurement with the CPU count.",
+        "finding": "codegraph status's initialized field is true during a build; the threshold N is blank."
+      },
+      {
+        "answer": "Section 2 measured get_state.systemPrompt lines and available_commands_update entries; section 5 rows 1a-1c; the scratch repository is built fresh.",
+        "finding": "Acceptance 1's skills and MCP clauses had no model-free check; this repository holds no fixture."
+      },
+      {
+        "answer": "T4.6 and T3.6 add deploy/kubernetes/operator-route README/overlay/pod.yml, docs/kubernetes.md 1523-1525 and 281.",
+        "finding": "Five documents outside the planner's list state the baseline or the fence."
+      },
+      {
+        "answer": "T1.6 and T4.5 give the new wording; section 7 says they are edited blind and who runs them.",
+        "finding": "stage4a's pod-baseline and stage4b's argv note assert the removed baseline and flag; both ship blind."
+      },
+      {
+        "answer": "Section 2 records the transcript: command, omp version, the two import and factory lines, the two controls.",
+        "finding": "The load-order and double-load measurement is the design's premise and is unverifiable from the repository."
+      },
+      {
+        "answer": "Section 2: the omp log shows subagents re-run the factory on the same module instance, so publishers count load paths; T2.1: the image build is the natives check and the comment moves.",
+        "finding": "Two claims need a check: factory runs under omp models, and the natives download after unlinking."
+      }
+    ]
+  },
+  "independentTasks": 3,
+  "issue": "LEGION-629",
+  "phase": "plan",
+  "planDocument": "dispatch://LEGION-629/artifact/plan-md",
+  "planReview": {
+    "rounds": 2,
+    "verdict": "approved"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — the phase worker's workspace, push, PR body and proof rules; no repository skill covers the daemon, the image or Kubernetes, and packages/daemon/AGENTS.md does not exist"
+    ],
+    "review": [
+      "legion-worker — references/merge-gate.md and review-threads.md; the reviewer reads the plan beside the spec and checks the two departures in section 6"
+    ],
+    "test": [
+      "legion-worker — references/pr-body.md defines the tester's proof and negative controls; the plan's section 5 rows are what the tester re-runs"
+    ]
+  },
+  "schemaVersion": 1,
+  "specDepartures": [
+    {
+      "evidence": "The test's existing control (line 80) already runs this case on the real binary in CI (internal/testbin/testbin.go fatals on GitHub Actions without the binary); acceptance 4 requires go test ./... green; deleting it leaves acceptance 1's first clause proven once by hand in one pod.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "The test that pins the fence is deleted, not rewritten. -\u003e The test that pins the fence is rewritten to prove the inverse: the pod's argument list loads the repository's extensions, hooks and commands beside the two explicit plugins."
+        ]
+      },
+      "plan": "The test is rewritten as TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands: the pod's agentArgv, on the pinned Oh My Pi, imports the scratch repository's extension, hook and command beside the two explicit plugins (exactly the five markers); no row asserts discovery off.",
+      "spec": "The test that pins the fence (packages/daemon/internal/runtime/sandbox/agent_argv_omp_test.go) is deleted, not rewritten."
+    },
+    {
+      "evidence": "Measured in the planner's pod on Oh My Pi 18.6.0: a plugin both linked in the profile and named by --extension is imported twice and its factory runs twice with discovery on (two ?mtime= tags); once with --no-extensions; once when only explicit. Oh My Pi de-duplicates by absolute path, not realpath.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The worker image stops linking pi-envoy and pi-legion into the profile (two omp plugin install lines leave the Dockerfile); pi-codegraph stays linked; the explicit --extension roots stay as the spec says; the pod lane refuses an image whose profile links a plugin a pod also names explicitly.",
+      "spec": "The pod drops --no-extensions and keeps the Envoy and Legion plugins as explicit extensions; the spec and docs/kubernetes.md describe all three plugins (pi-envoy, pi-legion, pi-codegraph) linked into the image's OMP profile."
+    }
+  ],
+  "taskCount": 6,
+  "workflowRecommendation": "One implementer. First step: merge legion/LEGION-462-issue-pod@origin into legion/LEGION-629 (the retarget merge; six files overlap with main since the fork point 3d85ea83) and open the PR with base legion/LEGION-462-issue-pod; then T1 (pod lane, probe mark, tests; no golden changes, the argv lives in launcherCommand) with T2 (Dockerfile unlink, docs) as one decision; T3 (shim warm-up with --warm-codegraph appended in launcherCommand for non-controller roles, cross-process lease) and T4 (podsafety: the pod overlay becomes turnscope.yml; the four settings and two env defaults go) independent of each other. Every acceptance row is proven in the implementer pod per section 5; stage4a/4b need a human on a devbox (section 7). Retarget main once #1752 merges."
+}
