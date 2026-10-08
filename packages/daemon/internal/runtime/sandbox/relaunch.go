@@ -58,25 +58,20 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // has its workspace's provisioning token minted, the controller's pod needs nothing. A workflow
 // claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
 // cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
+// An error leaves no child of this role running and none watched: a Resume's previous child, or a
+// child an ambiguous LauncherStart may have begun, is stopped before the error returns.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (loc runtime.Locator, retErr error) {
-	l, err := r.prepare(spec)
-	if err != nil {
-		return runtime.Locator{}, err
-	}
-	fail := func(step string, err error) (runtime.Locator, error) {
-		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
-	}
-	r.forget(spec.Claim)
-	// Machine.launch has moved prev out of its claim before calling Resume, and forget above has
-	// removed it from this runtime's watch. An error from here must therefore leave no child of this
-	// role running unrecorded: clean up its child, or the child an ambiguous start may have begun,
-	// on every error. The defer uses retErr only as the error it must return; it never calls a
-	// function through a named result or a mutable release function. stopUnrecordedRoleChild discovers
-	// the child at return time from the launcher state.
 	var (
 		pod         *corev1.Pod
 		startIssued bool
 	)
+	r.forget(spec.Claim)
+	// Machine.launch has moved prev out of its claim before calling Resume. Every error from the
+	// first prepare check onward must therefore leave no child of this role unrecorded: clean up
+	// the previous child, or the child an ambiguous start may have begun. The defer uses retErr only
+	// as the error it must return; it never calls a function through a named result or a mutable
+	// release function. stopUnrecordedRoleChild discovers the child at return time from launcher
+	// state.
 	defer func() {
 		if retErr == nil {
 			return
@@ -85,6 +80,13 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			retErr = errors.Join(retErr, fmt.Errorf("stop its unrecorded role child: %w", stopErr))
 		}
 	}()
+	l, err := r.prepare(spec)
+	if err != nil {
+		return runtime.Locator{}, err
+	}
+	fail := func(step string, err error) (runtime.Locator, error) {
+		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
+	}
 	release, err := r.lockPod(ctx, l.name)
 	if err != nil {
 		return fail("take its pod's launch turn", err)
@@ -178,10 +180,13 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 // stopUnrecordedRoleChild stops the child of token's launcher in either pod its failing relaunch
 // could have left it: prev's pod, which Machine had recorded before Resume, and pod, the pod this
 // relaunch reached or made. Every such child belongs to this role, never a sibling, and is
-// unrecorded once relaunch has failed. A stop is bounded even when the launch caller's context has
-// expired. When the prior child, or a child a start may have begun, has disconnected first, its stop
-// is still attempted at its generation so the returned launch error says the runtime could not end
-// it, rather than silently leaving it a zombie.
+// unrecorded once relaunch has failed. Once a Start was issued (startIssued), pod's candidate is the
+// issued generation, replacing prev's on a same-pod Resume, and its Stop is sent even while the
+// launcher reports no child: the Start may already be running without its result or state having
+// arrived, and the Stop follows it on the same connection. A stop is bounded even when the launch
+// caller's context has expired. When the prior child, or a child a start may have begun, has
+// disconnected first, its stop is still attempted at its generation so the returned launch error
+// says the runtime could not end it, rather than silently leaving it a zombie.
 func (r *Runtime) stopUnrecordedRoleChild(
 	ctx context.Context, token claim.Token, prev *runtime.Locator, pod *corev1.Pod, startIssued bool, generation uint64,
 ) error {
@@ -190,15 +195,16 @@ func (r *Runtime) stopUnrecordedRoleChild(
 		candidates[prev.Sandbox.PodUID] = prev.Sandbox.Generation
 	}
 	if pod != nil && startIssued {
-		if _, already := candidates[string(pod.UID)]; !already {
-			candidates[string(pod.UID)] = generation
-		}
+		// The Start frame may already be running this generation although its result and state have
+		// not arrived. On a same-pod Resume this deliberately replaces prev's generation: Stop
+		// must follow the generation the frame issued, not the one it replaced.
+		candidates[string(pod.UID)] = generation
 	}
 	var errs []error
 	for uid, expected := range candidates {
 		state, connected := r.launchers.state(token, uid)
 		switch {
-		case connected && state.Child == nil:
+		case connected && state.Child == nil && (!startIssued || pod == nil || uid != string(pod.UID)):
 			continue
 		case connected && state.Child != nil:
 			expected = state.Child.Generation

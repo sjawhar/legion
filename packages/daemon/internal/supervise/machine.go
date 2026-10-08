@@ -649,8 +649,9 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // first, so it is the one waited out. The boot token's hash is persisted before the process
 // starts, so the shim's first hello resolves. A launch the runtime or the spec refuses is a launch
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
-// only a start that succeeds forgets it. A launch the tree lifecycle refuses (checkLaunch) starts
-// nothing and is charged nothing.
+// only a start that succeeds forgets it. A launch that fails before the runtime is asked to start
+// its successor stops the process it let go (stopPrevious). A launch the tree lifecycle refuses
+// (checkLaunch) starts nothing and is charged nothing.
 func (m *Machine) launch(ctx context.Context) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
@@ -663,7 +664,7 @@ func (m *Machine) launch(ctx context.Context) error {
 
 		m.claim.State = StateLaunching
 		if err := m.persist(ctx); err != nil {
-			return err
+			return errors.Join(err, m.stopPrevious(ctx))
 		}
 		loc, err := m.start(ctx, token)
 		if err == nil {
@@ -686,7 +687,7 @@ func (m *Machine) launch(ctx context.Context) error {
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
-		return runtime.Locator{}, fmt.Errorf("build the launch of %s: %w", m.claim.Token, err)
+		return runtime.Locator{}, errors.Join(fmt.Errorf("build the launch of %s: %w", m.claim.Token, err), m.stopPrevious(ctx))
 	}
 	spec.Claim, spec.Project, spec.Tree, spec.Issue, spec.Role = m.claim.Token, m.claim.Project, m.claim.Tree, m.claim.Issue, m.claim.Role
 	spec.Generation, spec.BootToken, spec.ResumeSessionFile = m.claim.Generation, token, ""
@@ -695,6 +696,22 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
 	return m.deps.Runtime.Resume(ctx, m.previous, spec)
+}
+
+// stopPrevious stops the process letGo moved into previous when a launch fails before the runtime
+// is asked to start its successor: a spec that cannot be built or a launching state that cannot be
+// persisted never reaches Spawn or Resume, so nothing else ends a process the claim no longer
+// records. An error from Spawn or Resume is the runtime's to clean up (the Sandbox runtime's
+// relaunch stops the role's previous child). A process already gone is already stopped, so Suspend
+// does nothing for it; previous is kept, for the next launch to wait out.
+func (m *Machine) stopPrevious(ctx context.Context) error {
+	if m.previous == nil {
+		return nil
+	}
+	if err := m.deps.Runtime.Suspend(ctx, *m.previous); err != nil {
+		return fmt.Errorf("stop the process %s let go before its relaunch: %w", m.previous.Incarnation, err)
+	}
+	return nil
 }
 
 // died is the claim's process found gone — or found to be some other process — while it was
