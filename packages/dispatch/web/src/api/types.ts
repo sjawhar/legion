@@ -112,6 +112,8 @@ export type {
   MessageDeliveryMode,
   MessageEventPayload,
   MessageRead,
+  MyAnswerRow,
+  MyAnswersResponse,
   ProgressCount,
   Project,
   RepoProject,
