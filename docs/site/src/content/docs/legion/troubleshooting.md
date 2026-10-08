@@ -232,9 +232,8 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 These arrive as messages on the Dispatch issue, and the architect is told:
 
-- **`Issue reached review_round_cap=3.`** The implementer's round count reached three: every return
-  to implementing counts one (a tester's fail, a review's request for changes, CI turning red or the
-  head conflicting with its base), and so does a worker's move back to any earlier phase. The
+- **`Issue reached review_round_cap=3.`** The implementer's round count reached three
+  ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
   architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts.
