@@ -2327,8 +2327,12 @@ for child in "$child1" "$child2"; do
   on_issue "$child" until_true 900 "planner worker on $child, a child of $tree1, to register from an issue pod of its own" issue_worker_live "$child" planner
   assert_claim_endpoints "$child" planner
   record_resident "$child" planner || fail "$child's planner has no session and pod to keep: $(claim_view "$child" planner)"
-  [ "$(daemon_state | jq -r --arg issue "$child" '.issues[$issue].tree // ""')" = "$tree1" ] ||
-    fail "the daemon records $child under tree $(daemon_state | jq -c --arg issue "$child" '.issues[$issue] | {tree, phase}'), not $tree1"
+  # The tree an issue runs under is recorded on its claims (legion claims list, OperatorClaim.tree),
+  # not on the state view's issue entry, which carries no tree.
+  child_tree=$(claims_cli list --json | jq -r --arg issue "$child" '[.claims[] | select(.issue == $issue and .role == "planner") | .tree] | first // ""') ||
+    fail "legion claims list could not be read for $child's planner"
+  [ "$child_tree" = "$tree1" ] ||
+    fail "the daemon records $child's planner claim under tree '${child_tree:-none}', not $tree1: $(claims_cli list --json | jq -c --arg issue "$child" '[.claims[] | select(.issue == $issue) | {role, tree, state}]')"
 done
 root_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
 child1_pod=$(claim_sandbox "$child1" planner) || fail "$child1's planner has no Sandbox locator"

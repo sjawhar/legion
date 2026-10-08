@@ -1120,10 +1120,12 @@ the sum of the six.
 
 No pod carries an affinity: each owns its volume and shares nothing with another pod, so the
 scheduler bin-packs it wherever the `legion` pool has room for its reservation, and Karpenter adds a
-node under the pool's limits when none has, each at least a 4-vCPU type under the pool's
-`karpenter.k8s.aws/instance-cpu Gt 3` floor. A pod relaunched onto another node waits for its
-`ReadWriteOnce` volume to detach from the old one, which shows as transient `FailedAttachVolume` or
-`Multi-Attach` events until the old pod is gone; then it runs on.
+node under the pool's limits when none has, of the smallest type the pool's requirements allow. In
+production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
+floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 12 GiB
+issue pod fits, two per node, cpu the binding dimension. A pod relaunched onto another node waits
+for its `ReadWriteOnce` volume to detach from the old one, which shows as transient
+`FailedAttachVolume` or `Multi-Attach` events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
@@ -1132,15 +1134,16 @@ while its siblings idle. The reservation is the pod's working set, not one conta
 container's own request and limit are what the API shows and the scheduler counts.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
-`limits.memory` leave for pods of the per-pod sum: at the defaults, `limits.cpu: 64` places 16
-three-CPU pods, one per 4-vCPU floor node, where the tree-volume layout ran 16 trees, each pinned
-to a node of its own. `admission_cap` bounds roots alone: a tree of N children runs N+1 pods at
-once, and nothing caps concurrent child pods. A pod the pool cannot place stays `Pending`,
-unscheduled; once it has been for longer than `worker_boot_timeout_seconds` the boot watchdog
-reads it dead ([Liveness rules](#liveness-rules)), one launch failure, its relaunch meets the same
-pool, and the claim fails once its launch failures run out — no later than its registration
-deadline. Size the pool's limits for `admission_cap × (1 + the children a tree runs at once)` pods
-of the per-pod sum, or keep `admission_cap` within what the limits place.
+`limits.memory` leave for pods of the per-pod sum: at the defaults, two pods fit a floor node and
+`limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), where the
+tree-volume layout ran one tree per node, each pinned to a node of its own. `admission_cap` bounds
+roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods. A
+pod the pool cannot place stays `Pending`, unscheduled; once it has been for longer than
+`worker_boot_timeout_seconds` the boot watchdog reads it dead ([Liveness rules](#liveness-rules)),
+one launch failure, its relaunch meets the same pool, and the claim fails once its launch failures
+run out — no later than its registration deadline. Size the pool's limits for
+`admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum, or keep
+`admission_cap` within what the limits place.
 
 ### Trust model: the provisioning token
 
