@@ -109,6 +109,29 @@ describe("the dispatch command surface", () => {
     ).toMatchObject({ args: { priority: [0, null] } });
   });
 
+  test("a single-value flag given twice is named twice whether or not its first value parsed", () => {
+    expect(
+      parseCommand(
+        ["issue-update", "--issue", "LEGION-2", "--priority", "bad", "--priority", "3"],
+        noFiles
+      )
+    ).toEqual({
+      kind: "refused",
+      tool: "dispatch_issue_update",
+      problems: ['--priority must be a number, not "bad"', "--priority is given twice"],
+    });
+    expect(
+      parseCommand(
+        ["issue-update", "--issue", "LEGION-2", "--priority", "1", "--priority", "2"],
+        noFiles
+      )
+    ).toEqual({
+      kind: "refused",
+      tool: "dispatch_issue_update",
+      problems: ["--priority is given twice"],
+    });
+  });
+
   test("an option label holding the separator survives commandLine then parseCommand", () => {
     const args = {
       issue: "LEGION-2",
