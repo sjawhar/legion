@@ -45,6 +45,13 @@ Configuration: Missing Region"`.
 The broker refuses to start, naming the variable, when one is missing, malformed or out of range,
 and also while a variable it no longer reads is still set.
 
+A secret owned by a service rather than a person needs that service registered:
+`BROKER_SERVICES` lists the services, whitespace-separated (`BROKER_SERVICES=legion-daemon` for the
+Legion daemon's pods). A session enrolled under a machine login for a listed service gets that
+service's agent-tier secrets at once, and every other session is denied them. While a secret's
+owner tag names a service the list leaves out, the broker refuses the secret as
+`owner-tag-malformed` ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
+
 ## What it depends on
 
 | Dependency | What the broker needs from it |
