@@ -73,11 +73,15 @@ type Options struct {
 	Image string
 	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
-	// TreeVolume is each issue volume's size, positive; the daemon's configuration supplies its
-	// default (runtime.kubernetes.tree_volume, 20Gi).
-	TreeVolume resource.Quantity
-	Scheduling Scheduling
-	// Resources are each role's container requests and limits; a role absent here gets none.
+	// IssueVolume is each issue volume's size, positive; the daemon's configuration supplies its
+	// default (runtime.kubernetes.issue_volume, 20Gi).
+	IssueVolume resource.Quantity
+	Scheduling  Scheduling
+	// Resources are each role's container requirements, the controller's included: the daemon
+	// hands one for every role (config.DefaultResources fills what its file leaves out), its cpu and
+	// memory the request and the limit alike, so every container of every pod the runtime builds —
+	// the init containers take the launching role's — is Guaranteed. A role absent here gets none,
+	// which no daemon-built Options has.
 	Resources map[claim.Role]corev1.ResourceRequirements
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string

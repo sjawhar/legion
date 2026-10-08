@@ -62,7 +62,7 @@ func testOptions() Options {
 		Store:        newFakeStore(),
 		Image:        testImage,
 		StorageClass: "gp2",
-		TreeVolume:   resource.MustParse("20Gi"),
+		IssueVolume:  resource.MustParse("20Gi"),
 		StreamURL:    "tcp://192.0.2.250:13371",
 		DaemonURL:    "http://192.0.2.250:13370",
 		EnvoyURL:     "http://192.0.2.250:9020",

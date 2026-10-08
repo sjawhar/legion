@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -111,14 +112,21 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		if !ok {
 			return fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
-		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
-			Contract: api.DaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
-			// The role prompts every pod is handed are this daemon's, inlined at each launch, so the
-			// probe resolves what they name rather than the image's copy.
-			RoleReferences: p.roleReferences,
-		})
+		return sandboxed.ProbeImage(ctx, imageProbe(cfg, reads.opts, p.roleReferences))
 	}
 	return nil
+}
+
+// imageProbe is the probe of the daemon's worker image: this daemon's contract, the role prompts
+// every pod is handed — this daemon's, inlined at each launch, so the probe resolves what they name
+// rather than the image's copy — and the controller's reservation, the one role that runs alone in
+// its pod as the probe does, so the probe pod is Guaranteed as every Legion pod is.
+func imageProbe(cfg config.Config, opts sandbox.Options, references promptrefs.Names) sandbox.ImageProbe {
+	return sandbox.ImageProbe{
+		Contract: api.DaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
+		RoleReferences: references,
+		Resources:      opts.Resources[claim.RoleController],
+	}
 }
 
 // kubeClient is the client of runtime.kubernetes: the kubeconfig's context it names, or the
@@ -151,13 +159,14 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 }
 
 // sandboxOptions translates the configuration into the runtime's Options, all but the worker
-// stream's address, the connection directory and the token source, which boot hands the factory. It
-// refuses what the cluster would refuse only at the first pod: a role's request above its limit.
-// lookup is the daemon's environment, which can name the NATS nkey seed (launchSecrets).
+// stream's address, the connection directory and the token source, which boot hands the factory.
+// Every role the configuration holds a reservation for — all seven once the loader settled it —
+// gets its container requirements (roleRequirements). lookup is the daemon's environment, which
+// can name the NATS nkey seed (launchSecrets).
 func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
-	treeVolume, err := resource.ParseQuantity(k.TreeVolume)
+	issueVolume, err := resource.ParseQuantity(k.IssueVolume)
 	if err != nil {
-		return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.tree_volume: %w", err)
+		return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.issue_volume: %w", err)
 	}
 	var tolerations []corev1.Toleration
 	for _, t := range k.Scheduling.Tolerations {
@@ -165,14 +174,11 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 			Key: t.Key, Operator: corev1.TolerationOperator(t.Operator), Value: t.Value, Effect: corev1.TaintEffect(t.Effect),
 		})
 	}
-	var resources map[claim.Role]corev1.ResourceRequirements
-	for role, configured := range k.Resources {
-		requirements, err := roleRequirements(role, configured)
+	resources := make(map[claim.Role]corev1.ResourceRequirements, len(k.Resources))
+	for role, reservation := range k.Resources {
+		requirements, err := roleRequirements(role, reservation)
 		if err != nil {
 			return sandbox.Options{}, err
-		}
-		if resources == nil {
-			resources = map[claim.Role]corev1.ResourceRequirements{}
 		}
 		resources[role] = requirements
 	}
@@ -181,7 +187,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		agentSecrets = &sandbox.AgentSecrets{URL: a.URL, Audience: a.Audience, TokenExpiry: time.Duration(a.TokenExpirySeconds) * time.Second}
 	}
 	return sandbox.Options{
-		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, TreeVolume: treeVolume,
+		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, IssueVolume: issueVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
 		Resources:  resources,
 		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
@@ -268,49 +274,23 @@ func providerSecretKeys(keys []config.ProviderKey) map[string]string {
 	return secretKeys
 }
 
-// roleRequirements is one role's configured requests and limits as a container's, refusing a
-// request above its limit: the API server refuses such a pod, but only when the role first runs.
-func roleRequirements(role claim.Role, configured config.RoleResources) (corev1.ResourceRequirements, error) {
+// roleRequirements is one role's reservation as a container's requirements: its cpu and memory,
+// each the request and the limit alike, so the pod the role's containers make is Guaranteed and
+// bursts past nothing. The two lists are built apart so neither edit reaches the other.
+func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
 	key := "runtime.kubernetes.resources." + string(role)
-	requests, err := quantities(configured.Requests, key+".requests")
+	cpu, err := resource.ParseQuantity(reservation.CPU)
 	if err != nil {
-		return corev1.ResourceRequirements{}, err
+		return corev1.ResourceRequirements{}, fmt.Errorf("%s.cpu: %w", key, err)
 	}
-	limits, err := quantities(configured.Limits, key+".limits")
+	memory, err := resource.ParseQuantity(reservation.Memory)
 	if err != nil {
-		return corev1.ResourceRequirements{}, err
+		return corev1.ResourceRequirements{}, fmt.Errorf("%s.memory: %w", key, err)
 	}
-	for name, request := range requests {
-		if limit, ok := limits[name]; ok && request.Cmp(limit) > 0 {
-			return corev1.ResourceRequirements{}, fmt.Errorf("%s: the %s request %s is above its limit %s, which the cluster refuses",
-				key, name, request.String(), limit.String())
-		}
-	}
-	return corev1.ResourceRequirements{Requests: requests, Limits: limits}, nil
-}
-
-// quantities are one requests or limits mapping, nil when it sets nothing.
-func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
-	var list corev1.ResourceList
-	for _, part := range []struct {
-		name  corev1.ResourceName
-		value string
-	}{
-		{corev1.ResourceCPU, q.CPU}, {corev1.ResourceMemory, q.Memory}, {corev1.ResourceEphemeralStorage, q.EphemeralStorage},
-	} {
-		if part.value == "" {
-			continue
-		}
-		quantity, err := resource.ParseQuantity(part.value)
-		if err != nil {
-			return nil, fmt.Errorf("%s.%s: %w", key, part.name, err)
-		}
-		if list == nil {
-			list = corev1.ResourceList{}
-		}
-		list[part.name] = quantity
-	}
-	return list, nil
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu.DeepCopy(), corev1.ResourceMemory: memory.DeepCopy()},
+	}, nil
 }
 
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's

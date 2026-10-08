@@ -114,12 +114,12 @@ const (
 	liveSettle = 2*liveProbeInterval + 5*time.Second
 )
 
-// liveTreeVolume is the issue volume's size, the daemon configuration's default. The run sets no
+// liveIssueVolume is the issue volume's size, the daemon configuration's default. The run sets no
 // scheduling beyond the Legion pool the runtime selects: no pod asks for another pod's node or
 // keeps off one (every issue pod owns its volume, LEGION-632), and the `legion` NodePool's own
 // floor, karpenter.k8s.aws/instance-cpu Gt 3 (set in the deployment repository), is what makes a
 // node a 4-vCPU one with room for a pod while no pod requests anything.
-var liveTreeVolume = resource.MustParse("20Gi")
+var liveIssueVolume = resource.MustParse("20Gi")
 
 // The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers
 // Secret (ProvidersSecretName) the script creates for the run, holding a value no model route reads.
@@ -720,7 +720,7 @@ func (r *liveRig) startRuntime() error {
 		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
 	}
 	opts := Options{
-		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
+		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", IssueVolume: liveIssueVolume,
 		StreamURL: address,
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",

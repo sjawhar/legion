@@ -19,25 +19,30 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
-// context points at server.
+// context points at server, and every role's reservation at the loader's defaults, as a loaded
+// configuration holds them.
 func kubernetesConfig(t *testing.T, server string) config.Config {
 	t.Helper()
 	cfg := testConfig(t)
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
-		StorageClass: "gp2", TreeVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
+		StorageClass: "gp2", IssueVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
+		Resources: config.DefaultResources(),
 	}}
 	return cfg
 }
@@ -355,7 +360,7 @@ func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) 
 }
 
 // prepare refuses what the cluster would refuse only later: a kubeconfig with no current context
-// when runtime.kubernetes.context names none, and a role's request above its limit.
+// when runtime.kubernetes.context names none, or a context the kubeconfig does not have.
 func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -376,15 +381,6 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 			},
 			want: `context "production" does not exist`,
 		},
-		{
-			name: "a request above its limit",
-			change: func(k *config.Kubernetes, _ *testing.T) {
-				k.Resources = map[claim.Role]config.RoleResources{claim.RoleImplementer: {
-					Requests: config.Quantities{CPU: "2", Memory: "4Gi"}, Limits: config.Quantities{CPU: "1", Memory: "8Gi"},
-				}}
-			},
-			want: "runtime.kubernetes.resources.implementer: the cpu request 2 is above its limit 1",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
@@ -393,6 +389,43 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 				t.Fatalf("prepare = %v, want a refusal containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// Every role's reservation reaches the runtime's Options as that role's container requirements,
+// its cpu and memory the request and the limit alike — the file's values where it set them, here
+// one role's — so every container the runtime builds from them is Guaranteed; and the image probe
+// carries the controller's, the one role that runs alone in its pod as the probe does.
+func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", Memory: "6Gi"}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if len(opts.Resources) != len(claim.Roles)+1 {
+		t.Fatalf("the runtime's Resources name %d roles, want the six workflow roles and the controller", len(opts.Resources))
+	}
+	for role, reservation := range cfg.Runtime.Kubernetes.Resources {
+		got, ok := opts.Resources[role]
+		if !ok {
+			t.Errorf("%s has no requirements", role)
+			continue
+		}
+		want := corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory)},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory)},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s's requirements = %+v, want %+v (request == limit)", role, got, want)
+		}
+	}
+	probe := imageProbe(cfg, opts, promptrefs.New())
+	if !reflect.DeepEqual(probe.Resources, opts.Resources[claim.RoleController]) {
+		t.Errorf("the image probe carries %+v, want the controller's %+v", probe.Resources, opts.Resources[claim.RoleController])
+	}
+	if cpu := probe.Resources.Requests[corev1.ResourceCPU]; cpu.Cmp(resource.MustParse("1")) != 0 {
+		t.Errorf("the image probe requests cpu %s, want the controller's default 1", cpu.String())
 	}
 }
 

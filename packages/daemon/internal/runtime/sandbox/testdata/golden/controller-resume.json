@@ -53,7 +53,16 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "controller",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "4Gi"
+              },
+              "requests": {
+                "cpu": "1",
+                "memory": "4Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -118,7 +127,16 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "workspace-init",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "4Gi"
+              },
+              "requests": {
+                "cpu": "1",
+                "memory": "4Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {

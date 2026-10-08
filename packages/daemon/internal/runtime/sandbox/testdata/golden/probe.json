@@ -42,11 +42,12 @@
             "name": "probe",
             "resources": {
               "limits": {
-                "memory": "2Gi"
+                "cpu": "1",
+                "memory": "4Gi"
               },
               "requests": {
-                "cpu": "500m",
-                "memory": "1Gi"
+                "cpu": "1",
+                "memory": "4Gi"
               }
             },
             "securityContext": {

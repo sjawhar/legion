@@ -50,16 +50,26 @@ func TestTheControllerKeyIsRefusedWhereTheDaemonCannotLaunchOne(t *testing.T) {
 
 // The controller's pod is sized as a workflow role's pod is, by its own key under
 // runtime.kubernetes.resources, which only a daemon that launches the controller reads: under
-// `controller: operator` the key would size nothing, so it is refused, naming why.
+// `controller: operator` the key would size nothing, so it is refused, naming why — and only the
+// key the file wrote is, never the default every settled block holds for the controller.
 func TestTheControllersPodIsSizedOnlyWhereTheDaemonLaunchesIt(t *testing.T) {
-	const sized = "    resources: {controller: {requests: {cpu: 250m, memory: 1Gi}, limits: {memory: 2Gi}}}\n"
+	const sized = "    resources: {controller: {cpu: 2, memory: 8Gi}}\n"
 	cfg, err := LoadForValidation(writeConfigFile(t, "controller: daemon\n"+kubernetesFile+sized), noEnv)
 	if err != nil {
 		t.Fatalf("LoadForValidation with the controller's resources under controller: daemon: %v", err)
 	}
-	want := RoleResources{Requests: Quantities{CPU: "250m", Memory: "1Gi"}, Limits: Quantities{Memory: "2Gi"}}
+	want := RoleResources{CPU: "2", Memory: "8Gi"}
 	if got := cfg.Runtime.Kubernetes.Resources[claim.RoleController]; got != want {
 		t.Errorf("the controller's resources = %+v, want %+v", got, want)
+	}
+	for _, launch := range []string{"", "controller: operator\n"} {
+		cfg, err := LoadForValidation(writeConfigFile(t, launch+kubernetesFile), noEnv)
+		if err != nil {
+			t.Fatalf("LoadForValidation with %q and no resources key: %v", launch, err)
+		}
+		if got, want := cfg.Runtime.Kubernetes.Resources[claim.RoleController], DefaultResources()[claim.RoleController]; got != want {
+			t.Errorf("with %q the controller's default reservation = %+v, want %+v", launch, got, want)
+		}
 	}
 	for name, body := range map[string]string{
 		"no controller key":    kubernetesFile + sized,

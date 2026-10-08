@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -24,20 +25,82 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite the manifest goldens this package pins")
 
-// goldenOptions are production's settings: the budgets a golden's grace is read from, a role's
-// resources, and the Legion priority class.
+// goldenOptions are production's settings: the budgets a golden's grace is read from, every
+// role's reservation at the daemon's defaults, and the Legion priority class.
 func goldenOptions() Options {
 	opts := testOptions()
 	opts.BootTimeout = 120 * time.Second
 	opts.TerminationGrace = 30 * time.Second
 	opts.Scheduling = Scheduling{PriorityClass: "legion"}
-	opts.Resources = map[claim.Role]corev1.ResourceRequirements{
-		claim.RoleTester: {
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("2Gi")},
-			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
-		},
-	}
+	opts.Resources = reservations()
 	return opts
+}
+
+// reservations are the daemon's default reservations (config.DefaultResources) as the daemon
+// translates them for the runtime (internal/daemon/kubernetes.go, roleRequirements): every role,
+// the controller included, its cpu and memory the request and the limit alike.
+func reservations() map[claim.Role]corev1.ResourceRequirements {
+	translated := map[claim.Role]corev1.ResourceRequirements{}
+	for role, reservation := range config.DefaultResources() {
+		cpu, memory := resource.MustParse(reservation.CPU), resource.MustParse(reservation.Memory)
+		translated[role] = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory},
+		}
+	}
+	return translated
+}
+
+// Every container of every pod the runtime builds reserves cpu and memory and bursts past neither:
+// each has a non-zero request for both, equal to its limit, which is the kubelet's rule for the
+// Guaranteed class — judged over every container of the pod, the init containers included. An
+// issue pod's six launchers each carry their role's reservation and its two init containers the
+// launching role's; the controller's pod carries the controller's on both its containers, and so
+// does the image probe's one, which the daemon hands the controller's.
+func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := reservations()
+	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: want[claim.RoleController], RoleReferences: testRoleReferences}, time.Now())
+	for name, tc := range map[string]struct {
+		pod corev1.PodSpec
+		// launch is the role whose launch creates the pod, whose reservation every container that
+		// is not a role's own carries: the init containers, and the probe's one.
+		launch     claim.Role
+		containers int
+	}{
+		"root":       {podOf(t, r, rootSpec(t)), claim.RoleArchitect, 8},
+		"worker":     {podOf(t, r, workerSpec(t)), claim.RoleTester, 8},
+		"controller": {podOf(t, r, controllerSpec(t)), claim.RoleController, 2},
+		"probe":      {probe.Spec.PodTemplate.Spec, claim.RoleController, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			containers := slices.Concat(tc.pod.InitContainers, tc.pod.Containers)
+			if len(containers) != tc.containers {
+				t.Fatalf("the pod runs %d containers, want %d", len(containers), tc.containers)
+			}
+			for _, c := range containers {
+				role := tc.launch
+				if named := claim.Role(c.Name); claim.IsRole(named) || named == claim.RoleController {
+					role = named
+				}
+				if !reflect.DeepEqual(c.Resources, want[role]) {
+					t.Errorf("container %s carries %+v, want %s's reservation %+v", c.Name, c.Resources, role, want[role])
+				}
+				for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+					request, limit := c.Resources.Requests[kind], c.Resources.Limits[kind]
+					if request.Sign() <= 0 {
+						t.Errorf("container %s requests %s %s, want a positive reservation", c.Name, kind, request.String())
+					}
+					if request.Cmp(limit) != 0 {
+						t.Errorf("container %s requests %s %s but is limited to %s; the pod is Guaranteed only when they are equal", c.Name, kind, request.String(), limit.String())
+					}
+				}
+			}
+		})
+	}
 }
 
 // resumeSession is a session file Oh My Pi recorded in a pod.
@@ -256,11 +319,11 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	}
 }
 
-// The init containers run where the provisioning Secret is mounted, or on the tree volume every
-// agent of the tree can write, so nothing either executes may come from the tree volume: each one's
-// PATH names the image's directories only, and neither is told a tool path (#1258 deep review,
-// finding 3).
-func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
+// The init containers run where the provisioning Secret is mounted, or on the issue volume every
+// agent of the issue can write, so nothing either executes may come from the issue volume: each
+// one's PATH names the image's directories only, and neither is told a tool path (#1258 deep
+// review, finding 3).
+func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +336,7 @@ func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 		}
 		for _, dir := range filepath.SplitList(path) {
 			if dir == TreeRoot || strings.HasPrefix(dir, TreeRoot+"/") {
-				t.Errorf("%s's PATH names %s, on the tree volume", init.Name, dir)
+				t.Errorf("%s's PATH names %s, on the issue volume", init.Name, dir)
 			}
 		}
 		for name := range env {
@@ -601,7 +664,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}{
 		"tag image":         {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
 		"no class":          {func(o *Options) { o.StorageClass = "" }, "no storage class"},
-		"no volume size":    {func(o *Options) { o.TreeVolume = resource.Quantity{} }, "no issue volume size"},
+		"no volume size":    {func(o *Options) { o.IssueVolume = resource.Quantity{} }, "no issue volume size"},
 		"unix stream":       {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
 		"relative tool":     {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
 		"bad project":       {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},

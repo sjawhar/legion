@@ -74,9 +74,10 @@ type ImageProbe struct {
 	// refuse (the zero Names, a kind left nil, a name no prompt can write): a probe pod handed one
 	// would fail, and the failure would be blamed on the image.
 	RoleReferences promptrefs.Names
-	// Resources are the probe container's requests and limits (the TypeScript probe used the
-	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
-	// session-storage setting) and exits. None when zero.
+	// Resources are the probe container's requirements: the daemon hands it the controller's
+	// reservation (its cpu and memory, request and limit alike), the one role that runs alone in
+	// its pod as the probe does, so the probe pod is Guaranteed as every Legion pod is. It runs Oh
+	// My Pi three times (pi.agents, the plugin's load, the session-storage setting) and exits.
 	Resources corev1.ResourceRequirements
 }
 

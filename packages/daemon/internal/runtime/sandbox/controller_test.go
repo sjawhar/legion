@@ -237,15 +237,15 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 }
 
 // The controller's pod is sized by its own entry under runtime.kubernetes.resources, as a workflow
-// role's pod is by that role's: both its containers carry it, so an operator who sizes it moves it
-// out of the BestEffort class the kubelet evicts first.
+// role's pod is by that role's: both its containers carry it, the init container included, so a
+// controller the operator sized larger than the default runs at that size on every container.
 func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 	opts := goldenOptions()
 	sized := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
 	}
-	opts.Resources = map[claim.Role]corev1.ResourceRequirements{claim.RoleController: sized}
+	opts.Resources[claim.RoleController] = sized
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
