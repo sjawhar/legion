@@ -626,6 +626,44 @@ func TestControllerStartTellsTheControllerSlackReportingChannels(t *testing.T) {
 	}
 }
 
+// legion slack post/reply refuse any channel outside LEGION_SLACK_REPORTING_CHANNELS
+// (packages/daemon/cmd/legion/slack.go), enforced from the controller's own environment. The
+// operator-launched controller is the only one that can ever run `legion slack reply`, so its
+// launched environment must carry the daemon's configured channels, overriding whatever value the
+// operator's own shell happened to export.
+func TestControllerStartSetsSlackReportingChannelsOnItsOwnEnvironmentOverridingAnyInherited(t *testing.T) {
+	t.Setenv("LEGION_SLACK_REPORTING_CHANNELS", "ZINHERITED")
+	d := newControllerDaemonWithSlack(t, config.DesignGateRootIssues, &config.Slack{
+		Team: "T0WORKSPACE",
+		ReportingChannels: []config.ReportingChannel{
+			{Channel: "C0REPORTS", Project: "ACME"},
+			{Channel: "G0PRIVATE", Project: "WIDGETS"},
+		},
+	})
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	if got, want := c.env()["LEGION_SLACK_REPORTING_CHANNELS"], "C0REPORTS,G0PRIVATE"; got != want {
+		t.Errorf("LEGION_SLACK_REPORTING_CHANNELS = %q, want %q", got, want)
+	}
+}
+
+// A deployment with no Slack reporting channels configured must clear any inherited value too, so
+// `legion slack post`/`reply` in that controller's own environment allows nothing rather than
+// whatever channel the operator's shell happened to export.
+func TestControllerStartClearsSlackReportingChannelsWhenTheDeploymentConfiguresNone(t *testing.T) {
+	t.Setenv("LEGION_SLACK_REPORTING_CHANNELS", "ZINHERITED")
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	if _, set := c.env()["LEGION_SLACK_REPORTING_CHANNELS"]; set {
+		t.Errorf("LEGION_SLACK_REPORTING_CHANNELS is set; the daemon configured no reporting channels")
+	}
+}
+
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the
 // controller would otherwise promise, or withhold, a design approval on an assumption.
 func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {

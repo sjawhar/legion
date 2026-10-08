@@ -36,8 +36,13 @@ var (
 	slackHTTPClient = http.DefaultClient
 )
 
-// slackCommands is `legion slack`'s public bot surface. It obtains the bot token only through
-// agent-secrets, so its caller never reads or carries the token.
+// slackCommands is `legion slack`'s public bot surface. This process obtains the bot token only
+// through agent-secrets, restarting itself as the broker's child to redeem it, so this specific
+// invocation never reads or carries it. That is not a security boundary: LEGION_SLACK_BOT_TOKEN is
+// a shared agent-tier broker secret every enrolled session can redeem the same way, so any of them
+// can read or post in every channel the bot is in. The channel allowlist below (allowedSlackChannel)
+// guards against this process's own mistakes, not against a session that chooses to misuse the
+// token directly; the human design-gate review before work starts is where that trust is placed.
 var slackCommands = map[string]command{
 	"post":  runSlackPost,
 	"read":  runSlackRead,
@@ -206,12 +211,23 @@ type slackRepliesPage struct {
 }
 
 // slackThreadResult is readSlackThread's complete answer: every message of the thread, gathered
-// across every page conversations.replies paginated. There is no has_more on the wire here —
-// pagination is already finished by the time this is printed.
+// across every page conversations.replies paginated, up to slackMaxReplyPages pages or
+// slackMaxReplyMessages messages, whichever comes first. Truncated is true when a cap stopped the
+// read before Slack ran out of pages, so a caller knows the thread may hold more than it was shown.
 type slackThreadResult struct {
-	OK       bool              `json:"ok"`
-	Messages []json.RawMessage `json:"messages"`
+	OK        bool              `json:"ok"`
+	Messages  []json.RawMessage `json:"messages"`
+	Truncated bool              `json:"truncated,omitempty"`
 }
+
+// slackMaxReplyPages and slackMaxReplyMessages bound how much of a thread readSlackThread will
+// fetch: an unusually long thread, or one whose pagination loops a cursor back on itself, must
+// not read forever. Reaching either cap ends the read with Truncated set; a cursor Slack repeats,
+// which conversations.replies should never do, is refused outright rather than paged again.
+const (
+	slackMaxReplyPages    = 20
+	slackMaxReplyMessages = 1000
+)
 
 func postSlackMessage(ctx context.Context, token, channel, text, threadTS string, stdout io.Writer) error {
 	payload := map[string]string{"channel": channel, "text": text}
@@ -243,7 +259,13 @@ func postSlackMessage(ctx context.Context, token, channel, text, threadTS string
 func readSlackThread(ctx context.Context, token, channel, threadTS string, stdout io.Writer) error {
 	var messages []json.RawMessage
 	cursor := ""
-	for {
+	seenCursors := map[string]bool{}
+	truncated := false
+	for pages := 0; ; pages++ {
+		if pages >= slackMaxReplyPages {
+			truncated = true
+			break
+		}
 		response, err := slackRequest(ctx, token, "conversations.replies", http.MethodGet, nil, func(endpoint *url.URL) {
 			query := endpoint.Query()
 			query.Set("channel", channel)
@@ -266,12 +288,22 @@ func readSlackThread(ctx context.Context, token, channel, threadTS string, stdou
 			return errors.New("Slack conversations.replies reported failure")
 		}
 		messages = append(messages, page.Messages...)
-		cursor = page.ResponseMetadata.NextCursor
-		if !page.HasMore || cursor == "" {
+		if len(messages) >= slackMaxReplyMessages {
+			messages = messages[:slackMaxReplyMessages]
+			truncated = true
 			break
 		}
+		next := page.ResponseMetadata.NextCursor
+		if !page.HasMore || next == "" {
+			break
+		}
+		if next == cursor || seenCursors[next] {
+			return fmt.Errorf("Slack conversations.replies repeated cursor %q", next)
+		}
+		seenCursors[next] = true
+		cursor = next
 	}
-	return json.NewEncoder(stdout).Encode(slackThreadResult{OK: true, Messages: messages})
+	return json.NewEncoder(stdout).Encode(slackThreadResult{OK: true, Messages: messages, Truncated: truncated})
 }
 
 // slackRequest adds the token only to Slack's Authorization header. It never includes an API

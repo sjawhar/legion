@@ -169,6 +169,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 
+	// The daemon's answer, not the operator's shell, decides this allowlist: override whatever
+	// env (above) inherited, and clear it outright when this deployment configures no reporting
+	// channels, so `legion slack post`/`reply` never redeems a channel the operator's shell
+	// happened to export.
+	if value := daemon.SlackReportingChannelsEnvValue(answer.Slack); value != "" {
+		env[slackReportingChannelsEnv] = value
+	} else {
+		delete(env, slackReportingChannelsEnv)
+	}
+
 	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, answer.Secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}

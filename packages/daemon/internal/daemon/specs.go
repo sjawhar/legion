@@ -75,7 +75,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		addressing += " " + ReviewWorkflowsFragment(s.reviewWorkflows)
 	}
 	env := map[string]string{}
-	if value := slackReportingChannelsEnvValue(s.slack); value != "" {
+	if value := SlackReportingChannelsEnvValue(s.slack); value != "" {
 		env[slackReportingChannelsEnv] = value
 	}
 	if s.identity != nil {
@@ -115,7 +115,7 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 		return runtime.SpawnSpec{}, err
 	}
 	env := map[string]string{}
-	if value := slackReportingChannelsEnvValue(s.slack); value != "" {
+	if value := SlackReportingChannelsEnvValue(s.slack); value != "" {
 		env[slackReportingChannelsEnv] = value
 	}
 	return runtime.SpawnSpec{
@@ -202,9 +202,12 @@ func SlackFragment(slack config.Slack) string {
 // addressing, lets `legion slack` enforce it in code instead of trusting a prompt.
 const slackReportingChannelsEnv = "LEGION_SLACK_REPORTING_CHANNELS"
 
-// slackReportingChannelsEnvValue is slackReportingChannelsEnv's value for slack: "" when slack is
-// nil or names no channels, so SpawnSpec and controllerSpawnSpec set no Env entry for it then.
-func slackReportingChannelsEnvValue(slack *config.Slack) string {
+// SlackReportingChannelsEnvValue is slackReportingChannelsEnv's value for slack: "" when slack is
+// nil or names no channels, so SpawnSpec, controllerSpawnSpec and `legion controller start`
+// (packages/daemon/cmd/legion/controller.go) set no Env entry for it then. Exported so the
+// operator-launched controller's path can carry the same allowlist into its own Env, which the
+// daemon-launched controller gets from controllerSpawnSpec above.
+func SlackReportingChannelsEnvValue(slack *config.Slack) string {
 	if slack == nil {
 		return ""
 	}

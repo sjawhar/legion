@@ -202,6 +202,77 @@ func TestSlackReadPaginatesConversationsRepliesToCompletion(t *testing.T) {
 	}
 }
 
+// readSlackThread must not page forever: a thread with more pages than slackMaxReplyPages stops
+// there, with Truncated set, rather than reading indefinitely.
+func TestSlackReadStopsAtTheMaxPageCapAndMarksTruncated(t *testing.T) {
+	calls := 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/conversations.replies" {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		cursor := r.URL.Query().Get("cursor")
+		next := fmt.Sprintf("page%d", calls+1)
+		fmt.Fprintf(w, `{"ok":true,"messages":[{"ts":"%d","text":"msg%d (after %s)"}],"has_more":true,"response_metadata":{"next_cursor":"%s"}}`,
+			calls, calls, cursor, next)
+	}))
+	defer api.Close()
+
+	previous := slackAPIBaseURL
+	slackAPIBaseURL = api.URL + "/api"
+	t.Cleanup(func() { slackAPIBaseURL = previous })
+
+	var stdout bytes.Buffer
+	if err := readSlackThread(context.Background(), "test-token", "C0REPORT", "1", &stdout); err != nil {
+		t.Fatalf("readSlackThread: %v", err)
+	}
+	if calls != slackMaxReplyPages {
+		t.Errorf("conversations.replies calls = %d, want %d (the page cap)", calls, slackMaxReplyPages)
+	}
+	var result slackThreadResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode readSlackThread's output: %v", err)
+	}
+	if !result.Truncated {
+		t.Errorf("Truncated = false, want true: the thread had more pages than the cap")
+	}
+	if len(result.Messages) != slackMaxReplyPages {
+		t.Errorf("len(Messages) = %d, want %d", len(result.Messages), slackMaxReplyPages)
+	}
+}
+
+// A cursor conversations.replies repeats is refused outright rather than paged again, which would
+// otherwise loop forever.
+func TestSlackReadRefusesARepeatedCursor(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/conversations.replies" {
+			http.NotFound(w, r)
+			return
+		}
+		cursor := r.URL.Query().Get("cursor")
+		switch cursor {
+		case "":
+			fmt.Fprint(w, `{"ok":true,"messages":[{"ts":"1","text":"one"}],"has_more":true,"response_metadata":{"next_cursor":"page2"}}`)
+		default:
+			// Every later page, including the first repeat, hands back the same cursor Slack
+			// should never repeat.
+			fmt.Fprint(w, `{"ok":true,"messages":[{"ts":"2","text":"two"}],"has_more":true,"response_metadata":{"next_cursor":"page2"}}`)
+		}
+	}))
+	defer api.Close()
+
+	previous := slackAPIBaseURL
+	slackAPIBaseURL = api.URL + "/api"
+	t.Cleanup(func() { slackAPIBaseURL = previous })
+
+	var stdout bytes.Buffer
+	err := readSlackThread(context.Background(), "test-token", "C0REPORT", "1", &stdout)
+	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
+		t.Fatalf("readSlackThread error = %v, want a repeated-cursor refusal", err)
+	}
+}
+
 // legion slack post and reply refuse any channel outside LEGION_SLACK_REPORTING_CHANNELS: a report
 // thread's text might ask a session to post somewhere else, but the session cannot comply.
 func TestSlackPostAndReplyRefuseAChannelOutsideTheConfiguredReportingChannels(t *testing.T) {
