@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // isolatedRemovableSupervisor is isolatedOutboxPool plus a supervisor wired to a real store-backed
@@ -56,6 +57,11 @@ func isolatedRemovableSupervisor(t *testing.T) (*pgxpool.Pool, *supervisor) {
 		t.Fatalf("migrate isolated store: %v", err)
 	}
 	t.Cleanup(st.Close)
+	// Every claim claimOn plants is of tree LEGION-1, which admission opens before any claim of it
+	// exists (store.AdmitClaim refuses a claim of a tree whose lifecycle is absent).
+	if _, err := st.OpenTreeLifecycle(context.Background(), "legion", "LEGION-1", treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatalf("admit tree LEGION-1: %v", err)
+	}
 	pool, err := pgxpool.New(context.Background(), databaseURL.String())
 	if err != nil {
 		t.Fatalf("open isolated pool: %v", err)

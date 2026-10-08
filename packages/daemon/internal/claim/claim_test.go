@@ -234,3 +234,23 @@ func TestTheControllerRoleIsTheControllersOwnAndNoWorkflowRole(t *testing.T) {
 		t.Error("IsController(architect, no issue, no tree) = true, want false")
 	}
 }
+
+// A token names its role: a workflow role's token the role it ends in, and the controller's token
+// the controller, which Cut does not split. Anything else names no role, a token that only looks
+// like the controller's included.
+func TestATokenNamesItsRoleTheControllersIncluded(t *testing.T) {
+	for token, want := range map[Token]Role{
+		"legion-legion-legion-208-tester":    RoleTester,
+		"legion-legion-legion-208-architect": RoleArchitect,
+		ControllerToken("legion"):            RoleController,
+	} {
+		if role, ok := token.Role(); !ok || role != want {
+			t.Errorf("%s.Role() = %q, %t; want %q", token, role, ok, want)
+		}
+	}
+	for _, token := range []Token{"legion-legion-legion-208", "legion--controller", "legion-a-b-controller", "other-legion-controller", "legion-Legion-controller"} {
+		if role, ok := token.Role(); ok {
+			t.Errorf("%s.Role() = %q, want none", token, role)
+		}
+	}
+}

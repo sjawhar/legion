@@ -42,6 +42,66 @@ func TestThePinsHoldTheSelfPostingEndpointsOff(t *testing.T) {
 	}
 }
 
+// A bash call Oh My Pi leaves running past its own threshold, under `--mode rpc` (every Legion
+// role), moves to a background job a takeover's abort no longer reaches once it has moved — only
+// the turn asking for it to finish does. supervise.Machine.Quiesce's own promise, that the
+// outgoing worker "never writes the shared workspace beside the role the start hands it to",
+// depends on every long-running command staying inside the turn the abort ends (LEGION-462 found
+// this live, legion-smoke LEGSMOKE-463, at commit 80d0c82b).
+func TestThePinsHoldBashAutoBackgroundOff(t *testing.T) {
+	var pins map[string]any
+	if err := yaml.Unmarshal(overlay, &pins); err != nil {
+		t.Fatal(err)
+	}
+	var got any = pins
+	for _, key := range strings.Split("bash.autoBackground.enabled", ".") {
+		section, _ := got.(map[string]any)
+		got = section[key]
+	}
+	if got != false {
+		t.Errorf("the overlay holds bash.autoBackground.enabled = %#v, want false", got)
+	}
+}
+
+// With async on, the thermonuclear review pair a reviewer dispatches without `blocking: true` runs
+// as background jobs a takeover's RPC abort does not own, and its async result starts a new
+// reviewer turn beside whatever claims the issue next — a CI-red takeover mid-review among them,
+// exactly the turn boundary Quiesce exists to hold (LEGION-462).
+func TestThePinsHoldAsyncOff(t *testing.T) {
+	var pins map[string]any
+	if err := yaml.Unmarshal(overlay, &pins); err != nil {
+		t.Fatal(err)
+	}
+	var got any = pins
+	for _, key := range strings.Split("async.enabled", ".") {
+		section, _ := got.(map[string]any)
+		got = section[key]
+	}
+	if got != false {
+		t.Errorf("the overlay holds async.enabled = %#v, want false", got)
+	}
+}
+
+// TurnScopeOverlay is the two keys every Legion role's Oh My Pi needs regardless of runtime, for a
+// runtime with no overlay mechanism of its own to write directly (runtime/tmux): both off there
+// too, without the rest of the pod baseline.
+func TestTheTurnScopeOverlayHoldsBothOff(t *testing.T) {
+	var pins map[string]any
+	if err := yaml.Unmarshal(TurnScopeOverlay, &pins); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"bash.autoBackground.enabled", "async.enabled"} {
+		var got any = pins
+		for _, key := range strings.Split(path, ".") {
+			section, _ := got.(map[string]any)
+			got = section[key]
+		}
+		if got != false {
+			t.Errorf("the turn-scope overlay holds %s = %#v, want false", path, got)
+		}
+	}
+}
+
 func envMap(environ []string) map[string]string {
 	env := map[string]string{}
 	for _, pair := range environ {
