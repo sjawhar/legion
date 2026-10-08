@@ -29,31 +29,12 @@ func (s *Service) RunSettlementResumption(ctx context.Context) {
 		if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: resume owed document settlements", "error", err)
 		}
-		s.sweepOrphanedVersions()
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(SettlementResumeInterval):
 		}
 	}
-}
-
-// sweepOrphanedVersions drops an orphanedVersions entry once it is older than the settle delay:
-// a forced eviction (evictRoom) stashed it expecting the document to reload and adopt it
-// (lookUpState), but a document that never reloads - its task's own commit is the only thing
-// that would have released it, and that commit either already ran (taking the durable release
-// with it) or never will - would otherwise hold it forever (Simplify's finding, LEGION-513). The
-// settle delay, not some fixed bound, is the right age: a version write's own settlement is what
-// stashes and later reclaims one in the normal (non-evicted) case, so an orphan older than that
-// delay has had every ordinary chance to be claimed already.
-func (s *Service) sweepOrphanedVersions() {
-	now := s.now()
-	s.orphanedVersions.Range(func(key, value any) bool {
-		if now.Sub(value.(orphanedVersion).stashedAt) >= s.settle {
-			s.orphanedVersions.Delete(key)
-		}
-		return true
-	})
 }
 
 // resumeOwedSettlements arms the settlement of each document whose pending-settlement row is at
@@ -87,15 +68,6 @@ func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) 
 		return fmt.Errorf("list owed document settlements: %w", err)
 	}
 	for _, room := range rooms {
-		// Resumption's own age check (marked_at at least age old) is the authoritative signal
-		// that this document's prior owner is gone - a settlement only the process that owned it
-		// would ever refresh left this row stale, so no live generation's lease should defer to
-		// here: resuming means a load is about to run for this document regardless, and that
-		// load's own adoption must not wait out generationLeaseTTL behind a lease nothing will
-		// ever refresh again (LEGION-513).
-		if err := deleteGenerationLeasesForRoom(ctx, s.store.Pool, room); err != nil {
-			slog.Error("dispatch: delete document generation leases before resuming its settlement", "room", room, "error", err)
-		}
 		s.scheduleSettle(room)
 	}
 	if len(rooms) > 0 {
