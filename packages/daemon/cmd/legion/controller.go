@@ -231,13 +231,12 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // controllerEnvironment is what the controller's Oh My Pi is told on top of the operator's own
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
-// directory's gh shim and legion launcher first in the agent's bash tool as on every pane, and
+// directory's legion launcher first in the agent's bash tool as on every pane, and
 // LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
 // once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
 // pointers only. Later pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
-	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
-	separator := string(filepath.ListSeparator)
+	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
 		{"LEGION_ROLE", "controller"},
@@ -246,10 +245,10 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"LEGION_STATE_DIR", stateDir},
 		{"ENVOY_NATS_URL", strings.Join(cfg.NatsURLs, ",")},
 		{"ENVOY_URL", cfg.EnvoyURL},
-		// Every inherited worker-bin is dropped (the shipped pathWithoutWorkerBin), so a start
-		// from inside a Legion pane never puts that pane's shim behind this one.
-		{"PATH", workerBin + separator + bin + separator + workerbin.FreePath(os.Getenv("PATH"))},
-		{"PI_SHELL_PREFIX", shellprefix.For(workerBin, bin)},
+		// The launcher directory leads exactly once, so a start from inside a Legion pane never
+		// puts that pane's legion ahead of this one.
+		{"PATH", workerbin.Path(os.Getenv("PATH"), stateDir)},
+		{"PI_SHELL_PREFIX", shellprefix.For(bin)},
 		{"GH_CONFIG_DIR", filepath.Join(stateDir, "gh")},
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},

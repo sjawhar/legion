@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
 // daemonTools are the binaries Legion itself runs: `legion gh`'s gh, and the git and jj of
@@ -25,14 +24,10 @@ var daemonTools = []string{"gh", "git", "jj"}
 func toolEnv(tool string) string { return "LEGION_" + strings.ToUpper(tool) + "_PATH" }
 
 // resolveTools resolves each daemon tool by its LEGION_<TOOL>_PATH override, which must be an
-// absolute executable, or on PATH less every worker-bin entry (workerbin.FreePath): a daemon
-// started from inside a Legion pane inherits that pane's gh shim first on PATH, and a pane whose
-// `legion gh` ran that shim as its gh would reach `legion gh` again. It names every missing tool
-// with its override in one error, and refuses a jj older than the oldest the daemon runs
-// (checkJJVersion).
+// absolute executable, or on PATH. It names every missing tool with its override in one error, and
+// refuses a jj older than the oldest the daemon runs (checkJJVersion).
 func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
 	path, _ := lookupEnv("PATH")
-	path = workerbin.FreePath(path)
 	tools := map[string]string{}
 	var missing []string
 	for _, tool := range daemonTools {

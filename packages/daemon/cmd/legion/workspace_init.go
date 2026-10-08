@@ -22,7 +22,6 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -247,13 +246,8 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 			}
 		}
 	}
-	if err := workerbin.InstallGh(root); err != nil {
-		return err
-	}
-	for _, dir := range []string{"sessions", "gh"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", filepath.Join(root, dir), err)
-		}
+	if err := os.MkdirAll(filepath.Join(root, "sessions"), 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Join(root, "sessions"), err)
 	}
 
 	release, err := lockRepository(ctx, cloneDir+".lock", repository, lockWait, stdout)

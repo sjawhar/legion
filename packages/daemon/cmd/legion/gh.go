@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
 var githubIssueWriteVerbs = map[string]bool{
@@ -251,7 +249,6 @@ func childEnvironment(token string) []string {
 	delete(values, "LEGION_GRANT")
 	delete(values, "LEGION_GRANT_FILE")
 	values["GH_TOKEN"] = token
-	values["PATH"] = workerbin.FreePath(values["PATH"])
 	if stateDir := values["LEGION_STATE_DIR"]; stateDir != "" {
 		values["GH_CONFIG_DIR"] = filepath.Join(stateDir, "gh")
 	}

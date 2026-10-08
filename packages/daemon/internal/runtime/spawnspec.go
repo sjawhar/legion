@@ -22,11 +22,12 @@ func IsEnvName(name string) bool { return envName.MatchString(name) }
 // SecretsDir is `<state_dir>/secrets`, where secret files live under a state directory. Under a
 // daemon's state directory the daemon prunes it (internal/daemon/secrets.go): a claim's files go
 // when the claim is written with no process, and at boot every regular file that no claim with a
-// process owns goes, except the Dispatch token file; subdirectories are never pruned. So a claim's
-// file is named for its claim token (`<claim>` or `<claim>-<name>`, as GrantFile is), and a file
-// the daemon holds across claims is a subdirectory (config.ProviderEnvDir) or is kept by name in
-// boot's prune. In a Sandbox pod it is on the worker container's memory-backed state volume, which
-// goes with the pod.
+// process owns goes, except the Dispatch token file; subdirectories are never pruned, except a
+// claim's `-gh` directory (GHConfigDir), which goes with the claim's files. So a claim's file is
+// named for its claim token (`<claim>` or `<claim>-<name>`, as GrantFile is), and a file the
+// daemon holds across claims is a subdirectory (config.ProviderEnvDir) or is kept by name in
+// boot's prune. In a Sandbox pod it is on the worker container's memory-backed state volume,
+// which goes with the pod.
 func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secrets") }
 
 // SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.

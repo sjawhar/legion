@@ -545,7 +545,6 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		NatsURLs:          cfg.NatsURLs,
 		DispatchURL:       cfg.DispatchURL,
 		DispatchTokenFile: dispatchTokenFile,
-		Tools:             paneTools(tools),
 		OmpInvocation:     invocation,
 		OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
 		StopGrace:         cfg.WorkerStopTimeout,
