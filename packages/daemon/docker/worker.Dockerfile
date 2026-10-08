@@ -334,12 +334,14 @@ FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
+# socat: carries a connection over `kubectl exec` to a port inside the pod (a dev server an agent
+# runs), the only way in from outside: under gVisor `kubectl port-forward` reaches no listener.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git socat \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
