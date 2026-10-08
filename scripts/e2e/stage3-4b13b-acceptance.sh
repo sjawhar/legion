@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Live acceptance for LEGION-208 task 4b.13b (PR sjawhar/legion#1333) and the owed live proof of
-# #1313's pane rule. It stands up the Stage 3 rig (scratch Postgres, NATS, Envoy listener, native
-# Dispatch, the subscribe-only GitHub bridge, the branch plugin in an isolated OMP profile, the Go
-# daemon built from ACCEPT_ROOT) exactly as scripts/e2e/stage3-devbox-workflow.sh does, sourcing
-# that checkout's lib/rig.sh and lib/workflow.sh, and drives real agents through:
+# Live acceptance for LEGION-208 task 4b.13b (PR sjawhar/legion#1333). It stands up the Stage 3 rig
+# (scratch Postgres, NATS, Envoy listener, native Dispatch, the subscribe-only GitHub bridge, the
+# branch plugin in an isolated OMP profile, the Go daemon built from ACCEPT_ROOT) exactly as
+# scripts/e2e/stage3-devbox-workflow.sh does, sourcing that checkout's lib/rig.sh and
+# lib/workflow.sh, and drives real agents through:
 #   - prompts.New rewriting a stale Go prompt part at boot and leaving identical ones untouched;
 #   - the refused root stop naming `legion claims close` only for a tree no workflow issue backs;
-#   - the pane rule (#1313) in a root-architect pane, a phase-worker pane (with the phase still open
-#     after each refusal and the phase-stall follow-up clearing after the tool's handoff_complete),
-#     a `task` subagent, and an operator-spawned sub-architect, each against `legion handoff
-#     complete` plain, through `bash -lc`, and through eval, with `legion handoff read` from bash as
-#     the narrowed-rule control;
+#   - the phase-stall follow-up: a planner whose turn ends with its phase open gets the one
+#     follow-up, and the tool's handoff_complete closes the stall, with no follow-up after it;
 #   - park_child / rerun_child with their refusals, and the Dispatch writes' actor;
 #   - phase-finished carrying the worker's summary and verdict;
 #   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
@@ -146,7 +143,6 @@ cleanup() {
   stop_pid "$listener_pid"
   stop_pid "$bridge_pid"
   stop_pid "$nats_pid"
-  stop_pid "${subagent_watch_pid:-}"
   stop_pid "${instructor_pid:-}"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
@@ -433,10 +429,7 @@ role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
 role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
 token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
 
-# The refusal every rule-bound pane gives `legion handoff complete` (packages/pi-legion/extensions/
-# legion.ts LEGION_HANDOFF_COMPLETE.refusal), and the follow-up the phase stall sends
-# (packages/pi-legion/src/phase-stall.ts FOLLOW_UP).
-refusal_needle="a phase is completed with the \`legion\` tool's \`handoff_complete\`, never a shell command"
+# The follow-up the phase stall sends (packages/pi-legion/src/phase-stall.ts FOLLOW_UP).
 followup_needle="Your turn ended with your Legion phase still open"
 
 # tool_outcomes FILE: every tool result in an OMP session file, joined to the call that produced it.
@@ -448,41 +441,6 @@ tool_outcomes() {
         | {id: .message.toolCallId, tool: .message.toolName, isError: .message.isError,
            text: ([.message.content[]? | select(.type == "text") | .text] | join("\n")),
            call: $calls[.message.toolCallId]}]' "$1"
-}
-refusal_count() { tool_outcomes "$1" | jq --arg n "$refusal_needle" '[.[] | select(.text | contains($n))] | length'; }
-refusals_at_least() { local f; f=$($2) || return 1; [ "$(refusal_count "$f")" -ge "$3" ]; }
-# read_result FILE: the tool result of the bash call that ran `legion handoff read`.
-read_results() {
-  tool_outcomes "$1" | jq -c '[.[] | select(.tool == "bash" and ((.call.arguments.command // "") | test("legion handoff read")))]'
-}
-read_ran() { local f; f=$($1) || return 1; [ "$(read_results "$f" | jq length)" -ge 1 ]; }
-
-# probe_refusals LABEL FILEFN ISSUE PHASE: waits for each of the three refusals in the session FILEFN
-# prints, snapshotting the daemon's state after each, and requires ISSUE still in PHASE every time;
-# then requires the `legion handoff read` control to have run unrefused.
-probe_refusals() {
-  local label=$1 filefn=$2 issue=$3 want=$4 n f
-  for n in 1 2 3; do
-    until_true 900 "$label pane refusal $n" refusals_at_least "$label" "$filefn" "$n"
-    daemon_state >"$evidence/$label-after-refusal-$n.json"
-    if ! jq -e --arg i "$issue" --arg p "$want" '.issues[$i].phase == $p' "$evidence/$label-after-refusal-$n.json" >/dev/null; then
-      soft "$label: after refusal $n, $issue is in $(jq -r --arg i "$issue" '.issues[$i].phase' "$evidence/$label-after-refusal-$n.json"), want $want"
-    fi
-  done
-  f=$($filefn)
-  tool_outcomes "$f" | jq --arg n "$refusal_needle" '[.[] | select(.text | contains($n)) | {tool, call: .call.arguments, refusal: .text}]' >"$evidence/$label-refusals.json"
-  note "$label refusals ($(jq length "$evidence/$label-refusals.json")), each with $issue still $want:"
-  jq -r '.[] | "     [\(.tool)] \((.call.command // .call.code // .call | tostring) | .[0:140]) → \(.refusal | .[0:160])"' "$evidence/$label-refusals.json"
-  local shapes
-  shapes=$(jq -r '[.[] | if .tool == "eval" then "eval" elif ((.call.command // "") | test("bash -l?c|sh -c")) then "bash-c" else "plain" end] | unique | join(",")' "$evidence/$label-refusals.json")
-  [ "$shapes" = "bash-c,eval,plain" ] || soft "$label: refused shapes are '$shapes', want plain, bash -c, and eval"
-  until_true 600 "$label: the legion handoff read control to run" read_ran "$filefn"
-  read_results "$f" >"$evidence/$label-handoff-read.json"
-  if jq -e --arg n "$refusal_needle" 'all(.[]; (.text | contains($n)) | not)' "$evidence/$label-handoff-read.json" >/dev/null; then
-    note "$label control: \`legion handoff read\` from bash ran unrefused: $(jq -r '.[0].text | .[0:160] | gsub("\n"; " ")' "$evidence/$label-handoff-read.json")"
-  else
-    soft "$label: \`legion handoff read\` was refused by the pane rule"
-  fi
 }
 
 # ---- driving several issues at once ------------------------------------------------------------------
@@ -785,7 +743,7 @@ claim_is "$holder" '.state == "ready" or .state == "idle" or .state == "working"
 pass
 
 begin admission
-root1=$(new_issue "Primary READY and pane-rule profile")
+root1=$(new_issue "Primary READY and phase-stall profile")
 root2=$(new_issue "Early merge sentinel")
 root3=$(new_issue "Gated READY compass")
 set_status "$root1" todo
@@ -822,68 +780,36 @@ root1_architect_file() { claim_session_file "$root1" architect; }
 root1_planner_file() { claim_session_file "$root1" planner; }
 # assignment_delivered ISSUE ROLE: the daemon's assignment (a user message) reached the worker and
 # armed its phase stall. Each planner is instructed as soon as its assignment is in its session, so
-# no instruction races the assignment (a planner can take its assignment after the probe) and no
-# planner is left to act on the assignment alone (waiting for an idle turn instead let planners
-# complete planning unprompted before any instruction reached them).
+# no instruction races the assignment (an instruction sent earlier could reach a planner before
+# its assignment) and no planner is left to act on the assignment alone (waiting for an idle turn
+# instead let planners complete planning unprompted before any instruction reached them).
 assignment_delivered() {
   local f
   f=$(claim_session_file "$1" "$2") || return 1
   jq -e -s 'any(.[]; .type == "message" and .message.role == "user")' "$f" >/dev/null &&
     grep -qF '"customType":"legion-phase-stall"' "$f"
 }
-# The task subagent's refusal is snapshotted by a watcher the moment it is written, so the phase
-# it records is the phase at the refusal, not at whenever this script next looks.
-subagent_refused() {
-  local f dir
-  f=$(claim_session_file "$root3" planner) || return 1
-  dir=${f%.jsonl}
-  [ -d "$dir" ] || return 1
-  grep -rlF --include='*.jsonl' -- "$refusal_needle" "$dir" >/dev/null 2>&1
-}
-subagent_file() { local f; f=$(claim_session_file "$root3" planner) || return 1; grep -rlF --include='*.jsonl' -- "$refusal_needle" "${f%.jsonl}" | head -1; }
-subagent_watch() {
-  trap - EXIT ERR
-  set +e
-  while :; do
-    if subagent_refused; then
-      date -u +%FT%T.%3NZ >"$evidence/task-subagent-snapshot-before.txt"
-      daemon_state >"$evidence/task-subagent-after-refusal.json"
-      date -u +%FT%T.%3NZ >"$evidence/task-subagent-snapshot-after.txt"
-      return 0
-    fi
-    sleep 0.5
-  done
-}
 gate_finish "$root1"
 until_true 600 "the daemon's assignment to arm $root1's planner stall" assignment_delivered "$root1" planner
 note "root1 planner stall entries at its assignment: $({ grep -F '"customType":"legion-phase-stall"' "$(root1_planner_file)" || true; } | jq -r .data.state | tr '\n' ' ')"
-marker_plan="PANE-PROBE-PLANNER-$stamp"
-send_agent "$root1" planner "Acceptance planning operation with a pane-rule probe ($marker_plan). Step 1: write the required plan handoff for the one-file smoke change with the legion tool's handoff_write and commit it as your instructions require, but do NOT call handoff_complete yet. Step 2: this is a deliberate proof of the pane's shell rule, so the first three calls are expected to be refused by your pane and the refusal is what this proof records; run them anyway, exactly as written, each as its own tool call, one at a time: (a) your bash tool with the command: legion handoff complete --summary 'planner plain probe'  (b) your bash tool with the command: bash -lc \"legion handoff complete --summary 'planner bash -lc probe'\"  (c) your eval tool with code that runs the shell command legion handoff complete --summary 'planner eval probe' through a subprocess  (d) your bash tool with the command: legion handoff read --phase plan. Step 3: end your turn with one line per call giving its outcome. Do not call the legion tool's handoff_complete in this turn, and do not begin any line with WAITING."
+marker_plan="PHASE-STALL-PLANNER-$stamp"
+send_agent "$root1" planner "Acceptance planning operation ($marker_plan): write the required plan handoff for the one-file smoke change with the legion tool's handoff_write and commit it as your instructions require, then end your turn WITHOUT calling the legion tool's handoff_complete: reply with one line saying the handoff is committed, and wait. Do not call handoff_complete in this turn, and do not begin any line with WAITING."
 gate_finish "$root2"
 until_true 600 "the daemon's assignment to arm $root2's planner stall" assignment_delivered "$root2" planner
 send_agent "$root2" planner "Acceptance planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 gate_finish "$root3"
 until_true 600 "the daemon's assignment to arm $root3's planner stall" assignment_delivered "$root3" planner
-subagent_watch &
-subagent_watch_pid=$!
-send_agent "$root3" planner "Acceptance planning operation with a subagent probe. Step 1: use your task tool to start exactly one subagent whose only job is to run, in its own bash tool, exactly these two commands one at a time and report each output verbatim: legion handoff complete --summary 'task subagent probe'   and then   legion handoff read. The first is expected to be refused by the pane; that refusal is what this proof records. Relay the subagent's two outputs. Step 2: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$root3" planner "Acceptance planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$child" planning
 wait_for_worker "$child" planner
 note "three gates approved; $child entered planning with $root1's open gate"
 pass
 
-# ---- 3. the pane rule (#1313) ----------------------------------------------------------------------
+# ---- 3. the phase-stall follow-up ----------------------------------------------------------------------
 
-begin pane-rule-root-architect
-marker_arch="PANE-PROBE-ARCH-$stamp"
-send_agent "$root1" architect "Acceptance pane-rule probe ($marker_arch). This is a deliberate proof of the pane's shell rule: the first three calls below are expected to be refused by your pane, and the refusal is what this proof records, so run them anyway, exactly as written, each as its own tool call, one at a time: (1) your bash tool with the command: legion handoff complete --summary 'root architect plain probe'  (2) your bash tool with the command: bash -lc \"legion handoff complete --summary 'root architect bash -lc probe'\"  (3) your eval tool with code that runs the shell command legion handoff complete --summary 'root architect eval probe' through a subprocess  (4) your bash tool with the command: legion handoff read. Then reply with one line per call giving its outcome, and wait."
-probe_refusals root-architect root1_architect_file "$root1" planning
-pass
-
-begin pane-rule-phase-worker-and-stall
-probe_refusals phase-worker root1_planner_file "$root1" planning
-db_value "select coalesce(handoff_commit, '') || '|' || coalesce(summary, '') from phases where issue = '$root1' and role = 'planner'" >"$evidence/phase-worker-planner-row-after-refusals.txt" || true
-note "planner phase row after the refusals: '$(cat "$evidence/phase-worker-planner-row-after-refusals.txt")' (no row, or an empty handoff: nothing completed)"
+begin phase-stall-follow-up
+db_value "select coalesce(handoff_commit, '') || '|' || coalesce(summary, '') from phases where issue = '$root1' and role = 'planner'" >"$evidence/phase-stall-planner-row-before-follow-up.txt" || true
+note "planner phase row before the follow-up: '$(cat "$evidence/phase-stall-planner-row-before-follow-up.txt")' (no row, or an empty handoff: nothing completed)"
 # The planner's turn ended with its phase open, so the phase stall's follow-up fires; the rig's
 # instructions let it answer WAITING. Once the follow-up is in its session, it is given 60 s to
 # complete on its own, then told to.
@@ -895,69 +821,41 @@ if ! until_true_quiet 60 issue_phase "$root1" implementing; then
   until_true 900 "$root1's planner to complete after being told to" phase_at_least "$root1" implementing
 fi
 f=$(root1_planner_file)
-jq -s -c --arg needle "$refusal_needle" --arg followup "$followup_needle" --arg marker "$marker_plan" '
+jq -s -c --arg followup "$followup_needle" --arg marker "$marker_plan" '
   to_entries | map(.key as $i | .value as $e |
     if ($e.type == "custom" and $e.customType == "legion-phase-stall") then {i: $i, kind: "stall", state: $e.data.state}
     elif ($e.type == "message" and $e.message.role == "toolResult") then
-      ([$e.message.content[]? | select(.type == "text") | .text] | join("\n")) as $t
-      | if ($t | contains($needle)) then {i: $i, kind: "refusal", tool: $e.message.toolName}
-        elif $e.message.toolName == "legion" then {i: $i, kind: "legion-result", isError: $e.message.isError, text: ($t | .[0:240])}
-        else empty end
+      if $e.message.toolName == "legion" then
+        {i: $i, kind: "legion-result", isError: $e.message.isError, text: (([$e.message.content[]? | select(.type == "text") | .text] | join("\n")) | .[0:240])}
+      else empty end
     elif ($e.type == "message" and $e.message.role == "assistant") then
       [$e.message.content[]? | select(.type == "toolCall" and .name == "legion") | .arguments.op] as $ops
       | if ($ops | length) > 0 then {i: $i, kind: "legion-call", ops: $ops} else empty end
     elif (($e | tostring) | contains($followup)) then {i: $i, kind: "followup", type: $e.type, customType: ($e.customType // $e.message.role // null)}
     elif (($e | tostring) | contains($marker)) then {i: $i, kind: "instruction", type: $e.type}
-    else empty end)' "$f" >"$evidence/phase-worker-stall-timeline.json"
-# The predicate: Oh My Pi appends the re-arming
-# `open` for an arriving Envoy message before that message's own entry, so the check is on the last
-# stall state before the first refusal, not on an `open` after the instruction.
+    else empty end)' "$f" >"$evidence/phase-stall-timeline.json"
+# The predicate: Oh My Pi appends the re-arming `open` for an arriving Envoy message before that
+# message's own entry, so the stall state at the instruction is the last one before the entry
+# carrying the marker.
 jq '
-  (map(select(.kind == "refusal"))) as $refs
-  | ($refs | first | .i) as $firstref | ($refs | last | .i) as $lastref
-  | ([.[] | select(.kind == "stall" and .i < $firstref)] | last | .state) as $stall_at
-  | ([.[] | select(.kind == "followup" and .i > $lastref)] | first | .i) as $follow
+  ([.[] | select(.kind == "instruction")] | first | .i) as $instr
+  | ([.[] | select(.kind == "stall" and .i < $instr)] | last | .state) as $stall_at
+  | ([.[] | select(.kind == "followup" and .i > $instr)] | first | .i) as $follow
   | ([.[] | select(.kind == "legion-call" and (.ops | index("handoff_complete")) and .i > $follow)] | first | .i) as $call
   | ([.[] | select(.kind == "legion-result" and .isError == false and .i > $call)] | first | .i) as $done
-  | {stall_at_refusals: $stall_at, refusals: [$refs[].i], follow: $follow, call: $call, done: $done,
+  | {stall_at_instruction: $stall_at, instruction: $instr, follow: $follow, call: $call, done: $done,
      closed_after_call: any(.[]; .kind == "stall" and .state == "closed" and .i > $call),
      followups_after_done: (if $done == null then null else [.[] | select(.kind == "followup" and .i > $done)] | length end)}' \
-  "$evidence/phase-worker-stall-timeline.json" >"$evidence/phase-worker-stall-verdict.json"
-if jq -e '.stall_at_refusals == "open" and (.refusals | length) >= 3 and .follow != null and .call != null and .done != null
-    and .closed_after_call and .followups_after_done == 0' "$evidence/phase-worker-stall-verdict.json" >/dev/null; then
-  note "stall: open at the refusals → 3 refusals → the follow-up → the tool's handoff_complete → closed; no follow-up after it: $(jq -c . "$evidence/phase-worker-stall-verdict.json")"
+  "$evidence/phase-stall-timeline.json" >"$evidence/phase-stall-verdict.json"
+if jq -e '.stall_at_instruction == "open" and .instruction != null and .follow != null and .call != null and .done != null
+    and .closed_after_call and .followups_after_done == 0' "$evidence/phase-stall-verdict.json" >/dev/null; then
+  note "stall: open at the instruction → the turn ends with the phase open → the follow-up → the tool's handoff_complete → closed; no follow-up after it: $(jq -c . "$evidence/phase-stall-verdict.json")"
 else
-  soft "the planner's stall timeline fails the corrected predicate: $(jq -c . "$evidence/phase-worker-stall-verdict.json")"
+  soft "the planner's stall timeline fails the follow-up predicate: $(jq -c . "$evidence/phase-stall-verdict.json")"
 fi
-state_file phase-worker-after-tool-complete
-pass
-
-begin pane-rule-task-subagent
-until_true 900 "the snapshot at $root3's task subagent refusal" test -s "$evidence/task-subagent-snapshot-after.txt"
-subagent_phase=$(jq -r --arg i "$root3" '.issues[$i].phase' "$evidence/task-subagent-after-refusal.json")
-[ "$subagent_phase" = planning ] || soft "$root3 was $subagent_phase in the snapshot at its subagent's refusal, want planning"
-until_true 300 "$root3's task subagent to run legion handoff read" read_ran subagent_file
-subfile=$(subagent_file)
-tool_outcomes "$subfile" >"$evidence/task-subagent-outcomes.json"
-cp "$subfile" "$evidence/task-subagent-session.jsonl"
-note "subagent session $subfile: $(jq -r --arg n "$refusal_needle" '[.[] | select(.text | contains($n))][0] | "[\(.tool)] \(.call.arguments.command // "") → \(.text | .[0:140])"' "$evidence/task-subagent-outcomes.json")"
-if jq -e --arg n "$refusal_needle" 'any(.[]; .tool == "bash" and ((.call.arguments.command // "") | test("legion handoff read")) and ((.text | contains($n)) | not))' "$evidence/task-subagent-outcomes.json" >/dev/null; then
-  note "subagent control: legion handoff read ran unrefused in the same subagent"
-else
-  soft "the task subagent's legion handoff read did not run unrefused"
-fi
+state_file phase-stall-after-tool-complete
 wait_for_phase_at_least "$root2" implementing 900
 wait_for_phase_at_least "$root3" implementing 900
-# The refusal's own session timestamp, the snapshot window, and the planner's later completion.
-jq -n --arg refusal_at "$(jq -r -s --arg n "$refusal_needle" '[.[] | select(.type == "message" and .message.role == "toolResult"
-      and (([.message.content[]? | select(.type == "text") | .text] | join("\n")) | contains($n))) | .timestamp] | first' "$subfile")" \
-  --arg before "$(cat "$evidence/task-subagent-snapshot-before.txt")" --arg after "$(cat "$evidence/task-subagent-snapshot-after.txt")" \
-  --arg phase "$subagent_phase" \
-  --arg complete_at "$(jq -r -s '[.[] | select(.type == "message" and .message.role == "assistant" and any(.message.content[]?; .type == "toolCall"
-      and .name == "legion" and .arguments.op == "handoff_complete")) | .timestamp] | first // "none"' "$(claim_session_file "$root3" planner)")" \
-  '{refusal_written_at: $refusal_at, snapshot_started_at: $before, snapshot_finished_at: $after, phase_in_snapshot: $phase,
-    planner_handoff_complete_called_at: $complete_at}' >"$evidence/task-subagent-timing.json"
-note "task subagent timing: $(jq -c . "$evidence/task-subagent-timing.json")"
 pass
 
 # ---- 4. park_child / rerun_child ----------------------------------------------------------------------
@@ -1279,17 +1177,6 @@ jq -n --arg issue "$root3" --argjson refusals "$(jq length "$evidence/ready-cap-
 note "$root3's posted READY is $posted_len3 UTF-16 units; its merger met $(jq length "$evidence/ready-cap-merger-refusals-$root3.json") READY_PACKET_TOO_LONG refusal(s)"
 pass
 
-# ---- 9. the pane rule in an operator-spawned sub-architect ---------------------------------------------
-begin pane-rule-sub-architect
-child_phase=$(daemon_state | jq -r --arg c "$child" '.issues[$c].phase')
-sub=$(claims spawn --json --tree "$root1" --issue "$child" --role architect \
-  --task "Acceptance pane-rule probe. This is a deliberate proof of the pane's shell rule: the first three calls below are expected to be refused by your pane, and the refusal is what this proof records, so run them anyway, exactly as written, each as its own tool call, one at a time: (1) your bash tool with the command: legion handoff complete --summary 'sub-architect plain probe'  (2) your bash tool with the command: bash -lc \"legion handoff complete --summary 'sub-architect bash -lc probe'\"  (3) your eval tool with code that runs the shell command legion handoff complete --summary 'sub-architect eval probe' through a subprocess  (4) your bash tool with the command: legion handoff read. Then reply with one line per call giving its outcome, and wait. Do nothing else." | jq -er .token)
-sub_file() { token_session_file "$sub"; }
-probe_refusals sub-architect sub_file "$child" "$child_phase"
-claims stop --claim "$sub" >/dev/null || soft "the sub-architect probe claim $sub did not stop"
-note "sub-architect claim $sub (issue $child in tree $root1) probed and stopped; $child stayed $child_phase"
-pass
-
 begin production-untouched
 claims list --json >"$evidence/claims.json"
 timeout_hook=report_unchecked_launches
@@ -1313,7 +1200,6 @@ stop_dispatch() { stop_pid "$dispatch_pid"; dispatch_pid=; }
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=
 stop_pid "$bridge_pid"; bridge_pid=
-stop_pid "${subagent_watch_pid:-}"
 stop_pid "${instructor_pid:-}"; instructor_pid=
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
 stop_pid "$nats_pid"; nats_pid=

@@ -1401,7 +1401,7 @@ fixture_markers() {
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
 # before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
-# (stage3-4b13b-acceptance.sh, pane-rule-phase-worker-and-stall) for a pod's session: a worker
+# (stage3-4b13b-acceptance.sh, phase-stall-follow-up) for a pod's session: a worker
 # stopped while its handoff_complete call runs leaves that call with no result and no `closed`
 # (LEGION-283), and a worker resumed from such a session may report the phase again.
 completion_verdict() {
