@@ -1268,7 +1268,7 @@ func TestAStartWhoseAnswerIsDelayedPastItsDeadlineIsStoppedBeforeResumeReturns(t
 			}))
 			spec := workerSpec(t)
 			first := g.spawn(spec)
-			delayed := g.delayedStartLauncher(spec.Claim, 1)
+			delayed := g.scriptedStartLauncher(spec.Claim, 1, func(shimwire.LauncherStart) *shimwire.LauncherStartResult { return nil })
 			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
 			var prev *runtime.Locator
 			if previous {
@@ -1300,15 +1300,53 @@ func TestAStartWhoseAnswerIsDelayedPastItsDeadlineIsStoppedBeforeResumeReturns(t
 	}
 }
 
-// delayedStartLauncher is a launcher that accepts Start and starts its child but withholds the
-// Start result and state until the runtime's cleanup sends Stop. The Stop runs after Start on the
-// same TCP connection, so the child it reports ended is exactly the Start's generation.
-type delayedStartLauncher struct {
+// A launcher that answers a Start OK but names another generation than the Start's has said it
+// started something, and not what it was asked. That is no refusal, the one start error after which
+// nothing can be running, so relaunch reads the Start's outcome as unknown and stops the issued
+// generation, as for an unanswered Start: the launcher here did begin it.
+func TestAnOKStartAnswerNamingAnotherGenerationIsStoppedNotTakenAsARefusal(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	first := g.spawn(spec)
+	misanswering := g.scriptedStartLauncher(spec.Claim, 1, func(start shimwire.LauncherStart) *shimwire.LauncherStartResult {
+		return &shimwire.LauncherStartResult{ID: start.ID, OK: true, RunningGeneration: start.Generation - 1}
+	})
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
+	_, err := g.r.Resume(g.ctx, &first, spec)
+	if start := misanswering.start(t, 2); start.Generation != 2 {
+		t.Fatalf("Start = generation %d, want generation 2", start.Generation)
+	}
+	if stop := misanswering.stop(t, 2); stop.Generation != 2 {
+		t.Fatalf("Stop = generation %d, want the Start's generation 2", stop.Generation)
+	}
+	var refused startRefusal
+	if err == nil || errors.As(err, &refused) || !strings.Contains(err.Error(), "answered OK naming generation 1") {
+		t.Fatalf("Resume = %v, want the mismatched answer as an unknown outcome, not a refusal", err)
+	}
+	if recorded, found := g.r.recorded(spec.Claim); found {
+		t.Errorf("runtime still records %s after the failed Resume", recorded.Incarnation)
+	}
+	g.eventually("the launcher to report generation 2 ended", func() bool {
+		state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+		return connected && state.LastExit != nil && state.LastExit.Generation == 2
+	})
+	if state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID); !connected || state.Child != nil {
+		t.Fatalf("launcher after the mismatched answer = connected=%t state=%+v, want no child", connected, state)
+	}
+}
+
+// scriptedStartLauncher is a launcher that starts its child at each Start it receives and answers it
+// as answer says: nil withholds the Start result and state until the runtime's cleanup sends Stop.
+// The Stop runs after the Start on the same connection, so the child it reports ended is exactly
+// the Start's generation.
+type scriptedStartLauncher struct {
 	starts chan shimwire.LauncherStart
 	stops  chan shimwire.LauncherStop
 }
 
-func (g *rig) delayedStartLauncher(token claim.Token, running uint64) *delayedStartLauncher {
+func (g *rig) scriptedStartLauncher(
+	token claim.Token, running uint64, answer func(shimwire.LauncherStart) *shimwire.LauncherStartResult,
+) *scriptedStartLauncher {
 	g.t.Helper()
 	g.r.launchers.mu.Lock()
 	old := g.r.launchers.sessions[token]
@@ -1318,9 +1356,9 @@ func (g *rig) delayedStartLauncher(token claim.Token, running uint64) *delayedSt
 	}
 	server, client := net.Pipe()
 	pod := g.pod(SandboxName(token))
-	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "delayed-" + string(token), PodUID: string(pod.UID)})
+	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "scripted-" + string(token), PodUID: string(pod.UID)})
 	g.t.Cleanup(func() { _ = client.Close() })
-	delayed := &delayedStartLauncher{
+	scripted := &scriptedStartLauncher{
 		starts: make(chan shimwire.LauncherStart, 2),
 		stops:  make(chan shimwire.LauncherStop, 4),
 	}
@@ -1341,9 +1379,12 @@ func (g *rig) delayedStartLauncher(token claim.Token, running uint64) *delayedSt
 			switch command := frame.(type) {
 			case shimwire.LauncherStart:
 				running = command.Generation
-				delayed.starts <- command
+				scripted.starts <- command
+				if result := answer(command); result != nil {
+					_ = writer.WriteFrame(*result)
+				}
 			case shimwire.LauncherStop:
-				delayed.stops <- command
+				scripted.stops <- command
 				if running != command.Generation {
 					_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("generation %d is running, not %d", running, command.Generation)})
 					continue
@@ -1354,10 +1395,10 @@ func (g *rig) delayedStartLauncher(token claim.Token, running uint64) *delayedSt
 			}
 		}
 	}()
-	return delayed
+	return scripted
 }
 
-func (d *delayedStartLauncher) start(t *testing.T, generation uint64) shimwire.LauncherStart {
+func (d *scriptedStartLauncher) start(t *testing.T, generation uint64) shimwire.LauncherStart {
 	t.Helper()
 	for {
 		select {
@@ -1371,7 +1412,7 @@ func (d *delayedStartLauncher) start(t *testing.T, generation uint64) shimwire.L
 	}
 }
 
-func (d *delayedStartLauncher) stop(t *testing.T, generation uint64) shimwire.LauncherStop {
+func (d *scriptedStartLauncher) stop(t *testing.T, generation uint64) shimwire.LauncherStop {
 	t.Helper()
 	for {
 		select {
