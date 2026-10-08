@@ -37,9 +37,12 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // warmLeaseHeartbeat is how often a warm-up holding `.codegraph/legion-warm.lock` sets the lease's
 // mtime to now, and warmLeaseStale is how old that mtime may be before another process reads the
 // holder as dead and takes the lease over: six missed heartbeats, so a holder stalled through one
-// slow tick or a filesystem hiccup keeps its lease, and a dead one (a shim killed mid-build, a pod
-// that went away) costs the next warm-up at most a minute. The lease is the one cross-process
-// guard here; everything else is this process's. `warming` is a map in this process.
+// slow tick or a filesystem hiccup keeps its lease, while a dead one (a shim killed outright
+// mid-build, a pod that went away; a SIGTERMed shim's `codegraph` child dies with its process group
+// and the deferred release runs while the shim winds its Oh My Pi down) leaves a lease that a
+// warm-up within the minute still reads as live and skips, and the first one after that takes over.
+// The lease is the one cross-process guard here; everything else is this process's. `warming` is a
+// map in this process.
 // nextCodegraphStep lets a live CodeGraph lock veto a repair but not an `init`: an uninitialized
 // workspace has no `codegraph.lock` to read, so two processes that both find it uninitialized would
 // both run `init`. codegraphLockHeldByLiveProcess judges liveness by PID, which another
@@ -225,7 +228,10 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 		}
 		stale := path + ".stale-" + rand.Text()
 		if err := os.Rename(path, stale); err != nil {
-			return skipped("took over")
+			if errors.Is(err, os.ErrNotExist) {
+				return skipped("took over")
+			}
+			return failed(err)
 		}
 		_ = os.Remove(stale)
 	}

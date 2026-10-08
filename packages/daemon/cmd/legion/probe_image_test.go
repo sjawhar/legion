@@ -42,7 +42,7 @@ case "$*" in
   envoy=$(cd "$3" && pwd -P)
   root=$(cd "$5" && pwd -P)
   printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n' "$root" >&2
-  printf 'LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://%s/dist/envoy.js\nLEGION_ENVOY_PUBLISHERS=1\nLEGION_ENVOY_PUBLISHER=file://%s/dist/envoy.js\n' "$envoy" "$envoy" >&2
+  printf 'LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://%s/dist/envoy.js\nLEGION_ENVOY_PUBLISHER=file://%s/dist/envoy.js\n' "$envoy" "$envoy" >&2
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ]; then echo LEGION_PROMPT_AGENTS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ] && [ -z "${LEGION_SKIP_AGENT_MODELS:-}" ]; then echo LEGION_AGENT_MODELS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_SKILLS:-}" ]; then echo LEGION_PROMPT_SKILLS=resolved >&2; fi ;;

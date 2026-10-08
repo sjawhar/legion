@@ -17,14 +17,14 @@ export default async function probeLegionPluginLoaded(pi) {
   // entry's import.meta.url once (publishEnvoyPluginInterface, packages/pi-shared/src/interface.ts),
   // so a plugin both linked into the profile and named by --extension is two publishers — two load
   // paths, two import URLs — while a `task` subagent re-running the factory on the same module
-  // instance adds none. LEGION_ENVOY_PUBLISHERS is the count and each LEGION_ENVOY_PUBLISHER line
-  // one URL, so the gate can refuse a pod's double load naming every copy (bootgate.go judgeLoaded).
+  // instance adds none. Each LEGION_ENVOY_PUBLISHER line is one URL, so the gate can refuse a
+  // pod's double load naming every copy (bootgate.go judgeLoaded).
   const publishers = envoy?.publishers ?? [];
   const publisher = publishers[0];
   answer +=
     publisher === undefined
       ? "LEGION_ENVOY_INTERFACE=none\n"
-      : `LEGION_ENVOY_INTERFACE=${envoy.version}\nLEGION_ENVOY_LOADED_FROM=${publisher}\nLEGION_ENVOY_PUBLISHERS=${publishers.length}\n` +
+      : `LEGION_ENVOY_INTERFACE=${envoy.version}\nLEGION_ENVOY_LOADED_FROM=${publisher}\n` +
         publishers.map((from) => `LEGION_ENVOY_PUBLISHER=${from}\n`).join("");
   if (legacy !== undefined) answer += `LEGION_LEGACY_PLUGIN_LOADED_FROM=${legacy}\n`;
   process.stderr.write(answer);

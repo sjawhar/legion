@@ -33,9 +33,9 @@ func newImageOmp(t *testing.T, agents, load, session []string) imageOmp {
 dir=` + dir + `
 # The pod's load arm, three extensions, comes before the pane's, one, whose glob would swallow it.
 case "$*" in
-"models --extension "*" --extension "*" --extension "*" --json") kind=load ;;
+"models --extension "*" --extension "*" --extension "*" --json") kind=load lane=pod ;;
 "models --no-extensions --extension "*" --json") kind=agents ;;
-"models --extension "*" --json") kind=load ;;
+"models --extension "*" --json") kind=load lane=pane ;;
 "--mode rpc --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools") kind=session ;;
 *) echo "fake omp: unexpected argv: $*" >&2; exit 64 ;;
 esac
@@ -51,11 +51,11 @@ root="$HOME/.omp"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion" 2>/dev/null && pwd -P)
 envoy=$(cd "$root/plugins/node_modules/@sjawhar/pi-envoy" 2>/dev/null && pwd -P)
 # A pod's lane hands Oh My Pi the Envoy plugin root, then the Legion plugin root, as its explicit
-# extensions beside its discovery (eight words to a pane's four): each loads from its root.
-if [ "$kind" = load ] && [ "$#" -eq 8 ]; then envoy=$(cd "$3" && pwd -P); installed=$(cd "$5" && pwd -P); fi
+# extensions beside its discovery: each loads from its root.
+if [ "${lane:-}" = pod ]; then envoy=$(cd "$3" && pwd -P); installed=$(cd "$5" && pwd -P); fi
 legion="LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$installed/dist/legion.js?mtime=1\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n"
-# As the real probe answers: the first publisher, then how many published and each one's URL.
-with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHERS=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=1\n"
+# As the real probe answers: the first publisher, then one line per Envoy entry that published.
+with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=1\n"
 case "$kind:$step" in
 agents:available) echo LEGION_OMP_AGENTS=available >&2; exit 0 ;;
 agents:missing) echo LEGION_OMP_AGENTS=missing >&2; exit 0 ;;
@@ -71,7 +71,7 @@ load:legacy) printf "$legion${with_envoy}LEGION_LEGACY_PLUGIN_LOADED_FROM=file:/
 load:envoy-elsewhere) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$dir/elsewhere/pi-envoy/dist/envoy.js\n" >&2; exit 0 ;;
 # The profile links the Envoy plugin beside the explicit root: Oh My Pi imports the one file twice,
 # by two paths, and the Envoy entry publishes from each module instance.
-load:twice) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHERS=2\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=2\n" >&2; exit 0 ;;
+load:twice) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=2\n" >&2; exit 0 ;;
 session:refuses) echo "Invalid OMP_SESSION_STORAGE: legion-launch-probe (expected file or sql)" >&2; exit 1 ;;
 session:accepts) exit 0 ;;
 session:dies) echo "database is locked" >&2; exit 1 ;;

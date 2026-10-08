@@ -38,7 +38,7 @@ import (
 // only a plugin Oh My Pi actually loaded has done — and, beside it, the marker's value: the
 // `import.meta.url` of that `legion.ts`, where the plugin loaded from, and the Envoy plugin
 // interface version it speaks. It also prints the version the Envoy plugin publishes, where
-// from, how many Envoy entries published and each one's URL
+// from and each Envoy entry's URL
 // (`Symbol.for("legion.pi-shared.envoy-plugin-interface")`, packages/pi-shared/src/interface.ts),
 // or `none` when no Envoy entry published; and where the pre-split @sjawhar/pi-legion-envoy loaded
 // from (`Symbol.for("legion.pi-envoy.legion-loaded")`) when a pane still loads it. The symbol
@@ -65,14 +65,12 @@ const (
 	loadedFromMarker = "LEGION_PLUGIN_LOADED_FROM="
 	// speaksMarker begins the Envoy plugin interface version the loaded pi-legion speaks;
 	// envoyMarker the version the loaded pi-envoy publishes, or envoyNone when none loaded, and
-	// envoyFromMarker where it loaded from; publishersMarker how many Envoy entries published, and
-	// publisherMarker, one line per entry, each one's URL; legacyFromMarker where the pre-split
-	// package loaded from.
+	// envoyFromMarker where it loaded from; publisherMarker, one line per Envoy entry that
+	// published, each one's URL; legacyFromMarker where the pre-split package loaded from.
 	speaksMarker     = "LEGION_PLUGIN_ENVOY_INTERFACE="
 	envoyMarker      = "LEGION_ENVOY_INTERFACE="
 	envoyNone        = "none"
 	envoyFromMarker  = "LEGION_ENVOY_LOADED_FROM="
-	publishersMarker = "LEGION_ENVOY_PUBLISHERS="
 	publisherMarker  = "LEGION_ENVOY_PUBLISHER="
 	legacyFromMarker = "LEGION_LEGACY_PLUGIN_LOADED_FROM="
 	agentsMarker     = "LEGION_OMP_AGENTS=available"
@@ -248,16 +246,16 @@ type pluginLane struct {
 	// envoyAbsent, for one that loaded pi-legion at legionVersion and no pi-envoy; envoyMismatch,
 	// for one whose pi-envoy, loaded from from, publishes interface version found where its
 	// pi-legion speaks expected; legacyLoaded, for one that loaded the pre-split package from from
-	// beside pi-legion; loadedTwice, for one whose Envoy entry published from count module
-	// instances, more than one, listed in publishers. loadedTwice is nil where the lane ignores the
-	// count: a pane's and the controller's, which name no explicit root for a profile link to
-	// double, so only the pod's lane has the refusal.
+	// beside pi-legion; loadedTwice, for one whose Envoy entry published from more than one module
+	// instance, each listed in publishers. loadedTwice is nil where the lane ignores the count: a
+	// pane's and the controller's, which name no explicit root for a profile link to double, so
+	// only the pod's lane has the refusal.
 	notLoaded     func(version string) error
 	elsewhere     func(owner, read string, contract int) error
 	envoyAbsent   func(legionVersion string) error
 	envoyMismatch func(found, expected int, from string) error
 	legacyLoaded  func(from string) error
-	loadedTwice   func(count int, publishers []string) error
+	loadedTwice   func(publishers []string) error
 }
 
 // discoveryFlags adds the load probe, "$1", beside what Oh My Pi's discovery loads.
@@ -308,9 +306,9 @@ func (g pluginGate) lane() (pluginLane, error) {
 			legacyLoaded: func(from string) error {
 				return fmt.Errorf("the worker image loads %s from %s beside pi-legion: build the worker image from this daemon's commit", legacyPackage, from)
 			},
-			loadedTwice: func(count int, publishers []string) error {
+			loadedTwice: func(publishers []string) error {
 				return fmt.Errorf("pi-envoy loaded %d times (%s): the worker image's profile links it beside the explicit root %s, so a pod would load it twice — build the worker image from this daemon's commit",
-					count, strings.Join(publishers, ", "), envoyRoot)
+					len(publishers), strings.Join(publishers, ", "), envoyRoot)
 			},
 		}, nil
 	}
@@ -652,10 +650,12 @@ func owningManifest(file, pkg string) (string, error) {
 
 // loadAnswer is what the load probe printed about the plugins once it saw pi-legion's load marker:
 // each line's value after its marker, read by probeLoad, and publishers every publisherMarker line
-// in the order printed.
+// in the order printed — one per Envoy entry that published, so their count is how many module
+// instances the Envoy plugin loaded as. A probe of an older shape prints none, and the pane lane's
+// fakes print none: no count there means no refusal, as before the line existed.
 type loadAnswer struct {
-	legion, speaks, envoy, envoyFrom, envoyPublishers, legacyFrom string
-	publishers                                                    []string
+	legion, speaks, envoy, envoyFrom, legacyFrom string
+	publishers                                   []string
 }
 
 // readLoadAnswer reads the probe's lines from output; a line that is repeated keeps its last value,
@@ -674,7 +674,7 @@ func readLoadAnswer(output string) loadAnswer {
 			into   *string
 		}{
 			{loadedFromMarker, &answer.legion}, {speaksMarker, &answer.speaks}, {envoyMarker, &answer.envoy},
-			{envoyFromMarker, &answer.envoyFrom}, {publishersMarker, &answer.envoyPublishers}, {legacyFromMarker, &answer.legacyFrom},
+			{envoyFromMarker, &answer.envoyFrom}, {legacyFromMarker, &answer.legacyFrom},
 		} {
 			if rest, ok := strings.CutPrefix(line, field.marker); ok {
 				*field.into = rest
@@ -682,23 +682,6 @@ func readLoadAnswer(output string) loadAnswer {
 		}
 	}
 	return answer
-}
-
-// publisherCount is how many Envoy entries published the interface, the publishersMarker count the
-// probe prints beside every Envoy answer. None reads as one: the probe is this daemon's own,
-// embedded, so a current one always prints the count where the gate reads it (after an Envoy
-// answer), and an answer without it is a probe of an older shape — the fakes of the pane lane's
-// tests — whose one publisher is what every such answer meant. A count the gate cannot read is
-// refused as such.
-func (a loadAnswer) publisherCount() (int, error) {
-	if a.envoyPublishers == "" {
-		return 1, nil
-	}
-	count, err := strconv.Atoi(a.envoyPublishers)
-	if err != nil {
-		return 0, fmt.Errorf("the load probe answered %q on how many Envoy entries published, which the gate cannot read", publishersMarker+a.envoyPublishers)
-	}
-	return count, nil
 }
 
 // probeLoad is one load-probe attempt, and, on a pass, where the plugins loaded from. An Oh My Pi
@@ -770,12 +753,8 @@ func (l pluginLane) judgeLoaded(answer loadAnswer, version string) (loaded, erro
 	if found != expected {
 		return loaded{}, l.envoyMismatch(found, expected, answer.envoyFrom)
 	}
-	count, err := answer.publisherCount()
-	if err != nil {
-		return loaded{}, err
-	}
-	if l.loadedTwice != nil && count > 1 {
-		return loaded{}, l.loadedTwice(count, answer.publishers)
+	if l.loadedTwice != nil && len(answer.publishers) > 1 {
+		return loaded{}, l.loadedTwice(answer.publishers)
 	}
 	if err := l.verifyEnvoyLoadedFrom(answer.envoyFrom); err != nil {
 		return loaded{}, err

@@ -387,13 +387,13 @@ WORKDIR /home/legion
 #    plugin that is both loads twice — its factory runs twice in every role. The pod lane's probe in
 #    the final step refuses an image whose pi-envoy loads twice (the Envoy interface counts its
 #    publishers); a re-linked pi-legion alone it cannot see, since that plugin's load marker is one
-#    object the second load overwrites — so the two links come and go together, here. The
-#    alternative, dropping the explicit flags and loading both from the profile as a pane does, was
-#    refused: the image probe would stop certifying the two roots by path, and the spec names the
-#    explicit flags; explicit roots and an unlinked profile are one decision. This is OMP's first
-#    run in the image, so the CodeGraph install also downloads OMP's native modules (~345 MB) into
-#    /home/legion/.omp/natives/<version>/ — the build's success is the check; this layer ships them,
-#    a pod never fetches them, and the probes in the final step never wait on the download.
+#    object the second load overwrites — so the two links come and go together, here. Loading both
+#    from the profile instead, as a pane does, would stop the image probe certifying the two roots by
+#    path (bootgate.go's pod lane reads the explicit root's manifest for the contract and holds
+#    pi-envoy to its root): explicit roots and an unlinked profile are one decision. This is OMP's
+#    first run in the image, so the CodeGraph install also downloads OMP's native modules (~345 MB)
+#    into /home/legion/.omp/natives/<version>/ — the build's success is the check; this layer ships
+#    them, a pod never fetches them, and the probes in the final step never wait on the download.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \

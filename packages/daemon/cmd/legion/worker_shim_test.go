@@ -188,24 +188,7 @@ func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing
 	workspaceDir := t.TempDir()
 	t.Setenv("LEGION_WORKSPACE", workspaceDir)
 
-	daemon := make(chan error, 1)
-	go func() {
-		daemon <- func() error {
-			conn, err := ln.Accept()
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
-			if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
-				return err
-			}
-			if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
-				return err
-			}
-			_, err = io.Copy(io.Discard, conn)
-			return err
-		}()
-	}()
+	daemon := acknowledgeHello(ln)
 
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"legion", "worker-shim",
@@ -268,29 +251,6 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		}
 		return append(args, "--", "sh", "-c", check, marker, overlays, sessions)
 	}
-	acknowledge := func() chan error {
-		daemon := make(chan error, 1)
-		go func() {
-			daemon <- func() error {
-				conn, err := ln.Accept()
-				if err != nil {
-					return err
-				}
-				defer conn.Close()
-				if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
-					return err
-				}
-				if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
-					return err
-				}
-				// Held open until the shim closes it: a stream the daemon drops is one the shim
-				// dials again, which would outlive the agent's exit.
-				_, err = io.Copy(io.Discard, conn)
-				return err
-			}()
-		}()
-		return daemon
-	}
 
 	var stdout, stderr bytes.Buffer
 	if code := run(context.Background(), shim(true, "", ""), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "LEGION_STATE_DIR") {
@@ -314,7 +274,7 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file"},
 		"a pane": {false, "/etc/operator.yml", "unset"},
 	} {
-		daemon := acknowledge()
+		daemon := acknowledgeHello(ln)
 		stdout.Reset()
 		stderr.Reset()
 		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions), &stdout, &stderr); code != 7 {
@@ -324,4 +284,29 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 			t.Fatalf("%s: the daemon side: %v", name, err)
 		}
 	}
+}
+
+// acknowledgeHello is a daemon that accepts one shim, acks its hello and then holds the stream
+// open until the shim closes it: a stream the daemon drops is one the shim dials again, which
+// would outlive the agent's exit. Its result is the daemon side's error, once.
+func acknowledgeHello(ln net.Listener) chan error {
+	daemon := make(chan error, 1)
+	go func() {
+		daemon <- func() error {
+			conn, err := ln.Accept()
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
+				return err
+			}
+			if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
+				return err
+			}
+			_, err = io.Copy(io.Discard, conn)
+			return err
+		}()
+	}()
+	return daemon
 }
