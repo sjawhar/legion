@@ -670,3 +670,76 @@ describe("stage4b-pods.jq's ready_pods", () => {
     ).toBe("kept\n");
   });
 });
+
+// The pod-shape checkpoint's negative control (wrong_runtime_control) appends one line to the pod
+// watch: the last ready Sandbox pod's event with its runtimeClassName set to runc. pod_shape_verdict
+// reads watch events, {type, object}, so the control holds only if that line is one and the verdict
+// then names the pod's runtime class; a bare pod object is dropped unread and the verdict stays as
+// the real record left it.
+describe("the pod-shape checkpoint's wrong-runtime control", () => {
+  // watchEvent is one pod watch line for the golden root issue pod, uid UID, its six role launchers
+  // ready, as `kubectl get pods --watch -o json --output-watch-events` writes it.
+  function watchEvent(uid: string) {
+    const object = {
+      kind: "Pod",
+      metadata: { name: `pod-${uid}`, uid, creationTimestamp: created, labels: {} },
+      spec: pod().spec,
+      status: { containerStatuses: roles.map((role) => ({ name: role, ready: true })) },
+    };
+    return JSON.stringify({ type: "MODIFIED", object });
+  }
+  // verdict runs wrong_runtime_control on WATCH, appends its line as the checkpoint does, and runs
+  // pod_shape_verdict on the result; it also runs the verdict on WATCH alone, the baseline. Each
+  // keeps only the lines naming a runtime class: the golden pod departs from the run's other rules,
+  // which are not under test here.
+  function verdict(watch: string[]) {
+    const evidence = join(dir, `run-${++runs}`);
+    mkdirSync(evidence);
+    writeFileSync(
+      join(evidence, "worker-streams.jsonl"),
+      `${JSON.stringify({ since: "2026-10-06T11:00:00Z", stream: goldenStream })}\n`
+    );
+    writeFileSync(join(evidence, "pod-watch.json"), watch.map((line) => `${line}\n`).join(""));
+    const out =
+      runScript(`root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} work=${JSON.stringify(evidence)} route_configmap=route gateway_audience=audience
+run_resources=${JSON.stringify(JSON.stringify(defaults))}
+${shapeProblems}
+${fn("pod_shape_verdict")}
+${fn("wrong_runtime_control")}
+wrong_runtime_control "$evidence/pod-watch.json" >"$work/wrong-shape.json"
+cat "$evidence/pod-watch.json" "$work/wrong-shape.json" >"$work/pod-watch-wrong-shape.json"
+printf 'control line keys %s\\n' "$(jq -c keys "$work/wrong-shape.json")"
+pod_shape_verdict "$evidence/pod-watch.json" | sed 's/^/baseline /'
+pod_shape_verdict "$work/pod-watch-wrong-shape.json" | sed 's/^/control /'`);
+    if (out.exitCode !== 0) throw new Error(`the control's run exited ${out.exitCode}`);
+    const lines = out.out.split("\n");
+    // Each verdict line is `<uid>: <problem>;<problem>;…`, and a problem may itself hold ": ".
+    const runtime = (prefix: string) =>
+      lines
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => {
+          const rest = line.slice(prefix.length);
+          const at = rest.indexOf(": ");
+          const problems = rest
+            .slice(at + 2)
+            .split(";")
+            .filter((p) => p.startsWith("runtimeClassName"));
+          return problems.length === 0 ? "" : `${rest.slice(0, at)}: ${problems.join(";")}`;
+        })
+        .filter((line) => line !== "");
+    return {
+      keys: lines
+        .find((line) => line.startsWith("control line keys "))
+        ?.slice("control line keys ".length),
+      baseline: runtime("baseline "),
+      control: runtime("control "),
+    };
+  }
+
+  test("the verdict names the last ready pod's runtime class, and the line is a watch event", () => {
+    const result = verdict([watchEvent("uid-1"), watchEvent("uid-2")]);
+    expect(result.baseline).toEqual([]);
+    expect(result.control).toEqual(["uid-2: runtimeClassName runc"]);
+    expect(result.keys).toBe('["object","type"]');
+  });
+});

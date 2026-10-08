@@ -242,8 +242,8 @@ func (d *launchers) request(ctx context.Context, token claim.Token, podUID strin
 	}
 }
 
-// startRefusal is a Start the launcher answered without starting the generation: the one start
-// error after which no child of that generation can be running (stopIssuedChild).
+// startRefusal is a Start the launcher answered OK: false, without starting the generation: the one
+// start error after which no child of that generation can be running (stopIssuedChild).
 type startRefusal struct {
 	token      claim.Token
 	generation uint64
@@ -263,8 +263,13 @@ func (d *launchers) start(ctx context.Context, token claim.Token, podUID string,
 	if !ok {
 		return fmt.Errorf("launcher %s start: got %T", token, answer)
 	}
-	if !result.OK || result.RunningGeneration != command.Generation {
+	if !result.OK {
 		return startRefusal{token: token, generation: command.Generation, reason: result.Error}
+	}
+	// An OK answer naming another generation says the launcher started something, and not what it
+	// was asked: the Start's outcome is unknown, never a refusal, so the issued generation is stopped.
+	if result.RunningGeneration != command.Generation {
+		return fmt.Errorf("launcher %s start generation %d: answered OK naming generation %d", token, command.Generation, result.RunningGeneration)
 	}
 	return nil
 }
