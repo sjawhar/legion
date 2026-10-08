@@ -1,5 +1,5 @@
 {
-  "completed": "2026-10-08T07:56:36.12674173Z",
+  "completed": "2026-10-08T08:16:01.900970267Z",
   "deviations": [
     "Scope narrowed by the architect (dispatch://LEGION-578 comment 38d3fcaa, envoy c5df61a4): Tasks 1, 2, 4, 6 and 8 of the plan are LEGION-630's, LEGION-631's and LEGION-629's; this pull request carries the image, the capability check, the deployment report, the example operator route and their docs. Recorded in .legion/LEGION-578/plan.json",
     "The image sets no PUPPETEER_EXECUTABLE_PATH (the plan's option (a)); Oh My Pi's own system-Chromium detection picks /usr/bin/chromium, and the variable stays the operator's",
@@ -31,13 +31,15 @@
     "skills/legion-controller/SKILL.md (the tick's openCapabilities), scripts/e2e/{controller-start-tmux.sh,stage1-skeleton.sh,README.md}",
     "docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md, AGENTS.md, docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-….md, packages/daemon/internal/notify/notify.go (comment)",
     ".legion/LEGION-578/plan.json: the task list narrowed to the architect's scope",
-    "Round 1 (f5037e0e): packages/pi-legion/scripts/grant-rig/daemon-standin.ts (capabilities: [] in the state literal contract 15 requires), packages/daemon/docker/worker.Dockerfile and docs/kubernetes.md (the build OK line reads model-fallback=on), AGENTS.md (legion state --json), packages/daemon/internal/daemon/daemon.go and docs/kubernetes.md (the re-log runs at the first controller tick after a change), packages/daemon/internal/runtime/sandbox/probe.go (why the 64 KiB read bound holds the OK line)"
+    "Round 1 (f5037e0e): packages/pi-legion/scripts/grant-rig/daemon-standin.ts (capabilities: [] in the state literal contract 15 requires), packages/daemon/docker/worker.Dockerfile and docs/kubernetes.md (the build OK line reads model-fallback=on), AGENTS.md (legion state --json), packages/daemon/internal/daemon/daemon.go and docs/kubernetes.md (the re-log runs at the first controller tick after a change), packages/daemon/internal/runtime/sandbox/probe.go (why the 64 KiB read bound holds the OK line)",
+    "Round 1 (57cf6a62), at the architect request: packages/daemon/docker/worker.Dockerfile header and publish-gate comments worded for LEGION-629 (#1848): the two Legion plugins are the pod explicit extension roots and never linked into the profile (CodeGraph alone is), discovery on, the OK line carries extensions=discovered before agent-models; #1848 own hunk (step 3 and the omp plugin install lines) untouched"
   ],
   "issue": "LEGION-578",
   "openQuestions": [
     "Stage 4a on the pull request's image digest (ghcr.io/sjawhar/legion-worker@sha256:… from Worker Image run 37736231904 at 00127cd3c61f) needs a devbox operator: `image-probe` (the OK line with capabilities=checked and model-fallback=on under the fixture overlay, which turns retry.modelFallback on), `image-probe-negative` and the new `image-probe-capability-negative` (operator pod env PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium → refusal naming `capability browser is missing`), and the launch time from pod creation to registration against the 360 s deadline with the 1007 MiB image (docs/kubernetes.md 'Image size and pull time' records the size and that the pull time is measured there)",
     "The deployment's own operator overlay still sets retry.modelFallback: false; on the repin to this image the daemon will report `capability model-fallback is open` at boot and in legion state until the deployment turns it on or writes capabilities.decided.model-fallback",
-    "A dogfood tmux daemon reports secrets and resource-limits open at every boot (and the tick names them) until its legion.yaml decides them; the example lines are in docs/kubernetes.md 'The deployment's capability report'"
+    "A dogfood tmux daemon reports secrets and resource-limits open at every boot (and the tick names them) until its legion.yaml decides them; the example lines are in docs/kubernetes.md 'The deployment's capability report'",
+    "Until #1848 lands (on #1752 branch), the Dockerfile header and publish-gate comments name the extensions=discovered mark and the unlinked profile that #1848 code delivers; the plugin-install step and docs/kubernetes.md:31 are #1848 own and still say the pre-629 shape here"
   ],
   "phase": "implement",
   "proof": [
