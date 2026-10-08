@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
@@ -321,8 +322,8 @@ func TestTheDaemonSaysItsControllerIsNotRegisteredWhileItsLaunchHangs(t *testing
 	stalled := stalledLaunches{Runtime: fake.NewRuntime(), started: &atomic.Bool{}, release: make(chan struct{})}
 	o := fakeRuntime(stalled.Runtime, &built{})
 	build := o.runtime
-	o.runtime = func(ctx context.Context, conns runtime.Conns, address string, apps appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
-		if _, err := build(ctx, conns, address, apps, removable); err != nil {
+	o.runtime = func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		if _, err := build(ctx, listener, address, apps, st, removable); err != nil {
 			return nil, err
 		}
 		return stalled, nil

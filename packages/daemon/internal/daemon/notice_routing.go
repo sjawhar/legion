@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // noticeSummary is the one-line message a notice is published with, "<kind> on <issue>": the
@@ -31,7 +32,7 @@ const noticeSummarySeparator = " on "
 // errNoticeWaits is a notice held for its architect: the architect holds no role while its claim
 // can hold it again, or an earlier notice held for the same architect has not gone yet, and a later
 // one must not overtake it. The row is tried again on the outbox's backoff, logged once.
-var errNoticeWaits = errors.New("the notice waits for its architect")
+var errNoticeWaits = wait.New("the notice waits for its architect")
 
 // errNoticeUnroutable is a notice whose architect cannot be resolved from the record: its issue is
 // not recorded, has no tree or no recorded root, or its keys make no claim token. readNoticeRoute

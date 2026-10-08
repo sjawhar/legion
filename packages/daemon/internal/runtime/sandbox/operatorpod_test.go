@@ -82,9 +82,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}},
-			{Name: "boot", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
-		}}, want: "runtime.kubernetes.pod.volumes[1].name boot is a volume Legion puts in every pod"},
-		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/boot"), want: overlaps("/var/run/legion/boot", "/var/run/legion/boot", false)},
+			{Name: "launcher-tester", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
+		}}, want: "runtime.kubernetes.pod.volumes[1].name launcher-tester is a volume Legion puts in every pod"},
+		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/launcher"), want: overlaps("/var/run/legion/launcher", "/var/run/legion/launcher", false)},
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
 		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
 		{name: "a mount above the sessions Legion mounts", pod: mountAt("/home/legion/.omp/profiles/legion/agent"),
