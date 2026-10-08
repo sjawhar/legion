@@ -101,6 +101,8 @@ export interface AskCardProps {
   documentLink?: boolean;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
+  /** `change` opens the seeded form when the viewer may replace the current answer. */
+  mode?: "answer" | "change";
 }
 
 /** The urgency notch's text colour, matching the urgency badge of the same level. */
@@ -156,14 +158,19 @@ export function AskCard({
   initialThreadUpdatedAt,
   documentLink = true,
   onAnswered,
+  mode = "answer",
 }: AskCardProps): ReactNode {
   const {
     answerFailure,
     answerFieldId,
     answerPlaceholder,
+    answers,
     answerText,
     askChanged,
     canAnswer,
+    canChangeAnswer,
+    cancelChanging,
+    changing,
     clarification,
     completed,
     displayedAsk,
@@ -181,6 +188,7 @@ export function AskCard({
     sendClarification,
     setAnswerText,
     setQuestionChoice,
+    startChanging,
     submit,
     submitHint,
     toggleOther,
@@ -194,6 +202,7 @@ export function AskCard({
     getAskThread: getThread,
     initialThread,
     initialThreadUpdatedAt,
+    initiallyChanging: mode === "change",
     onAnswered,
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
@@ -345,7 +354,13 @@ export function AskCard({
       title={submitHint}
       type="submit"
     >
-      {mutation.isPending ? "Answering…" : "Answer"}
+      {mutation.isPending
+        ? changing
+          ? "Saving…"
+          : "Answering…"
+        : changing
+          ? "Save answer"
+          : "Answer"}
     </button>
   );
   const submitHintNode =
@@ -378,14 +393,25 @@ export function AskCard({
     <div className="space-y-2">
       <div className="flex gap-2">
         {submitButton}
-        <button
-          className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-          disabled={trimmedAnswer === "" || isSubmitting || uploading}
-          onClick={sendClarification}
-          type="button"
-        >
-          {clarification.isPending ? "Sending…" : "Ask back"}
-        </button>
+        {changing ? (
+          <button
+            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+            disabled={isSubmitting}
+            onClick={cancelChanging}
+            type="button"
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+            disabled={trimmedAnswer === "" || isSubmitting || uploading}
+            onClick={sendClarification}
+            type="button"
+          >
+            {clarification.isPending ? "Sending…" : "Ask back"}
+          </button>
+        )}
       </div>
       {submitHintNode}
     </div>
@@ -395,12 +421,15 @@ export function AskCard({
     return (
       <>
         <AskCompletionCard
+          answers={answers}
           artifactSlug={artifactSlug}
           ask={completed}
           documentLink={documentLink}
           edits={edits}
           frame={frame}
+          onChangeAnswer={canChangeAnswer ? startChanging : undefined}
         />
+        {answerFailure === null ? null : <QueryError message={answerFailure.message} />}
         {referencedByNode}
         {threadNode}
       </>

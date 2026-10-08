@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useId, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
 import { ApiError, api, apiErrorMessage } from "../../api/client";
-import { inboxQuery, projectsQuery } from "../../api/queries";
+import { inboxQuery, projectsQuery, whoAmIQuery } from "../../api/queries";
 import type {
   AnswerAskInput,
   Ask,
+  AskAnswer,
   AskRead,
   Comment,
   CreateCommentInput,
@@ -30,6 +31,8 @@ interface UseAskAnswerFormOptions {
   initialThreadUpdatedAt?: number;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
+  /** Opens the form for an answer the viewer may change, instead of its completion record. */
+  initiallyChanging?: boolean;
 }
 
 /** A failed answer, as the card shows it. */
@@ -48,6 +51,21 @@ interface AskAnswerFailure {
 function answerFailure(error: Error): AskAnswerFailure {
   if (error instanceof ApiError) {
     switch (error.code) {
+      case "ASK_ANSWER_CHANGED":
+        return {
+          message: "The answer changed since you opened it; here is the current one.",
+          retryable: false,
+        };
+      case "NOT_ANSWERER":
+        return {
+          message: "Only the person who answered can change this answer.",
+          retryable: false,
+        };
+      case "ASK_APPROVAL_REVIEW":
+        return {
+          message: "An approval is a review; record a new review on the document.",
+          retryable: false,
+        };
       case "ASK_CLOSED":
         return {
           message: "This ask was already answered, so your answer was not saved.",
@@ -80,9 +98,11 @@ export function useAskAnswerForm({
   getAskThread,
   initialThread,
   initialThreadUpdatedAt,
+  initiallyChanging = false,
   onAnswered,
 }: UseAskAnswerFormOptions) {
   const queryClient = useQueryClient();
+  const viewer = useQuery(whoAmIQuery()).data?.login;
   // Each AskCard instance owns its answer field label so cards with the same
   // ask id never collide when a responsive transition briefly renders both.
   const answerFieldId = `${useId()}-answer`;
@@ -92,6 +112,9 @@ export function useAskAnswerForm({
   const [questionChoice, setQuestionChoice] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const [askChanged, setAskChanged] = useState(false);
+  const [changing, setChanging] = useState(false);
+  const replacing = useRef<AskAnswer | undefined>(undefined);
+  const initialChangeConsumed = useRef(false);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
   // thread. A thread invalidated while its Inbox snapshot was in flight bypasses that snapshot.
@@ -110,9 +133,11 @@ export function useAskAnswerForm({
     }
   }, [ask.id, queryClient, refreshInitialThread, threadQuery.data]);
   const edits = threadQuery.data?.edits ?? [];
+  const answers = threadQuery.data?.answers ?? [];
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
     onMutate: async () => {
+      if (replacing.current !== undefined) return undefined;
       await queryClient.cancelQueries({ queryKey: inboxQuery().queryKey });
       const previous = queryClient.getQueryData<InboxRow[]>(inboxQuery().queryKey);
       queryClient.setQueryData<InboxRow[]>(inboxQuery().queryKey, (current) =>
@@ -121,21 +146,46 @@ export function useAskAnswerForm({
       return previous;
     },
     onError: (error, _input, previous) => {
-      queryClient.setQueryData(inboxQuery().queryKey, previous);
-      void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });
+      if (replacing.current === undefined) {
+        queryClient.setQueryData(inboxQuery().queryKey, previous);
+        void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });
+      }
       if (error instanceof ApiError && error.code === "ASK_EDITED") {
         setAskChanged(true);
         setSelected([]);
         setOtherSelected(false);
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
       }
+      if (error instanceof ApiError && error.code === "ASK_ANSWER_CHANGED") {
+        // The card shows the thread's current answer, not one this card recorded earlier.
+        void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
+        replacing.current = undefined;
+        setJustAnswered(null);
+        setChanging(false);
+      }
     },
     onSettled: () => {
       submitGuard.release();
     },
     onSuccess: (updatedAsk) => {
+      const changed = replacing.current !== undefined;
+      replacing.current = undefined;
+      setChanging(false);
       setJustAnswered(updatedAsk);
-      onAnswered?.(ask.id);
+      if (changed) {
+        if (updatedAsk.answer !== null) {
+          const changedAnswer = updatedAsk.answer;
+          queryClient.setQueryData<AskRead>(["ask-thread", ask.id], (current) =>
+            current === undefined
+              ? undefined
+              : { ...current, answers: [...current.answers, changedAnswer], ask: updatedAsk }
+          );
+        }
+        void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
+        void queryClient.invalidateQueries({ queryKey: ["me", "answers"] });
+      } else {
+        onAnswered?.(ask.id);
+      }
       invalidateOwnerReads();
     },
   });
@@ -187,6 +237,39 @@ export function useAskAnswerForm({
   const threadAsk = threadQuery.data?.ask;
   const displayedAsk =
     threadAsk !== undefined && (askChanged || threadAsk.state !== "open") ? threadAsk : ask;
+  const recordedAsk = justAnswered ?? (displayedAsk.state === "open" ? null : displayedAsk);
+  const canChangeAnswer =
+    recordedAsk !== null &&
+    recordedAsk.kind !== "approval" &&
+    recordedAsk.state === "answered" &&
+    recordedAsk.answer !== null &&
+    viewer !== undefined &&
+    recordedAsk.answer.user.toLowerCase() === viewer.toLowerCase();
+  const startChanging = () => {
+    if (!canChangeAnswer || recordedAsk?.answer === null || recordedAsk === null) return;
+    const current = recordedAsk.answer;
+    const realSelected = current.selected.filter((label) =>
+      recordedAsk.options.some((option) => option.label === label)
+    );
+    replacing.current = current;
+    mutation.reset();
+    setSelected(realSelected);
+    setOtherSelected(realSelected.length === 0 && current.text !== null && current.text !== "");
+    setAnswerText(current.text ?? "");
+    setQuestionChoice(false);
+    setChanging(true);
+  };
+  const cancelChanging = () => {
+    replacing.current = undefined;
+    mutation.reset();
+    setChanging(false);
+  };
+  useEffect(() => {
+    if (!initiallyChanging || initialChangeConsumed.current) return;
+    if (viewer === undefined || recordedAsk === null) return;
+    initialChangeConsumed.current = true;
+    if (canChangeAnswer) startChanging();
+  });
   const hasOptions = displayedAsk.options.length > 0;
   const isApproval = displayedAsk.kind === "approval";
   const isSubmitting = mutation.isPending || clarification.isPending;
@@ -225,7 +308,7 @@ export function useAskAnswerForm({
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
       const answerSelection = isApproval || hasOptions ? selected : [];
-      mutation.mutate(answerAskInput(displayedAsk, answerSelection, text));
+      mutation.mutate(answerAskInput(displayedAsk, answerSelection, text, replacing.current));
     });
   };
 
@@ -278,15 +361,19 @@ export function useAskAnswerForm({
     if (text === "") return;
     submitGuard.guard(() => clarification.mutate(text));
   };
-  const completed = justAnswered ?? (displayedAsk.state === "open" ? null : displayedAsk);
+  const completed = changing ? null : recordedAsk;
 
   return {
     answerFailure: mutation.error === null ? null : answerFailure(mutation.error),
     answerFieldId,
     answerPlaceholder,
+    answers,
     answerText,
     askChanged,
     canAnswer,
+    canChangeAnswer,
+    cancelChanging,
+    changing,
     clarification,
     completed,
     displayedAsk,
@@ -304,6 +391,7 @@ export function useAskAnswerForm({
     sendClarification,
     setAnswerText,
     setQuestionChoice,
+    startChanging,
     submitGuard,
     submit,
     submitHint,

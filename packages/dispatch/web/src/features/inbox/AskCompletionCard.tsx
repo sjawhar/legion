@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Ask, AskEdit, AskResolution } from "../../api/types";
+import type { Ask, AskAnswer, AskEdit, AskResolution } from "../../api/types";
 import {
   badgeLow,
   calloutSuccessBg,
@@ -59,6 +59,40 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): 
   );
 }
 
+/** Earlier answers to an ask whose answer was changed, oldest first. */
+export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNode {
+  const earlier = answers.slice(0, -1);
+  const latest = answers.at(-1);
+  if (earlier.length === 0 || latest === undefined) return null;
+  return (
+    <div className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
+      <p>
+        Changed <Timestamp at={latest.at} />
+      </p>
+      <details className="mt-1">
+        <summary className={`cursor-pointer font-medium ${linkText} ${linkHoverText}`}>
+          {earlier.length === 1
+            ? "Show 1 earlier answer"
+            : `Show ${earlier.length} earlier answers`}
+        </summary>
+        <div className="mt-2 space-y-3">
+          {earlier.map((previous) => (
+            <div key={previous.at}>
+              {previous.selected.length === 0 ? null : <p>{previous.selected.join(", ")}</p>}
+              {previous.text === null || previous.text === "" ? null : (
+                <MarkdownBody markdown={previous.text} />
+              )}
+              <p className="mt-1">
+                {previous.user} · <Timestamp at={previous.at} />
+              </p>
+            </div>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 export function OrphanedAnchorNotice({
   artifactSlug,
   ask,
@@ -91,17 +125,21 @@ export function OrphanedAnchorNotice({
 }
 
 function AnsweredAsk({
+  answers,
   artifactSlug,
   ask,
   documentLink,
   edits,
   frame,
+  onChangeAnswer,
 }: {
+  answers: AskAnswer[];
   artifactSlug: string | undefined;
   ask: Ask;
   documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
+  onChangeAnswer?: () => void;
 }): ReactNode {
   const { answer } = ask;
   // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
@@ -151,6 +189,16 @@ function AnsweredAsk({
           Asked <Timestamp at={ask.created_at} /> · Answered by{" "}
           <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
         </p>
+      )}
+      <AskAnswerHistory answers={answers} />
+      {onChangeAnswer === undefined ? null : (
+        <button
+          className={`mt-2 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
+          onClick={onChangeAnswer}
+          type="button"
+        >
+          Change answer
+        </button>
       )}
     </article>
   );
@@ -205,6 +253,8 @@ function ResolvedAsk({
 export type AskFrame = "card" | "block";
 
 interface AskCompletionCardProps {
+  /** Every real answer, oldest first, from the ask's thread read. */
+  answers?: AskAnswer[];
   artifactSlug: string | undefined;
   ask: Ask;
   /** Whether an approval ask's completed record also links its document and version; mirrors
@@ -212,14 +262,18 @@ interface AskCompletionCardProps {
   documentLink?: boolean;
   edits: AskEdit[];
   frame?: AskFrame;
+  /** Shown only to the person who gave the current, non-approval answer. */
+  onChangeAnswer?: () => void;
 }
 
 export function AskCompletionCard({
+  answers = [],
   artifactSlug,
   ask,
   documentLink = true,
   edits,
   frame = "card",
+  onChangeAnswer,
 }: AskCompletionCardProps): ReactNode {
   if (ask.state === "resolved") {
     if (ask.resolution === undefined) {
@@ -236,11 +290,13 @@ export function AskCompletionCard({
   }
   return (
     <AnsweredAsk
+      answers={answers}
       artifactSlug={artifactSlug}
       ask={{ ...ask, answer: ask.answer }}
       documentLink={documentLink}
       edits={edits}
       frame={frame}
+      onChangeAnswer={onChangeAnswer}
     />
   );
 }
