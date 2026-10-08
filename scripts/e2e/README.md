@@ -344,7 +344,8 @@ in the transcript, for the pull request's merge state to read `CLEAN`, `UNSTABLE
 a timeout names the last state read. The fixture pull request's branch is
 `proof/clean-main-<project, lowercased>`, and the cleanup fails, naming it, when a branch of that
 name is there before it makes its own: an earlier run left that one, and the cleanup neither uses
-nor removes it. That checkpoint, `smoke-main-clean`, is the fixture's
+nor removes it. To go on, delete that branch on `sjawhar/legion-smoke`, which also closes a pull
+request open on it, and run again. That checkpoint, `smoke-main-clean`, is the fixture's
 teardown, not the workflow under test. It begins only once every checkpoint before it has passed,
 the first issue's workflow through its human merge and sign-off included. A failure there stops
 the run like any other: the checkpoints after `smoke-main-clean`, from `held-after-launch-budget`
@@ -773,7 +774,8 @@ the run that owns it. A signal to the whole process group does not stop the remo
   Every Stage 4b run's cleanup branch has that one name, so the teardown acts only on the branch the
   run recorded making: a run that never reached the cleanup touches none, an earlier run's
   included, and `done` fails, naming the branch, when one is there before it makes its own, which it
-  then leaves. Every one of
+  then leaves. To go on, delete that branch on `sjawhar/legion-smoke`, which also closes a pull
+  request open on it, and run again. Every one of
   these writes is Stage 3's proof human's: the devbox `gh`, and for the fixture push the git
   credential helper the same routing installs. So the driver runs from the operator's own Oh My Pi
   session, and `prerequisites` refuses to start, before it takes the lock, when `gh` acts as anyone
