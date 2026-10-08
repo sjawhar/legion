@@ -46,7 +46,7 @@ var __export = (target, all) => {
 var __require = import.meta.require;
 
 // hooks/session-hook.ts
-import { appendFileSync } from "fs";
+import { appendFileSync, readFileSync as readFileSync4 } from "fs";
 import { join as join4 } from "path";
 
 // ../envoy-client/src/dispatch-config.ts
@@ -14192,7 +14192,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string().describe("Concise issue title."),
@@ -14239,7 +14239,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       release: z2.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -14850,7 +14850,13 @@ function flagTable(tool, fields) {
         field,
         action: "append",
         value: '"<label>: <description>"',
-        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label).`.trim()
+        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label). A label that holds ": " goes in --${name}-json.`.trim()
+      });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
       });
     } else if (kind === "json") {
       add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
@@ -14993,15 +14999,9 @@ function parseCommand(argv, io) {
     }
     switch (action) {
       case "set": {
-        if (!claim(field, flag, false))
-          break;
-        if (info.kind === "number") {
-          const parsed = number4(flag, value);
-          if (parsed !== undefined)
-            args[field] = parsed;
-        } else {
-          args[field] = value;
-        }
+        const parsed = info.kind === "number" ? number4(flag, value) : value;
+        if (parsed !== undefined && claim(field, flag, false))
+          args[field] = parsed;
         break;
       }
       case "file": {
@@ -15070,21 +15070,30 @@ function fieldWords(field, info, value) {
   }
   if (kind === "json")
     return flagWithValue(`--${name}-json`, JSON.stringify(value));
-  if ((kind === "options" || typeof kind === "object") && Array.isArray(value)) {
+  if (kind === "options" && Array.isArray(value)) {
+    if (value.length === 0)
+      return [`--clear-${name}`];
+    const texts = value.map(optionText);
+    if (texts.includes(undefined))
+      return flagWithValue(`--${name}-json`, JSON.stringify(value));
+    return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
+  }
+  if (typeof kind === "object" && Array.isArray(value)) {
     if (value.length === 0)
       return [`--clear-${name}`];
     const flag = `--${singular(name)}`;
-    return value.flatMap((item) => {
-      if (kind === "options") {
-        const option = item;
-        const label = scalarText(option.label);
-        const text = option.description === undefined ? label : `${label}${OPTION_SEPARATOR}${scalarText(option.description)}`;
-        return flagWithValue(flag, text);
-      }
-      return flagWithValue(flag, item === null ? "none" : scalarText(item));
-    });
+    return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }
   return flagWithValue(`--${name}`, scalarText(value));
+}
+function optionText(option) {
+  if (typeof option !== "object" || option === null || !("label" in option)) {
+    return scalarText(option);
+  }
+  const label = scalarText(option.label);
+  if (label.includes(OPTION_SEPARATOR))
+    return;
+  return "description" in option && option.description !== undefined ? `${label}${OPTION_SEPARATOR}${scalarText(option.description)}` : label;
 }
 function commandLine(tool, args) {
   const surface = surfaceFor(tool);
@@ -15812,9 +15821,9 @@ function picturesNewestFirst(texts) {
 class ToolInputError extends Error {
   tool;
   problems;
-  constructor(tool, problems, options = {}) {
+  constructor(tool, problems) {
     const count = problems.length;
-    const cli = options.syntax === "cli" && isDispatchTool(tool);
+    const cli = isDispatchTool(tool);
     const help = cli ? [
       `Allowed flags: ${commandFlags(tool).join(", ")}`,
       `Example: ${commandLine(tool, exampleFor(tool))}`
@@ -15915,8 +15924,8 @@ function pathText(path2, cliTool) {
   const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
   return tail === "" ? flag : `${flag} ${tail}`;
 }
-function formatZodIssues(issues, schema, options = {}) {
-  const cliTool = options.syntax === "cli" ? options.tool : undefined;
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue2) => {
     const path2 = pathText(issue2.path, cliTool);
@@ -16001,7 +16010,9 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
   const fix = `${limit.shorten} or send fewer pictures`;
   const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
   if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [`${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`], { syntax: "cli" });
+    throw new ToolInputError(tool, [
+      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
+    ]);
   }
   const lines = [];
   const addresses = [];
@@ -16544,7 +16555,9 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   if (fullID !== undefined)
     return fullID;
   if (!idPrefixPattern.test(id)) {
-    throw new ToolInputError(tool, [`${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`], { syntax: "cli" });
+    throw new ToolInputError(tool, [
+      `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`
+    ]);
   }
   const prefix = id.toLowerCase();
   const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
@@ -16552,7 +16565,7 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
     return matches[0].id;
   throw new ToolInputError(tool, [
     matches.length === 0 ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id` : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`
-  ], { syntax: "cli" });
+  ]);
 }
 var askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
 async function sessionOpenAsks(client, sessionId) {
@@ -16573,7 +16586,9 @@ async function resolveAskArgument(tool, args, client, sessionId) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => {
       return;
     });
-    throw new ToolInputError(tool, [asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`], { syntax: "cli" });
+    throw new ToolInputError(tool, [
+      asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`
+    ]);
   }
   return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
 }
@@ -17431,12 +17446,12 @@ async function executeDispatchTool(input) {
   const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
   if (!parsed.success) {
     const issues = parsed.error.issues.filter((issue3) => !ownerMissing || !(issue3.code === "invalid_type" && issue3.path.length === 1 && issue3.path[0] === "issue" && issue3.input === undefined || issue3.code === "custom" && issue3.path.length === 0 && (issue3.message.startsWith("Exactly one of issue and project is required") || issue3.message.startsWith("issue is required unless in_reply_to"))));
-    problems.push(...formatZodIssues(issues, schema, { syntax: "cli", tool: input.tool }));
+    problems.push(...formatZodIssues(issues, schema, input.tool));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
   const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args.images, input.cwd, problems) : [];
   if (problems.length > 0)
-    throw new ToolInputError(input.tool, problems, { syntax: "cli" });
+    throw new ToolInputError(input.tool, problems);
   const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   if (input.tool === "dispatch_open_asks") {
     const client2 = dispatchClient();
@@ -17861,7 +17876,9 @@ ${followsAsk(askOwner)}`,
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
-        throw new ToolInputError(input.tool, [await invalidReplyToAskProblem(client, owner2, resolved)], { syntax: "cli" });
+        throw new ToolInputError(input.tool, [
+          await invalidReplyToAskProblem(client, owner2, resolved)
+        ]);
       }
       const requestedTurn = optionalString(args, "turn");
       const body = await writePictures(resolved, stringArg(args, "body"), {
@@ -18422,12 +18439,29 @@ var DispatchFirstInput = exports_external.object({
   hook_event_name: exports_external.enum(["SessionStart", "SubagentStart"]),
   cwd: exports_external.string().optional()
 });
+var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
+function nameDispatchHost(envFile) {
+  let written = "";
+  try {
+    written = readFileSync4(envFile, "utf8");
+  } catch (error48) {
+    if (error48.code !== "ENOENT")
+      throw error48;
+  }
+  if (written.split(`
+`).includes(DISPATCH_HOST_LINE))
+    return;
+  const separator = written === "" || written.endsWith(`
+`) ? "" : `
+`;
+  appendFileSync(envFile, `${separator}${DISPATCH_HOST_LINE}
+`);
+}
 async function openAsks(raw) {
   const input = OpenAsksInput.parse(raw);
   const envFile = process.env["CLAUDE_ENV_FILE"];
   if (envFile)
-    appendFileSync(envFile, `export DISPATCH_HOST=claude
-`);
+    nameDispatchHost(envFile);
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"];
   if (pluginData !== undefined && pluginData.trim().length > 0) {
     try {

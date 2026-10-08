@@ -2665,7 +2665,7 @@ report_after_tick() {
       | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
       | ([$lines[] | select(.m | objects | .type == "message" and .message.role == "assistant"
           and any(.message.content[]?; .type? == "toolCall" and .name == "bash"
-            and ((.arguments.command // "") | test("^\\s*dispatch\\s+message(\\s|$)"))))
+            and ((.arguments.command // "") | test("(^|[;&|]\\s*|^\\s*(\\w+=\\S*\\s+)+)\\s*dispatch\\s+message(\\s|$)"))))
         | .i] | first) as $call
       | $call != null and any($lines[]; .i < $call and (.raw | contains($tick))
           and (.i as $t | ([$msgs[] | select(.i < $t)] | last) as $before

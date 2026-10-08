@@ -1966,13 +1966,13 @@ export default function envoyExtension(pi: PiApi): void {
       (entry) =>
         entry.details !== undefined && opensAsk({ toolName: entry.tool, details: entry.details })
     );
-    // A shell call that ran nothing but `dispatch`: a bash command whose head is one, or an eval
-    // cell (its code can run `dispatch` only through a shell, which the scan cannot read) during
-    // which the ledger grew.
-    const dispatchOnly =
-      (event.toolName === "bash" || event.toolName === "eval") &&
-      entries.length > 0 &&
-      (event.toolName === "eval" || dispatchCommandHead(event.input.command) !== undefined);
+    // A call that owes no check: a bash command that is one `dispatch` command and wrote to the
+    // ledger, or any eval cell during which the ledger grew. The two differ on purpose: a bash
+    // command's text is scanned, while an eval cell runs `dispatch` only through a shell its code
+    // starts, which no scan reads, so for it the ledger growing is the only signal.
+    const bashRanDispatchAlone =
+      event.toolName === "bash" && dispatchCommandHead(event.input.command) !== undefined;
+    const owesNoCheck = entries.length > 0 && (bashRanDispatchAlone || event.toolName === "eval");
     if (openedAsk) {
       // The agent asked the humans itself, so this stop has nothing left for the nudge to
       // say: it spends the check the period owed rather than ending the period, and aborts a
@@ -1980,7 +1980,7 @@ export default function envoyExtension(pi: PiApi): void {
       // check, whose prompt names the ask.
       askAwareness = { ...askAwareness, check_due: false };
       abortSelfCheck("the agent opened the ask itself");
-    } else if (!dispatchOnly) {
+    } else if (!owesNoCheck) {
       // Real work: it owes the period another check, the way finishing a step re-arms the
       // host's todo reminder. A `dispatch` command is the agent talking to the humans this
       // nudge is about, not work, so it owes nothing — and a turn that only replies calls no

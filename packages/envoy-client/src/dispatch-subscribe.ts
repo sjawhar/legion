@@ -1,4 +1,5 @@
 import { DispatchEventSchema, SubscriptionRemovedEventPayloadSchema } from "@legion/contracts";
+import { commandLine } from "./dispatch-command";
 import { documentTopicOf, issueTopic, type OwnerTopic } from "./dispatch-owner";
 
 /**
@@ -32,7 +33,7 @@ export function dispatchFollowNotice(
   }
   return {
     ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch follow --ask ${ask} --action unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
   };
 }
 

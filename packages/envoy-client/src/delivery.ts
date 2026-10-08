@@ -832,7 +832,7 @@ export function renderInbound(
             skip: false,
             content:
               frame.event.type === "ask.follower_added"
-                ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch follow --ask ${ask} --action unfollow to stop.`
+                ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; ${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop.`
                 : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
             envelope,
           };

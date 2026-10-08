@@ -4,7 +4,8 @@
 //
 // open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
 // 1. Name Claude Code as the `dispatch` command's host: append `export DISPATCH_HOST=claude` to
-//    `CLAUDE_ENV_FILE`, which Claude Code sources into every later Bash command of the session.
+//    `CLAUDE_ENV_FILE`, which Claude Code sources into every later Bash command of the session,
+//    unless an earlier SessionStart already wrote that line there.
 //    The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which Claude Code sets fresh
 //    in each Bash command, so a `/clear` needs nothing more here.
 // 2. Record the CURRENT session id for this Claude process so the channel
@@ -22,7 +23,7 @@
 // before this plugin version, or before Dispatch was configured) gets it. A plugin installed
 // without the skill file exits non-zero naming it, which Claude Code shows the user.
 
-import { appendFileSync } from "node:fs"
+import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
@@ -43,10 +44,25 @@ const DispatchFirstInput = z.object({
   cwd: z.string().optional(),
 })
 
+const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
+
+/** Appends the host line to the env file, once: every SessionStart of the session runs this. */
+function nameDispatchHost(envFile: string): void {
+  let written = ""
+  try {
+    written = readFileSync(envFile, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  if (written.split("\n").includes(DISPATCH_HOST_LINE)) return
+  const separator = written === "" || written.endsWith("\n") ? "" : "\n"
+  appendFileSync(envFile, `${separator}${DISPATCH_HOST_LINE}\n`)
+}
+
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
   const envFile = process.env["CLAUDE_ENV_FILE"]
-  if (envFile) appendFileSync(envFile, "export DISPATCH_HOST=claude\n")
+  if (envFile) nameDispatchHost(envFile)
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
   if (pluginData !== undefined && pluginData.trim().length > 0) {
     try {

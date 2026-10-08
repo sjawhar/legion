@@ -36689,7 +36689,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string().describe("Concise issue title."),
@@ -36736,7 +36736,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       release: z2.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -37893,7 +37893,13 @@ function flagTable(tool, fields) {
         field,
         action: "append",
         value: '"<label>: <description>"',
-        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label).`.trim()
+        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label). A label that holds ": " goes in --${name}-json.`.trim()
+      });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
       });
     } else if (kind === "json") {
       add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
@@ -38036,15 +38042,9 @@ function parseCommand(argv, io) {
     }
     switch (action) {
       case "set": {
-        if (!claim(field, flag, false))
-          break;
-        if (info.kind === "number") {
-          const parsed = number4(flag, value);
-          if (parsed !== undefined)
-            args[field] = parsed;
-        } else {
-          args[field] = value;
-        }
+        const parsed = info.kind === "number" ? number4(flag, value) : value;
+        if (parsed !== undefined && claim(field, flag, false))
+          args[field] = parsed;
         break;
       }
       case "file": {
@@ -38113,21 +38113,30 @@ function fieldWords(field, info, value) {
   }
   if (kind === "json")
     return flagWithValue(`--${name}-json`, JSON.stringify(value));
-  if ((kind === "options" || typeof kind === "object") && Array.isArray(value)) {
+  if (kind === "options" && Array.isArray(value)) {
+    if (value.length === 0)
+      return [`--clear-${name}`];
+    const texts = value.map(optionText);
+    if (texts.includes(undefined))
+      return flagWithValue(`--${name}-json`, JSON.stringify(value));
+    return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
+  }
+  if (typeof kind === "object" && Array.isArray(value)) {
     if (value.length === 0)
       return [`--clear-${name}`];
     const flag = `--${singular(name)}`;
-    return value.flatMap((item) => {
-      if (kind === "options") {
-        const option = item;
-        const label = scalarText(option.label);
-        const text = option.description === undefined ? label : `${label}${OPTION_SEPARATOR}${scalarText(option.description)}`;
-        return flagWithValue(flag, text);
-      }
-      return flagWithValue(flag, item === null ? "none" : scalarText(item));
-    });
+    return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }
   return flagWithValue(`--${name}`, scalarText(value));
+}
+function optionText(option) {
+  if (typeof option !== "object" || option === null || !("label" in option)) {
+    return scalarText(option);
+  }
+  const label = scalarText(option.label);
+  if (label.includes(OPTION_SEPARATOR))
+    return;
+  return "description" in option && option.description !== undefined ? `${label}${OPTION_SEPARATOR}${scalarText(option.description)}` : label;
 }
 function commandLine(tool, args) {
   const surface = surfaceFor(tool);
@@ -38806,7 +38815,7 @@ function renderInbound(raw, sessionID, subject2) {
           const ask = follower.data.ask_id ?? "?";
           return {
             skip: false,
-            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch follow --ask ${ask} --action unfollow to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
+            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; ${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
             envelope: envelope2
           };
         }
@@ -39116,7 +39125,7 @@ function dispatchFollowNotice(details) {
   }
   return {
     ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch follow --ask ${ask} --action unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
   };
 }
 function subscriptionRemovedTopics(raw, sessionID) {
@@ -39189,9 +39198,9 @@ function natsAuthOptions(env) {
 class ToolInputError extends Error {
   tool;
   problems;
-  constructor(tool, problems, options = {}) {
+  constructor(tool, problems) {
     const count = problems.length;
-    const cli = options.syntax === "cli" && isDispatchTool(tool);
+    const cli = isDispatchTool(tool);
     const help = cli ? [
       `Allowed flags: ${commandFlags(tool).join(", ")}`,
       `Example: ${commandLine(tool, exampleFor(tool))}`
@@ -39292,8 +39301,8 @@ function pathText(path2, cliTool) {
   const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
   return tail === "" ? flag : `${flag} ${tail}`;
 }
-function formatZodIssues(issues, schema, options = {}) {
-  const cliTool = options.syntax === "cli" ? options.tool : undefined;
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue2) => {
     const path2 = pathText(issue2.path, cliTool);
@@ -39373,29 +39382,25 @@ var envoyToolSpecs = [
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to.")
     }),
-    operation: EnvoyToolOperation.subscribe,
-    requiresSubscriptionCapability: true
+    operation: EnvoyToolOperation.subscribe
   },
   {
     name: "envoy_unsubscribe",
     description: "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted.",
     arguments: (schema) => ({ topics: schema.array(schema.string()).optional() }),
-    operation: EnvoyToolOperation.unsubscribe,
-    requiresSubscriptionCapability: true
+    operation: EnvoyToolOperation.unsubscribe
   },
   {
     name: "envoy_list",
     description: "List the current Envoy topic subscriptions for this session so you can confirm the exact topic shapes that are active.",
     arguments: () => ({}),
-    operation: EnvoyToolOperation.listInterests,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.listInterests
   },
   {
     name: "envoy_inbox",
     description: "List this Pi session's 50 most recent rendered Envoy deliveries, newest first.",
     arguments: () => ({}),
-    operation: EnvoyToolOperation.inbox,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.inbox
   },
   {
     name: "envoy_send",
@@ -39404,36 +39409,31 @@ var envoyToolSpecs = [
       session_id: schema.string().describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema)
     }),
-    operation: EnvoyToolOperation.send,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.send
   },
   {
     name: "envoy_publish",
     description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
-    operation: EnvoyToolOperation.publish,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.publish
   },
   {
     name: "envoy_role_set",
     description: "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session.",
     arguments: (schema) => ({ role: schema.string() }),
-    operation: EnvoyToolOperation.setRole,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.setRole
   },
   {
     name: "envoy_role_get",
     description: "Get the live holder of a named Envoy role.",
     arguments: (schema) => ({ role: schema.string() }),
-    operation: EnvoyToolOperation.getRole,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.getRole
   },
   {
     name: "envoy_whoami",
     description: "Returns this session's Envoy identity: session ID, machine ID, port, and directory. session_id is the address a reply reaches. Where a host runs a task subagent inside its parent's process, such a subagent registers no Envoy session of its own, so its session_id is the parent session that spawned it and the result says so.",
     arguments: () => ({}),
-    operation: EnvoyToolOperation.whoami,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.whoami
   },
   {
     name: "envoy_sessions",
@@ -39443,8 +39443,7 @@ var envoyToolSpecs = [
       dir: schema.string().optional(),
       title: schema.string().optional()
     }),
-    operation: EnvoyToolOperation.listSessions,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.listSessions
   }
 ];
 function sendConfirmationText(result) {

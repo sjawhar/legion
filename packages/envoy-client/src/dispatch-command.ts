@@ -399,13 +399,8 @@ export function parseCommand(
     }
     switch (action) {
       case "set": {
-        if (!claim(field, flag, false)) break;
-        if (info.kind === "number") {
-          const parsed = number(flag, value);
-          if (parsed !== undefined) args[field] = parsed;
-        } else {
-          args[field] = value;
-        }
+        const parsed = info.kind === "number" ? number(flag, value) : value;
+        if (parsed !== undefined && claim(field, flag, false)) args[field] = parsed;
         break;
       }
       case "file": {

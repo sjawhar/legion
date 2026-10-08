@@ -596,15 +596,16 @@ merger_summary() {
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
 # merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself: an
-# envoy_publish (the tool, or a write to its xd:// device), or a bash call whose command is
-# `dispatch message` with a body (--body, or --body-file - with a here-document) opening READY.
+# envoy_publish (the tool, or a write to its xd:// device), or a bash call that runs `dispatch
+# message` (first, after `;`, `&` or `|`, or after variable assignments) with a body (--body, or
+# --body-file - with a here-document) opening READY.
 merger_self_posted() {
   local f
   f=$(claim_session_file "$1" merger) || return 1
   jq -s -c '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
     | select(.type == "toolCall" and (.name == "envoy_publish" or
         (.name == "write" and ((.arguments.path // "") | test("xd://envoy_publish"))) or
-        (.name == "bash" and ((.arguments.command // "") | test("^\\s*dispatch\\s+message(\\s|$)")))))
+        (.name == "bash" and ((.arguments.command // "") | test("(^|[;&|]\\s*|^\\s*(\\w+=\\S*\\s+)+)\\s*dispatch\\s+message(\\s|$)")))))
     | select(.name != "bash" or ((.arguments.command // "")
         | test("--body(=|\\s+)[\u0027\"]?\\s*READY|--body-file(=|\\s+)-[^\\n]*\\n\\s*READY")))
     | {name, arguments}]' "$f"

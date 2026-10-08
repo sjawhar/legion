@@ -160,6 +160,27 @@ test("names Claude Code as the dispatch host in CLAUDE_ENV_FILE, after whatever 
   }
 })
 
+// SessionStart fires on startup, resume, clear, compact and fork; the file keeps one line for it.
+test("names the dispatch host once however many SessionStarts write the same env file", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-env-twice-"))
+  const envFile = join(scratch, "session-env.sh")
+  await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
+  try {
+    const env = {
+      HOME: scratch,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+    }
+    expect((await runHook(hookInput, env)).exitCode).toBe(0)
+    expect((await runHook(hookInput, env)).exitCode).toBe(0)
+    expect(await readFile(envFile, "utf8")).toBe(
+      "export FROM_ANOTHER_HOOK=1\nexport DISPATCH_HOST=claude\n",
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 test("leaves an env file alone when Claude Code names none", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-no-env-"))
   const envFile = join(scratch, "session-env.sh")

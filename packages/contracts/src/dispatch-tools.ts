@@ -260,7 +260,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
     description:
-      "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
@@ -398,7 +398,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1" },
     description:
       "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
-      "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " +
+      "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " +
       "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
       "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +

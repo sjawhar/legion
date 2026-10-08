@@ -31,23 +31,34 @@ const skillsDirectory = [
 const PACKAGE_NAME = "@sjawhar/opencode-legion-envoy";
 
 /** The package root: the nearest directory above `from` whose package.json names this package.
- *  The packed server.js sits in dist/src/, the repo's server.ts in src/. */
+ *  The packed server.js sits in dist/src/, the repo's server.ts in src/. A manifest on the way up
+ *  that is not JSON is some other package's and is passed over. */
 function packageRoot(from: string): string {
   for (let directory = from; ; directory = path.dirname(directory)) {
     const manifest = path.join(directory, "package.json");
-    if (existsSync(manifest) && JSON.parse(readFileSync(manifest, "utf8")).name === PACKAGE_NAME) {
-      return directory;
-    }
+    if (existsSync(manifest) && manifestName(manifest) === PACKAGE_NAME) return directory;
     if (path.dirname(directory) === directory) {
       throw new Error(`envoy: no ${PACKAGE_NAME} package.json above ${from}`);
     }
   }
 }
 
+function manifestName(manifest: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
+    return typeof parsed === "object" && parsed !== null && "name" in parsed
+      ? parsed.name
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Holds the `dispatch` shim the `shell.env` hook puts first on every shell command's PATH. */
 const PLUGIN_BIN = path.join(packageRoot(moduleDirectory), "bin");
 
-function toolSpec(name: string): ToolSpec {
+/** A spec by its name, typed so a misspelled name fails `tsc` rather than the plugin's load. */
+function toolSpec(name: (typeof envoyToolSpecs)[number]["name"]): ToolSpec {
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
   if (spec === undefined) throw new Error(`envoy tool contract has no ${name}`);
   return spec;
