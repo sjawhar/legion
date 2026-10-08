@@ -26,8 +26,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
   `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
   generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The client's strict
-  state parse needs this release beside a daemon at 15; the daemon's boot gate refuses any earlier
-  contract.
+  state parse needs a daemon at this release's contract (the `legion.daemonApiVersion` entry
+  above); the daemon's boot gate refuses any earlier contract.
 - Every phase worker stays live from its role's first assignment until its issue closes
   (LEGION-462): no move between phases suspends it, so a role that finished its phase still
   answers questions through Envoy, and its next assignment arrives in the same session. The worker

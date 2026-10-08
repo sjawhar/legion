@@ -38,8 +38,9 @@ Extends docs/solutions/daemon/plugin-daemon-api-contract-version-gate.md.
 ## Evidence
 
 sjawhar/legion#1846 made `capabilities` a required member of `LegionStateResponse`
-(`packages/contracts/src/legion-api.ts`) and bumped the contract to 15 with the plugin in the same
-commit, as the gate's rule says. Round 1's blocking review finding, outside the diff:
+(`packages/contracts/src/legion-api.ts`) and bumped the daemon API contract (`DaemonAPIVersion` in
+`packages/daemon/internal/api/version.go`) with the plugin in the same commit, as the gate's rule
+says. Round 1's blocking review finding, outside the diff:
 `packages/pi-legion/scripts/grant-rig/daemon-standin.ts` builds its `GET /legion/v1/state` document
 with a literal and parses it at module load (`LegionStateResponse.parse({...})`), so the grant rig
 (`scripts/grant-rig/README.md`) and the skill-scenario rig (`scripts/skill-scenarios/rig.sh`) threw

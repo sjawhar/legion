@@ -607,8 +607,7 @@ carries over (below), so the upgrade drains the deployment while it still runs t
      refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
      `internal/runtime/sandbox/probe.go`); and
    - for an operator-launched controller, every operator's `legion` and `pi-legion` at this
-     release's daemon API contract (`internal/api/version.go`: 15 for the shared issue pod, 16 once
-     the capability report lands beside it).
+     release's daemon API contract (`DaemonAPIVersion` in `internal/api/version.go`).
      `legion controller start` refuses a `pi-legion` speaking another contract (`probeAndMint` in
      `cmd/legion/controller.go`), and the daemon refuses a `legion` or `pi-legion` of another
      contract with 409 (`internal/api/controller.go`). That `pi-legion` release must be published
