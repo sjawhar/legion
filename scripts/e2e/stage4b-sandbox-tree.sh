@@ -1174,10 +1174,13 @@ delete_consumers() {
 }
 # remove_run_branches closes each pull request the run left open on the smoke repository and deletes
 # each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
-# stops before the proof human's merge would otherwise leave behind. It makes no gh call unless
-# require_proof_human passed: a refused run's gh acts as someone else.
+# stops before the proof human's merge would otherwise leave behind. Then it closes the cleanup pull
+# request done opened, and deletes its branch, when the run stopped between making the branch and the
+# merge (close_smoke_cleanup, lib/workflow.sh): every run's is proof/clean-main-legsmoke, so it acts
+# only on the one this run made, and a note names by URL any it could not close. It makes no gh call
+# unless require_proof_human passed: a refused run's gh acts as someone else.
 remove_run_branches() {
-  local issue number
+  local issue number out line
   [ -n "$proof_human" ] || return 0
   for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
@@ -1187,6 +1190,8 @@ remove_run_branches() {
     fi
     timeout 60 gh api -X DELETE "repos/$repo/git/refs/heads/legion/$issue" >/dev/null 2>&1 && note "deleted the run's branch legion/$issue from $repo"
   done
+  out=$(close_smoke_cleanup) || true
+  while IFS= read -r line; do [ -z "$line" ] || note "$line"; done <<<"$out"
   return 0
 }
 # collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: each
