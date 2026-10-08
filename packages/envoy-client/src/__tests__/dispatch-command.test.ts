@@ -109,6 +109,33 @@ describe("the dispatch command surface", () => {
     ).toMatchObject({ args: { priority: [0, null] } });
   });
 
+  test("an option label holding the separator survives commandLine then parseCommand", () => {
+    const args = {
+      issue: "LEGION-2",
+      question: "Q?",
+      options: [
+        { label: "b: with colon", description: "x" },
+        { label: "Plain", description: "costs: a day" },
+        { label: "c: no description" },
+      ],
+    };
+    const argv = shellWords(commandLine("dispatch_ask", args));
+    expect(parseCommand(argv.slice(1), noFiles)).toEqual({
+      kind: "call",
+      tool: "dispatch_ask",
+      args,
+      dryRun: false,
+    });
+    // Every label free of the separator keeps the readable flag.
+    expect(
+      commandLine("dispatch_ask", {
+        issue: "LEGION-2",
+        question: "Q?",
+        options: [{ label: "Ship", description: "a: b" }],
+      })
+    ).toContain("--option 'Ship: a: b'");
+  });
+
   test("an unknown flag and a missing value are refused together, naming the flags", () => {
     const parsed = parseCommand(["message", "--isue", "LEGION-2", "--body"], noFiles);
     expect(parsed.kind).toBe("refused");

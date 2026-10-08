@@ -100,9 +100,11 @@ specs: one command per spec, named by the spec's name without its `dispatch_` pr
 hyphens for underscores (`issue-update`), one flag per field
 (`reply_to_ask` → `--reply-to-ask`), `--<field>-file <path>` for every string (`-` reads stdin),
 `--no-<field>` for a boolean, `--clear-<field>` for a nullable field or a list, a repeated
-singular flag for a list (`--label a --label b`, `--option "Label: what it costs"`), and
-`--<field>-json` for any other object. `dispatch --help` lists the commands, `dispatch <command>
---help` its flags and an example, and `--dry-run` prints the arguments a command would send.
+singular flag for a list (`--label a --label b`, `--option "Label: what it costs"`, split at the
+first `: `; a label holding `: ` goes in `--options-json`, which the generated command line uses
+for such a list), and `--<field>-json` for any other object. `dispatch --help` lists the
+commands, `dispatch <command> --help` its flags and an example, and `--dry-run` prints the
+arguments a command would send.
 
 `runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
 `DISPATCH_HOST` (`omp`, `claude` or `opencode`) and the session's id (`CLAUDE_CODE_SESSION_ID`
@@ -112,15 +114,18 @@ directory's `title` file, names the session on what it writes. It resolves Dispa
 `activeDispatchConfig` does. stdout carries what the model reads: the result, one
 `- picture: <path>` line per image (written under the session directory), the follow notice the
 first time a call follows an ask, and every refusal. It exits 0 on success, 1 when Dispatch or the
-arguments refused the call, and 2 on a usage error. Under Claude Code a result over 25,000
-characters is cut there and the whole of it written to a file the output names.
+arguments refused the call, and 2 on a usage error, a corrupted `state.json` included. Under
+Claude Code the whole output stays under 25,000 characters: the result text is cut to fit, the
+full text written to a file the output names, and the picture lines and follow notice kept. When
+Dispatch took the call but the session's state (a picture, the ledger, the memory) could not be
+written, the result still prints, with one line saying so.
 
 `dispatch-session-state.ts` keeps one directory per session under `DISPATCH_STATE_DIR` (default
 `<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
 long-lived host remembered across calls (the triage lines and pictures already shown, the asks
 whose follow notice was printed), and `results.jsonl` gets one line per call with the tool's
-`details` or its refusal, which pi-envoy's run-end check reads. Directories idle for 14 days are
-removed, at most once a day.
+`details` or its refusal, which pi-envoy's run-end check reads; a line that is not JSON is named
+(file and line number) and skipped. Directories idle for 14 days are removed, at most once a day.
 
 `bun bin/stand-in-gateway.ts --status 502 --body html` serves one non-Dispatch answer (`html`,
 `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on `--port` (ephemeral by default) and

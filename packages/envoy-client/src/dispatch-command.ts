@@ -18,7 +18,9 @@ import { messageFor } from "./errors";
  * - nullable: `--clear-<field>` sends null;
  * - array of scalars: the singular flag, repeated (`--label a --label b`), and `--clear-<field>`
  *   sends an empty list; in an array of numbers that admits null, `none` is null;
- * - `options`: `--option "Label: description"`, repeated, split at the first ": ";
+ * - `options`: `--option "Label: description"`, repeated, split at the first ": "; and
+ *   `--options-json <json>` for a list whose labels hold ": " themselves, which `commandLine`
+ *   writes for such a list so every list round-trips;
  * - any other object or array: `--<field>-json <json>` and `--<field>-json-file <path>`.
  * Every command also takes `--help` and `--dry-run`.
  */
@@ -242,7 +244,13 @@ function flagTable(tool: string, fields: ReadonlyMap<string, FieldInfo>): Map<st
         field,
         action: "append",
         value: '"<label>: <description>"',
-        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label).`.trim(),
+        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label). A label that holds ": " goes in --${name}-json.`.trim(),
+      });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`,
       });
     } else if (kind === "json") {
       add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
@@ -472,23 +480,31 @@ function fieldWords(field: string, info: FieldInfo, value: unknown): string[] {
     return [value ? `--${name}` : `--no-${name}`];
   }
   if (kind === "json") return flagWithValue(`--${name}-json`, JSON.stringify(value));
-  if ((kind === "options" || typeof kind === "object") && Array.isArray(value)) {
+  if (kind === "options" && Array.isArray(value)) {
+    if (value.length === 0) return [`--clear-${name}`];
+    const texts = value.map(optionText);
+    // A label holding the separator cannot be written as `--option`, whose value splits at it.
+    if (texts.includes(undefined)) return flagWithValue(`--${name}-json`, JSON.stringify(value));
+    return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
+  }
+  if (typeof kind === "object" && Array.isArray(value)) {
     if (value.length === 0) return [`--clear-${name}`];
     const flag = `--${singular(name)}`;
-    return value.flatMap((item) => {
-      if (kind === "options") {
-        const option = item as { label?: unknown; description?: unknown };
-        const label = scalarText(option.label);
-        const text =
-          option.description === undefined
-            ? label
-            : `${label}${OPTION_SEPARATOR}${scalarText(option.description)}`;
-        return flagWithValue(flag, text);
-      }
-      return flagWithValue(flag, item === null ? "none" : scalarText(item));
-    });
+    return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
   }
   return flagWithValue(`--${name}`, scalarText(value));
+}
+
+/** An option as `--option` writes it, or undefined when its label holds the separator. */
+function optionText(option: unknown): string | undefined {
+  if (typeof option !== "object" || option === null || !("label" in option)) {
+    return scalarText(option);
+  }
+  const label = scalarText(option.label);
+  if (label.includes(OPTION_SEPARATOR)) return undefined;
+  return "description" in option && option.description !== undefined
+    ? `${label}${OPTION_SEPARATOR}${scalarText(option.description)}`
+    : label;
 }
 
 /** The command line that sends `args`: `dispatch <command> <flags>`, POSIX single-quoted. */
