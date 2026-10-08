@@ -900,9 +900,20 @@ left_planning() {
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
 
-# driver_action KIND UID: the driver itself ended a pod or role container on pod UID; the watch's
-# checker matches its UID, not an implementation-specific process incarnation.
-driver_action() { printf '%s %s %s\n' "$1" "$2" "$(date -u +%FT%T.%3NZ)" >>"$evidence/driver-actions.txt"; }
+# driver_action KIND UID [ROLE]: the driver itself ended something on pod UID. `kill-container UID
+# ROLE` ended one role container's launcher, which ends that role alone; `delete-pod UID` and
+# `close UID` ended the whole pod, every role in it. Each line is `KIND UID TIME`, then ROLE for a
+# kill. The watch's checker matches UID and, for a kill, ROLE (pod_watch_verdict), never a process
+# incarnation; any other form is refused here, before it is written.
+driver_action() {
+  local line
+  case "$1:${3-}" in
+    kill-container:?*) line="$1 $2 $(date -u +%FT%T.%3NZ) $3" ;;
+    delete-pod: | close:) line="$1 $2 $(date -u +%FT%T.%3NZ)" ;;
+    *) fail "driver_action: '$*' is not kill-container UID ROLE, delete-pod UID or close UID" ;;
+  esac
+  printf '%s\n' "$line" >>"$evidence/driver-actions.txt"
+}
 # claim_restarted_or_held ISSUE ROLE INCARNATION: the daemon held ISSUE, or ROLE now records another
 # process. A role-container restart stays in its issue pod, so a pod-UID comparison cannot prove it.
 claim_restarted_or_held() {
@@ -935,7 +946,7 @@ end_claim_process() {
         *) fail "the $role claim of $issue is $state at $ended_incarnation, not eligible for $method" ;;
       esac
       ended_restarts=$(op get pod "$ended_pod" -o json | jq -er --arg role "$ended_container" '.status.containerStatuses[] | select(.name == $role) | .restartCount')
-      driver_action kill-container "$ended_pod_uid"
+      driver_action kill-container "$ended_pod_uid" "$ended_container"
       # Killing PID 1 ends this launcher's process group. kubectl's exit says nothing either way;
       # the restart count below is the Kubernetes observation that the role-specific end landed.
       exec_out=$(op exec "$ended_pod" -c "$ended_container" -- sh -c 'kill 1' 2>&1) ||
@@ -965,7 +976,8 @@ pod_end_observed() {
     claim_moved_or_held "$1" "$2" "$3"
 }
 # relaunch_ends CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver ended:
-# when the driver's end (its kill or its delete), the relaunch's registration (the first
+# when the driver's end (its `kill-container` of CLAIM's role, or its `delete-pod`, on the relaunch's
+# pod between its launch and its death; driver_action), the relaunch's registration (the first
 # `api: claim registered` of CLAIM between its `supervise: launched` and its `supervise: process
 # died`) and its death fell, in seconds after its launch, and whether the daemon charged the death
 # as one with work outstanding
@@ -986,7 +998,10 @@ relaunch_ends() {
     def since($t): . - $t | . * 100 | round / 100 | tostring;
     ($log | split("\n") | map(fromjson? // empty | select(.claim == $c) | . + {t: (.time | secs)})) as $lines
     | ($lines | map(select(.msg == "supervise: launched") | .t)) as $launches
-    | ($actions | split("\n") | map(split(" ") | select(length == 3 and (.[0] == "kill" or .[0] == "delete")) | {key: .[1], value: .[2]}) | from_entries) as $ends_issued
+    | ($c | split("-") | last) as $role
+    | [$actions | split("\n")[] | split(" ")
+        | select((.[0] == "kill-container" and length == 4 and .[3] == $role) or (.[0] == "delete-pod" and length == 3))
+        | {uid: .[1], at: .[2], t: (.[2] | secs)}] as $ends_issued
     | [$ARGS.positional[] as $u
         | ($lines | map(select(.msg == "supervise: launched" and .incarnation == $u)) | first) as $launch
         | ($lines | map(select(.msg == "supervise: process died" and .incarnation == $u)) | first) as $death
@@ -996,7 +1011,7 @@ relaunch_ends() {
             | {u: $u, l: $l, d: $d,
                r: ($lines | map(select(.msg == "api: claim registered" and .t > $l and .t < $d) | .t) | first),
                charged: ($lines | any(.msg == "supervise: the agent died with work outstanding" and .t >= $d and .t < $next)),
-               ended: $ends_issued[$u]}
+               ended: ([$ends_issued[] | select(.uid == ($u | split("/")[0]) and .t >= $l and .t <= $d) | .at] | first)}
           end] as $ends
     | ($ends[] as $e | if $e.missing then "relaunch \($e.u[0:8]): the daemon log has no \($e.missing) of it"
         else "relaunch \($e.u[0:8]): end issued +\(if $e.ended == null then "(none recorded)" else ($e.ended | secs | since($e.l)) + " s" end), \(if $e.r == null then "never registered" else "registered +" + ($e.r | since($e.l)) + " s" end), died +\($e.d | since($e.l)) s, \(if $e.charged then "charged as a death with work outstanding" else "not charged (a launch failure)" end)" end),
@@ -1010,8 +1025,14 @@ relaunch_ends() {
   ' --args "$@"
 }
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
-# a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`,
-# naming the pod uid as the incarnation) that no driver action ended, and exits 1 when there is any.
+# a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`)
+# that no driver action ended, and exits 1 when there is any. The daemon names the dead process by
+# its claim, whose last word is its role, and its incarnation, `<pod uid>/<generation>`; the driver
+# records an action by pod uid (driver_action). A `kill-container` ended one role, so it accounts
+# for a death of that role, of any generation, in its pod and no other role's; a `delete-pod` or
+# `close` ended the whole pod, so it accounts for a death of any role in it. A record line in any
+# other form is named and accounts for nothing, so the verdict never judges against a record it
+# cannot read.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
 # resume that finds the tree volume lost dies by design (the runtime's detail begins "the tree volume
 # was lost: "), and
@@ -1024,7 +1045,11 @@ relaunch_ends() {
 pod_watch_verdict() {
   local watch=$1 actions=$2 log=$3
   jq -s -r --rawfile actions "$actions" --rawfile log "$log" --arg unscheduled "$(never_scheduled_deaths "$watch" "$log")" '
-    ($actions | split("\n") | map(select(. != "") | split(" ")[1])) as $driver
+    def readable: (.[0] == "kill-container" and length == 4) or ((.[0] == "delete-pod" or .[0] == "close") and length == 3);
+    ($actions | split("\n") | map(select(. != "") | split(" "))) as $lines
+    | [ $lines[] | select(readable | not)
+        | "driver action \(join(" ")) is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME" ] as $unreadable
+    | [ $lines[] | select(readable) | {kind: .[0], uid: .[1], role: .[3]} ] as $driver
     | ($unscheduled | split("\n") | map(select(. != ""))) as $retired
     | ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died"))) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
@@ -1037,31 +1062,47 @@ pod_watch_verdict() {
         | [ ($p.status.initContainerStatuses[]?, $p.status.containerStatuses[]?) | (.state.terminated, .lastState.terminated) | select(. != null) ] as $terms
         | select($podReason == "Evicted" or any($terms[]; .reason == "OOMKilled"))
         | "\($p.metadata.name) uid \($p.metadata.uid): \($podReason) \([$terms[] | "\(.reason) exit \(.exitCode)"] | join(", "))" ]
+      + $unreadable
       + [ $died[] | select((.detail // "") | startswith("the tree volume was lost: ") | not)
-          | .incarnation as $i | select(($driver | index($i)) == null and ($retired | index($i)) == null)
-          | "incarnation \($i) died with no driver action: observed \(.observed), \((.detail // "") | .[0:200])" ]
+          | .incarnation as $i | ($i | split("/")[0]) as $pod | ((.claim // "") | split("-") | last) as $role
+          | select(any($driver[]; .uid == $pod and (.kind != "kill-container" or .role == $role)) | not)
+          | select(($retired | index($i)) == null)
+          | "incarnation \($i) of \(.claim // "no claim") died with no driver action: observed \(.observed), \((.detail // "") | .[0:200])" ]
       | unique as $bad
     | if $hog then $bad[] else ("the memory hog was never seen OOMKilled", $bad[]) end
   ' "$watch" | tee "$work/pod-watch-verdict.txt"
   [ ! -s "$work/pod-watch-verdict.txt" ]
 }
 # never_scheduled_deaths WATCH DAEMONLOG prints, one a line, each incarnation the daemon found dead
-# (`supervise: process died`) whose pod the watch saw `PodScheduled=False` with reason
-# `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon retired at its
-# boot deadline because the scheduler never placed it. It reads the pod's own conditions, never the
-# daemon's detail text.
+# (`supervise: process died`) whose pod, the incarnation's pod uid, the watch saw `PodScheduled=False`
+# with reason `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon
+# retired at its boot deadline because the scheduler never placed it. It reads the pod's own
+# conditions, never the daemon's detail text.
 never_scheduled_deaths() {
   local watch=$1 log=$2
   jq -s -r --rawfile log "$log" '
     ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died") | .incarnation)) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
-    | $died[] | . as $i
-    | [ $pods[] | select(.metadata.uid == $i) ] as $seen
+    | $died[] | . as $i | ($i | split("/")[0]) as $uid
+    | [ $pods[] | select(.metadata.uid == $uid) ] as $seen
     | select(($seen | length) > 0
         and any($seen[]; any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))
         and (any($seen[]; (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True")) | not))
     | $i
   ' "$watch" | sort -u
+}
+# sibling_death_line ACTIONS prints a synthetic `supervise: process died` line, pod-watch-verdict's
+# control that a `kill-container` accounts only for the role it killed: the death of another role in
+# the pod of the record's last kill whose pod no `delete-pod` or `close` also ended. It prints nothing
+# when the record holds no such kill.
+sibling_death_line() {
+  jq -R -s -c 'split("\n") | map(select(. != "") | split(" ")) as $a
+    | [ $a[] | select(.[0] == "kill-container" and length == 4) | . as $k
+        | select(any($a[]; .[1] == $k[1] and (.[0] == "delete-pod" or .[0] == "close")) | not) ]
+    | last // empty
+    | (if .[3] == "architect" then "planner" else "architect" end) as $sibling
+    | {msg: "supervise: process died", claim: "legion-e2e-control-\($sibling)", incarnation: "\(.[1])/1",
+       observed: "gone", detail: "synthetic: the \($sibling) of the pod whose \(.[3]) the driver killed"}' "$1"
 }
 # watch_raw FILE KIND PATH writes every watch event of the API collection PATH (with its query) to
 # FILE, one JSON object a line, for the rest of the run. kubectl's own watch ends, silently, when the
@@ -1303,6 +1344,15 @@ pod_shape_verdict() {
   done < <(jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods' "$watch" |
     jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
 }
+# wrong_runtime_control WATCH prints the pod-shape checkpoint's negative-control line: the last event
+# of WATCH whose pod is a Sandbox pod with all six role launchers ready (stage4b-pods.jq's
+# ready_pod_event), its pod's runtimeClassName set to runc. The line stays a watch event, {kind,
+# object}, so pod_shape_verdict reads it as it reads every recorded pod; a bare pod object would be
+# dropped unread, and the control would pass on the real record alone.
+wrong_runtime_control() {
+  jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$1" | tail -1 |
+    jq -c '.object.spec.runtimeClassName = "runc"'
+}
 # stream_missing WATCH prints each Sandbox pod UID the run knows from another source that the watch
 # never recorded: a pod the shape watcher read, a pod the driver ended, and every pod in a daemon
 # process incarnation. A watch that went silent partway through the run fails here, naming what it
@@ -1468,10 +1518,13 @@ delete_consumers() {
 }
 # remove_run_branches closes each pull request the run left open on the smoke repository and deletes
 # each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
-# stops before the proof human's merge would otherwise leave behind. It makes no gh call unless
-# require_proof_human passed: a refused run's gh acts as someone else.
+# stops before the proof human's merge would otherwise leave behind. Then it closes the cleanup pull
+# request done opened, and deletes its branch, when the run stopped between making the branch and the
+# merge (close_smoke_cleanup, lib/workflow.sh): every run's is proof/clean-main-legsmoke, so it acts
+# only on the one this run made, and a note names by URL any it could not close. It makes no gh call
+# unless require_proof_human passed: a refused run's gh acts as someone else.
 remove_run_branches() {
-  local issue number
+  local issue number out line
   [ -n "$proof_human" ] || return 0
   for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
@@ -1481,6 +1534,8 @@ remove_run_branches() {
     fi
     timeout 60 gh api -X DELETE "repos/$repo/git/refs/heads/legion/$issue" >/dev/null 2>&1 && note "deleted the run's branch legion/$issue from $repo"
   done
+  out=$(close_smoke_cleanup) || true
+  while IFS= read -r line; do [ -z "$line" ] || note "$line"; done <<<"$out"
   return 0
 }
 # collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: each
@@ -3475,11 +3530,8 @@ jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
 note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
 # Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded.
-jq -c 'select(.object.kind == "Pod") | .object
-  | ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
-  | [.status.containerStatuses[]? | select(.name as $name | $roles | index($name))] as $status
-  | select(($status | map(.name) | sort) == ($roles | sort) and all($status[]; .ready))' "$evidence/pod-watch.json" | tail -1 |
-  jq -c '.spec.runtimeClassName = "runc"' >"$work/wrong-shape.json"
+wrong_runtime_control "$evidence/pod-watch.json" >"$work/wrong-shape.json"
+[ -s "$work/wrong-shape.json" ] || fail "the pod watch holds no ready Sandbox pod to build the wrong-runtime control from"
 cat "$evidence/pod-watch.json" "$work/wrong-shape.json" >"$evidence/controls/pod-watch-wrong-shape.json"
 expect_failure pod-shape-wrong-runtime test -z "$(pod_shape_verdict "$evidence/controls/pod-watch-wrong-shape.json")"
 cp "$evidence/driver-actions.txt" "$work/driver-actions.saved"
@@ -3511,14 +3563,21 @@ jq -c 'select(.object.kind == "Pod") | .object' "$evidence/pod-watch.json" | tai
   jq -c '{kind: "Pod", object: (.status.containerStatuses[0].state = {terminated: {reason: "OOMKilled", exitCode: 137}})}' >"$work/injected.json"
 cat "$evidence/pod-watch.json" "$work/injected.json" >"$evidence/controls/pod-watch-with-oom.json"
 expect_failure pod-watch-synthetic-oom pod_watch_verdict "$evidence/controls/pod-watch-with-oom.json" "$evidence/driver-actions.txt" "$daemon_log"
-{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-control", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-with-death.log"
+{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-control/1", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-with-death.log"
 expect_failure pod-watch-synthetic-death pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-with-death.log"
+# A kill-container accounts only for the role it killed: the death of another role in that pod is
+# named.
+sibling=$(sibling_death_line "$evidence/driver-actions.txt")
+[ -n "$sibling" ] || fail "the run recorded no kill-container of a pod it did not also delete or close, to build the sibling-death control from"
+{ cat "$daemon_log"; printf '%s\n' "$sibling"; } >"$evidence/controls/daemon-log-sibling-death.log"
+expect_failure pod-watch-sibling-death pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-sibling-death.log"
 # Controls for the unscheduled-retirement rule: a pod that was only ever Unschedulable and then died
-# is accounted for, and the same death is unexplained once its pod was scheduled.
+# is accounted for, and the same death is unexplained once its pod was scheduled. Each death names its
+# process as the daemon does, `<pod uid>/<generation>`.
 jq -cn '{kind: "Pod", object: {kind: "Pod", metadata: {name: "control-unscheduled", uid: "00000000-e2e4-unscheduled", labels: {}},
   spec: {}, status: {phase: "Pending", conditions: [{type: "PodScheduled", status: "False", reason: "Unschedulable"}]}}}' >"$work/unscheduled.json"
 cat "$evidence/pod-watch.json" "$work/unscheduled.json" >"$evidence/controls/pod-watch-unscheduled.json"
-{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-unscheduled", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-unscheduled-death.log"
+{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-unscheduled/1", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-unscheduled-death.log"
 pod_watch_verdict "$evidence/controls/pod-watch-unscheduled.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-unscheduled-death.log" ||
   fail "the verdict counted a pod retired unscheduled as an unexplained death: $(tr '\n' ';' <"$work/pod-watch-verdict.txt")"
 jq -c '.object.spec.nodeName = "control-node" | .object.status.conditions = [{type: "PodScheduled", status: "True"}]' "$work/unscheduled.json" >"$work/scheduled.json"

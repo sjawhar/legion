@@ -1,12 +1,14 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1054,27 +1056,8 @@ func editSecret(g *rig, name string, edit func(*corev1.Secret)) {
 func TestAFailedLauncherBindingReadNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
-	machine, store := supervisedSandboxMachine(t, g, spec)
-	g.launcher(spec.Claim)
-	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
-		t.Fatalf("initial Spawn: %v", err)
-	}
-	first := machine.Claim().Locator
-	if first == nil {
-		t.Fatal("initial Spawn left the Machine without a locator")
-	}
-	for _, event := range []supervise.Event{
-		supervise.StreamHello{Claim: spec.Claim, Generation: 1},
-		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: resumeSession},
-		supervise.RequestReady{Claim: spec.Claim, Generation: 1, Session: "ses-tester"},
-	} {
-		if err := machine.Handle(g.ctx, event); err != nil {
-			t.Fatalf("%T for generation 1: %v", event, err)
-		}
-	}
-	if got := machine.Claim().State; got != supervise.StateReady {
-		t.Fatalf("initial role state = %s, want ready", got)
-	}
+	machine, store, _ := supervisedSandboxMachine(t, g, spec)
+	first := startSupervisedSandboxRole(t, g, machine, spec, resumeSession)
 
 	secret := roleSecretName(first.Sandbox.Name, claim.RoleTester)
 	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
@@ -1104,17 +1087,359 @@ func TestAFailedLauncherBindingReadNeverLeavesASupervisedRoleChildRunning(t *tes
 	}
 }
 
+// A Resume whose next spec prepare rejects must stop the old role child too. Machine has already
+// let its locator go, so the malformed spec must not leave the child either watched or running as
+// the Machine retries to Failed. Each is a different prepare refusal that happens before relaunch
+// otherwise forgets the role: the recorded session path, a prompt file and one argv string.
+func TestAPrepareRefusalOnResumeNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sessionFile string
+		mutate      func(*runtime.SpawnSpec)
+		want        string
+	}{
+		"an invalid stored session path": {
+			sessionFile: "/sessions/not-under-the-pod.jsonl",
+			want:        "is not under",
+		},
+		"a missing prompt file": {
+			sessionFile: resumeSession,
+			mutate: func(spec *runtime.SpawnSpec) {
+				spec.Prompt.RolePromptPaths = []string{"/missing/role-prompt.md"}
+			},
+			want: "prompt file",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil)
+			spec := workerSpec(t)
+			machine, store, specs := supervisedSandboxMachine(t, g, spec)
+			first := startSupervisedSandboxRole(t, g, machine, spec, tc.sessionFile)
+			next := spec
+			if tc.mutate != nil {
+				tc.mutate(&next)
+			}
+			specs.next = &next
+			err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+				Locator: *first, Kind: runtime.StaleAddress, At: rigNow,
+			}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("StaleAddress = %v, want the prepare refusal %q", err, tc.want)
+			}
+			if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
+				t.Fatalf("claim after the persistent prepare refusal = %+v, want failed with three launch failures and no locator", got)
+			}
+			if recorded, found := g.r.recorded(spec.Claim); found {
+				t.Errorf("runtime still records %s after the failed claim", recorded.Incarnation)
+			}
+			state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+			if !connected || state.Child != nil {
+				t.Fatalf("the failed claim left launcher connected=%t child=%+v, want no child", connected, state.Child)
+			}
+			if stored := store.claim; stored.State != supervise.StateFailed || stored.Locator != nil {
+				t.Errorf("stored claim after failure = %+v, want failed with no locator", stored)
+			}
+		})
+	}
+}
+
+// An error while Machine asks its Specs for a later Resume is before Runtime.Resume and therefore
+// before relaunch's cleanup. Machine itself must stop the previous role process before it reports
+// the launch failure; otherwise the same cleared locator leaves that generation watched and running.
+func TestASpecBuilderRefusalOnResumeNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	machine, store, specs := supervisedSandboxMachine(t, g, spec)
+	first := startSupervisedSandboxRole(t, g, machine, spec, resumeSession)
+	specs.err = errors.New("the deployment instructions could not be read")
+	err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *first, Kind: runtime.StaleAddress, At: rigNow,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "build the launch") {
+		t.Fatalf("StaleAddress = %v, want the Spec-builder refusal", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
+		t.Fatalf("claim after the persistent Spec refusal = %+v, want failed with three launch failures and no locator", got)
+	}
+	if recorded, found := g.r.recorded(spec.Claim); found {
+		t.Errorf("runtime still records %s after the failed claim", recorded.Incarnation)
+	}
+	state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+	if !connected || state.Child != nil {
+		t.Fatalf("the failed claim left launcher connected=%t child=%+v, want no child", connected, state.Child)
+	}
+	if stored := store.claim; stored.State != supervise.StateFailed || stored.Locator != nil {
+		t.Errorf("stored claim after failure = %+v, want failed with no locator", stored)
+	}
+}
+
+// A claim that never registered is relaunched through Spawn, which hands the runtime no previous
+// locator. When that Spawn fails before its Start (here every read of the role's launcher Secret
+// fails), the Machine must stop the generation it let go, since the runtime cannot know it: retried
+// to Failed, no child of the role is left running and nothing is watched.
+func TestASpawnRefusalForAnUnregisteredClaimNeverLeavesItsChildRunning(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	machine, store, _ := supervisedSandboxMachine(t, g, spec)
+	g.launcher(spec.Claim)
+	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
+		t.Fatalf("initial Spawn: %v", err)
+	}
+	first := machine.Claim().Locator
+	if first == nil {
+		t.Fatal("initial Spawn left the Machine without a locator")
+	}
+	if err := machine.Handle(g.ctx, supervise.StreamHello{Claim: spec.Claim, Generation: 1}); err != nil {
+		t.Fatalf("hello for generation 1: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateShimConnected {
+		t.Fatalf("role state = %s, want shim_connected and unregistered", got)
+	}
+	secret := roleSecretName(first.Sandbox.Name, claim.RoleTester)
+	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() == secret {
+			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+		}
+		return false, nil, nil
+	})
+	err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *first, Kind: runtime.StaleAddress, At: rigNow,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "read its pod's launcher bindings") {
+		t.Fatalf("StaleAddress = %v, want the binding-read failure", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
+		t.Fatalf("claim after the persistent Spawn refusal = %+v, want failed with three launch failures and no locator", got)
+	}
+	if recorded, found := g.r.recorded(spec.Claim); found {
+		t.Errorf("runtime still records %s after the failed claim", recorded.Incarnation)
+	}
+	state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+	if !connected || state.Child != nil {
+		t.Fatalf("the failed claim left launcher connected=%t child=%+v, want no child", connected, state.Child)
+	}
+	if stored := store.claim; stored.State != supervise.StateFailed || stored.Locator != nil {
+		t.Errorf("stored claim after failure = %+v, want failed with no locator", stored)
+	}
+}
+
+// startSupervisedSandboxRole walks a real Sandbox runtime's role through the Machine to Ready at
+// generation 1, returning the recorded locator a later Resume must stop on error.
+func startSupervisedSandboxRole(
+	t *testing.T, g *rig, machine *supervise.Machine, spec runtime.SpawnSpec, sessionFile string,
+) *runtime.Locator {
+	t.Helper()
+
+	g.launcher(spec.Claim)
+	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
+		t.Fatalf("initial Spawn: %v", err)
+	}
+	first := machine.Claim().Locator
+	if first == nil {
+		t.Fatal("initial Spawn left the Machine without a locator")
+	}
+	for _, event := range []supervise.Event{
+		supervise.StreamHello{Claim: spec.Claim, Generation: 1},
+		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile},
+		supervise.RequestReady{Claim: spec.Claim, Generation: 1, Session: "ses-tester"},
+	} {
+		if err := machine.Handle(g.ctx, event); err != nil {
+			t.Fatalf("%T for generation 1: %v", event, err)
+		}
+	}
+	if got := machine.Claim().State; got != supervise.StateReady {
+		t.Fatalf("initial role state = %s, want ready", got)
+	}
+	return first
+}
+
+// A launcher can receive a Start while its answer is delayed past the runtime's start deadline.
+// That start may have begun the new generation even though start returns an error, so relaunch,
+// which owns the child it started, sends a Stop for the issued generation before returning. This
+// holds both where Resume has no previous locator and where its previous locator names the same
+// pod: the Stop names the issued generation, never the previous one, which is the caller's.
+func TestAStartWhoseAnswerIsDelayedPastItsDeadlineIsStoppedBeforeResumeReturns(t *testing.T) {
+	for name, previous := range map[string]bool{
+		"without a previous locator":              false,
+		"on the same pod as its previous locator": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil, withOptions(func(o *Options) {
+				o.BootTimeout, o.TerminationGrace = time.Second, 50*time.Millisecond
+			}))
+			spec := workerSpec(t)
+			first := g.spawn(spec)
+			delayed := g.scriptedStartLauncher(spec.Claim, 1, func(shimwire.LauncherStart) *shimwire.LauncherStartResult { return nil })
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
+			var prev *runtime.Locator
+			if previous {
+				prev = &first
+			}
+			if _, err := g.r.Resume(g.ctx, prev, spec); err == nil || !strings.Contains(err.Error(), "start through its authenticated launcher") {
+				t.Fatalf("Resume = %v, want the delayed Start's deadline", err)
+			}
+			if start := delayed.start(t, 2); start.Generation != 2 {
+				t.Fatalf("Start = generation %d, want generation 2", start.Generation)
+			}
+			if stop := delayed.stop(t, 2); stop.Generation != 2 {
+				t.Fatalf("Stop = generation %d, want the Start's generation 2", stop.Generation)
+			}
+			if recorded, found := g.r.recorded(spec.Claim); found {
+				t.Errorf("runtime still records %s after the failed Resume", recorded.Incarnation)
+			}
+			// The launcher reports generation 2's exit in the state frame it writes after its Stop
+			// result, which the runtime reads asynchronously; wait for it, then hold it exactly.
+			g.eventually("the launcher to report generation 2 ended", func() bool {
+				state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+				return connected && state.LastExit != nil && state.LastExit.Generation == 2
+			})
+			state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+			if !connected || state.Child != nil || state.LastExit == nil || state.LastExit.Generation != 2 {
+				t.Fatalf("launcher after the delayed Start = connected=%t state=%+v, want generation 2 ended", connected, state)
+			}
+		})
+	}
+}
+
+// A launcher that answers a Start OK but names another generation than the Start's has said it
+// started something, and not what it was asked. That is no refusal, the one start error after which
+// nothing can be running, so relaunch reads the Start's outcome as unknown and stops the issued
+// generation, as for an unanswered Start: the launcher here did begin it.
+func TestAnOKStartAnswerNamingAnotherGenerationIsStoppedNotTakenAsARefusal(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	first := g.spawn(spec)
+	misanswering := g.scriptedStartLauncher(spec.Claim, 1, func(start shimwire.LauncherStart) *shimwire.LauncherStartResult {
+		return &shimwire.LauncherStartResult{ID: start.ID, OK: true, RunningGeneration: start.Generation - 1}
+	})
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
+	_, err := g.r.Resume(g.ctx, &first, spec)
+	if start := misanswering.start(t, 2); start.Generation != 2 {
+		t.Fatalf("Start = generation %d, want generation 2", start.Generation)
+	}
+	if stop := misanswering.stop(t, 2); stop.Generation != 2 {
+		t.Fatalf("Stop = generation %d, want the Start's generation 2", stop.Generation)
+	}
+	var refused startRefusal
+	if err == nil || errors.As(err, &refused) || !strings.Contains(err.Error(), "answered OK naming generation 1") {
+		t.Fatalf("Resume = %v, want the mismatched answer as an unknown outcome, not a refusal", err)
+	}
+	if recorded, found := g.r.recorded(spec.Claim); found {
+		t.Errorf("runtime still records %s after the failed Resume", recorded.Incarnation)
+	}
+	g.eventually("the launcher to report generation 2 ended", func() bool {
+		state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID)
+		return connected && state.LastExit != nil && state.LastExit.Generation == 2
+	})
+	if state, connected := g.r.launchers.state(spec.Claim, first.Sandbox.PodUID); !connected || state.Child != nil {
+		t.Fatalf("launcher after the mismatched answer = connected=%t state=%+v, want no child", connected, state)
+	}
+}
+
+// scriptedStartLauncher is a launcher that starts its child at each Start it receives and answers it
+// as answer says: nil withholds the Start result and state until the runtime's cleanup sends Stop.
+// The Stop runs after the Start on the same connection, so the child it reports ended is exactly
+// the Start's generation.
+type scriptedStartLauncher struct {
+	starts chan shimwire.LauncherStart
+	stops  chan shimwire.LauncherStop
+}
+
+func (g *rig) scriptedStartLauncher(
+	token claim.Token, running uint64, answer func(shimwire.LauncherStart) *shimwire.LauncherStartResult,
+) *scriptedStartLauncher {
+	g.t.Helper()
+	g.r.launchers.mu.Lock()
+	old := g.r.launchers.sessions[token]
+	g.r.launchers.mu.Unlock()
+	if old != nil {
+		old.close()
+	}
+	server, client := net.Pipe()
+	pod := g.pod(SandboxName(token))
+	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "scripted-" + string(token), PodUID: string(pod.UID)})
+	g.t.Cleanup(func() { _ = client.Close() })
+	scripted := &scriptedStartLauncher{
+		starts: make(chan shimwire.LauncherStart, 2),
+		stops:  make(chan shimwire.LauncherStop, 4),
+	}
+	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
+	go func() {
+		writer := shimwire.NewWriter(client)
+		_ = writer.WriteFrame(shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: running, PID: 42}})
+		reader := shimwire.NewReader(bufio.NewReader(client))
+		for {
+			line, err := reader.ReadLine()
+			if err != nil {
+				return
+			}
+			frame, err := shimwire.Decode(line)
+			if err != nil {
+				return
+			}
+			switch command := frame.(type) {
+			case shimwire.LauncherStart:
+				running = command.Generation
+				scripted.starts <- command
+				if result := answer(command); result != nil {
+					_ = writer.WriteFrame(*result)
+				}
+			case shimwire.LauncherStop:
+				scripted.stops <- command
+				if running != command.Generation {
+					_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("generation %d is running, not %d", running, command.Generation)})
+					continue
+				}
+				running = 0
+				_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, OK: true})
+				_ = writer.WriteFrame(shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: command.Generation, Code: 143, Signal: "terminated"}})
+			}
+		}
+	}()
+	return scripted
+}
+
+func (d *scriptedStartLauncher) start(t *testing.T, generation uint64) shimwire.LauncherStart {
+	t.Helper()
+	for {
+		select {
+		case command := <-d.starts:
+			if command.Generation == generation {
+				return command
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("no generation-%d Start", generation)
+		}
+	}
+}
+
+func (d *scriptedStartLauncher) stop(t *testing.T, generation uint64) shimwire.LauncherStop {
+	t.Helper()
+	for {
+		select {
+		case command := <-d.stops:
+			if command.Generation == generation {
+				return command
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("no generation-%d Stop", generation)
+		}
+	}
+}
+
 // supervisedSandboxMachine is a Machine over the rig's real Sandbox runtime, rather than the
 // runtime fake most Machine tests use. Its in-memory Store and no-timer Clock are enough for this
 // lifecycle: no task is sent and no deadline fires while the test drives the Machine directly.
-func supervisedSandboxMachine(t *testing.T, g *rig, spec runtime.SpawnSpec) (*supervise.Machine, *supervisedSandboxStore) {
+func supervisedSandboxMachine(
+	t *testing.T, g *rig, spec runtime.SpawnSpec,
+) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
 	t.Helper()
 	c := supervise.Claim{
 		Token: spec.Claim, Project: spec.Project, Tree: spec.Tree, Issue: spec.Issue, Role: spec.Role, State: supervise.StateQueued,
 	}
 	store := &supervisedSandboxStore{claim: c}
+	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
-		Runtime: g.r, Conns: g.conns, Store: store, Specs: sandboxMachineSpecs{spec: spec}, Clock: sandboxMachineClock{},
+		Runtime: g.r, Conns: g.conns, Store: store, Specs: specs, Clock: sandboxMachineClock{},
 		Log:    slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
 		Timeouts: supervise.Timeouts{
@@ -1124,12 +1449,22 @@ func supervisedSandboxMachine(t *testing.T, g *rig, spec runtime.SpawnSpec) (*su
 	if err != nil {
 		t.Fatalf("new Machine: %v", err)
 	}
-	return machine, store
+	return machine, store, specs
 }
 
-type sandboxMachineSpecs struct{ spec runtime.SpawnSpec }
+type sandboxMachineSpecs struct {
+	spec runtime.SpawnSpec
+	next *runtime.SpawnSpec
+	err  error
+}
 
-func (s sandboxMachineSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
+func (s *sandboxMachineSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
+	if s.err != nil {
+		return runtime.SpawnSpec{}, s.err
+	}
+	if s.next != nil {
+		return *s.next, nil
+	}
 	return s.spec, nil
 }
 
