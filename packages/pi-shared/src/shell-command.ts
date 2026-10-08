@@ -28,8 +28,9 @@ export function isSingleLegionCommand(command: unknown): boolean {
 }
 
 /** The one here-document a command's first line may end with, opened with a quoted delimiter so
- * the shell expands nothing in its body. */
-const HEREDOC_OPENING = /^(.*?)\s*<<-?\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*$/;
+ * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
+ * which bash strips leading tabs from the delimiter line. */
+const HEREDOC_OPENING = /^(.*?)\s*<<(-?)\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*$/;
 
 /** Outside quotes, a `dispatch` head refuses whatever would end the command, start another, expand
  * something, redirect, start a comment (bash reads the rest of the line as one, a here-document
@@ -58,9 +59,10 @@ function architectCommandHead(command: unknown): string | undefined {
   if (lines.length > 1) {
     const opening = HEREDOC_OPENING.exec(head);
     if (opening === null) return undefined;
-    const delimiter = opening[2];
+    const stripTabs = opening[2] === "-";
+    const delimiter = opening[3];
     const end = lines.findIndex(
-      (line, index) => index > 0 && line.replace(/^\t+/, "") === delimiter
+      (line, index) => index > 0 && (stripTabs ? line.replace(/^\t+/, "") : line) === delimiter
     );
     // The first line equal to the delimiter ends the here-document in the shell, so it must be
     // the last line: anything after it would run as a command.
