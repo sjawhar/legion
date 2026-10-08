@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runDispatchCli } from "../dispatch-cli";
+import { fitClaudeOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
@@ -276,12 +276,32 @@ describe("the dispatch CLI", () => {
     expect(claude.code).toBe(0);
     // print() ends the output with one newline.
     expect(claude.stdout.length).toBeLessThanOrEqual(limit + 1);
-    expect(claude.stdout).toContain("\n- picture: ");
+    const pictureLine = /\n(- picture: [^\n]*)/.exec(claude.stdout)?.[1];
+    expect(pictureLine).toBeDefined();
+    // The file holds the whole result, its picture lines included.
     const marker = /\(the full result, (\d+) characters: (\S+)\)/.exec(claude.stdout);
-    expect(marker?.[1]).toBe(String(text.length));
-    expect(readFileSync(marker?.[2] ?? "", "utf-8")).toBe(text);
+    const written = `${text}\n${pictureLine}`;
+    expect(marker?.[1]).toBe(String(written.length));
+    expect(readFileSync(marker?.[2] ?? "", "utf-8")).toBe(written);
   });
 
+  test("a state write that fails after a cut result still leaves Claude Code's output under the limit", async () => {
+    const limit = 25_000;
+    const read = ["read", "--message", LONG_THREAD];
+    replyLength = limit;
+    const dir = join(stateDir, "sessions", "ses-long-4");
+    mkdirSync(dir, { recursive: true });
+    // The ledger cannot be written, so the CLI adds its own diagnostic line after the result.
+    mkdirSync(join(dir, "results.jsonl"));
+    const claude = await run(read, {
+      DISPATCH_HOST: "claude",
+      CLAUDE_CODE_SESSION_ID: "ses-long-4",
+    });
+    expect(claude.code).toBe(0);
+    expect(claude.stdout).toContain("dispatch: Dispatch took the call, but this session's state");
+    expect(claude.stdout).toContain("(the full result, ");
+    expect(claude.stdout.length).toBeLessThanOrEqual(limit + 1);
+  });
   test("a corrupted state.json is refused with exit 2, naming the file, and sends nothing", async () => {
     const dir = join(stateDir, "sessions", "ses-1");
     mkdirSync(dir, { recursive: true });
@@ -314,5 +334,46 @@ describe("the dispatch CLI", () => {
     expect(stdout).toContain("Picture shot.png");
     expect(stdout).not.toContain("- picture: ");
     expect(stdout).toContain("dispatch: Dispatch took the call, but this session's state");
+  });
+});
+
+describe("fitClaudeOutput", () => {
+  const write = (text: string): string => `/state/out/${text.length}.md`;
+
+  test("leaves an output under the limit as it is", () => {
+    expect(fitClaudeOutput("text", ["- picture: a"], ["note"], 100, write)).toBe(
+      "text\n- picture: a\nnote"
+    );
+  });
+
+  test("cuts the result text first, keeping every line after it and naming the full result", () => {
+    const out = fitClaudeOutput(
+      "x".repeat(200),
+      ["- picture: a"],
+      ["follow notice", "note"],
+      120,
+      write
+    );
+    expect(out.length).toBeLessThanOrEqual(120);
+    expect(out).toContain("(the full result, 213 characters: /state/out/213.md)");
+    expect(out).toEndWith("\n- picture: a\nfollow notice\nnote");
+  });
+
+  test("when the picture lines and notice alone pass the limit, drops picture lines and names them", () => {
+    const pictures = Array.from(
+      { length: 10 },
+      (_, index) => `- picture: /p/${index} (${"y".repeat(30)})`
+    );
+    const out = fitClaudeOutput("x".repeat(50), pictures, ["follow notice", "note"], 200, write);
+    expect(out.length).toBeLessThanOrEqual(200);
+    expect(out).toEndWith("\nfollow notice\nnote");
+    expect(out).toMatch(/\n\(\d+ more picture lines? left out: see the full result\)\n/);
+    expect(out).toContain("(the full result, ");
+  });
+
+  test("when the kept lines alone pass the limit, the output is cut to it and names the file first", () => {
+    const out = fitClaudeOutput("x".repeat(50), ["- picture: a"], ["n".repeat(500)], 200, write);
+    expect(out.length).toBe(200);
+    expect(out).toStartWith("(the full result, 63 characters: /state/out/63.md)");
   });
 });

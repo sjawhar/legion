@@ -33,13 +33,51 @@ const USAGE = 2;
 const HOSTS: Record<string, DispatchHost> = { omp: "omp", claude: "claude", opencode: "opencode" };
 
 /** Claude Code reads back at most 30,000 characters of a command's output by default
- *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare: past it,
- *  the result text is shortened and the full text is written to a file the agent opens, while the
- *  picture lines and the follow notice after it are kept whole. */
+ *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare, every line
+ *  the CLI adds counted (`fitClaudeOutput`). */
 const CLAUDE_OUTPUT_MAX = 25_000;
 
 /** What the CLI prints when the call reached Dispatch but its local record could not be written. */
 const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
+
+function stateWriteFailed(problem: string): string {
+  return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
+}
+
+/**
+ * The output, as lines, at most `limit` characters. Within the limit it is the result text, the
+ * picture lines, then the `kept` lines (the follow notice and the CLI's own notes) as given. Past
+ * it, the text and every picture line are written whole through `writeFull`, and the output names
+ * that file: the result text is cut first, then picture lines are dropped from the end with a line
+ * saying how many, while the kept lines stay whole. Only when the kept lines alone pass the limit
+ * is the whole output, naming the file first, cut to it.
+ */
+export function fitClaudeOutput(
+  text: string,
+  pictures: readonly string[],
+  kept: readonly string[],
+  limit: number,
+  writeFull: (full: string) => string
+): string {
+  const whole = [text, ...pictures, ...kept].join("\n");
+  if (whole.length <= limit) return whole;
+  const full = [text, ...pictures].join("\n");
+  const marker = `(the full result, ${full.length} characters: ${writeFull(full)})`;
+  const tail = (shown: number): string => {
+    const left = pictures.length - shown;
+    const dropped =
+      left === 0
+        ? []
+        : [`(${left} more picture line${left === 1 ? "" : "s"} left out: see the full result)`];
+    return [marker, ...pictures.slice(0, shown), ...dropped, ...kept].join("\n");
+  };
+  let shown = pictures.length;
+  // The text needs at least the newline before the marker.
+  while (shown > 0 && tail(shown).length + 1 > limit) shown -= 1;
+  const after = tail(shown);
+  const room = limit - after.length - 1;
+  return room >= 0 ? `${text.slice(0, room)}\n${after}` : after.slice(0, limit);
+}
 
 /**
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
@@ -133,7 +171,10 @@ export async function runDispatchCli(
     return USAGE;
   }
   const { tool, args } = parsed;
-  let lines: string[];
+  let text: string;
+  const pictures: string[] = [];
+  const notes: string[] = [];
+  const problems: string[] = [];
   let entry: { tool: string; details?: unknown; error?: string };
   let code: number;
   try {
@@ -148,49 +189,44 @@ export async function runDispatchCli(
       env,
       ...(io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }),
     });
-    const after: string[] = [];
-    let stateProblem: string | undefined;
+    text = result.text;
     try {
       for (const image of result.images ?? []) {
         const picture = writePicture(dir, image);
-        after.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
+        pictures.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
       }
     } catch (error) {
-      stateProblem = messageFor(error);
+      problems.push(messageFor(error));
     }
     const notice = dispatchFollowNotice(result.details);
     if (notice !== null && !follows.has(notice.ask)) {
       follows.add(notice.ask);
-      after.push(notice.text);
-    }
-    let text = result.text;
-    const tail = after.map((line) => `\n${line}`).join("");
-    if (host === "claude" && text.length + tail.length > CLAUDE_OUTPUT_MAX) {
-      try {
-        const path = writeLongOutput(dir, text);
-        const marker = `\n(the full result, ${text.length} characters: ${path})`;
-        text = `${text.slice(0, Math.max(0, CLAUDE_OUTPUT_MAX - tail.length - marker.length))}${marker}`;
-      } catch (error) {
-        stateProblem ??= messageFor(error);
-      }
-    }
-    lines = [`${text}${tail}`];
-    if (stateProblem !== undefined) {
-      lines.push(`${STATE_WRITE_FAILED} could not be written: ${stateProblem}`);
+      notes.push(notice.text);
     }
     entry = { tool, details: result.details };
     code = OK;
   } catch (error) {
-    const message = messageFor(error);
-    lines = [message];
-    entry = { tool, error: message };
+    text = messageFor(error);
+    entry = { tool, error: text };
     code = REFUSED;
   }
   try {
     recordOutcome(dir, sessionId, follows, entry);
   } catch (error) {
-    lines.push(`${STATE_WRITE_FAILED} could not be written: ${messageFor(error)}`);
+    problems.push(messageFor(error));
   }
-  print(lines.join("\n"));
+  const kept = [...notes, ...problems.map(stateWriteFailed)];
+  const writeFull = (full: string): string => {
+    try {
+      return writeLongOutput(dir, full);
+    } catch (error) {
+      return `not written, ${messageFor(error)}`;
+    }
+  };
+  print(
+    host === "claude"
+      ? fitClaudeOutput(text, pictures, kept, CLAUDE_OUTPUT_MAX, writeFull)
+      : [text, ...pictures, ...kept].join("\n")
+  );
   return code;
 }
