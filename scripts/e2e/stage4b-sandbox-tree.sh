@@ -1303,6 +1303,15 @@ pod_shape_verdict() {
   done < <(jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods' "$watch" |
     jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
 }
+# wrong_runtime_control WATCH prints the pod-shape checkpoint's negative-control line: the last event
+# of WATCH whose pod is a Sandbox pod with all six role launchers ready (stage4b-pods.jq's
+# ready_pod_event), its pod's runtimeClassName set to runc. The line stays a watch event, {kind,
+# object}, so pod_shape_verdict reads it as it reads every recorded pod; a bare pod object would be
+# dropped unread, and the control would pass on the real record alone.
+wrong_runtime_control() {
+  jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$1" | tail -1 |
+    jq -c '.object.spec.runtimeClassName = "runc"'
+}
 # stream_missing WATCH prints each Sandbox pod UID the run knows from another source that the watch
 # never recorded: a pod the shape watcher read, a pod the driver ended, and every pod in a daemon
 # process incarnation. A watch that went silent partway through the run fails here, naming what it
@@ -3474,11 +3483,8 @@ jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
 note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
 # Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded.
-jq -c 'select(.object.kind == "Pod") | .object
-  | ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
-  | [.status.containerStatuses[]? | select(.name as $name | $roles | index($name))] as $status
-  | select(($status | map(.name) | sort) == ($roles | sort) and all($status[]; .ready))' "$evidence/pod-watch.json" | tail -1 |
-  jq -c '.spec.runtimeClassName = "runc"' >"$work/wrong-shape.json"
+wrong_runtime_control "$evidence/pod-watch.json" >"$work/wrong-shape.json"
+[ -s "$work/wrong-shape.json" ] || fail "the pod watch holds no ready Sandbox pod to build the wrong-runtime control from"
 cat "$evidence/pod-watch.json" "$work/wrong-shape.json" >"$evidence/controls/pod-watch-wrong-shape.json"
 expect_failure pod-shape-wrong-runtime test -z "$(pod_shape_verdict "$evidence/controls/pod-watch-wrong-shape.json")"
 cp "$evidence/driver-actions.txt" "$work/driver-actions.saved"
