@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/reviewthreads"
@@ -30,11 +31,13 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 // runResolveThreads is `legion threads resolve`: as the App of the role running it, or with --gh
 // as whoever the caller's own gh authenticates as, it resolves every unresolved review thread the
-// rule (reviewthreads.Resolution) closes and names every other one as left open. --gh is for a
-// session outside a Legion pane, which has no grant: it applies the same rule through the session's
-// own gh (ghGraphQL), from any directory, and knows none of Legion's role Apps, so no thread counts
-// as a bot's. Inside a pane --gh is refused before anything runs: the pane's gh is `legion gh`,
-// which refuses a GraphQL body it cannot read, and the pane has its grant. In the reviewer's pane
+// rule (reviewthreads.Resolution) closes and names every other one as left open. The role's App
+// token is the one its gh files hold (roleGitHubToken), and Legion's two App logins, which decide
+// whose thread counts as a bot's, are the ones the daemon names on the pane (roleApps). --gh is for
+// a session outside a Legion pane, which has no role's gh files: it applies the same rule through
+// the session's own gh (ghGraphQL), from any directory, and knows none of Legion's role Apps, so no
+// thread counts as a bot's. Inside a pane --gh is refused before anything runs: a pane names its
+// grant (LEGION_GRANT_FILE), so it is a role, and a role resolves as its App. In the reviewer's pane
 // it asks the daemon instead (resolveThroughDaemon): GitHub lets only the pull request's author's
 // App resolve its threads, and the reviewer acts as the review App.
 func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -71,33 +74,54 @@ func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Wri
 	case legionclaim.Role(os.Getenv("LEGION_ROLE")) == legionclaim.RoleReviewer:
 		return resolveThroughDaemon(ctx, repository, number, stdout, stderr)
 	default:
-		response, err := redeemGrant(ctx, "/legion/v1/gh-token")
+		token, err := roleGitHubToken()
 		if err != nil {
 			hint := ""
-			if errors.Is(err, errNoGrant) {
-				hint = "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
+			if errors.Is(err, errNoGhConfigDir) {
+				hint = "; a session outside a Legion pane adds --gh"
 			}
-			fmt.Fprintf(stderr, "legion threads resolve: Unable to redeem LEGION_GRANT: %v%s\n", err, hint)
+			fmt.Fprintf(stderr, "legion threads resolve: %v%s\n", err, hint)
 			return 1
 		}
-		defer response.Body.Close()
-		var credential githubTokenResponse
-		if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
-			fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
+		if apps, err = roleApps(); err != nil {
+			fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 			return 1
 		}
-		apps, err = reviewthreads.AppsFrom(credential.LegionAppLogins)
-		if err != nil {
-			fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response: %v\n", err)
-			return 1
-		}
-		call = reviewthreads.TokenGraphQL(os.Getenv("LEGION_GITHUB_GRAPHQL_URL"), credential.Token)
+		call = reviewthreads.TokenGraphQL(os.Getenv("LEGION_GITHUB_GRAPHQL_URL"), token)
 	}
 	// The rule is the daemon's too (reviewthreads); threads_test.go pins it end to end.
 	outcomes, err := reviewthreads.Resolve(ctx, call, repository, number, func(thread reviewthreads.Thread) (reviewthreads.Acceptance, string) {
 		return reviewthreads.Resolution(thread, apps)
 	})
 	return printOutcomes(outcomes, 0, err, stdout, stderr)
+}
+
+// appLoginVariables is the variable a tree agent reads each Legion App's bot login from, the two
+// the daemon sets beside the role's git identity (internal/daemon's appLoginEnv).
+var appLoginVariables = map[appauth.AppRole]string{
+	appauth.Implement: "LEGION_IMPLEMENT_APP_LOGIN",
+	appauth.Review:    "LEGION_REVIEW_APP_LOGIN",
+}
+
+// roleApps is Legion's role Apps for the bot-thread rule, from the two logins the daemon names on
+// the pane (appLoginVariables): nil, so that no thread counts as a bot's, when either is unset or
+// blank, as a daemon with no Apps sets neither and the daemon's own rule then knows none. A login
+// that is not an App's is refused naming both variables, since the rule would otherwise spare the
+// wrong account.
+func roleApps() (*reviewthreads.Apps, error) {
+	logins := make(map[appauth.AppRole]string, len(appLoginVariables))
+	for role, variable := range appLoginVariables {
+		login := strings.TrimSpace(os.Getenv(variable))
+		if login == "" {
+			return nil, nil
+		}
+		logins[role] = login
+	}
+	apps, err := reviewthreads.AppsFrom(logins)
+	if err != nil {
+		return nil, fmt.Errorf("%s=%q and %s=%q: %w", appLoginVariables[appauth.Implement], logins[appauth.Implement], appLoginVariables[appauth.Review], logins[appauth.Review], err)
+	}
+	return apps, nil
 }
 
 // resolveThroughDaemon is `legion threads resolve` in the reviewer's pane: the daemon resolves, as
@@ -161,7 +185,7 @@ func printOutcomes(outcomes []reviewthreads.Outcome, withheld int, err error, st
 }
 
 // ghGraphQL calls GitHub through the caller's own gh (`gh api graphql --input -`), for a session
-// outside a Legion pane, which has no grant to redeem. gh gets the caller's environment, which
+// outside a Legion pane, which has no role's gh files. gh gets the caller's environment, which
 // decides whose credential it uses, with GH_REPO set to the repository, so a gh that picks its
 // credential by repository (the devbox shim routes to that owner's App) authenticates for it from
 // any directory. A failed gh fails with gh's own message; a successful one has its stderr copied to

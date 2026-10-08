@@ -50,7 +50,7 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			t.Setenv("LEGION_ROLE", "merger")
-			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			fakeHandoffJJ(t, "beef")
 			bodies := handoffDaemon(t, phase.Merging)
 			readyGitHub(t, tc.checkRun, tc.status, tc.mergeableState)
 			var out, errb bytes.Buffer
@@ -134,7 +134,7 @@ func TestHandoffCompleteReadyJudgesARequiredWorkflowByItsRunOnTheHead(t *testing
 			t.Cleanup(server.Close)
 			workspace := t.TempDir()
 			t.Setenv("LEGION_ROLE", "merger")
-			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			fakeHandoffJJ(t, "beef")
 			bodies := handoffDaemon(t, phase.Merging)
 			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
 			var out, errb bytes.Buffer
@@ -197,7 +197,7 @@ func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
 			t.Cleanup(server.Close)
 			workspace := t.TempDir()
 			t.Setenv("LEGION_ROLE", "merger")
-			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			fakeHandoffJJ(t, "beef")
 			bodies := handoffDaemon(t, phase.Merging)
 			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
 			var out, errb bytes.Buffer
@@ -226,7 +226,7 @@ func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
 func TestHandoffCompleteReadyKeepsTheNewestCheckRunWhenGitHubListsAnOlderCancelledDuplicateLast(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("LEGION_ROLE", "merger")
-	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+	fakeHandoffJJ(t, "beef")
 	bodies := handoffDaemon(t, phase.Merging)
 	// id 5 (the later run, success) listed before id 2 (the earlier run a concurrency-group
 	// cancellation superseded) - the one ordering a "keep whichever is last" read gets wrong.

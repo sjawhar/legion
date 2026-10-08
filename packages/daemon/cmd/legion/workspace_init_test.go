@@ -27,6 +27,10 @@ const winitWait = 30 * time.Second
 
 const winitRepo = "acme/widgets"
 
+// winitHelper is the credential helper every provisioned clone gets; a test function's local
+// `workspace` path shadows the package where the clone is checked.
+const winitHelper = workspace.GitHubCredentialHelper
+
 // fakeJJ is the jj first on the tree volume's PATH. It records every invocation as one line,
 // "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
 // pin — with WINIT_HOLD set, a clone of github.com/acme/widgets (which reaches the pod's feed)
@@ -161,7 +165,7 @@ func (v *treeVolume) fetchArgs() []string {
 }
 
 func (v *treeVolume) args(issue string) []string {
-	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", "!legion credential", "--feed", v.feed}
+	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", winitHelper, "--feed", v.feed}
 }
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
@@ -476,7 +480,7 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 		t.Fatalf("the clone's origin is %q, want GitHub's", origin)
 	}
 	helpers, err := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper").Output()
-	if err != nil || !strings.HasSuffix(string(helpers), "\n!legion credential\n") {
+	if err != nil || !strings.HasSuffix(string(helpers), "\n"+winitHelper+"\n") {
 		t.Fatalf("the clone's credential helpers are %q (%v), want the named helper last", helpers, err)
 	}
 

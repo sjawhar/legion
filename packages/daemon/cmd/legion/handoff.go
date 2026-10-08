@@ -223,8 +223,8 @@ func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool
 	if _, stamped := fields["issue"]; stamped {
 		return false
 	}
-	jj := os.Getenv("LEGION_JJ_PATH")
-	if jj == "" || !filepath.IsAbs(jj) {
+	jj, err := jjOnPath()
+	if err != nil {
 		return false
 	}
 	return unchangedSinceOwnNonMergeWrite(jj, workspace, legacyHandoffFile(name))
@@ -235,8 +235,8 @@ func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool
 // handoffCommit already uses to find a commit outside the base), that touched it. No such commit -
 // this branch never itself wrote relPath, only inherited it from main - answers false. A commit that
 // did, whose content a later forward merge's conflict resolution then replaced with main's side,
-// also answers false: content, not merely a touched path, decides. Any jj error, or
-// LEGION_JJ_PATH unset or relative, fails closed to false.
+// also answers false: content, not merely a touched path, decides. Any jj error, or no jj on PATH,
+// fails closed to false.
 func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
 	written, err := jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+fileset+"))", "--no-graph", "-T", "commit_id")
@@ -320,9 +320,9 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	return 0
 }
 
-// handoffCommit is the commit a completion of phase current reports, resolved with the jj the
-// daemon resolved at boot, which it names on every pane as LEGION_JJ_PATH. The phase decides, not
-// the role. A phase phase.HandoffFile names ends with its role's handoff, and the completion reports
+// handoffCommit is the commit a completion of phase current reports, resolved with PATH's jj, as
+// the worker's own shell runs it (jjOnPath). The phase decides, not the role. A phase
+// phase.HandoffFile names ends with its role's handoff, and the completion reports
 // the commit that carries it: the last commit on the issue branch that changed
 // .legion/<issue>/<phase>.json (handoffFile), a commit that deleted it included. While that file is
 // absent from the workspace, a flat legacyHandoffFile standing in for it when
@@ -338,9 +338,9 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 // it does not run, which the daemon refuses naming whose phase it is. Paths reach jj as
 // root-anchored filesets, so --workspace works from any directory.
 func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase) (string, error) {
-	jj := os.Getenv("LEGION_JJ_PATH")
-	if !filepath.IsAbs(jj) {
-		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
+	jj, err := jjOnPath()
+	if err != nil {
+		return "", err
 	}
 	word, fileBacked := phase.HandoffFile(current)
 	if !fileBacked || workflow.RoleFor(current) != role {
@@ -448,7 +448,18 @@ func issueRecord(ctx context.Context) (paneIssue, error) {
 	return current, nil
 }
 
-// jjOutput runs the boot-resolved jj on the pane workspace and returns its trimmed output.
+// jjOnPath is the jj every worker command runs: PATH's, the one the worker's own shell runs, since
+// the daemon pins none on a pane or pod. A PATH without one fails naming jj and the PATH searched,
+// so the refusal says where a jj was looked for.
+func jjOnPath() (string, error) {
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		return "", fmt.Errorf("jj is not on PATH (%s)", os.Getenv("PATH"))
+	}
+	return jj, nil
+}
+
+// jjOutput runs jj on the pane workspace and returns its trimmed output.
 func jjOutput(jj, workspace, subject string, args ...string) (string, error) {
 	command := exec.Command(jj, append([]string{"-R", workspace}, args...)...)
 	command.Dir = workspace

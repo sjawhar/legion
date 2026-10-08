@@ -169,7 +169,6 @@ func TestHandoffReadFallsBackToItsOwnUnstampedLegacyHandoff(t *testing.T) {
 	writeLegacyHandoffFile(t, workspace, "plan.json", `{"scope":"small","subIssues":[]}`+"\n")
 	handoffJJ(t, jj, workspace, "commit", "-m", "plan: record handoff")
 	t.Setenv("LEGION_ISSUE", "THIS-1")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"scope": "small"`) {
 		t.Fatalf("handoff read --phase plan of this tree's own unstamped flat handoff = %d: stdout %s stderr %s; want it returned", code, out.String(), errb.String())
@@ -187,7 +186,6 @@ func TestHandoffReadNeverFallsBackToAnUnstampedHandoffInheritedFromMain(t *testi
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
 	t.Setenv("LEGION_ISSUE", "THIS-1")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb)
 	if code != 1 || out.String() != "" {
@@ -226,7 +224,6 @@ func TestHandoffReadNeverFallsBackToAnUnstampedHandoffAForwardMergeReplacedWithM
 	writeLegacyHandoffFile(t, workspace, "plan.json", `{"scope":"huge","subIssues":["OTHER-1"]}`+"\n")
 
 	t.Setenv("LEGION_ISSUE", "THIS-1")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb)
 	if code != 1 || out.String() != "" {
@@ -261,7 +258,6 @@ func TestHandoffReadFallsBackToItsOwnUnstampedLegacyHandoffAfterAForwardMerge(t 
 	}
 
 	t.Setenv("LEGION_ISSUE", "THIS-1")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"scope": "small"`) {
 		t.Fatalf("handoff read --phase plan of this tree's own unstamped handoff after an unrelated forward merge = %d: stdout %s stderr %s; want it returned", code, out.String(), errb.String())
@@ -304,7 +300,7 @@ func TestHandoffCommandsRefuseAnIssueThatIsNotAnIssueKey(t *testing.T) {
 			}
 
 			t.Setenv("LEGION_ROLE", "tester")
-			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "c0ffee"))
+			fakeHandoffJJ(t, "c0ffee")
 			bodies := handoffDaemonFor(t, tc.issue, phase.Testing)
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}, &out, &errb)
@@ -335,7 +331,6 @@ func TestHandoffCompleteFallsBackToItsOwnLegacyHandoff(t *testing.T) {
 			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
 			carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", "implementer")
-			t.Setenv("LEGION_JJ_PATH", jj)
 			bodies := handoffDaemon(t, phase.Implementing)
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
@@ -628,9 +623,8 @@ func TestHandoffWriteAcceptsEveryPlanHandoffShapeThePlannerPromptShows(t *testin
 // A tester whose handoff is missing is refused before any request, and the refusal names the file
 // its phase ends with, .legion/<issue>/test.json.
 func TestHandoffCompleteRefusesAMissingPhaseFileBeforeTheRequest(t *testing.T) {
-	workspace, jj := handoffRepo(t)
+	workspace, _ := handoffRepo(t)
 	t.Setenv("LEGION_ROLE", "tester")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	bodies := handoffDaemon(t, phase.Testing)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}, &out, &errb)
@@ -639,12 +633,12 @@ func TestHandoffCompleteRefusesAMissingPhaseFileBeforeTheRequest(t *testing.T) {
 	}
 }
 
-// fakeHandoffJJ writes the jj a pane is told as LEGION_JJ_PATH, which reports the handoff committed
-// (no working-copy change) and names commit as the commit carrying it; a decoy jj first on PATH
-// fails naming itself.
-func fakeHandoffJJ(t *testing.T, commit string) string {
+// fakeHandoffJJ puts first on PATH a jj which reports the handoff committed (no working-copy
+// change) and names commit as the commit carrying it: a worker command's jj is its PATH's, as its
+// own shell runs it.
+func fakeHandoffJJ(t *testing.T, commit string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "jj")
+	dir := t.TempDir()
 	script := `#!/bin/sh
 case " $* " in
 *" diff "*) ;;
@@ -653,20 +647,16 @@ case " $* " in
 *) echo "unexpected jj $*" >&2; exit 2 ;;
 esac
 `
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "jj"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write the fake jj: %v", err)
 	}
-	decoys := t.TempDir()
-	if err := os.WriteFile(filepath.Join(decoys, "jj"), []byte("#!/bin/sh\necho 'the jj on PATH ran' >&2\nexit 97\n"), 0o700); err != nil {
-		t.Fatalf("write the decoy jj: %v", err)
-	}
-	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return path
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // handoffDaemon is the daemon a pane completes its phase with: it serves the daemon's state
 // document (GET /legion/v1/state, internal/api/state.go) with the pane's issue, THIS-1, in phase p,
-// answers /legion/v1/handoff/complete, and hands back the completion bodies it read.
+// answers /legion/v1/handoff/complete, and hands back the completion bodies it read. The pane's
+// GH_CONFIG_DIR holds the role's gh files, where a READY check reads the App token.
 func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	t.Helper()
 	return handoffDaemonFor(t, "THIS-1", p)
@@ -686,8 +676,6 @@ func handoffDaemonFor(t *testing.T, issue string, p phase.Phase) *[]map[string]a
 		case r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(state)
-		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/gh-token":
-			_, _ = w.Write([]byte(`{"token":"installation-token","appLogin":"legion-implementer[bot]"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/handoff/complete":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -713,6 +701,7 @@ func handoffDaemonFor(t *testing.T, issue string, p phase.Phase) *[]map[string]a
 	// tests pass would depend on the shell that ran them.
 	t.Setenv("JJ_USER", "")
 	t.Setenv("JJ_EMAIL", "")
+	roleGhConfig(t, "installation-token")
 	readyGitHub(t, `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`, `{"context":"legacy","state":"success"}`, "clean")
 	return bodies
 }
@@ -720,7 +709,7 @@ func handoffDaemonFor(t *testing.T, issue string, p phase.Phase) *[]map[string]a
 // readyGitHub serves acme/widgets#42 to a merger's READY check: head c0de on main, whose ruleset
 // requires the check "ci" and whose branch protection requires the status "legacy", reporting the
 // given check run and commit status on the head (either may be empty) and the pull request's
-// mergeable_state, plus the token route of the daemon the check redeems its grant at.
+// mergeable_state.
 func readyGitHub(t *testing.T, checkRun, status, mergeableState string) {
 	t.Helper()
 	repo := "/repos/acme/widgets"
@@ -753,23 +742,24 @@ func readyGitHub(t *testing.T, checkRun, status, mergeableState string) {
 	t.Setenv("LEGION_GITHUB_API_URL", server.URL)
 }
 
-// `legion handoff complete` resolves the committed handoff with the jj the daemon resolved at boot
-// (LEGION_JJ_PATH, set on every pane) and refuses without it: never a PATH lookup.
-func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
+// `legion handoff complete` resolves the committed handoff with the jj on its PATH, as the worker's
+// own shell runs it (the daemon pins none on a pane or pod), and a PATH without one is refused
+// naming jj and the PATH searched.
+func TestHandoffCompleteResolvesTheCommitWithTheJJOnPATH(t *testing.T) {
 	workspace := t.TempDir()
 	writeHandoffFile(t, workspace, "THIS-1", "test.json", "{}\n")
 	t.Setenv("LEGION_ROLE", "tester")
-	jj := fakeHandoffJJ(t, "c0ffee")
 	bodies := handoffDaemon(t, phase.Testing)
 	args := []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}
 
-	t.Setenv("LEGION_JJ_PATH", "")
+	empty := t.TempDir()
+	t.Setenv("PATH", empty)
 	var out, errb bytes.Buffer
-	if code := run(context.Background(), args, &out, &errb); code != 1 || !strings.Contains(errb.String(), "LEGION_JJ_PATH") {
-		t.Fatalf("handoff complete without LEGION_JJ_PATH = %d, stderr %q; want a refusal naming it", code, errb.String())
+	if code := run(context.Background(), args, &out, &errb); code != 1 || !strings.Contains(errb.String(), "jj is not on PATH ("+empty+")") {
+		t.Fatalf("handoff complete with no jj on PATH = %d, stderr %q; want a refusal naming jj and the PATH searched", code, errb.String())
 	}
 
-	t.Setenv("LEGION_JJ_PATH", jj)
+	fakeHandoffJJ(t, "c0ffee")
 	errb.Reset()
 	if code := run(context.Background(), args, &out, &errb); code != 0 {
 		t.Fatalf("handoff complete = %d, stderr %q", code, errb.String())
@@ -785,7 +775,7 @@ func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("LEGION_ROLE", "merger")
-	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+	fakeHandoffJJ(t, "beef")
 	bodies := handoffDaemon(t, phase.Merging)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb); code != 0 {
@@ -805,7 +795,7 @@ func TestHandoffCompleteSendsNoGeneration(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("LEGION_ROLE", "merger")
 	t.Setenv("LEGION_GENERATION", "7")
-	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+	fakeHandoffJJ(t, "beef")
 	bodies := handoffDaemon(t, phase.Merging)
 	var out, errb bytes.Buffer
 
@@ -822,7 +812,7 @@ func TestHandoffCompleteSendsNoGeneration(t *testing.T) {
 }
 
 // handoffRepo is a real colocated jj repository standing in for a pane workspace. It returns the
-// workspace and the absolute jj a pane is told as LEGION_JJ_PATH.
+// workspace and the absolute jj on PATH, the one the commands under test run too.
 func handoffRepo(t *testing.T) (string, string) {
 	t.Helper()
 	jj, err := exec.LookPath("jj")
@@ -895,7 +885,6 @@ func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
 			handoffJJ(t, jj, workspace, "commit", "-m", tc.phase+": record handoff")
 			carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", tc.role)
-			t.Setenv("LEGION_JJ_PATH", jj)
 			bodies := handoffDaemon(t, tc.current)
 			args := []string{"legion", "handoff", "complete", "--summary", "phase done"}
 			if tc.verdict != "" {
@@ -934,7 +923,6 @@ func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T
 		t.Fatalf("handoff write = %d: %s", code, errb.String())
 	}
 	t.Setenv("LEGION_ROLE", "implementer")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	bodies := handoffDaemon(t, phase.Implementing)
 	errb.Reset()
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
@@ -953,7 +941,6 @@ func TestHandoffCompleteWithWorkspaceFlagIgnoresTheCallersDirectory(t *testing.T
 	carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 	t.Chdir(t.TempDir())
 	t.Setenv("LEGION_ROLE", "implementer")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	bodies := handoffDaemon(t, phase.Implementing)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "implemented"}, &out, &errb); code != 0 {
@@ -986,7 +973,6 @@ func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 	handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
 	t.Chdir(workspace)
 	t.Setenv("LEGION_ROLE", "implementer")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	bodies := handoffDaemon(t, phase.Implementing)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
@@ -1021,7 +1007,6 @@ func TestHandoffCompleteReportsTheProductionCheckOnTheMergedMain(t *testing.T) {
 	}
 	t.Chdir(workspace)
 	t.Setenv("LEGION_ROLE", "implementer")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	bodies := handoffDaemon(t, phase.ProductionCheck)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "production check verified"}, &out, &errb); code != 0 {
@@ -1057,7 +1042,6 @@ func TestHandoffCompleteReadsThePhaseBeforeTheHandoff(t *testing.T) {
 			handoffJJ(t, jj, workspace, "commit", "-m", "docs: the retro's learning")
 			standing := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", tc.role)
-			t.Setenv("LEGION_JJ_PATH", jj)
 			bodies := handoffDaemon(t, tc.current)
 			args := []string{"legion", "handoff", "complete", "--summary", "done"}
 			if tc.role == "tester" {
@@ -1130,7 +1114,6 @@ func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
 			handoffJJ(t, jj, workspace, "commit", "-m", "chore: remove .legion/ before approval")
 			deletion := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", tc.role)
-			t.Setenv("LEGION_JJ_PATH", jj)
 			bodies := handoffDaemon(t, tc.current)
 			args := []string{"legion", "handoff", "complete", "--summary", "the .legion/ deletion is pushed"}
 			if tc.verdict != "" {
@@ -1181,7 +1164,6 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 			writeHandoffFile(t, workspace, "THIS-1", "test.json", `{"issue":"THIS-1"}`+"\n")
 			as("commit", "-m", "test: record handoff")
 			t.Setenv("LEGION_ROLE", "tester")
-			t.Setenv("LEGION_JJ_PATH", jj)
 			bodies := handoffDaemon(t, phase.Testing)
 			// After the harness, which clears whatever identity the calling shell exported.
 			t.Setenv("JJ_USER", "legion-reviewer[bot]")

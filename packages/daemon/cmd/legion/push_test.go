@@ -39,7 +39,6 @@ func newPushRig(t *testing.T) pushRig {
 	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
 	t.Setenv("LEGION_ISSUE", "LEGION-7")
 	t.Setenv("LEGION_ROLE", "tester")
-	t.Setenv("LEGION_JJ_PATH", jj)
 	t.Setenv("LEGION_WORKSPACE", workspace)
 	t.Setenv("TMPDIR", t.TempDir())
 	r := pushRig{t: t, jj: jj, workspace: workspace, gh: remote}

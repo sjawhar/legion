@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -43,16 +42,11 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	if err != nil {
 		return err
 	}
-	response, err := redeemGrant(ctx, "/legion/v1/gh-token")
+	token, err := roleGitHubToken()
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
-	var credential githubTokenResponse
-	if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
-		return fmt.Errorf("the daemon returned no GitHub token")
-	}
-	github := githubrest.Client{Token: credential.Token, API: githubrest.RepositoryAPI(os.Getenv("LEGION_GITHUB_API_URL"), repository)}
+	github := githubrest.Client{Token: token, API: githubrest.RepositoryAPI(os.Getenv("LEGION_GITHUB_API_URL"), repository)}
 	var pull struct {
 		Head struct {
 			SHA string `json:"sha"`
@@ -125,9 +119,13 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	return nil
 }
 
-// workspaceRepository is the GitHub repository the workspace's origin names.
+// workspaceRepository is the GitHub repository the workspace's origin names, read with PATH's jj.
 func workspaceRepository(workspace string) (ghrepo.Repository, error) {
-	remotes, err := pushJJ(os.Getenv("LEGION_JJ_PATH"), workspace, "git", "remote", "list")
+	jj, err := jjOnPath()
+	if err != nil {
+		return ghrepo.Repository{}, err
+	}
+	remotes, err := pushJJ(jj, workspace, "git", "remote", "list")
 	if err != nil {
 		return ghrepo.Repository{}, err
 	}

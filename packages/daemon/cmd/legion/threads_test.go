@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
 var (
@@ -21,14 +23,21 @@ var (
 	stateWord  = regexp.MustCompile(`\bstate\b`)
 )
 
-// fakeThreadsGitHub serves page for every reviewThreads query and records each resolved thread id.
-// Like GitHub, it answers only the fields a query selects: each newest comment's "state" is dropped
-// unless the query's newest selection names it.
+// roleToken is the App token the role's gh files hold in these tests (roleGhConfig).
+const roleToken = "role-token"
+
+// fakeThreadsGitHub serves page for every reviewThreads query and records each resolved thread id,
+// failing the test on a call whose bearer is not the token the role's gh files hold. Like GitHub,
+// it answers only the fields a query selects: each newest comment's "state" is dropped unless the
+// query's newest selection names it.
 func fakeThreadsGitHub(t *testing.T, page string) (url string, resolved func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var ids []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+roleToken {
+			t.Errorf("GitHub was called with Authorization %q, want the token of the role's gh files, %q", got, "Bearer "+roleToken)
+		}
 		var request struct {
 			Query     string         `json:"query"`
 			Variables map[string]any `json:"variables"`
@@ -67,30 +76,38 @@ func selectsNewestState(query string) bool {
 	return false
 }
 
-// legionLogins is the daemon's gh-token answer naming both of Legion's role Apps by App role.
-const legionLogins = `,"legionAppLogins":{"implement":"legion-implementer[bot]","review":"legion-reviewer[bot]"}`
-
-// runThreadsResolve redeems a stub grant and runs `legion threads resolve` against githubURL.
-func runThreadsResolve(t *testing.T, githubURL string) (code int, stdout, stderr string) {
+// roleGhConfig writes the gh files a pane's GH_CONFIG_DIR holds for a role whose App token is
+// token, as the daemon renders them, names the directory on the environment, and returns it.
+func roleGhConfig(t *testing.T, token string) string {
 	t.Helper()
-	return runThreadsResolveNaming(t, githubURL, legionLogins)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ghconfig.HostsFile), []byte(ghconfig.Hosts(token)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GH_CONFIG_DIR", dir)
+	return dir
 }
 
-// runThreadsResolveNaming is runThreadsResolve with the daemon's gh-token answer carrying logins,
-// the JSON fields after appLogin ("" for none).
-func runThreadsResolveNaming(t *testing.T, githubURL, logins string) (code int, stdout, stderr string) {
+// runThreadsResolve runs `legion threads resolve` in an implementer's pane against githubURL: the
+// role's gh files hold its token, and both Legion App logins are named as the daemon names them.
+func runThreadsResolve(t *testing.T, githubURL string) (code int, stdout, stderr string) {
 	t.Helper()
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/legion/v1/gh-token" {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = io.WriteString(w, `{"token":"grant-token","appLogin":"legion-implementer[bot]"`+logins+`}`)
-	}))
-	t.Cleanup(daemon.Close)
-	t.Setenv("LEGION_DAEMON_URL", daemon.URL)
+	return runThreadsResolveNaming(t, githubURL, "legion-implementer[bot]", "legion-reviewer[bot]")
+}
+
+// runThreadsResolveNaming is runThreadsResolve with LEGION_IMPLEMENT_APP_LOGIN and
+// LEGION_REVIEW_APP_LOGIN set to implement and review, each absent when "".
+func runThreadsResolveNaming(t *testing.T, githubURL, implement, review string) (code int, stdout, stderr string) {
+	t.Helper()
+	roleGhConfig(t, roleToken)
+	t.Setenv("LEGION_ROLE", "implementer")
 	t.Setenv("LEGION_GITHUB_GRAPHQL_URL", githubURL)
-	t.Setenv("LEGION_GRANT", "one-command-grant")
+	for variable, login := range map[string]string{"LEGION_IMPLEMENT_APP_LOGIN": implement, "LEGION_REVIEW_APP_LOGIN": review} {
+		t.Setenv(variable, login)
+		if login == "" {
+			os.Unsetenv(variable)
+		}
+	}
 	var out, errb bytes.Buffer
 	code = run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7"}, &out, &errb)
 	return code, out.String(), errb.String()
@@ -224,29 +241,39 @@ func TestThreadsResolveClosesABotsThreadOnTheLegionReviewersAcceptance(t *testin
 	}
 }
 
-// Which accounts are Legion's own, and which is its review App, is the daemon's to say. A daemon
-// whose gh-token answer names no Legion App logins (one that could not read one) leaves every
-// bot's thread to its opener's Accepted:, and the left-open line says the session cannot tell,
-// rather than that the reply was not an acceptance. A daemon names every App or none: an answer
-// naming some is refused as invalid, as the contract refuses it.
+// Which accounts are Legion's own, and which is its review App, is the daemon's to say, through
+// the two login variables it sets on a tree agent. A daemon with no Apps sets neither, and a pane
+// missing either one applies no bot rule: every bot's thread is left to its opener's Accepted:,
+// and the left-open line says the session cannot tell, rather than that the reply was not an
+// acceptance. A login that is not an App's is refused naming the variables, since the rule would
+// otherwise spare the wrong account.
 func TestThreadsResolveAppliesNoBotRuleWithoutLegionsAppLogins(t *testing.T) {
 	github, resolved := fakeThreadsGitHub(t, threadsPage(threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"}))
-	if code, stdout, stderr := runThreadsResolveNaming(t, github, `,"legionAppLogins":{"implement":"legion-implementer[bot]"}`); code != 1 || stdout != "" ||
-		!strings.HasPrefix(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response") || len(resolved()) != 0 {
-		t.Fatalf("a partial login answer = %d %q %q, resolved %v; want it refused as invalid", code, stdout, stderr, resolved())
+	code, stdout, stderr := runThreadsResolveNaming(t, github, "legion-implementer", "legion-reviewer[bot]")
+	want := `legion threads resolve: LEGION_IMPLEMENT_APP_LOGIN="legion-implementer" and LEGION_REVIEW_APP_LOGIN="legion-reviewer[bot]": `
+	if code != 1 || stdout != "" || !strings.HasPrefix(stderr, want) || len(resolved()) != 0 {
+		t.Fatalf("a login that is not an App's = %d %q %q, resolved %v; want it refused naming the variables", code, stdout, stderr, resolved())
 	}
-	github, resolved = fakeThreadsGitHub(t, threadsPage(
-		threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
-		threadVector{id: "human", openerType: "User", opener: "octocat", newestType: "Bot", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
-	))
-	code, stdout, stderr := runThreadsResolveNaming(t, github, "")
-	if code != 0 {
-		t.Fatalf("threads resolve = %d: %s", code, stderr)
-	}
-	want := "left open https://github.test/thread/ci-bot — newest reply by legion-reviewer is not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:\n" +
-		"left open https://github.test/thread/human — newest reply by legion-implementer is not an acceptance\n"
-	if stdout != want || len(resolved()) != 0 {
-		t.Fatalf("stdout = %q, resolved %v; want both left open", stdout, resolved())
+	for name, logins := range map[string][2]string{
+		"neither login set":          {"", ""},
+		"the implement login absent": {"", "legion-reviewer[bot]"},
+		"the review login blank":     {"legion-implementer[bot]", " "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			github, resolved := fakeThreadsGitHub(t, threadsPage(
+				threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+				threadVector{id: "human", openerType: "User", opener: "octocat", newestType: "Bot", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
+			))
+			code, stdout, stderr := runThreadsResolveNaming(t, github, logins[0], logins[1])
+			if code != 0 {
+				t.Fatalf("threads resolve = %d: %s", code, stderr)
+			}
+			want := "left open https://github.test/thread/ci-bot — newest reply by legion-reviewer is not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:\n" +
+				"left open https://github.test/thread/human — newest reply by legion-implementer is not an acceptance\n"
+			if stdout != want || len(resolved()) != 0 {
+				t.Fatalf("stdout = %q, resolved %v; want both left open", stdout, resolved())
+			}
+		})
 	}
 }
 
@@ -331,11 +358,12 @@ func (g standinGh) calls() []ghCall {
 	}
 }
 
-// outsideAPane is a session no Legion pane started: no grant of any kind, and a daemon and a GitHub
-// endpoint that fail the test if anything reaches them, run from a directory that is no checkout.
+// outsideAPane is a session no Legion pane started: no grant of any kind, no role's gh files and
+// no Legion App login, and a daemon and a GitHub endpoint that fail the test if anything reaches
+// them, run from a directory that is no checkout.
 func outsideAPane(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"LEGION_GRANT_FILE", "LEGION_GRANT"} {
+	for _, name := range []string{"LEGION_GRANT_FILE", "LEGION_GRANT", "GH_CONFIG_DIR", "LEGION_IMPLEMENT_APP_LOGIN", "LEGION_REVIEW_APP_LOGIN"} {
 		t.Setenv(name, "")
 		os.Unsetenv(name)
 	}
@@ -357,7 +385,7 @@ func runThreadsResolveWithGh(t *testing.T) (code int, stdout, stderr string) {
 
 // A session outside a Legion pane adds --gh: the same rule runs through its own gh, which gets
 // GH_REPO so it authenticates for the repository from any directory, and whose stderr is shown on
-// success too. With no grant there are no Legion App logins, so no thread counts as a bot's.
+// success too. Outside a pane there are no Legion App logins, so no thread counts as a bot's.
 func TestThreadsResolveWithGhResolvesThroughTheSessionsOwnGh(t *testing.T) {
 	gh := newStandinGh(t, threadsPage(
 		threadVector{id: "accepted", openerType: "User", opener: "reviewer", newestType: "User", newest: "reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
@@ -408,8 +436,8 @@ func TestThreadsResolveWithGhNamesAFailedGh(t *testing.T) {
 	}
 }
 
-// In a Legion pane, which names its grant file, --gh is refused before anything runs: the pane's
-// gh is `legion gh`, and the pane has its grant.
+// In a Legion pane, which names its grant file, --gh is refused before anything runs: a pane is a
+// role, and a role resolves as its App through the gh files the pane names.
 func TestThreadsResolveRefusesGhInALegionPane(t *testing.T) {
 	gh := newStandinGh(t, threadsPage())
 	outsideAPane(t)
@@ -424,14 +452,23 @@ func TestThreadsResolveRefusesGhInALegionPane(t *testing.T) {
 	}
 }
 
-// A session with no grant that leaves out --gh is told it can add it.
-func TestThreadsResolveWithoutAGrantNamesGh(t *testing.T) {
+// A session with no role's gh files that leaves out --gh is told what names them and that it can
+// add --gh; a pane whose GH_CONFIG_DIR holds no readable hosts.yml is told the path.
+func TestThreadsResolveWithoutTheRolesGhFilesNamesThem(t *testing.T) {
 	outsideAPane(t)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7"}, &out, &errb)
-	want := "legion threads resolve: Unable to redeem LEGION_GRANT: LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset); a session outside a Legion pane has no grant and adds --gh to resolve through its own gh\n"
+	want := "legion threads resolve: GH_CONFIG_DIR is unset; a Legion pane or pod names the directory of its role's gh files; a session outside a Legion pane adds --gh\n"
 	if code != 1 || errb.String() != want {
-		t.Fatalf("threads resolve with no grant = %d, stderr %q; want 1 and %q", code, errb.String(), want)
+		t.Fatalf("threads resolve with no GH_CONFIG_DIR = %d, stderr %q; want 1 and %q", code, errb.String(), want)
+	}
+
+	empty := t.TempDir()
+	t.Setenv("GH_CONFIG_DIR", empty)
+	errb.Reset()
+	code = run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7"}, &out, &errb)
+	if prefix := "legion threads resolve: read " + filepath.Join(empty, ghconfig.HostsFile) + ": "; code != 1 || !strings.HasPrefix(errb.String(), prefix) || strings.Contains(errb.String(), "--gh") {
+		t.Fatalf("threads resolve with no hosts.yml under GH_CONFIG_DIR = %d, stderr %q; want 1 and stderr starting %q without the --gh hint", code, errb.String(), prefix)
 	}
 }
 
@@ -483,6 +520,10 @@ func TestThreadsResolveInTheReviewersPaneAsksTheDaemon(t *testing.T) {
 			github, resolved := fakeThreadsGitHub(t, threadsPage())
 			t.Setenv("LEGION_DAEMON_URL", daemon.URL)
 			t.Setenv("LEGION_GITHUB_GRAPHQL_URL", github)
+			// The grant under test is the manual one: a grant file the running shell names (a test
+			// run from a Legion pane) would otherwise be the one sent.
+			t.Setenv("LEGION_GRANT_FILE", "")
+			os.Unsetenv("LEGION_GRANT_FILE")
 			t.Setenv("LEGION_GRANT", "one-command-grant")
 			t.Setenv("LEGION_ROLE", "reviewer")
 			var out, errb bytes.Buffer

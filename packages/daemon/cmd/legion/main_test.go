@@ -612,9 +612,8 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 
 // --check-config makes every refusal boot makes from the configuration, the environment and the
 // files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
-// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation,
-// and the host's gh, git and jj. Each is refused in boot's words, no App key command runs, and no
-// state directory is made.
+// operator bearer's file, the Dispatch bearer's file, the instructions file and the OMP invocation.
+// Each is refused in boot's words, no App key command runs, and no state directory is made.
 func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct {
@@ -644,10 +643,6 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
 			func(string) string {
 				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
-			}},
-		{"a relative LEGION_GIT_PATH", "", func(t *testing.T, _ string) { t.Setenv("LEGION_GIT_PATH", "bin/git") },
-			func(string) string {
-				return `legion start: LEGION_GIT_PATH is not an absolute executable path: "bin/git"` + "\n"
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

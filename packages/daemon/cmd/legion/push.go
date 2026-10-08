@@ -140,9 +140,9 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	jj := os.Getenv("LEGION_JJ_PATH")
-	if jj == "" || !filepath.IsAbs(jj) {
-		return errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
+	jj, err := jjOnPath()
+	if err != nil {
+		return err
 	}
 	dir := workspaceFlag
 	if dir == "" {
@@ -326,8 +326,8 @@ func markHead(jj, dir string, skip bool) error {
 	return nil
 }
 
-// pushJJ runs the boot-resolved jj on the workspace and returns its trimmed output, stderr
-// included in the error when it fails.
+// pushJJ runs jj on the workspace and returns its trimmed output, stderr included in the error
+// when it fails.
 func pushJJ(jj, dir string, args ...string) (string, error) {
 	command := exec.Command(jj, append([]string{"-R", dir}, args...)...)
 	command.Dir = dir
