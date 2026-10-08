@@ -90,8 +90,8 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	rooms             sync.Map
 	shutdownRooms     sync.Map
-	nextConnection atomic.Uint64
-	stopping         atomic.Bool
+	nextConnection    atomic.Uint64
+	stopping          atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool
