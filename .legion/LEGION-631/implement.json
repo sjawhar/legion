@@ -1,8 +1,9 @@
 {
-  "completed": "2026-10-08T09:19:06.889129502Z",
+  "completed": "2026-10-08T09:58:22.958024745Z",
   "deviations": [
     "Task 0b's kubectl measurement was not possible from this pod (no kubectl, no service-account token, the pod's AWS role is refused eks:ListClusters); the projected-volume observation above stands in, the architect accepted it as the design's basis (envoy 457c39df4f453944b9fdcdf8d428c57a), and stage 4b's github-credential-refresh records the live propagation delay.",
-    "The simplify pass (ce-simplify-code) applied: one App-login variable table (appauth.LoginEnv) for the daemon's spec builder and `legion threads resolve`; the grant rig calls the tmux runtime's exported WriteGHConfig instead of restating it; the boot's clone-helper fix-up probes before rewriting and logs only a rewrite; the tmux boot stage is logged as `launcher` (was `worker-bin`); podKind.agentEnv lost its unused *Runtime parameter; six stale comments corrected. Skipped: collapsing the Sandbox refresher's per-role Secret GETs into one List per tick (6 reads per live pod per minute, bounded by the admission cap)."
+    "The simplify pass (ce-simplify-code) applied: one App-login variable table (appauth.LoginEnv) for the daemon's spec builder and `legion threads resolve`; the grant rig calls the tmux runtime's exported WriteGHConfig instead of restating it; the boot's clone-helper fix-up probes before rewriting and logs only a rewrite; the tmux boot stage is logged as `launcher` (was `worker-bin`); podKind.agentEnv lost its unused *Runtime parameter; six stale comments corrected. Skipped: collapsing the Sandbox refresher's per-role Secret GETs into one List per tick (6 reads per live pod per minute, bounded by the admission cap).",
+    "Round 2: push_actors (the events-feed read awaited by until_true 600) is replaced by one `gh api repos/\u003crepo\u003e/commits/\u003csha\u003e` per head, as the plan offered and the architect ruled (envoy d4d2e08bbd137621415a429db5b8a5b6); the committer login is the account the pane's git identity maps to, the App whose token the pane pushes with. The tester's wording items: grants_test.go's comment no longer names `legion gh`, and workspace_test.go's fixtures pass workspace.GitHubCredentialHelper."
   ],
   "discoveredComplexity": [
     "#1752 moved twice under this branch (42a685d1 → b90f0c97); both forward merges were clean.",
@@ -153,11 +154,12 @@
     "skills/legion-worker/references/conflicts-and-rewrites.md",
     "skills/legion-worker/references/merge-gate.md",
     "skills/legion-worker/references/pr-body.md",
-    "skills/legion-worker/references/review-threads.md"
+    "skills/legion-worker/references/review-threads.md",
+    "packages/daemon/internal/workspace/workspace_test.go"
   ],
   "issue": "LEGION-631",
   "openQuestions": [
-    "Stage 3 (in-agent-credentials, the pane credentials against legion-smoke) and stage 4b (github-credential after tree-moved, github-credential-refresh after token-rotation, the gh-\u003crole\u003e pod-shape rules) need a devbox operator session; the architect requests them from the operator lane. The worker image for stage 4b: Worker Image run 37755570061 (workflow_dispatch on legion/LEGION-631 at 8b28e7381273, https://github.com/sjawhar/legion/actions/runs/37755570061); while #1843 is based on #1752's branch no pull_request image build runs for it.",
+    "Stage 3 (in-agent-credentials, the pane credentials against legion-smoke) and stage 4b (github-credential after tree-moved, github-credential-refresh after token-rotation, the gh-\u003crole\u003e pod-shape rules) need a devbox operator session; the architect requests them from the operator lane. The worker image for stage 4b: Worker Image run 37755570061 (workflow_dispatch on legion/LEGION-631 at 8b28e7381273, https://github.com/sjawhar/legion/actions/runs/37755570061); while #1843 is based on #1752's branch no pull_request image build runs for it. The image built: ghcr.io/sjawhar/legion-worker@sha256:a5b2393623bb3530ce920ec1aba64512b2096cb749305bea4f0150b57e1bdc94 (run 37755570061, success); the round-2 head 889e5f0e changes only scripts/e2e and two Go test files, so that image still carries this branch's daemon, plugin and skills.",
     "LEGION_REAL_GITHUB=1 go test ./internal/api -run TestRealGitHubCredentialSurface needs both App keys (devbox).",
     "Tests this pod cannot run and CI must: internal/daemon's 15 Docker-bound tests (testcontainers NATS), internal/admit (Postgres), internal/intake/natsauth/testnats (Docker), internal/supervise's type-check tests (cgo), internal/config's python3 test, internal/launcher's TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild and cmd/legion's fifo-based workspace-init lock tests and the pod-safety probe (gVisor); none touches this change's packages beyond cmd/legion/internal/daemon, whose own tests passed."
   ],
@@ -186,6 +188,14 @@
       "negativeControl": "The refresher tests' negative branches: a Secret whose github-hosts equals the render gets no Update; a Secret owned by another Sandbox UID is left alone; a render error leaves the Secret and logs 'refresh failed'.",
       "observed": "ok for every package; TestGhReadsTheRenderedFilesWithoutWriting ran (not skipped) against /usr/local/bin/gh 2.98.0.",
       "surface": "packages/daemon unit suite with the fake clientset: TestEveryRolesPrivateVolumesMountInItsContainerAlone (the gh-\u003crole\u003e volume mounted in its role's container alone, its two items), the ghcredential_test.go refresher tests (only a Secret whose github-hosts differs is updated; LAUNCHER_TOKEN and annotations survive; another Sandbox UID is skipped; the controller is untouched; a 409 is retried once), TestGhReadsTheRenderedFilesWithoutWriting (the real gh 2.98.0 reads the rendered files read-only)."
+    },
+    {
+      "command": "for pair in \"$plan_head:legion-reviewer[bot]:the planner's handoff commit\" \"$pr_head:legion-implementer[bot]:the implementer's head\"; do IFS=: read -r sha want what \u003c\u003c\u003c\"$pair\"; actor=$(timeout 60 gh api \"repos/sjawhar/legion/commits/$sha\" --jq '.committer.login // \"nobody\"'); [ \"$actor\" = \"$want\" ] || fail …; done with plan_head=07dbcd250175667edb3dd859855383abaa845551 (the planner's `plan: record handoff`) and pr_head=8b28e73812738f0c0d36fc6e189441989efc1937 (the implementer's code head)",
+      "criterion": "Round 2 (tester failure 1): stage 4b github-credential reads each push's App from an oracle a multi-hour run can rely on — GitHub's record of the commit (committer login), not the repository's lossy events feed.",
+      "headSha": "889e5f0ecdf1",
+      "negativeControl": "The same loop with the planner's commit 07dbcd25 paired with legion-implementer[bot] fails: `the planner's commit as the implementer's 07dbcd25… on legion/LEGION-631 was committed by legion-reviewer[bot], want legion-implementer[bot]`.",
+      "observed": "07dbcd25 → legion-reviewer[bot]; 8b28e738 → legion-implementer[bot]; both lines recorded as the checkpoint records them (`\u003csha\u003e \u003cactor\u003e \u003cwhat\u003e`); every head the tester found missing from the events feed (the planner handoff pushes of LEGION-629/630/631/632, fa019613) is a commit GitHub's commits API answers for at once, with no lag and no window.",
+      "surface": "Real GitHub (sjawhar/legion) from this pod through the pane's gh: the checkpoint's new loop body run verbatim (same `gh api repos/$repo/commits/$sha --jq .committer.login` calls, the same pass/fail lines) over this pull request's own two heads of each kind."
     }
   ],
   "schemaVersion": 1,
