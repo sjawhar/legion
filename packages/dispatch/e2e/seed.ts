@@ -87,14 +87,12 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
 // try lets go of every lock it took, and the next try first waits for that one table while it
 // holds none, so the wait cannot close a cycle. Once it holds them all, nothing else touches those
 // tables until COMMIT; the TRUNCATE's other locks are on the tables' own sequences, which only an
-// insert into one of those tables advances. A table still held after 5 s fails the reset, naming
-// the transactions that hold it.
+// insert into one of those tables advances. Each wait is capped at the time left of 5 s, so a
+// table still held 5 s after the step began fails the reset then, naming that table's holders.
 
 async function resetDatabaseOnce(): Promise<void> {
   await sql(
     "BEGIN",
-    // Bounds each wait for one held table; the loop's own deadline bounds the whole step.
-    "SET LOCAL lock_timeout = '1s'",
     `DO $$
       DECLARE
         targets regclass[];
@@ -103,6 +101,8 @@ async function resetDatabaseOnce(): Promise<void> {
         holders text;
         deadline timestamptz := clock_timestamp() + interval '5 seconds';
       BEGIN
+        -- The closure TRUNCATE ... CASCADE empties. packages/envoy/internal/pgmigrate/touched.go
+        -- (reachedByForeignKeys) walks the same closure for a migration's truncate.
         WITH RECURSIVE truncated(rel) AS (
           SELECT unnest(ARRAY[${tables.map(sqlLiteral).join(", ")}]::regclass[])
           UNION
@@ -115,8 +115,12 @@ async function resetDatabaseOnce(): Promise<void> {
           -- A failed try rolls back this block, releasing every lock it took.
           BEGIN
             IF contended IS NOT NULL THEN
-              target := contended;
-              EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', target);
+              -- PostgreSQL checks a wait for a deadlock after deadlock_timeout (1 s by default);
+              -- this wait holds none of the tables' locks, so no cycle can run through it.
+              PERFORM set_config('lock_timeout',
+                greatest(1, ceil(1000 * extract(epoch FROM deadline - clock_timestamp())))::int || 'ms',
+                true);
+              EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', contended);
             END IF;
             FOREACH target IN ARRAY targets LOOP
               EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE NOWAIT', target);
@@ -126,15 +130,19 @@ async function resetDatabaseOnce(): Promise<void> {
             contended := target;
           END;
           IF clock_timestamp() >= deadline THEN
-            SELECT string_agg(DISTINCT format('%s %s by %s (%s)', l.relation::regclass, l.mode,
-                     left(regexp_replace(a.query, '\\s+', ' ', 'g'), 120), a.state), '; ')
+            -- Every lock mode conflicts with ACCESS EXCLUSIVE, so each granted lock on the table
+            -- the last try waited for is one that blocked it.
+            SELECT string_agg(DISTINCT format('%s (%s, %s)',
+                     left(regexp_replace(a.query, '\\s+', ' ', 'g'), 120), l.mode, a.state), '; ')
               INTO holders
               FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-              WHERE l.granted AND l.pid <> pg_backend_pid() AND l.relation = ANY (targets::oid[]);
-            RAISE EXCEPTION 'could not lock the tables to truncate within 5 s; held: %',
-              coalesce(holders, 'by nobody now, after waiting on ' || contended);
+              WHERE l.granted AND l.pid <> pg_backend_pid() AND l.relation = contended;
+            RAISE EXCEPTION 'could not lock % to truncate it within 5 s; held by: %', contended,
+              coalesce(holders, 'a transaction that ended just before this report');
           END IF;
         END LOOP;
+        -- The waits above are the only ones lock_timeout bounds.
+        PERFORM set_config('lock_timeout', '0', true);
       END
     $$`,
     `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
