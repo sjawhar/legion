@@ -11,7 +11,6 @@ import {
   LegionErrorResponse,
   LegionEscalateRequest,
   LegionGateRegisterRequest,
-  LegionGrantCredentialRequest,
   LegionGrantRequest,
   LegionGrantResponse,
   LegionHandoffCompleteRequest,
@@ -162,7 +161,6 @@ test("every workflow request has a strict schema", () => {
       LegionControllerGrantRequest,
       { sessionId: "ses_controller", secret: "s" },
     ],
-    ["grant credential", LegionGrantCredentialRequest, { grantId: "grant-208" }],
     [
       "threads resolve",
       LegionThreadsResolveRequest,

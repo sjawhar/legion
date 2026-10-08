@@ -16,6 +16,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion.daemonApiVersion` is 16 (LEGION-631). Each Legion role's GitHub App token is now a file
+  the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
+  `config.yml`, rendered and refreshed by the daemon), empties `GH_TOKEN`, `GITHUB_TOKEN` and
+  `GH_HOST`, and names the two Apps' bot logins as `LEGION_IMPLEMENT_APP_LOGIN` and
+  `LEGION_REVIEW_APP_LOGIN`; the daemon's credential routes, the `gh` shim and the `legion gh`
+  and `legion credential` commands are gone, with the absolute-path pins of a pane's gh, git and
+  jj. The tool-call hook therefore mints a grant into `LEGION_GRANT_FILE` only before a `bash`
+  command that invokes `legion` (`legion threads resolve`, `legion status`, `legion push`; a
+  command whose quoting does not tokenise mints too), never before any other shell command, the
+  `github` tool or a `pr://`/`issue://` read, and its grant request carries no `push` field. The
+  client's strict parse needs this release beside a daemon at 16; the daemon's boot gate and
+  `legion probe-image` refuse any earlier contract.
 - `legion.daemonApiVersion` is 15. Contract 15 changes a Sandbox locator on the daemon's
   `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
   `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process

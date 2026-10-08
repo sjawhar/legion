@@ -223,7 +223,7 @@ export function createControllerSession(deps: {
       await claim(context);
     } catch (error) {
       context.ui.notify(
-        `legion: re-claiming the controller for this session failed (${messageFor(error)}). Until a re-claim succeeds, controller wakes and merges will not reach this session and its shell commands run without a Legion grant, so legion gh is unavailable.`,
+        `legion: re-claiming the controller for this session failed (${messageFor(error)}). Until a re-claim succeeds, controller wakes and merges will not reach this session, and its \`legion status\` and other legion commands that call the daemon run without a Legion grant and fail.`,
         "warning"
       );
     }

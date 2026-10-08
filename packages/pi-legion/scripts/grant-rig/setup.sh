@@ -109,8 +109,10 @@ else
   ln -sfn "$SRC/packages/pi-legion/extensions/legion.ts" "$AGENT/extensions/legion.ts"
 fi
 
-# Scratch state directory: what the daemon's `state_dir` holds for a pane.
-mkdir -p "$RIG/state/secrets" "$RIG/state/gh" "$RIG/ws"
+# Scratch state directory: what the daemon's `state_dir` holds for a pane. The claim's gh files
+# (`secrets/<claim>-gh/{hosts.yml,config.yml}`, the pane's GH_CONFIG_DIR) are written by
+# daemon-pane.go when run.ts builds the pane.
+mkdir -p "$RIG/state/secrets" "$RIG/ws"
 chmod 0700 "$RIG/state/secrets"
 printf 'rig-boot\n' > "$RIG/state/secrets/boot"
 chmod 0600 "$RIG/state/secrets/boot"
@@ -122,10 +124,10 @@ test -f "$SRC/packages/daemon/cmd/legion/main.go" || {
 }
 (cd "$SRC/packages/daemon" && go build -o "$RIG/legion" ./cmd/legion)
 
-# worker-bin/gh and bin/legion, installed by the daemon's own boot step (workerbin.Install, run
-# through daemon-pane.ts): the `gh` shim drops its own directory from PATH and execs `legion gh`,
-# and the launcher execs the daemon's binary, here the one just built.
-WORKER_BIN=$(bun "$SRC/packages/pi-legion/scripts/grant-rig/daemon-pane.ts" "$SRC/packages/daemon" install "$RIG/state" "$RIG/legion")
+# bin/legion, installed by the daemon's own boot step (workerbin.Install, run through
+# daemon-pane.ts): the launcher execs the daemon's binary, here the one just built. Nothing shims
+# gh: a pane's gh is its PATH's, reading the token from GH_CONFIG_DIR.
+LAUNCHER_DIR=$(bun "$SRC/packages/pi-legion/scripts/grant-rig/daemon-pane.ts" "$SRC/packages/daemon" install "$RIG/state" "$RIG/legion")
 
 # Appends what the calling shell command actually ran under, so the worker prompt never has to
 # name the credential: the grant file's contents and mode (file delivery), then the plain
@@ -149,10 +151,10 @@ if ! test -d "$RIG/ws/.jj"; then
   jj git init "$RIG/ws" >/dev/null
 fi
 
-# What this rig runs, for report.json, and the gh shim's directory, which verdict G expects first
+# What this rig runs, for report.json, and the launcher directory, which verdict G expects first
 # on the pane's PATH.
 cat > "$RIG/rig-mode.json" <<EOF
-{"plugins":"$PLUGINS_MODE","legionBuild":"$LEGION_BUILD","commit":"$BUILD_COMMIT","checkout":"$SRC","workerBin":"$WORKER_BIN"}
+{"plugins":"$PLUGINS_MODE","legionBuild":"$LEGION_BUILD","commit":"$BUILD_COMMIT","checkout":"$SRC","launcherDir":"$LAUNCHER_DIR"}
 EOF
 
 : > "$RIG/standin.log"

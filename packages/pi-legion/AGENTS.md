@@ -62,13 +62,16 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/claim-session.ts`) or, for the controller, the controller session
 (`src/controller-session.ts`). `package.json` declares the contract it was built against as
-`legion.daemonApiVersion`: the claim, credential, workflow, controller, and state
+`legion.daemonApiVersion`: the claim, grant, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
 `src/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
 (where the claim session writes its jj attribution overlay), `LEGION_WORKSPACE` (where the handoff
 actions run, `src/handoff-actions.ts`), `LEGION_GENERATION` (set by the daemon, read by
-nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, the Envoy
+nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, the GitHub
+variables (`GH_CONFIG_DIR`, the role's directory of gh files, with `GH_TOKEN`, `GITHUB_TOKEN` and
+`GH_HOST` set empty, and `LEGION_IMPLEMENT_APP_LOGIN`/`LEGION_REVIEW_APP_LOGIN`: read by the pane's
+`gh`, `git` and `legion`, by nothing here), the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, `LEGION_REMOVABLE_WORKSPACES`
@@ -82,10 +85,13 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 15 for contract 15's Sandbox locator in an issue's shared pod (LEGION-462), after contract
-14's daemon-launched controller pod (LEGION-592) and contract 13's `push` grant and
-`LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries no `legion`
-key, and the gate reads only this package's.
+number is 16 for contract 16's token file (LEGION-631: the three routes that redeemed a grant for a
+GitHub or git credential and the grant request's `push` are gone, the pane gains the GitHub
+variables above and loses the absolute-path pins of its gh, git and jj and the credential-helper
+variable), after contract 15's Sandbox locator in an issue's shared pod
+(LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
+grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries
+no `legion` key, and the gate reads only this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
@@ -98,10 +104,16 @@ role `controller` and no tree or issue, the `/grants` controller-session form
 (`{sessionId, secret}`), and `controllerLocator` (`{runtime, external: true, sessionId,
 registeredAt}`) on `/legion/v1/state`.
 Contract 5 adds `LEGION_GRANT_FILE` to the pane's environment, tmux pane and Sandbox pod alike
-(LEGION-262): Oh My Pi copies its environment once for every `gh` it runs to serve a `pr://` or
-`issue://` read or its `github` tool, so the pointer has to be there from its start, and this
-extension does not set it after the claim registers. On a pane launched without it, the plugin
-refuses every bash command and every call Oh My Pi serves with `gh`, answering
+(LEGION-262): the pointer is the pane's for life, and this extension does not set it after the
+claim registers. Since contract 16 the file is read only by the `legion` commands that call the
+daemon with a grant — `legion handoff complete` (the `legion` tool's `handoff_complete`), `legion
+threads resolve`, `legion status` — never by `gh` or `git`, which read the role's GitHub App
+token from the gh files under the pane's `GH_CONFIG_DIR` (`hosts.yml` and `config.yml`, rendered
+and refreshed by the daemon: `/var/run/legion/gh` in a pod, `<state_dir>/secrets/<claim>-gh` on
+tmux), with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty so no token in the daemon's
+environment outranks the file, and `LEGION_IMPLEMENT_APP_LOGIN`/`LEGION_REVIEW_APP_LOGIN` naming
+the two Apps' bot logins for `legion threads resolve`. On a pane launched without
+`LEGION_GRANT_FILE`, the plugin refuses every bash command that invokes `legion`, answering
 `LEGION_GRANT_FILE is not set on this pane: …`. Restarting the daemon does not clear it, since
 a restarted daemon re-adopts a live pane without relaunching it; relaunching the pane does
 (`legion claims suspend` and then `legion claims resume` on its claim).
@@ -146,8 +158,8 @@ token and the topic the daemon sends an architect every notice on (no claim subs
 issue's notice topic, so no phase worker is woken by an architect's notice); and `claims/ready`,
 retried three times a second apart on a 5xx or transport failure only, and run again whenever the
 Envoy heartbeat regains the role. A session with no Legion environment boots nothing and gets no
-tool. The tool-call hook mints a fresh grant into the pane's `LEGION_GRANT_FILE` before every call
-that redeems one (see the grant file row below). It also registers the `legion` tool: architects
+tool. The tool-call hook mints a fresh grant into the pane's `LEGION_GRANT_FILE` before every bash
+command that invokes `legion` (see the grant file row below). It also registers the `legion` tool: architects
 register gates, release children, request a backward move, choose retry or escalation, sign off,
 close an admitted root tree (a root architect only), and read records; phase workers request a
 backward move and read records. No `claims/exit` report runs at shutdown, because a
@@ -192,7 +204,8 @@ an unset `LEGION_PROJECT`, or one whose controller role is not that of the proje
 `api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
-`LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
+`LEGION_PROJECT`), then a controller grant before each bash command that invokes `legion`
+(`legion status`) from the `/grants`
 controller-session form with the secret the registration was issued. What the daemon publishes
 on that topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
 subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
@@ -248,7 +261,8 @@ A worker's handoff operations are actions of the `legion` tool, never shell text
 daemon's own `legion handoff ...` command, `legion` found on the pane's PATH (the tmux
 `<state_dir>/bin/legion` launcher, or the image's binary in a pod), in `LEGION_WORKSPACE`;
 `handoff_complete` first mints a grant into `LEGION_GRANT_FILE`, as the tool-call hook does before a
-shell command. `legion gh` and `legion credential` stay shell commands: git and gh call them. What a
+shell command that invokes `legion`. GitHub is the pane's plain `gh` and `git`, which read the
+role's App token from the gh files under `GH_CONFIG_DIR`; no action here touches it. What a
 later phase needs goes in the handoff; a question for another live role goes to its role topic with
 `envoy_publish`.
 
@@ -293,7 +307,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entry | `extensions/legion.ts` | The one entry; ships as `dist/legion.js` in `@sjawhar/pi-legion`. Inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment; in a Legion session it refuses to run without the Envoy plugin's interface (the section above). The Envoy entry is `../pi-envoy/extensions/envoy.ts` (`packages/pi-envoy/AGENTS.md`) |
-| Legion lifecycle modules | `src/` | Classification (`classify.ts`), the daemon client (`daemon-client.ts`) and the claim session (`claim-session.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — every `bash` command, the `github` tool, and any tool whose `path`/`paths` names a `pr://` or `issue://` URL, which Oh My Pi serves by running `gh` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the static gh environment and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`, `handoff-actions.ts`), the phase stall (`phase-stall.ts`) |
+| Legion lifecycle modules | `src/` | Classification (`classify.ts`), the daemon client (`daemon-client.ts`) and the claim session (`claim-session.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — a `bash` command one of whose simple commands invokes `legion`, by name or by a path ending `/legion`, in any position; a command that does not tokenise mints too, and nothing else does, since `gh` and `git`, the `github` tool and a `pr://`/`issue://` read all read the role's token file under `GH_CONFIG_DIR` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the GitHub variables and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`, `handoff-actions.ts`), the phase stall (`phase-stall.ts`) |
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`; inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals and that `/legion-claim-controller` answers the sentence without exiting |
@@ -302,7 +316,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-envoy` |
-| Rigs | `scripts/grant-rig/`, `scripts/skill-scenarios/` | The grant rig proves on a real phase worker how each shell command gets its grant (`scripts/grant-rig/README.md`); the skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section) |
+| Rigs | `scripts/grant-rig/`, `scripts/skill-scenarios/` | The grant rig proves on a real phase worker that a `legion` shell command gets its grant and no other command does (`scripts/grant-rig/README.md`); the skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section) |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 
 ## Critical conventions

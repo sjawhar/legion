@@ -5,12 +5,12 @@
 // -overlay` as a main inside a checkout's packages/daemon, the one place the daemon's internal
 // packages can be imported from.
 //
-//	install <root> <legion>  installs root's worker-bin/gh and bin/legion, which execs legion, as
-//	                         the daemon does at boot (workerbin.Install), and prints root's
-//	                         worker-bin
+//	install <root> <legion>  installs root's bin/legion, which execs legion, as the daemon does at
+//	                         boot (workerbin.Install), and prints the launcher's directory
 //	phase <role>             prints the phase the role's worker runs in: the first phase
 //	                         workflow.RoleFor gives to the role
-//	pane                     reads a paneRequest (JSON) on stdin and prints its paneResponse (JSON)
+//	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh files
+//	                         under its GH_CONFIG_DIR, and prints its paneResponse (JSON)
 package main
 
 import (
@@ -18,10 +18,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -58,7 +60,7 @@ func install(root, legion string) error {
 	if err := workerbin.Install(root, legion); err != nil {
 		return err
 	}
-	fmt.Println(workerbin.Dir(root))
+	fmt.Println(workerbin.LauncherDir(root))
 	return nil
 }
 
@@ -86,8 +88,13 @@ type paneRequest struct {
 	NATSURLs  []string `json:"natsUrls"`
 	// BootTokenFile is the rig's boot token file, the one its stand-in daemon checks.
 	BootTokenFile string `json:"bootTokenFile"`
-	// Path is the PATH the daemon would start under: its gh, git and jj resolve on it as at boot,
-	// and the pane's PATH is it behind the pane's worker-bin and bin.
+	// GHToken is the GitHub token the rig stands in for the claim's App token: it is rendered
+	// into the claim's gh files (hosts.yml and config.yml under runtime.GHConfigDir), which the
+	// pane's GH_CONFIG_DIR names, as the daemon's tmux runtime writes them at spawn. "" is a
+	// daemon with no GitHub credential: no files, and no gh variable on the pane.
+	GHToken string `json:"ghToken"`
+	// Path is the PATH the daemon would start under; the pane's PATH is it behind the pane's
+	// launcher directory (workerbin.Path).
 	Path string `json:"path"`
 	// SystemPrompt asks for the pane's system prompt, composed from the role prompts the daemon
 	// module embeds.
@@ -114,19 +121,17 @@ func pane() error {
 	if err != nil {
 		return err
 	}
-	tools, err := daemon.PaneTools(func(name string) (string, bool) {
-		if name == "PATH" {
-			return req.Path, true
+	ghConfigDir := ""
+	if req.GHToken != "" {
+		ghConfigDir = runtime.GHConfigDir(req.StateDir, token)
+		if err := writeGHConfig(ghConfigDir, req.GHToken); err != nil {
+			return fmt.Errorf("write the claim's gh files: %w", err)
 		}
-		return "", false
-	})
-	if err != nil {
-		return err
 	}
 	spec := runtime.SpawnSpec{Claim: token, Project: req.Project, Tree: req.Issue, Issue: req.Issue, Role: role, Generation: 1}
 	variables, err := tmux.PaneVariables(spec, tmux.PaneInputs{
 		StateDir: req.StateDir, Workspace: req.Workspace, DaemonURL: req.DaemonURL, EnvoyURL: req.EnvoyURL,
-		NATSURLs: req.NATSURLs, Tools: tools,
+		NATSURLs: req.NATSURLs, GHConfigDir: ghConfigDir,
 	}, []runtime.SecretFile{{Variable: "LEGION_BOOT_TOKEN", Path: req.BootTokenFile}})
 	if err != nil {
 		return err
@@ -142,6 +147,22 @@ func pane() error {
 		}
 	}
 	return json.NewEncoder(os.Stdout).Encode(res)
+}
+
+// writeGHConfig writes the two gh files for token into dir as the daemon's tmux runtime does: the
+// directory 0700, config.yml and hosts.yml 0600 (ghconfig.Config, ghconfig.Hosts), so a pane's
+// plain `gh auth token` prints token and nothing else.
+func writeGHConfig(dir, token string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, ghconfig.ConfigFile), []byte(ghconfig.Config), 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, ghconfig.HostsFile), []byte(ghconfig.Hosts(token)), 0o600)
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the

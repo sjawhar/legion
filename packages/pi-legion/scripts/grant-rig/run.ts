@@ -3,23 +3,25 @@
  * Drives a headless phase worker (`omp --mode rpc`) through 30+ shell commands against the
  * stand-in daemon (`daemon-standin.ts`) and checks, per shell command, how the one-time
  * credential reached the shell — through the 0600 file the pane's `LEGION_GRANT_FILE` names,
- * written by the extension before the command runs, and never through the command text or the
- * bash tool's `env` argument:
+ * written by the extension before a command that invokes `legion` runs, and never through the
+ * command text or the bash tool's `env` argument — and that no other command got one:
  *
  *   A. transcript — the model-visible `arguments.command` of every bash tool call holds no
  *      `LEGION_GRANT` mention, and no call needed an `env` argument;
- *   B. stand-in log — exactly one `/legion/v1/grants` mint per bash call, and every
- *      `/git-credential` and `/gh-token` redemption answered 200 with a minted id;
+ *   B. stand-in log — exactly one `/legion/v1/grants` mint per bash call that invokes `legion`,
+ *      and none for any other bash call;
  *   C. `seen-grants.log` — the grant file each `record-grant` command read held the grant minted
  *      for that command, mode 0600;
- *   D. tool results — `which gh` resolves to the worker shim, `gh --version` prints a version,
- *      the `legion …` commands print `exit=0` and never `Unable to redeem`;
+ *   D. tool results — `gh --version` prints a version and `gh auth token` prints the rig's token,
+ *      both on the pane's own gh reading `GH_CONFIG_DIR`, and every `legion …` probe prints
+ *      `exit=0`;
  *   E. OMP log — one `extension instance loaded` per session instance, and exactly one
  *      `legion tool_call hook` line per bash tool call;
  *   F. no minted id appears anywhere in the transcript or the OMP log (the stand-in log is the
  *      oracle and is exempt);
- *   G. the environment probe shows the pane's static credential environment: no GH_CONFIG_DIR,
- *      GH_TOKEN, GITHUB_TOKEN or GH_HOST, and worker-bin first on PATH exactly once.
+ *   G. the environment probe shows the pane's static credential environment: `GH_CONFIG_DIR` is
+ *      the claim's directory of gh files, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` are empty, and
+ *      the launcher directory is first on PATH exactly once, with no `worker-bin` entry.
  *
  * The same `analyze` subcommand scores a transcript produced by the interactive (tmux) leg, so
  * both legs share one counting script. See README.md for the layout `setup.sh` creates.
@@ -37,7 +39,7 @@ import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promise
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import type { LegionRole } from "@legion/contracts";
+import { type LegionRole, roleToken } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { DAEMON_MODULE, type DaemonPane, daemonPane } from "./daemon-pane";
 
@@ -56,41 +58,50 @@ interface Step {
   readonly command?: string;
 }
 
+/** A `record-grant` step: `legion state --json` first, so the hook mints for the command (the
+ * rule mints only before a bash command that invokes `legion`), then the record. */
 function recordStep(n: number): Step {
-  return { n, kind: "bash", command: `record-grant; echo step-${n}` };
+  return {
+    n,
+    kind: "bash",
+    command: `legion state --json >/dev/null; record-grant; echo step-${n}`,
+  };
 }
 
+/** The stand-in for the claim's GitHub App token: `daemon-pane.go` renders it into the claim's gh
+ * files, and the pane's own `gh auth token` prints it (verdict D). A placeholder, never a secret. */
+export const RIG_GH_TOKEN = "ghs_rig_token";
+
 /** The pane's static credential environment, as the shell sees it. Names no credential variable:
- * the four GitHub variables are absent on a Legion pane (`legion gh` gives its own gh child the
- * token and the config directory), so each prints empty. */
+ * `GH_CONFIG_DIR` is the claim's directory of gh files and the three token variables are set
+ * empty on a Legion pane, so each of those prints empty. */
 const PROBE_COMMAND =
   'printf \'GH_CONFIG_DIR=%s GH_TOKEN=%s GITHUB_TOKEN=%s GH_HOST=%s\\n\' "$GH_CONFIG_DIR" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_HOST"; echo "PATH=$PATH"';
 const PROBE_NEEDLE = "GH_CONFIG_DIR=%s";
+const GH_TOKEN_PROBE = "gh auth token; echo exit=$?";
+const LEGION_PROBE = "legion state; echo exit=$?";
 
-/** The full headless leg: 33 bash calls and 3 `task` spawns. `short` is the terminal leg: 8
+/** The full headless leg: 32 bash calls and 3 `task` spawns. `short` is the terminal leg: 8
  * bash calls and 1 spawn. Neither prompt names the credential variable or the word `export`, nor
  * `legion handoff complete`, which the extension refuses in a phase worker's shell (its phase
- * ends through the `legion` tool's `handoff_complete`). The credential step writes to stdout on
- * purpose: a `> file` redirection trips the profile's bash interceptor ("use the write tool"),
- * and the stand-in's token is a placeholder anyway. */
+ * ends through the `legion` tool's `handoff_complete`). The gh steps run the pane's own gh with
+ * nothing but the pane's environment: `gh --version` needs no credential, `gh auth token` prints
+ * the one `GH_CONFIG_DIR` holds without touching the network. */
 function buildSteps(short: boolean): Step[] {
-  const credential = (n: number): Step => ({
-    n,
-    kind: "bash",
-    command: `printf 'protocol=https\\nhost=github.com\\n' | legion credential get; echo exit=$?`,
-  });
   const probe = (n: number): Step => ({ n, kind: "bash", command: PROBE_COMMAND });
+  const ghToken = (n: number): Step => ({ n, kind: "bash", command: GH_TOKEN_PROBE });
+  const legion = (n: number): Step => ({ n, kind: "bash", command: LEGION_PROBE });
   if (short) {
     return [
       recordStep(1),
       recordStep(2),
       probe(3),
       recordStep(4),
-      recordStep(5),
+      ghToken(5),
       { n: 6, kind: "task" },
       recordStep(7),
       recordStep(8),
-      credential(9),
+      legion(9),
     ];
   }
   const steps: Step[] = [];
@@ -98,18 +109,17 @@ function buildSteps(short: boolean): Step[] {
   steps.push({ n: 6, kind: "task" });
   for (let n = 7; n <= 15; n++) steps.push(recordStep(n));
   steps.push({ n: 16, kind: "task" });
-  steps.push({ n: 17, kind: "bash", command: "which gh" });
-  steps.push({ n: 18, kind: "bash", command: "gh --version" });
+  steps.push({ n: 17, kind: "bash", command: "gh --version" });
+  steps.push(ghToken(18));
   steps.push(probe(19));
   for (let n = 20; n <= 28; n++) steps.push(recordStep(n));
   steps.push({ n: 29, kind: "task" });
   for (let n = 30; n <= 32; n++) steps.push(recordStep(n));
-  // Bash calls 30-32 (the three task steps are not bash calls): every `legion` probe runs on the
+  // Bash calls 30-32 (the three task steps are not bash calls): the `legion` probe runs on the
   // 30th or later command, the point at which the 1.17.0 imitation had become routine.
-  steps.push(credential(33));
-  steps.push({ n: 34, kind: "bash", command: "legion gh -- --version; echo exit=$?" });
-  steps.push(credential(35));
-  steps.push(recordStep(36));
+  steps.push(legion(33));
+  steps.push(recordStep(34));
+  steps.push(ghToken(35));
   return steps;
 }
 
@@ -217,13 +227,14 @@ export interface PaneSource {
  * the daemon tells the pane comes from the daemon's own functions in `source`'s module
  * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
  * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment,
- * `envoyDefaultsFromEnvironment`), the gh, git and jj the daemon resolves on the caller's PATH,
- * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE`, the four XDG base directories, the
- * boot token pointer (`<state>/secrets/boot`, the file the stand-in checks), and PATH with
- * worker-bin then bin first; and, with `systemPrompt`, the system prompt argument. An inherited
- * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the GitHub variables no Legion
- * pane carries are dropped first. The profile's agent directory is under the inherited `HOME`. The
- * skill scenario rig (`../skill-scenarios/worker-pane.ts`) builds its tester pane with it too.
+ * `envoyDefaultsFromEnvironment`), `GH_CONFIG_DIR` naming the claim's gh files, which hold
+ * `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty, `PI_SHELL_PREFIX`,
+ * `LEGION_GRANT_FILE`, the four XDG base directories, the boot token pointer
+ * (`<state>/secrets/boot`, the file the stand-in checks), and PATH with the launcher directory
+ * first; and, with `systemPrompt`, the system prompt argument. An inherited `ANTHROPIC_API_KEY`,
+ * every `LEGION_*` and `DISPATCH_*` value and the caller's own GitHub variables are dropped first.
+ * The profile's agent directory is under the inherited `HOME`. The skill scenario rig
+ * (`../skill-scenarios/worker-pane.ts`) builds its tester pane with it too.
  */
 export function workerPane(
   launch: Pick<WorkerLaunch, "rig" | "port" | "profile">,
@@ -251,6 +262,7 @@ export function workerPane(
     envoyUrl: envoy.envoyUrl,
     natsUrls: envoy.natsUrls,
     bootTokenFile: path.join(stateDir, "secrets", "boot"),
+    ghToken: RIG_GH_TOKEN,
     path: env.PATH ?? "",
     systemPrompt: source.systemPrompt,
   });
@@ -535,9 +547,9 @@ async function readOmpLog(
 interface Analysis {
   readonly label: string;
   readonly bashCalls: number;
+  readonly legionCalls: number;
   readonly mints: number;
   readonly rows: string[];
-  readonly redemptions: string[];
   readonly executed: string[];
   readonly results: string[];
   readonly envNotes: string[];
@@ -572,16 +584,30 @@ function parseSeenGrant(line: string): SeenGrant {
   return { fileGrant, mode, envGrant };
 }
 
-/** Verdict G: the probe's output shows the daemon's static credential environment, with
- * `workerBin`, the gh shim's directory, first on PATH and nowhere else. */
-function probeShowsPaneEnvironment(text: string, workerBin: string): boolean {
+/** Whether a bash command invokes `legion` as the extension judges it (`needsGrant`): a word equal
+ * to `legion`, or ending `/legion`, in any position of any simple command. The rig's commands are
+ * the prompt's own, so a word split on whitespace and the shell's separators is faithful enough. */
+export function invokesLegion(command: string): boolean {
+  return command.split(/[\s;&|()`]+/).some((word) => word === "legion" || word.endsWith("/legion"));
+}
+
+/** Verdict G: the probe's output shows the daemon's static credential environment: `GH_CONFIG_DIR`
+ * is `ghConfigDir`, the claim's directory of gh files, the three token variables are empty, and
+ * `launcherDir`, the `legion` launcher's directory, is first on PATH and nowhere else, with no
+ * `worker-bin` entry (the gh shim's directory, which no daemon installs any more). */
+export function probeShowsPaneEnvironment(
+  text: string,
+  ghConfigDir: string,
+  launcherDir: string
+): boolean {
   const pathLine = text.split("\n").find((line) => line.startsWith("PATH="));
   if (!pathLine) return false;
   const entries = pathLine.slice("PATH=".length).split(path.delimiter);
   return (
-    text.includes("GH_CONFIG_DIR= GH_TOKEN= GITHUB_TOKEN= GH_HOST=") &&
-    entries[0] === workerBin &&
-    entries.filter((entry) => entry === workerBin).length === 1
+    text.includes(`GH_CONFIG_DIR=${ghConfigDir} GH_TOKEN= GITHUB_TOKEN= GH_HOST=`) &&
+    entries[0] === launcherDir &&
+    entries.filter((entry) => entry === launcherDir).length === 1 &&
+    entries.every((entry) => path.basename(entry) !== "worker-bin")
   );
 }
 
@@ -612,7 +638,14 @@ async function analyze(input: {
     .filter((line) => line.path === "/legion/v1/grants" && line.status === 200)
     .map((line) => line.mintedGrantId ?? "");
   const minted = new Set(mintedInOrder);
-  const oneToOne = mintedInOrder.length === calls.length;
+  // The hook mints before a bash call that invokes `legion` and before no other, so the mints
+  // pair, in order, with exactly those calls; `ownMint` is each such call's when they do.
+  const legionCalls = calls.filter((call) => invokesLegion(call.command));
+  const oneToOne = mintedInOrder.length === legionCalls.length;
+  const mintOf = new Map<string, string>();
+  if (oneToOne) {
+    for (const [i, call] of legionCalls.entries()) mintOf.set(call.id, mintedInOrder[i] ?? "");
+  }
 
   const hooksByCall = new Map<string, HookLine[]>();
   for (const hook of hooks) {
@@ -636,7 +669,7 @@ async function analyze(input: {
   const parentInstances = new Set<string>();
 
   calls.forEach((call, k) => {
-    const ownMint = oneToOne ? mintedInOrder[k] : undefined;
+    const ownMint = mintOf.get(call.id);
     const callHooks = hooksByCall.get(call.id) ?? [];
     const H = callHooks.length;
     const distinct = new Set(callHooks.map((hook) => hook.instance));
@@ -649,7 +682,7 @@ async function analyze(input: {
     }
     const T = call.textIds.length;
     // The claim verdict A prints is "free of credential lines": any mention of the variable in the
-    // model-visible text — an export, an inline `LEGION_GRANT=… legion gh`, a bare echo — is a
+    // model-visible text — an export, an inline `LEGION_GRANT=… legion state`, a bare echo — is a
     // failure, not only the exact line shape the 1.17.0 hook used to write.
     const mentions = call.command.split(GRANT_NAME).length - 1;
     if (T > 0 || mentions > 0) textFree = false;
@@ -682,20 +715,17 @@ async function analyze(input: {
         `call ${k + 1}: file held ${grant} mode ${seen?.mode ?? "-"}${seen && seen.envGrant !== "-" ? ` (text-delivered variable ${seen.envGrant})` : ""} ${ok ? "== minted, 0600" : `!= minted ${ownMint ?? "?"}`}`
       );
     }
+    const G = oneToOne ? (invokesLegion(call.command) ? 1 : 0) : "?";
     rows.push(
-      `${String(k + 1).padStart(2)}  H=${H}/${distinct.size}  G=${oneToOne ? 1 : "?"}  T=${T}${mentions > T ? ` (+${mentions - T} other mention${mentions - T === 1 ? "" : "s"} of ${GRANT_NAME})` : ""}  ${fileState}  ${envState}  ${extras.length > 0 ? `X=[${extras.join(",")}]` : ""}`
+      `${String(k + 1).padStart(2)}  H=${H}/${distinct.size}  G=${G}  T=${T}${mentions > T ? ` (+${mentions - T} other mention${mentions - T === 1 ? "" : "s"} of ${GRANT_NAME})` : ""}  ${fileState}  ${envState}  ${extras.length > 0 ? `X=[${extras.join(",")}]` : ""}`
         .replaceAll(/ {2,}/g, "  ")
         .trimEnd()
     );
     for (const id of call.textIds) earlier.add(id);
 
-    const probe = [
-      "which gh",
-      "gh --version",
-      PROBE_NEEDLE,
-      "legion credential get",
-      "legion gh --",
-    ].find((needle) => call.command.includes(needle));
+    const probe = ["gh --version", GH_TOKEN_PROBE, PROBE_NEEDLE, LEGION_PROBE].find((needle) =>
+      call.command.includes(needle)
+    );
     if (probe) {
       const text = call.result?.text ?? "(no result)";
       if (probe === PROBE_NEEDLE) probeResult = call.result?.text;
@@ -705,37 +735,40 @@ async function analyze(input: {
     }
   });
 
-  const redemptionLines = standin.filter((line) =>
-    ["/legion/v1/git-credential", "/legion/v1/gh-token"].includes(line.path)
-  );
-  const redemptions = redemptionLines.map(
-    (line) =>
-      `${line.at} ${line.path} -> ${line.status} grant ${line.grantId ?? "?"} ${
-        line.grantId !== undefined && minted.has(line.grantId) ? "(minted)" : "(never minted)"
-      }`
-  );
-  const redemptionsAll200 =
-    redemptionLines.length > 0 && redemptionLines.every((line) => line.status === 200);
-  const probeCalls = calls.filter((call) => /legion (credential get|gh --)/.test(call.command));
+  // Verdict D: the pane's own gh reads the rig's token from GH_CONFIG_DIR, and every `legion`
+  // probe ran to completion under its grant.
+  const resultOf = (needle: string) =>
+    calls.filter((call) => call.command.includes(needle)).map((call) => call.result?.text ?? "");
+  const ghVersions = resultOf("gh --version");
+  const ghTokens = resultOf(GH_TOKEN_PROBE);
+  const legionProbes = resultOf(LEGION_PROBE);
   const resultsClean =
-    probeCalls.length > 0 &&
-    probeCalls.every(
-      (call) =>
-        call.result?.text.includes("exit=0") && !call.result.text.includes("Unable to redeem")
-    );
+    ghVersions.length > 0 &&
+    ghVersions.every((text) => text.includes("gh version")) &&
+    ghTokens.length > 0 &&
+    ghTokens.every((text) => text.includes(RIG_GH_TOKEN) && text.includes("exit=0")) &&
+    legionProbes.length > 0 &&
+    legionProbes.every((text) => text.includes("exit=0") && !text.includes("Unable to redeem"));
   const leakedIds = mintedInOrder.filter(
     (id) => id.length > 0 && (transcriptText.includes(id) || ompLogText.includes(id))
   );
-  // The directory setup.sh installed the gh shim in, as the daemon does at boot; a rig prepared by
-  // an older setup.sh names none.
+  // The directory setup.sh installed the legion launcher in, as the daemon does at boot; a rig
+  // prepared by an older setup.sh names none. The claim's gh directory is where the daemon's own
+  // function puts it (runtime.GHConfigDir, through daemon-pane.go).
   const rigMode = (await Bun.file(path.join(input.rig, "rig-mode.json"))
     .json()
-    .catch(() => ({}))) as { readonly workerBin?: unknown };
-  const workerBin = typeof rigMode.workerBin === "string" ? rigMode.workerBin : undefined;
+    .catch(() => ({}))) as { readonly launcherDir?: unknown };
+  const launcherDir = typeof rigMode.launcherDir === "string" ? rigMode.launcherDir : undefined;
+  const ghConfigDir = path.join(
+    input.rig,
+    "state",
+    "secrets",
+    `${roleToken(RIG_CLAIM.project, RIG_CLAIM.issue, RIG_CLAIM.role)}-gh`
+  );
   const probeOk =
     probeResult !== undefined &&
-    workerBin !== undefined &&
-    probeShowsPaneEnvironment(probeResult, workerBin);
+    launcherDir !== undefined &&
+    probeShowsPaneEnvironment(probeResult, ghConfigDir, launcherDir);
   // A run with no bash calls proves nothing: every verdict below needs calls to judge.
   const ran = calls.length > 0;
   const recorded = executed.length > 0;
@@ -748,20 +781,20 @@ async function analyze(input: {
 
   const verdict = [
     `A. command text never mentions ${GRANT_NAME} (no credential line, no inline assignment, nothing): ${ran && textFree ? "PASS" : "FAIL"}; no call needed an env argument (every record-grant ran under the file's grant and no env carried ${GRANT_NAME}): ${ran && recorded && executedAll && envGrantFree ? "PASS" : "FAIL"}`,
-    `B. one mint per bash call: ${ran && oneToOne ? "PASS" : `FAIL (${mintedInOrder.length} mints, ${calls.length} calls)`}; redemptions all 200: ${redemptionsAll200 ? "PASS" : "FAIL"}`,
+    `B. one mint per bash call that invokes legion, none for any other: ${ran && legionCalls.length > 0 && legionCalls.length < calls.length && oneToOne ? "PASS" : `FAIL (${mintedInOrder.length} mints, ${legionCalls.length} legion calls of ${calls.length})`}`,
     `C. every record-grant ran under its own mint from a 0600 file: ${recorded && executedAll ? "PASS" : "FAIL"}`,
-    `D. legion commands exit=0 and never 'Unable to redeem': ${resultsClean ? "PASS" : "FAIL"}`,
+    `D. gh --version and gh auth token (the rig's token) succeed on the pane's own gh, legion probes exit=0: ${resultsClean ? "PASS" : "FAIL"}`,
     `E. exactly one hook line per bash call, one parent instance: ${hooksOne && parentInstances.size === 1 ? "PASS" : "FAIL"} (${instances.size} legion extension instances: the parent plus one per task spawn)`,
     `F. no minted id appears in the transcript or the OMP log: ${ran && mintedInOrder.length > 0 && leakedIds.length === 0 ? "PASS" : `FAIL (${leakedIds.length} of ${mintedInOrder.length} minted ids found)`}`,
-    `G. environment probe shows no GH_CONFIG_DIR/GH_TOKEN/GITHUB_TOKEN/GH_HOST, worker-bin first on PATH exactly once: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : workerBin === undefined ? "FAIL (rig-mode.json names no workerBin; rerun setup.sh)" : "FAIL"}`,
+    `G. environment probe shows GH_CONFIG_DIR as the claim's gh directory, GH_TOKEN/GITHUB_TOKEN/GH_HOST empty, the launcher directory first on PATH exactly once and no worker-bin: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : launcherDir === undefined ? "FAIL (rig-mode.json names no launcherDir; rerun setup.sh)" : "FAIL"}`,
   ];
 
   return {
     label: input.label,
     bashCalls: calls.length,
+    legionCalls: legionCalls.length,
     mints: mintedInOrder.length,
     rows,
-    redemptions,
     executed,
     results,
     envNotes,
@@ -774,13 +807,10 @@ async function analyze(input: {
 function renderAnalysis(analysis: Analysis): string {
   return [
     `== grant rig: ${analysis.label} ==`,
-    `bash calls: ${analysis.bashCalls}; grant mints: ${analysis.mints}; legion extension instances (parent + task spawns): ${analysis.instances}`,
+    `bash calls: ${analysis.bashCalls} (${analysis.legionCalls} invoking legion); grant mints: ${analysis.mints}; legion extension instances (parent + task spawns): ${analysis.instances}`,
     "",
-    "per call  H=hook lines/distinct instances  G=mints  T=credential lines in command text  file=grant file vs mint (record-grant calls)  env=keys the model put in arguments.env  X=classification of text ids",
+    "per call  H=hook lines/distinct instances  G=mints (1 for a call that invokes legion, 0 otherwise)  T=credential lines in command text  file=grant file vs mint (record-grant calls)  env=keys the model put in arguments.env  X=classification of text ids",
     ...analysis.rows,
-    "",
-    "redemptions (stand-in log):",
-    ...(analysis.redemptions.length > 0 ? analysis.redemptions : ["(none)"]),
     "",
     "executed grant (seen-grants.log: grant file contents and mode vs mint for that call):",
     ...(analysis.executed.length > 0 ? analysis.executed : ["(none)"]),

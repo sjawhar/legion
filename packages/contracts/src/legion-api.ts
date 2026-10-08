@@ -387,11 +387,6 @@ export const LegionControllerGrantRequest = z.strictObject({
   secret: nonEmptyString,
 });
 
-/** `api.GrantCredentialRequest`, shared by the three grant-redemption routes. */
-export const LegionGrantCredentialRequest = z.strictObject({
-  grantId: nonEmptyString,
-});
-
 /** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,

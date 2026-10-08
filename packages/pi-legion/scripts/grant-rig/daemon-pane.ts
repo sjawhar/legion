@@ -43,7 +43,9 @@ export function runDaemonPane(module: string, args: readonly string[], input?: s
 }
 
 /** The claim a pane is launched for and the rig's stand-ins for what the daemon knows at boot
- * (daemon-pane.go's paneRequest). */
+ * (daemon-pane.go's paneRequest). `ghToken` stands in for the claim's GitHub App token: it is
+ * rendered into the claim's gh files under `<stateDir>/secrets/<claim>-gh`, the pane's
+ * `GH_CONFIG_DIR`; omitted, the pane gets no gh variable, as from a daemon with no GitHub Apps. */
 export interface PaneRequest {
   readonly project: string;
   readonly issue: string;
@@ -54,6 +56,7 @@ export interface PaneRequest {
   readonly envoyUrl: string;
   readonly natsUrls: readonly string[];
   readonly bootTokenFile: string;
+  readonly ghToken?: string;
   readonly path: string;
   readonly systemPrompt?: boolean;
 }

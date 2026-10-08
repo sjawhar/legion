@@ -171,11 +171,11 @@
 
 ### Removed
 
-- Removed `LegionGitHubTokenResponse`, `LegionGitCredentialResponse` and `LegionGrantRequest.push`,
-  with the `github-token.json`, `git-credential.json` and `provisioning-credential.json` fixtures:
-  the Legion daemon's `POST /legion/v1/gh-token`, `/git-credential` and `/provisioning-credential`
-  routes and the push grant lifetime are deleted, since each role's GitHub App token is now a file
-  its plain `gh` and `git` read (LEGION-631).
+- Removed `LegionGitHubTokenResponse`, `LegionGitCredentialResponse`, `LegionGrantRequest.push` and
+  `LegionGrantCredentialRequest`, with the `github-token.json`, `git-credential.json` and
+  `provisioning-credential.json` fixtures: the Legion daemon's `POST /legion/v1/gh-token`,
+  `/git-credential` and `/provisioning-credential` routes and the push grant lifetime are deleted,
+  since each role's GitHub App token is now a file its plain `gh` and `git` read (LEGION-631).
 - Removed `HandoffMessage`, `validateHandoffMessage`, and `MESSAGES_DIR_NAME`: the `legion handoff message|messages` commands they served are gone, and nothing else read `.legion/messages/`.
 - Removed `legionNoticeSubject`: the Go daemon publishes no notice on an issue's topic any more, and its one caller, `legionControllerNoticeSubject`, now builds the controller topic itself.
 - Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,

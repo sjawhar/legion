@@ -47,23 +47,18 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
   exitProcess = hook;
 }
 
-/** A `pr://` or `issue://` URL anywhere Oh My Pi's path pipeline finds one: alone, inside one pair
- * of outer double quotes (which it strips), or as one entry of a list split on `;`, `,`, or
- * whitespace. Its internal-URL router resolves either scheme, in any case, by running `gh`. */
-const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
-
-/** Whether a tool call runs something that redeems the pane's grant: a `bash` command (`legion`,
- * `jj git push`, the `gh` shim), Oh My Pi's `github` tool, and any tool whose `path` or `paths`
- * names a `pr://` or `issue://` URL (`read`, `grep`, `glob`, `ast_grep`, `ast_edit` all resolve
- * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
- * that runs `legion gh`. A grant lives its ttl (60 seconds, or pushTTL for a `legion push`
- * invocation), so a call that reaches `gh` long after the
- * pane's last bash command needs its own. */
-function needsGrant({ toolName, input }: ToolCallEvent): boolean {
-  if (toolName === "bash") return typeof input.command === "string";
-  if (toolName === "github") return true;
-  const paths = Array.isArray(input.paths) ? input.paths : [input.path];
-  return paths.some((entry) => typeof entry === "string" && GH_RESOLVED_URL.test(entry));
+/** Whether a tool call runs something that redeems the pane's grant: a `bash` command one of whose
+ * simple commands (`commands`, `splitShellCommands`' tokenisation of it) invokes `legion` — a word
+ * equal to `legion` or ending `/legion`, in any position, so `legion threads resolve` and
+ * `legion status` (which call the daemon with the grant) count, and so, harmlessly, do `legion
+ * push`, `legion state` and `legion handoff write`. Nothing else redeems one: `gh` and `git`, and
+ * Oh My Pi's `github` tool and `pr://`/`issue://` reads, which it serves by running `gh`, read the
+ * role's GitHub App token from the gh files under the pane's `GH_CONFIG_DIR`; the grant is only a
+ * `legion` command's authentication to the daemon. A command that does not tokenise (`commands`
+ * undefined: an unterminated quote) mints, since for a credential the safe default is to mint. */
+function needsGrant({ toolName, input }: ToolCallEvent, commands: string[][] | undefined): boolean {
+  if (toolName !== "bash" || typeof input.command !== "string") return false;
+  return commands?.some((words) => commandMatch(words, "legion", []) !== -1) ?? true;
 }
 
 async function wrapWithGrant(
@@ -90,10 +85,11 @@ async function persistedTranscript(
   return { sessionFile, agentId };
 }
 
-// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; a
-// sub-architect completes its phase through the `legion` tool, never bash: `legion handoff
-// complete` is refused ahead of this gate by the pane rules (PANE_RULES), in a sub-architect's pane
-// and a root architect's alike.
+// An architect delegates code work; its bash is held to one `legion ...` invocation (`legion
+// state`, `legion handoff read`), and GitHub it reads through Oh My Pi's own `github` tool and
+// `pr://`/`issue://` reads, which gh serves with the role's token file. A sub-architect completes
+// its phase through the `legion` tool, never bash: `legion handoff complete` is refused ahead of
+// this gate by the pane rules (PANE_RULES), in a sub-architect's pane and a root architect's alike.
 // Allow bash only for a single `legion ...` invocation: no chaining outside a
 // quoted argument. This is a conservative character scan, not a shell parser --
 // it rejects some legitimate quoting it can't reason about (nested quotes,
@@ -213,16 +209,16 @@ function splitShellCommands(command: string): string[][] | undefined {
   return commands;
 }
 
-/** The index of the first word that is name itself or ends `/name` (an absolute-path shim, e.g.
- * the worker-bin `jj` or `legion`) and whose immediately following words equal, in order, every
+/** The index of the first word that is name itself or ends `/name` (an absolute path, e.g. the
+ * launcher `<state_dir>/bin/legion`) and whose immediately following words equal, in order, every
  * word of sequence ([] means no required follow-up: the bare first-mention search
- * jjLogRewriteInvocation uses, which then scans the rest of the words itself). A later mention
- * is tried when an earlier one's sequence does not match (`legion gh -- legion push`: the first
- * `legion` is not followed by `push`, the second is), and neither looks only at words[0], so a
- * prefix before the command name (`time`, `timeout 600`, an env assignment such as `FOO=1`, a
- * leading `!` or `if`, which splitShellCommands's naive split leaves attached ahead of a `;`)
- * never hides it. Shared by jjLogRewriteInvocation, isPushInvocation, and the handoff-complete
- * rule's own invocation matcher. */
+ * jjLogRewriteInvocation and needsGrant use, the former then scanning the rest of the words
+ * itself). A later mention is tried when an earlier one's sequence does not match (`echo legion
+ * && legion handoff complete`: the first `legion` is not followed by `handoff complete`, the
+ * second is), and neither looks only at words[0], so a prefix before the command name (`time`,
+ * `timeout 600`, an env assignment such as `FOO=1`, a leading `!` or `if`, which
+ * splitShellCommands's naive split leaves attached ahead of a `;`) never hides it. Shared by
+ * jjLogRewriteInvocation, needsGrant, and the handoff-complete rule's own invocation matcher. */
 function commandMatch(words: readonly string[], name: string, sequence: readonly string[]): number {
   for (let index = 0; index < words.length; index += 1) {
     const word = words[index];
@@ -230,24 +226,6 @@ function commandMatch(words: readonly string[], name: string, sequence: readonly
     if (sequence.every((expected, offset) => words[index + 1 + offset] === expected)) return index;
   }
   return -1;
-}
-
-/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: a
- * `legion` (or `.../legion`) mention immediately followed by `push`. */
-function isPushInvocation(words: readonly string[]): boolean {
-  return commandMatch(words, "legion", ["push"]) !== -1;
-}
-
-/** Whether tokenised simple commands (splitShellCommands' result, shared with paneRuleRefusal's
- * own tokenisation of the same bash command rather than retokenising it) include a `legion push`
- * invocation -- `legion push`, `cd … && legion push`, a pipeline's last segment -- so the
- * tool_call hook mints its grant with the longer pushTTL (dispatch://LEGION-583): jj's own
- * working-copy snapshot before the network push can outrun the ordinary sixty seconds on a
- * near-full tree volume. undefined (a tool call that is not `bash`, or an unterminated quote) is
- * judged not a push: the ordinary grant is the safe default, since missing a genuine push here
- * costs only the grant expiring before it, which `legion push` already fails loudly on. */
-function commandsRunPush(commands: string[][] | undefined): boolean {
-  return commands?.some(isPushInvocation) ?? false;
 }
 
 /** A rule the tool_call hook holds a pane's shell-running tool calls to. */
@@ -389,7 +367,7 @@ function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
 
 /** The refusal for the first of `rules` a tool call breaks, or undefined. commands is bash's own
  * tokenisation (splitShellCommands(input.command)), computed once by the caller and shared with
- * the push-grant check later in the same hook, rather than tokenised twice for the same command.
+ * needsGrant later in the same hook, rather than tokenised twice for the same command.
  * A supervised service's start is included (a `bash` call with a `name`); `eval` code and the
  * content a `write` sends to a `proc://` target (stdin for a supervised service) are held to the
  * plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
@@ -621,16 +599,15 @@ export default function legionExtension(pi: PiApi): void {
     ) {
       return { block: true, reason: codeToolRefusal };
     }
-    if (!needsGrant(toolCall)) return undefined;
+    if (!needsGrant(toolCall, commands)) return undefined;
     // The shared wrapper mints through the caller's client, then writes the grant to the pane's
     // `LEGION_GRANT_FILE`, which `legion` reads ahead of `LEGION_GRANT`. The host writes a hook's
     // revised `input` back into the assistant message (text the model imitates — LEGION-12), and a
     // plugin that replaces the bash tool may drop `env` (secretsd's legacy shim, LEGION-52), so the
-    // grant travels through neither and the tool call's input is never rewritten. GH_CONFIG_DIR and
-    // the emptied GitHub keys are on the pane from the daemon. The daemon names the grant file on
-    // every pane it launches; a pane without one was launched by a daemon older than this plugin,
-    // and minting for it would only produce a grant nothing could read. A blank value (an
-    // operator's own export) is the same absence.
+    // grant travels through neither and the tool call's input is never rewritten. The daemon names
+    // the grant file on every pane it launches; a pane without one was launched by a daemon older
+    // than this plugin, and minting for it would only produce a grant nothing could read. A blank
+    // value (an operator's own export) is the same absence.
     if (active === undefined) {
       // A claimed controller session mints a controller grant (`/grants` `{sessionId, secret}`,
       // authenticated by its registration's secret) and is wrapped exactly like a worker.
@@ -655,7 +632,6 @@ export default function legionExtension(pi: PiApi): void {
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
-        push: commandsRunPush(commands),
       })
     );
   });

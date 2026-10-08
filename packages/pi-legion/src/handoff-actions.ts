@@ -11,8 +11,8 @@ import { writeMintedGrant } from "./grant-file";
  * a bash command (LEGION-208 Stage 4b, task 4b.15). Each action runs the same command underneath —
  * `legion` found on the pane's PATH, which is the daemon's own CLI: the `<state_dir>/bin/legion`
  * launcher on tmux, the image's binary in a pod — in the issue workspace, so both daemons' CLIs
- * keep their contracts and neither daemon changes. `legion gh` and `legion credential` stay shell
- * commands: git and gh call them.
+ * keep their contracts and neither daemon changes. GitHub needs no action here: the pane's plain
+ * `gh` and `git` read the role's App token from the gh files under its `GH_CONFIG_DIR`.
  */
 
 /** Each handoff action and the fields it accepts, beside `op`. */

@@ -33,8 +33,8 @@ async function writeGrantFile(file: string, grantId: string): Promise<void> {
 
 /**
  * Mints a grant and writes it to the pane's `LEGION_GRANT_FILE`, where `legion` reads it: the one
- * path by which the tool-call hook (before a bash command and before a call Oh My Pi serves with
- * `gh`) and the `legion` tool's `handoff_complete` hand a command its grant.
+ * path by which the tool-call hook (before a bash command that invokes `legion`) and the `legion`
+ * tool's `handoff_complete` hand a command its grant.
  * A pane without the variable was launched by a daemon older than this plugin, so it is refused
  * before anything is minted. A daemon restart re-adopts a live pane without relaunching it, so the
  * remedy is to relaunch the pane, not the daemon.
