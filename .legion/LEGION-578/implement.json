@@ -1,0 +1,68 @@
+{
+  "completed": "2026-10-08T06:22:34.621943338Z",
+  "deviations": [
+    "Scope narrowed by the architect (dispatch://LEGION-578 comment 38d3fcaa, envoy c5df61a4): Tasks 1, 2, 4, 6 and 8 of the plan are LEGION-630's, LEGION-631's and LEGION-629's; this pull request carries the image, the capability check, the deployment report, the example operator route and their docs. Recorded in .legion/LEGION-578/plan.json",
+    "The image sets no PUPPETEER_EXECUTABLE_PATH (the plan's option (a)); Oh My Pi's own system-Chromium detection picks /usr/bin/chromium, and the variable stays the operator's",
+    "capabilities.Deployment() of the design is capabilities.Decidable() (the type and the function could not share the name)",
+    "legion start --check-config prints the secrets row only when no broker is configured: a configured broker's login is boot's fact, not the file's",
+    "Under tmux the daemon reads retry.modelFallback through the plugin gate's environment after the gate passes (a Warn and 'not read' on failure), so the model-fallback row is measured on both runtimes rather than only by the probe pod",
+    "Stage 1's script gained an assertion that the running daemon's state carries the 19-row report with resource-limits open under tmux — the plan named Stage 1's daemon as where `legion state` shows the list"
+  ],
+  "discoveredComplexity": [
+    "The worker image grows from 369 MiB to 1007 MiB compressed (the Debian layer 307 MiB, almost all Chromium's library closure; Go 64 MiB + gopls 20 MiB; Node's tree with the servers 66 MiB); the cold-node pull time is Stage 4a's to measure and this change moves no deadline",
+    "Two cmd/legion tests fail only in a worker pod: TestProbeImageWithPodSafetyProbesOnThePodsBaseline/bare (this pod mounts /etc/legion-operator/overlay.yml, which the test asserts absent) and TestLoadAcceptsPrivateKeyCommandWithUnpaddedBase64Output in internal/config (no python3 on the current image); both pass on CI's runner (Tests run 37736231872)"
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/capabilities/{capabilities.go,image.go,deployment.go} (new package: the table, the image-site checks, the deployment report) and tests",
+    "packages/daemon/internal/ompdirs/ompdirs.go (new: Oh My Pi's profile-root resolution, lifted from internal/daemon/bootgate.go) and test",
+    "packages/daemon/internal/bootprobe/bootprobe.go: the OK line's capabilities=checked and model-fallback=on|off marks, ImageReport, shared mark parsers",
+    "packages/daemon/cmd/legion/probe_image.go: prints the capability table, refuses naming every missing image capability, reads retry.modelFallback; probe_image_test.go",
+    "packages/daemon/cmd/legion/main.go: legion start --check-config prints the configuration's open gaps after Config OK; main_test.go",
+    "packages/daemon/internal/runtime/sandbox/probe.go: ProbeImage returns bootprobe.ImageReport; judge requires capabilities=checked; probeLogLines 100; probe_test.go; live_test.go and live_install_test.go (image-probe-capability-negative)",
+    "packages/daemon/internal/daemon/{daemon.go,kubernetes.go,bootgate.go}: the probe report kept on the supervision, Deployment(cfg), the tmux model-fallback read after the gate, the report logged at boot and on change, registered with admission; capabilities_test.go",
+    "packages/daemon/internal/config/{config.go,kubernetes.go}: capabilities.decided.\u003cname\u003e and RoleResources.Reserved; config_test.go",
+    "packages/daemon/internal/api/{state.go,version.go}: State.Capabilities, CapabilityState, DaemonAPIVersion 15; golden fixtures regenerated",
+    "packages/daemon/internal/record/outbox.go and internal/admit/admit.go: the tick notice's openCapabilities",
+    "packages/daemon/internal/workflow/hold_test.go, internal/daemon/outbox_test.go, internal/workflow/engine_test.go: notice comparisons by reflect.DeepEqual",
+    "packages/contracts/src/legion-api.ts (+test), packages/contracts/fixtures/daemon-api/{state*.json,version.json}, packages/pi-legion/package.json (daemonApiVersion 15), packages/pi-legion/{AGENTS.md,CHANGELOG.md}",
+    "packages/daemon/docker/worker.Dockerfile: Go 1.26.8 (+gopls v0.23.0), typescript@5.9.3 + typescript-language-server@6.0.1 + pyright@1.1.414, trixie's python3, curl, wget, chromium; the toolchain step runs each; third-party notices",
+    "deploy/kubernetes/daemon/legion.yaml.example (resources for every role, capabilities.decided.secrets), deploy/kubernetes/operator-route/overlay.yml (retry.modelFallback: true)",
+    "skills/legion-controller/SKILL.md (the tick's openCapabilities), scripts/e2e/{controller-start-tmux.sh,stage1-skeleton.sh,README.md}",
+    "docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md, AGENTS.md, docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-….md, packages/daemon/internal/notify/notify.go (comment)",
+    ".legion/LEGION-578/plan.json: the task list narrowed to the architect's scope"
+  ],
+  "issue": "LEGION-578",
+  "openQuestions": [
+    "Stage 4a on the pull request's image digest (ghcr.io/sjawhar/legion-worker@sha256:… from Worker Image run 37736231904 at 00127cd3c61f) needs a devbox operator: `image-probe` (the OK line with capabilities=checked and model-fallback=on under the fixture overlay, which turns retry.modelFallback on), `image-probe-negative` and the new `image-probe-capability-negative` (operator pod env PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium → refusal naming `capability browser is missing`), and the launch time from pod creation to registration against the 360 s deadline with the 1007 MiB image (docs/kubernetes.md 'Image size and pull time' records the size and that the pull time is measured there)",
+    "The deployment's own operator overlay still sets retry.modelFallback: false; on the repin to this image the daemon will report `capability model-fallback is open` at boot and in legion state until the deployment turns it on or writes capabilities.decided.model-fallback",
+    "A dogfood tmux daemon reports secrets and resource-limits open at every boot (and the tick names them) until its legion.yaml decides them; the example lines are in docs/kubernetes.md 'The deployment's capability report'"
+  ],
+  "phase": "implement",
+  "proof": [
+    {
+      "command": "Worker Image run 37736231904 at 00127cd3c61f (https://github.com/sjawhar/legion/actions/runs/37736231904), and run 37733156000 at ff33c8c9fb1b, the first build with the tools — step `RUN … legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`",
+      "criterion": "The worker image carries Python, Go, gopls, the TypeScript and Python language servers, curl, wget and Chromium, each checked by the image's own publish gate (plan criterion 3); the probe prints the declared table and fails the build naming a missing capability (criterion 5)",
+      "headSha": "00127cd3c61f4003ba3e55268d70580dd82c9f23",
+      "negativeControl": "the same binary built from the branch (`go build ./cmd/legion` at 00127cd3c61f) run inside a Legion worker pod (Agent Sandbox, gVisor) on the current pre-change image: `legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models --daemon-api-version 14` printed the 19-row table and exited 1 with `capability eval-python is missing: omp setup python --check reports available=false; capability browser is missing: chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable; capability lsp is missing: gopls, typescript-language-server, pyright-langserver are not on PATH; capability toolchain is missing: curl, wget, python3 are not on PATH` (go resolved only because this shell's PATH carries a $HOME-provisioned Go)",
+      "observed": "the toolchain step printed `go version go1.26.8 linux/amd64`, `GOROOT: /opt/go`, `golang.org/x/tools/gopls v0.23.0`, `Version 5.9.3`, `pyright 1.1.414`, `Python 3.13.5`, `curl 8.14.1`, `GNU Wget 1.25.0`, `Chromium 154.0.8037.92 built on Debian GNU/Linux 13 (trixie)`; the probe printed all 19 capability rows — eval-python present (omp setup python --check reports available=true), browser present (/usr/bin/chromium (chromium on PATH) --version: Chromium 154.0.8037.92), lsp present (gopls, typescript-language-server, pyright-langserver at /usr/local/bin), codegraph present, toolchain present (go, curl, wget, python3, node, bun, uv on PATH; go version go1.26.8) — then `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=15`, in run 37733156000 at ff33c8c9fb1b and again in run 37736231904 at 00127cd3c61f (`legion (devel) commit 00127cd3c61f…`); the final head's image published as ghcr.io/sjawhar/legion-worker@sha256:97d3a9ba051ffd72d5770a7e3d6d354efb7da75da243103ab4e12b0d243468b4 (:sha-00127cd3c61f), 22 layers, 1,056,283,825 bytes compressed (1.18.1: 12 layers, 386,510,448 bytes)",
+      "surface": "the pull request's Worker Image workflow: the image built on the GitHub runner from packages/daemon/docker/worker.Dockerfile, whose last step runs the image's own `legion probe-image` (production-like: it is the build that publishes ghcr.io/sjawhar/legion-worker)"
+    },
+    {
+      "command": "legion start --check-config --config ./legion.yaml (the shipped example); the same with the merger's `resources` line removed; legion start --check-config --config ./legion.yaml (tmux, nothing decided); the tmux file plus capabilities.decided for secrets and resource-limits",
+      "criterion": "Deployment gaps (secrets, resource-limits, model-fallback) are reported with the legion.yaml line that records a decision, never a refusal to start; an unknown decided name is refused naming the valid names (plan criterion 7)",
+      "headSha": "00127cd3c61f4003ba3e55268d70580dd82c9f23",
+      "negativeControl": "the tmux file plus `capabilities: { decided: { nonsense: \"x\" } }` → `legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits`, exit 1",
+      "observed": "the shipped example: `Config OK: project=WIDGETS` alone, exit 0; without the merger's resources: the OK line then `capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"\u003creason\u003e\"`, exit 0; the tmux file: the OK line then the `secrets` (the tmux runtime enrolls no process with the secrets broker) and `resource-limits` (the tmux runtime sets no requests or limits on a pane) open lines, exit 0; with both decided: the OK line alone, exit 0. On a running daemon: CI's Stage 1 live proof (Tests run 37736231872, job test, `stage 1 e2e: PASS`) booted the daemon on a real Postgres and asserted `legion state --json` carries the 19-row `capabilities` report with resource-limits open and its configLine",
+      "surface": "the built `legion` binary (`go build ./cmd/legion` at 00127cd3c61f) in a Legion worker pod, `legion start --check-config` on real configuration files: the shipped deploy/kubernetes/daemon/legion.yaml.example (with stub token files, a stub kubeconfig and LEGION_POSTGRES_DSN set) and a minimal tmux configuration"
+    }
+  ],
+  "schemaVersion": 1,
+  "trickyParts": [
+    "A variable the image's ENV sets is one runtime.kubernetes.pod.env is refused (sandbox/operatorpod.go imageEnv, held to the Dockerfile by TestImageEnvIsWhatTheWorkerImageSets), so the image sets no PUPPETEER_EXECUTABLE_PATH: Oh My Pi finds /usr/bin/chromium on PATH itself before any download (its Kpe/Udr/Xdr resolution, read from the pinned bundle), and the operator's pod env naming another browser is what the probe runs, which the Stage 4a image-probe-capability-negative check drives",
+    "typescript-language-server wraps tsserver, which TypeScript 7 (npm latest, 7.0.2, bin tsc alone) no longer ships, so TypeScript is pinned to the repository's own 5.9.3",
+    "record.Notice gained a slice field (openCapabilities), so every `==`/slices.Equal on notices panics at runtime (CI caught hold_test.go after local Postgres-less runs skipped it); comparisons are reflect.DeepEqual now",
+    "The OK line's existing mark parsers anchored agent-models to daemon-api-version=; the new marks sit between them, and one markPattern builder tolerates marks a line lacks (an older CLI's) or adds",
+    "The probe pod's log tail was 50 lines; the table adds 19 before the OK line, so probeLogLines is 100",
+    "Oh My Pi's profile-root resolution (OMP_PROFILE/PI_PROFILE, PI_CONFIG_DIR, XDG_DATA_HOME, PI_CODING_AGENT_DIR) lived only in the boot gate; the probe's plugin-lock check now reads it through the new internal/ompdirs rather than a second simplified port"
+  ]
+}
