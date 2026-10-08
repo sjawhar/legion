@@ -314,6 +314,11 @@
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's
   `ref` is unchanged (LEGION-622).
+- The secrets broker no longer logs `agent secret policy load failed; previous policy kept` for a
+  periodic reread of the namespace that its own shutdown cut short: `policy.NewCurrent` logs a
+  failed reload only while its context is live, so the deployment's alarm on that line no longer
+  counts a shutdown as a failed load. A reload that fails while the broker runs logs exactly as
+  before.
 - Agent bearer tokens can now list repository-to-project mappings and architecture sources, and set
   or remove repository mappings, architecture sources, and delivery settings. Settings writes record
   the bearer-supplied session actor, as other agent-authenticated writes do.

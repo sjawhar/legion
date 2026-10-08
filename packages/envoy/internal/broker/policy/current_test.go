@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -310,25 +312,53 @@ func TestARereadWaitsForTheWriterLockOnlyWhileItsCallerDoes(t *testing.T) {
 	}
 }
 
-// hangingLister answers page until hang is set, and from then on waits for its context to end and
-// answers its error, as the SDK does: a Secrets Manager that has stopped answering.
+// hangingLister answers page until hang; from then on it holds each call until unhang releases
+// every held call with page, or until the call's context ends and it answers that context's error,
+// as the SDK does: a Secrets Manager that stops answering, then answers again. heldCalls counts the
+// calls it has held. hang and unhang pair: a repeated hang keeps holding, and an unhang with
+// nothing held does nothing.
 type hangingLister struct {
-	page *secretsmanager.ListSecretsOutput
-	hang atomic.Bool
+	page      *secretsmanager.ListSecretsOutput
+	heldCalls atomic.Int64
+	mu        sync.Mutex
+	held      chan struct{} // closed by unhang; nil while it answers
+}
+
+func (h *hangingLister) hang() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.held == nil {
+		h.held = make(chan struct{})
+	}
+}
+
+func (h *hangingLister) unhang() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.held != nil {
+		close(h.held)
+		h.held = nil
+	}
 }
 
 func (h *hangingLister) ListSecrets(ctx context.Context, _ *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
-	if h.hang.Load() {
-		<-ctx.Done()
-		return nil, ctx.Err()
+	h.mu.Lock()
+	held := h.held
+	h.mu.Unlock()
+	if held != nil {
+		h.heldCalls.Add(1)
+		select {
+		case <-held:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	return h.page, nil
 }
 
-// TestAReloadGivesUpWithinItsInterval pins that a periodic reload whose Secrets Manager stops
-// answering fails once its interval has passed, logging LoadFailedMessage, rather than holding the
-// writer lock every reread waits on for as long as the process lives.
-func TestAReloadGivesUpWithinItsInterval(t *testing.T) {
+// hangingLoader is the loader of an empty namespace whose listing lister answers.
+func hangingLoader(t *testing.T) (*hangingLister, policy.Loader) {
+	t.Helper()
 	store := secrets.NewLocal()
 	page, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
 	if err != nil {
@@ -337,15 +367,53 @@ func TestAReloadGivesUpWithinItsInterval(t *testing.T) {
 	lister := &hangingLister{page: page}
 	loader := policytest.Loader(store)
 	loader.Secrets = lister
-	logged := policytest.CaptureLog(t)
-	cur, err := policy.NewCurrent(t.Context(), loader, 50*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lister.hang.Store(true)
-	await(t, func() bool { return strings.Contains(logged.String(), policy.LoadFailedMessage) })
-	lister.hang.Store(false)
-	if err := rereadWithin(t, cur, context.Background(), "NEW_KEY"); err != nil {
-		t.Fatalf("RefreshOne after the hung reload gave up = %v", err)
-	}
+	return lister, loader
+}
+
+// TestAReloadGivesUpWithinItsInterval pins that a periodic reload whose Secrets Manager stops
+// answering fails once its interval has passed, logging LoadFailedMessage, rather than holding the
+// writer lock every reread waits on for as long as the process lives. It runs in a synctest
+// bubble, which waits for the reload goroutine to return, so none of its lines reach a later
+// test's capture.
+func TestAReloadGivesUpWithinItsInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister, loader := hangingLoader(t)
+		logged := policytest.CaptureLog(t)
+		cur, err := policy.NewCurrent(t.Context(), loader, 50*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lister.hang()
+		const failed = "ERROR " + policy.LoadFailedMessage + " error=\"list secrets under " + policytest.Prefix + ": context deadline exceeded\"\n"
+		await(t, func() bool { return strings.Contains(logged.String(), failed) })
+		lister.unhang()
+		if err := rereadWithin(t, cur, context.Background(), "NEW_KEY"); err != nil {
+			t.Fatalf("RefreshOne after the hung reload gave up = %v", err)
+		}
+	})
+}
+
+// TestAReloadItsShutdownEndsLogsNothing pins that a reload cut short because NewCurrent's context
+// ended, the broker shutting down, is no failed load: the deployment's alarm counts
+// LoadFailedMessage, so a reload in flight when that context ends logs nothing.
+func TestAReloadItsShutdownEndsLogsNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister, loader := hangingLoader(t)
+		logged := policytest.CaptureLog(t)
+		ctx, shutdown := context.WithCancel(t.Context())
+		if _, err := policy.NewCurrent(ctx, loader, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		lister.hang()
+		time.Sleep(time.Minute + time.Second)
+		synctest.Wait()
+		if held := lister.heldCalls.Load(); held != 1 {
+			t.Fatalf("%d reloads held on the listing a minute in, want the first", held)
+		}
+		shutdown()
+		synctest.Wait() // the reload has returned, and its goroutine with it
+		if logged.String() != "" {
+			t.Fatalf("a reload the shutdown ended logged:\n%s", logged)
+		}
+	})
 }

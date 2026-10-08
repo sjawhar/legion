@@ -1939,14 +1939,16 @@ gives a secret created without a value no version, as Secrets Manager does); and
 an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
 `cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
-the alarm, and a failed reload keeps the last set. `Set.Version`, the SHA-256 of every served
-secret's name, owner, tier and ARN, is recorded on every request, and a live grant is re-checked
-only once it has moved (`stillAllowed`); the record line, the column and the API field that carry
-it keep the name `rules_version`, since records are content-addressed and stored bodies must still
-parse. `policy.NewSet` is the one place a `Version` is computed, ascending by slug (not by request
-name, which orders `A0` and `A_B` the other way), for a full load and a single-name merge alike, so
-an unchanged namespace keeps its version (`TestGoldenDigest` pins the bytes). `Loader.LoadOne`
-reads one name with `DescribeSecret` under the same rules and the same refusal line, and
+the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
+context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
+SHA-256 of every served secret's name, owner, tier and ARN, is recorded on every request, and a
+live grant is re-checked only once it has moved (`stillAllowed`); the record line, the column and
+the API field that carry it keep the name `rules_version`, since records are content-addressed and
+stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
+by slug (not by request name, which orders `A0` and `A_B` the other way), for a full load and a
+single-name merge alike, so an unchanged namespace keeps its version (`TestGoldenDigest` pins the
+bytes). `Loader.LoadOne` reads one name with `DescribeSecret` under the same rules and the same
+refusal line, and
 `Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one writer lock
 from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
 so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's

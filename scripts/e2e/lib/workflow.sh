@@ -359,16 +359,40 @@ smoke_pr_mergeable() {
   return 1
 }
 report_smoke_pr_merge_state() { note "the cleanup pull request's last merge state: ${smoke_pr_merge_state:-never read}"; }
+# smoke_branch_state BRANCH prints `present` when the smoke repository has the branch BRANCH and
+# `absent` when it has none, and fails when GitHub gives no answer within 60 s. matching-refs
+# answers an absent branch with an empty list, where a read of the ref itself answers 404 as it
+# answers other failures; it matches by prefix, so only BRANCH's own ref counts.
+smoke_branch_state() {
+  local refs
+  refs=$(timeout 60 gh api "repos/$repo/git/matching-refs/heads/$1" --jq ".[] | select(.ref == \"refs/heads/$1\") | .ref") || return 1
+  if [ -n "$refs" ]; then echo present; else echo absent; fi
+}
+# The cleanup pull request's branch is proof/clean-main-<project, lowercased>. Stage 3's project is
+# a fresh key per run, but Stage 4b's is LEGSMOKE in every run, so the name alone cannot tell this
+# run's branch from one an earlier run left. smoke_cleanup_branch is the run's record that the
+# branch is its own: clean_smoke_main sets it once it has read that the branch does not exist and
+# just before it makes it, so a create whose answer is lost still counts, and empties it once the
+# merge has deleted the branch. smoke_cleanup_url is the pull request gh pr create answered.
+smoke_cleanup_branch=
+smoke_cleanup_url=
 # clean_smoke_main removes every leftover from the smoke main through the proof human's ordinary
 # merge (the smoke main takes changes only through pull requests), so the next run starts from a
 # fixture whose base carries no other issue's handoff. See approve_as_reviewer for why a merge
-# leaves them. It merges its pull request once smoke_pr_mergeable holds, waiting up to 600 s.
+# leaves them. It merges its pull request once smoke_pr_mergeable holds, waiting up to 600 s. It
+# fails, naming the branch, when its branch exists before it makes it: that one is an earlier run's,
+# which this run neither uses nor removes. A run that stops between making the branch and the
+# merge leaves its teardown both to remove (close_smoke_cleanup).
 clean_smoke_main() {
-  local paths base branch path sha url pr
+  local paths base branch state path sha url pr
   paths=$(smoke_main_leftovers)
   [ -n "$paths" ] || return 0
   base=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
   branch="proof/clean-main-${project,,}"
+  state=$(smoke_branch_state "$branch")
+  [ "$state" = absent ] ||
+    fail "$repo already has the branch $branch, which this run did not make: an earlier run left it and the pull request on it, if any; close that pull request and delete the branch, then run again"
+  smoke_cleanup_branch=$branch
   gh api "repos/$repo/git/refs" -f ref="refs/heads/$branch" -f sha="$base" >/dev/null
   while IFS= read -r path; do
     sha=$(gh api "repos/$repo/contents/$path?ref=$branch" --jq .sha)
@@ -376,24 +400,68 @@ clean_smoke_main() {
   done <<<"$paths"
   url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
     --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
+  smoke_cleanup_url=$url
   pr=${url##*/}
   timeout_hook=report_smoke_pr_merge_state
   until_true 600 "$repo#$pr to pass its required checks (merge state CLEAN, UNSTABLE or HAS_HOOKS)" smoke_pr_mergeable "$pr"
   timeout_hook=
   gh -R "$repo" pr merge "$pr" --squash --delete-branch
+  smoke_cleanup_branch=
+  smoke_cleanup_url=
   note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
+}
+# close_smoke_cleanup is a teardown's part for a run that stopped between clean_smoke_main making
+# its branch and the merge deleting it (a merge GitHub answered with a 504, a wait that timed out, an
+# interrupt): it closes each open pull request whose branch is exactly smoke_cleanup_branch, with a
+# comment naming the run, and deletes the branch. A run that never made the branch makes no gh call
+# here, and another run's proof/clean-main-<project> is never touched. It prints one line for each
+# pull request it closed or could not close, by URL, and for the branch, and returns 1 when the pull
+# request may still be open or the branch remains. Each gh call gets 60 s. Only the listing's stdout
+# is parsed (see close_run_pull_requests); its stderr goes to the caller's.
+close_smoke_cleanup() {
+  local branch=$smoke_cleanup_branch prs number url out state refused=0
+  [ -n "$branch" ] || return 0
+  if prs=$(timeout 60 gh -R "$repo" pr list --state open --limit 1000 --json number,url,headRefName \
+    --jq ".[] | select(.headRefName == \"$branch\") | \"\(.number) \(.url)\""); then
+    while read -r number url; do
+      [ -n "$number" ] || continue
+      if out=$(timeout 60 gh -R "$repo" pr close "$number" \
+        --comment "Closed by the run that opened it (${0##*/}, project $project, pid $$), at its teardown." </dev/null 2>&1); then
+        printf "closed the run's cleanup pull request %s\n" "$url"
+      else
+        printf "could not close the run's cleanup pull request %s: %s\n" "$url" "${out//$'\n'/ }"
+        refused=1
+      fi
+    done <<<"$prs"
+  else
+    printf "could not list the open pull requests on %s, so the run's cleanup pull request %s may still be open (gh's reason is on stderr)\n" \
+      "$repo" "${smoke_cleanup_url:-on $branch}"
+    refused=1
+  fi
+  if ! state=$(smoke_branch_state "$branch"); then
+    printf "could not read whether the run's cleanup branch %s remains on %s (gh's reason is on stderr)\n" "$branch" "$repo"
+    refused=1
+  elif [ "$state" = present ]; then
+    if out=$(timeout 60 gh api -X DELETE "repos/$repo/git/refs/heads/$branch" 2>&1); then
+      printf "deleted the run's cleanup branch %s from %s\n" "$branch" "$repo"
+    else
+      printf "could not delete the run's cleanup branch %s from %s: %s\n" "$branch" "$repo" "${out//$'\n'/ }"
+      refused=1
+    fi
+  fi
+  return "$refused"
 }
 
 # ---- the run's own pull requests ------------------------------------------------------------------
 
 # run_pull_requests prints the number of every open pull request on the smoke repository whose
-# branch is this run's own: the daemon's `legion/<project>-*` issue branches and clean_smoke_main's
-# `proof/clean-main-<ptoken>`, so a lane running beside this one is untouched. The limit is far above
-# the repository's open count: gh's default of 30 is a window of the newest, and this run's own can
-# sit outside it.
+# branch is one of this run's issue branches, the daemon's `legion/<project>-*`, so a lane running
+# beside this one is untouched; clean_smoke_main's own is close_smoke_cleanup's. The limit is far
+# above the repository's open count: gh's default of 30 is a window of the newest, and this run's
+# own can sit outside it.
 run_pull_requests() {
   gh -R "$repo" pr list --state open --limit 1000 --json number,headRefName \
-    --jq "[.[] | select((.headRefName | startswith(\"legion/$project-\")) or .headRefName == \"proof/clean-main-$ptoken\") | .number] | .[]"
+    --jq "[.[] | select(.headRefName | startswith(\"legion/$project-\")) | .number] | .[]"
 }
 # close_run_pull_requests closes each of them with its branch, printing one line per pull request
 # with gh's reason on anything short of a full close, and returns 1 when a pull request stays open
@@ -422,14 +490,18 @@ close_run_pull_requests() {
   return "$refused"
 }
 # close_unpassed_run_pull_requests is the EXIT trap's part: a run that did not pass (`ok` unset)
-# closes what it opened, best effort, reporting to stderr. A passing run closed them in
-# cleanup-is-complete. A run that never established the proof human (require_proof_human) opened
-# nothing and makes no gh call here, since its gh may act as someone else.
+# closes what it opened, best effort, reporting to stderr: its issue pull requests, and the cleanup
+# pull request and branch of a smoke-main cleanup it stopped inside (close_smoke_cleanup, whose
+# lines name by URL what it could not close). A passing run closed the first in cleanup-is-complete
+# and merged the second in smoke-main-clean. A run that never established the proof human
+# (require_proof_human) opened nothing and makes no gh call here, since its gh may act as someone
+# else.
 close_unpassed_run_pull_requests() {
   [ -z "${ok:-}" ] || return 0
   [ -n "$proof_human" ] || return 0
   close_run_pull_requests >&2 ||
     printf "some of this run's pull requests may still be open on %s (above)\n" "$repo" >&2
+  close_smoke_cleanup >&2 || true
   return 0
 }
 
