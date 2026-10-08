@@ -514,3 +514,38 @@ func TestBlockAskIndexedAfterEditKeepsTheWritingActor(t *testing.T) {
 		t.Fatalf("saw %d block asks, want 2", seen)
 	}
 }
+
+func TestChangingBlockAskReplacesAnswerAttributes(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Change typed ask", "decision", transportAsk, "Which transport?")
+	first := readBlockAsk(t, handler, askID)
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected":           []string{"REST"},
+		"text":               "REST first.",
+		"expected_edited_at": first.EditedAt,
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer block ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	original := decodeBody[model.Ask](t, answered)
+	if original.Answer == nil {
+		t.Fatal("initial block answer is missing")
+	}
+	originalAt := timestampValue(original.Answer.At)
+
+	changed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected":           []string{"gRPC"},
+		"expected_answer_at": originalAt,
+	}, "alice")
+	if changed.Code != http.StatusOK {
+		t.Fatalf("change block answer: status=%d body=%s", changed.Code, changed.Body.String())
+	}
+	updated := decodeBody[model.Ask](t, changed)
+	if updated.Answer == nil || len(updated.Answer.Selected) != 1 || updated.Answer.Selected[0] != "gRPC" || updated.Answer.Text != nil || !updated.Answer.At.After(original.Answer.At) {
+		t.Fatalf("changed block answer = %#v", updated)
+	}
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	if !strings.Contains(markdown, `selected="[&#x22;gRPC&#x22;]"`) || strings.Contains(markdown, `answer="REST first."`) || strings.Contains(markdown, `answer=""`) {
+		t.Fatalf("changed block markdown = %q, want gRPC selected and no answer attribute", markdown)
+	}
+}
