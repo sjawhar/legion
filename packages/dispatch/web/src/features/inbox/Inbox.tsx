@@ -60,6 +60,7 @@ import { type AskOrdinal, askIssueKey, askOrdinals, controlName } from "./ask-na
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { type CrossBandCount, crossBandCounts, groupRows, type InboxGroup } from "./grouping";
+import { useMotionHold } from "./motion-hold";
 import { SnoozeControl } from "./SnoozeControl";
 import {
   COLLAPSED_SECTIONS,
@@ -152,7 +153,6 @@ function AssignToMe({
     </>
   );
 }
-
 
 /** The owning issue or document link shared by an ask row and its group header. */
 function InboxOwnerLink({
@@ -456,6 +456,9 @@ export function Inbox({
   // views below are client-side partitions of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
+  const listRef = useRef<HTMLElement>(null);
+  // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
+  const adoptedInbox = useMotionHold(inbox.data, listRef);
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
   // state all read this one answer.
   const credentials = useCredentialRequests();
@@ -528,7 +531,7 @@ export function Inbox({
       return next;
     });
   }, []);
-  const listedIds = inbox.data?.map((row) => row.id).join(" ");
+  const listedIds = adoptedInbox?.map((row) => row.id).join(" ");
   useEffect(() => {
     if (listedIds === undefined) return;
     const listed = new Set(listedIds === "" ? [] : listedIds.split(" "));
@@ -543,8 +546,8 @@ export function Inbox({
   const agent = filter.agent;
   const fromAgent =
     agent === undefined
-      ? (inbox.data ?? [])
-      : (inbox.data ?? []).filter(
+      ? (adoptedInbox ?? [])
+      : (adoptedInbox ?? []).filter(
           (ask) => ask.author.kind === "session" && ask.author.id === agent
         );
   const inView = (rows: readonly InboxRow[]) =>
@@ -600,7 +603,6 @@ export function Inbox({
   // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
   // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
   const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
-  const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
   // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
@@ -627,8 +629,7 @@ export function Inbox({
     if (jumpTo === null) return;
     const target = [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])].find(
       (row) =>
-        row.dataset.inboxOwnerKey === jumpTo.ownerKey &&
-        row.dataset.inboxSection === jumpTo.section
+        row.dataset.inboxOwnerKey === jumpTo.ownerKey && row.dataset.inboxSection === jumpTo.section
     );
     setJumpTo(null);
     if (target === undefined) return;
@@ -856,7 +857,7 @@ export function Inbox({
       {viewSwitch}
       {chip}
       {agent === undefined ? (
-        <BlockedOnYou asks={inView(inbox.data)} credentialRequests={credentials.requests} />
+        <BlockedOnYou asks={inView(adoptedInbox ?? [])} credentialRequests={credentials.requests} />
       ) : null}
       {bulkBar}
     </>

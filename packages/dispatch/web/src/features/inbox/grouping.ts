@@ -1,5 +1,5 @@
 import type { InboxRow } from "../../api/types";
-import { askOwner, type AskOwner } from "./ask-name";
+import { type AskOwner, askOwner } from "./ask-name";
 import type { InboxSection } from "./sections";
 
 /** Rows of one Inbox owner that stay adjacent within one band. */

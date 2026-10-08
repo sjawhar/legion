@@ -7,8 +7,8 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
 import type { Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import type { InboxView } from "../refs/routes";
-import { DIALOG_SCOPE } from "../shell/keymap";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { DIALOG_SCOPE } from "../shell/keymap";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
 import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
@@ -661,16 +661,22 @@ test("a held row stays inside its owner's group", async () => {
     fireEvent.pointerOver(heldRow);
 
     act(() => {
-      queryClient.setQueryData<InboxRow[]>(["inbox"], [
-        urgent,
-        first,
-        {
-          ...held,
-          last_reply: { author: { id: "session-1", kind: "session" }, created_at: held.created_at },
-          waiting_on: "agent",
-        },
-        other,
-      ]);
+      queryClient.setQueryData<InboxRow[]>(
+        ["inbox"],
+        [
+          urgent,
+          first,
+          {
+            ...held,
+            last_reply: {
+              author: { id: "session-1", kind: "session" },
+              created_at: held.created_at,
+            },
+            waiting_on: "agent",
+          },
+          other,
+        ]
+      );
     });
 
     const header = document.querySelector<HTMLElement>('[data-inbox-group-header="issue:CORE-1"]');

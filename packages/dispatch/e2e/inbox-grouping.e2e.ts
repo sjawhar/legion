@@ -67,9 +67,9 @@ async function seededGroups() {
 }
 
 async function inboxRows(page: Page): Promise<string[]> {
-  return page.locator("[data-inbox-row]").evaluateAll((rows) =>
-    rows.map((row) => row.getAttribute("data-inbox-row") ?? "")
-  );
+  return page
+    .locator("[data-inbox-row]")
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-inbox-row") ?? ""));
 }
 
 test("groups an issue and document's asks while rows remain the flat keyboard list", async ({
@@ -90,7 +90,9 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
     await expect(issueHeader).toContainText("Grouped issue");
     await expect(issueHeader).toContainText("3 asks");
 
-    const documentHeader = page.locator('[data-inbox-group-header="document:CORE/grouped-document"]');
+    const documentHeader = page.locator(
+      '[data-inbox-group-header="document:CORE/grouped-document"]'
+    );
     await expect(documentHeader).toContainText("CORE · Grouped document");
     await expect(documentHeader).toContainText("2 asks");
 
@@ -100,9 +102,7 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
     const rowIds = await inboxRows(page);
     const ungrouped = rowIds.filter((id) => !groupedIds.has(id) && !documentIds.has(id));
     expect(ungrouped).toEqual(
-      served
-        .map((row) => row.id)
-        .filter((id) => !groupedIds.has(id) && !documentIds.has(id))
+      served.map((row) => row.id).filter((id) => !groupedIds.has(id) && !documentIds.has(id))
     );
 
     const firstGroupId = served.find((row) => groupedIds.has(row.id))?.id;
@@ -116,9 +116,9 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
     await expect(page.locator(`[data-inbox-row="${singleton.id}"]`)).not.toHaveAttribute(
       "data-inbox-group"
     );
-    await expect(page.locator(`[data-inbox-group-header="issue:${singletonIssue.key}"]`)).toHaveCount(
-      0
-    );
+    await expect(
+      page.locator(`[data-inbox-group-header="issue:${singletonIssue.key}"]`)
+    ).toHaveCount(0);
 
     const expectedForward = await inboxRows(page);
     await page.locator("body").focus();
@@ -126,9 +126,7 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
     for (const _ of expectedForward) {
       await page.keyboard.press("j");
       forward.push(
-        await page.evaluate(
-          () => document.activeElement?.getAttribute("data-inbox-row") ?? ""
-        )
+        await page.evaluate(() => document.activeElement?.getAttribute("data-inbox-row") ?? "")
       );
     }
     expect(forward).toEqual(expectedForward);
@@ -142,9 +140,7 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
     for (const _ of expectedBackward) {
       await page.keyboard.press("k");
       backward.push(
-        await page.evaluate(
-          () => document.activeElement?.getAttribute("data-inbox-row") ?? ""
-        )
+        await page.evaluate(() => document.activeElement?.getAttribute("data-inbox-row") ?? "")
       );
     }
     expect(backward).toEqual(expectedBackward);

@@ -69,6 +69,14 @@ async function topOf(locator: Locator): Promise<number> {
   return box.y;
 }
 
+async function nextFrame(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const frame = Promise.withResolvers<void>();
+    requestAnimationFrame(() => frame.resolve());
+    await frame.promise;
+  });
+}
+
 const scrollY = (page: Page) => page.evaluate(() => window.scrollY);
 
 /** Scrolls so the row's centre sits at the viewport's centre. */
@@ -318,6 +326,131 @@ test("a grouped header stays with its pointer-held row while a P0 ask arrives", 
     expect(Math.abs((await topOf(header)) - headerBefore)).toBeLessThanOrEqual(2);
 
     await leaveRow(page);
+  } finally {
+    await alice.close();
+  }
+});
+
+async function seedTravellingPointerGroup() {
+  await createProject({ key: "CORE", name: "Core" });
+  const grouped = await createIssue({ project: "CORE", title: "Grouped travelling pointer asks" });
+  await patchIssue(grouped.key, { priority: 1 });
+  await createAsk(grouped.key, { question: "Travelling pointer grouped first" }, session);
+  await createAsk(grouped.key, { question: "Travelling pointer grouped second" }, session);
+  await seedAsks("Travelling pointer", 6);
+}
+
+async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
+  const rows = page.locator("[data-inbox-row]");
+  await expect(rows).toHaveCount(8);
+  expect(await scrollY(page)).toBe(0);
+  const sixth = rows.nth(5);
+  const initialSixthBox = await sixth.boundingBox();
+  const viewport = page.viewportSize();
+  if (initialSixthBox === null || viewport === null) throw new Error("sixth row has no box");
+  // Keep the destination on screen while leaving rows below it, so the anchor can still scroll.
+  await page.setViewportSize({
+    height: Math.ceil(initialSixthBox.y + initialSixthBox.height + 40),
+    width: viewport.width,
+  });
+  const fourth = await rows.nth(3).boundingBox();
+  const fifth = await rows.nth(4).boundingBox();
+  const sixthBox = await sixth.boundingBox();
+  if (fourth === null || fifth === null || sixthBox === null)
+    throw new Error("Inbox row has no box");
+  const sixthID = await sixth.getAttribute("data-inbox-row");
+  if (sixthID === null) throw new Error("sixth row has no id");
+  const destination = page.locator(`[data-inbox-row="${sixthID}"]`);
+  const sixthBefore = await topOf(destination);
+  const x = sixthBox.x + sixthBox.width / 2;
+  const gap = (fourth.y + fourth.height + fifth.y) / 2;
+  const requested = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const delivered = Promise.withResolvers<void>();
+  let hold = true;
+  await page.route("**/api/v1/inbox", async (route) => {
+    const response = await route.fetch();
+    const listed = (await response.json()) as Array<{ question?: string }>;
+    if (!hold || !listed.some((row) => row.question === "Travelling pointer arrival")) {
+      await route.fulfill({ json: listed, response });
+      return;
+    }
+    hold = false;
+    requested.resolve();
+    await release.promise;
+    await route.fulfill({ json: listed, response });
+    delivered.resolve();
+  });
+
+  try {
+    for (const y of [fourth.y - 20, fourth.y + fourth.height / 2, gap]) {
+      await page.mouse.move(x, y);
+      await nextFrame(page);
+    }
+
+    const urgent = await createIssue({ project: "CORE", title: "Travelling pointer P0" });
+    await patchIssue(urgent.key, { priority: 0 });
+    const p0 = await createAsk(urgent.key, { question: "Travelling pointer arrival" }, session);
+    await requested.promise;
+    // Seeding can outlast the hold; this last move puts the refetch inside the pointer's travel.
+    await page.mouse.move(x, gap + 1);
+    await nextFrame(page);
+    release.resolve();
+    await delivered.promise;
+    // Keep travelling inside the gap while the released response renders. Each move is still pointer
+    // motion, but none rests on a row the viewport anchor could hold.
+    for (let step = 0; step < 10; step += 1) {
+      await page.mouse.move(x, gap + (step % 2));
+      await nextFrame(page);
+      await page.waitForTimeout(25);
+    }
+
+    const targetY = sixthBox.y + sixthBox.height / 2;
+    for (let step = 1; step <= 5; step += 1) {
+      await page.mouse.move(x, gap + ((targetY - gap) * step) / 5);
+      await nextFrame(page);
+    }
+
+    await expect(page.locator(`[data-inbox-row="${p0.id}"]`)).toBeAttached();
+    await expect(rows).toHaveCount(9);
+    const underPointer = await page.evaluate(
+      ({ x, y }) =>
+        document
+          .elementFromPoint(x, y)
+          ?.closest("[data-inbox-row]")
+          ?.getAttribute("data-inbox-row"),
+      { x, y: targetY }
+    );
+    expect(underPointer).toBe(sixthID);
+    expect(Math.abs((await topOf(destination)) - sixthBefore)).toBeLessThanOrEqual(2);
+  } finally {
+    release.resolve();
+    await page.unroute("**/api/v1/inbox");
+  }
+}
+
+test("a travelling pointer keeps its destination when a P0 row arrives", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await seedAsks("Travelling pointer", 8);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await travelPointerAcrossIncomingRow(page);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a travelling pointer crosses a grouped owner without losing its destination", async ({
+  browser,
+}) => {
+  await seedTravellingPointerGroup();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await travelPointerAcrossIncomingRow(page);
   } finally {
     await alice.close();
   }

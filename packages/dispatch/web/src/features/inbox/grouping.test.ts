@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 
 import type { InboxRow } from "../../api/types";
-import { issueAsk } from "./inbox-fixture";
 import { crossBandCounts, groupRows, type InboxBand } from "./grouping";
+import { issueAsk } from "./inbox-fixture";
 
 function onIssue(id: string, key: string): InboxRow {
   return issueAsk({
@@ -69,11 +69,19 @@ test("crossBandCounts gives each displayed owner the counts in every other band"
   const bands: InboxBand[] = [
     {
       section: "human",
-      rows: [onIssue("a-human", "CORE-1"), onIssue("b-human", "CORE-1"), onIssue("c-human", "CORE-2")],
+      rows: [
+        onIssue("a-human", "CORE-1"),
+        onIssue("b-human", "CORE-1"),
+        onIssue("c-human", "CORE-2"),
+      ],
     },
     {
       section: "agent",
-      rows: [onIssue("a-agent", "CORE-1"), onIssue("b-agent", "CORE-2"), onIssue("c-agent", "CORE-2")],
+      rows: [
+        onIssue("a-agent", "CORE-1"),
+        onIssue("b-agent", "CORE-2"),
+        onIssue("c-agent", "CORE-2"),
+      ],
     },
     { section: "later", rows: [onIssue("a-later", "CORE-1")] },
   ];
