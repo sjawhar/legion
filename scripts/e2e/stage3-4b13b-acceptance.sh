@@ -432,9 +432,9 @@ role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
 role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
 token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
 
-# The refusal every rule-bound pane gives `legion handoff complete` (packages/pi-envoy/extensions/
+# The refusal every rule-bound pane gives `legion handoff complete` (packages/pi-legion/extensions/
 # legion.ts LEGION_HANDOFF_COMPLETE.refusal), and the follow-up the phase stall sends
-# (src/legion/phase-stall.ts FOLLOW_UP).
+# (packages/pi-legion/src/phase-stall.ts FOLLOW_UP).
 refusal_needle="a phase is completed with the \`legion\` tool's \`handoff_complete\`, never a shell command"
 followup_needle="Your turn ended with your Legion phase still open"
 
@@ -693,7 +693,8 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
 pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
@@ -713,7 +714,7 @@ main_sha=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$scratch_base" -f sha="$main_sha" >/dev/null
 note "scratch base $repo:$scratch_base at main $main_sha"
 start_daemon
-note "project $project, profile $profile, plugin $(jq -r '.name + "@" + .version' "$manifest"), ports NATS $port_nats Dispatch $port_dispatch daemon $port_daemon listener $port_listener"
+note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), ports NATS $port_nats Dispatch $port_dispatch daemon $port_daemon listener $port_listener"
 pane_watcher &
 watcher_pid=$!
 production_baseline
@@ -1134,7 +1135,7 @@ grant_changed() { [ "$(grant_mtime "$1")" != "$2" ]; }
 begin ready-cap-refused-at-the-boundary
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
 # The pane's LEGION_GRANT_FILE is <LEGION_STATE_DIR>/secrets/<claim token>-grant, the file the
-# daemon names on the pane and the plugin writes a grant into before each bash command (pi-envoy
+# daemon names on the pane and the plugin writes a grant into before each bash command (pi-legion
 # extensions/legion.ts).
 merger_state=$(pane_value "$merger_omp" LEGION_STATE_DIR)
 merger_ws=$(readlink "/proc/$merger_omp/cwd")

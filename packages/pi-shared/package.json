@@ -1,0 +1,70 @@
+{
+  "name": "@legion/pi-shared",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./interface": {
+      "types": "./src/interface.ts",
+      "bun": "./src/interface.ts"
+    },
+    "./injected-user-turns": {
+      "types": "./src/injected-user-turns.ts",
+      "bun": "./src/injected-user-turns.ts"
+    },
+    "./pi-types": {
+      "types": "./src/pi-types.ts",
+      "bun": "./src/pi-types.ts"
+    },
+    "./role-claim-bridge": {
+      "types": "./src/role-claim-bridge.ts",
+      "bun": "./src/role-claim-bridge.ts"
+    },
+    "./subagent-session": {
+      "types": "./src/subagent-session.ts",
+      "bun": "./src/subagent-session.ts"
+    },
+    "./tool-result": {
+      "types": "./src/tool-result.ts",
+      "bun": "./src/tool-result.ts"
+    },
+    "./shell-command": {
+      "types": "./src/shell-command.ts",
+      "bun": "./src/shell-command.ts"
+    },
+    "./test/cross-imports": {
+      "types": "./test/cross-imports.ts",
+      "bun": "./test/cross-imports.ts"
+    },
+    "./test/host-registry": {
+      "types": "./test/host-registry.ts",
+      "bun": "./test/host-registry.ts"
+    },
+    "./test/omp-harness": {
+      "types": "./test/omp-harness.ts",
+      "bun": "./test/omp-harness.ts"
+    },
+    "./test/omp-natives": {
+      "types": "./test/omp-natives.ts",
+      "bun": "./test/omp-natives.ts"
+    },
+    "./test/skills-guard": {
+      "types": "./test/skills-guard.ts",
+      "bun": "./test/skills-guard.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/ test/"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@legion/envoy-client": "workspace:*",
+    "@oh-my-pi/pi-tui": "^18.1.15",
+    "@oh-my-pi/pi-utils": "^18.1.15",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

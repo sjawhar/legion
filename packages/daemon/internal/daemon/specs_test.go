@@ -2,13 +2,17 @@ package daemon
 
 import (
 	"context"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -104,5 +108,48 @@ func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
 				t.Fatalf("addressing %q; want it to end with %q", spec.Prompt.Addressing, tc.want)
 			}
 		})
+	}
+}
+
+// The daemon's controller (`controller: daemon`) is launched with its role part and the headless
+// part, told the project's design gate policy as the operator's controller is, with the
+// deployment's instructions and launch secrets, and with no repository and no git identity: it
+// works Dispatch, never a checkout, and commits nothing.
+func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+		instructions: "/state/deployment-instructions.md", secrets: map[string]string{"ENVOY_TOKEN": "envoy-bearer"},
+		repo: ghrepo.MustParse("acme/widgets"),
+		identity: func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+			t.Error("the controller's launch asked for a git identity")
+			return runtime.GitIdentity{}, nil
+		},
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want, err := composer.ControllerPromptPaths(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(spec.Prompt.RolePromptPaths, want) {
+		t.Errorf("role prompts = %q, want %q", spec.Prompt.RolePromptPaths, want)
+	}
+	if spec.Prompt.Addressing != DesignGateFragment(config.DesignGateOff) {
+		t.Errorf("addressing = %q, want the design gate policy alone", spec.Prompt.Addressing)
+	}
+	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
+		t.Errorf("instructions = %q, want %q", spec.Prompt.DeploymentInstructionsPath, s.instructions)
+	}
+	if !spec.Repository.IsZero() || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
+		t.Errorf("repository %q, env %v, recovered from %q; want none of them", spec.Repository, spec.Env, spec.WorkspaceRecoveredFrom)
+	}
+	if !maps.Equal(spec.Secrets, s.secrets) {
+		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
 	}
 }

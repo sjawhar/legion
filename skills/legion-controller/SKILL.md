@@ -26,8 +26,8 @@ For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_DAEMON_URL`, `LEGION_PROJECT` (the daemon's project), `LEGION_STATE_DIR`, and `LEGION_GRANT_FILE`
 (an absolute path to a file only you can read, under a 0700 directory; the extension writes
 each command's grant there and every `bash` call is blocked without it) in its environment. Do
-not set `LEGION_CONTROLLER=1` — that marker is `legion controller start`'s own, and a session
-carrying it claims at startup. Then run:
+not set `LEGION_CONTROLLER=1` — that marker is the launched controller's own (`legion controller
+start`'s session, or the daemon's pod), and a session carrying it claims at startup. Then run:
 
 ```text
 /legion-claim-controller
@@ -50,12 +50,27 @@ retry. And the role does not follow `/new` or `/fork` in a takeover session — 
 `LEGION_CONTROLLER=1` the new session is not a Legion session to the extension — so after either
 command run `/legion-claim-controller` again.
 
-The daemon holds nothing for a controller: daemon state and the Dispatch project remain
-authoritative, and the start procedure below reads what happened while no controller ran.
+Daemon state and the Dispatch project remain authoritative, and the start procedure below reads
+what happened while no controller ran. Who launched you is the deployment's `controller` setting:
+the operator, or the daemon itself. The `How this controller runs` part of your system prompt says
+which.
+
+### Started by the daemon
+
+Under `controller: daemon` the daemon launched you as a pod in the cluster and supervises you like
+a root architect: you run headless (`omp --mode rpc`), nobody types into your session, and nobody
+reads your replies as they appear. The extension registered with your launch's boot token, claimed
+the role, subscribed to the controller topic and reported ready; the daemon then sent your start
+message. When your pod dies the daemon relaunches it and resumes this same session, with a new
+start message, so run the start procedure each time one arrives. A human reaches you through
+Dispatch (a message to your session on the Agents page, a reply to an ask you opened, a mention) or
+Envoy: answer them where they will read it, a Dispatch message or reply, since text left only in
+your session reaches no one. `legion state` and `legion status <KEY> <status>` work as below. There
+is no `legion controller start` against this daemon, and nobody can replace you with one.
 
 ### Started by the operator
 
-The daemon launches no controller, under either runtime: the operator ran
+Under `controller: operator`, the default, the daemon launches no controller: the operator ran
 `legion controller start --config controller.yaml [--daemon-url <url>]` on
 their own machine, and you are that foreground OMP session. The command fetched a fresh controller
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
@@ -78,8 +93,10 @@ mints a new secret, so your grants stop working and the role moves to the new se
 The Go daemon's controller topic is a wake for a session that is running when it is published.
 Envoy hands an Oh My Pi session no retained copy of a notice published before it subscribed, so a
 hold, a tree architect's failed claim, a new triage root, or a freed slot from while no controller
-ran never arrives as a wake. `legion controller start` opens your first turn with a start message
-(`Legion controller start: …`), so every start and restart runs this procedure with nothing typed.
+ran never arrives as a wake. Every launch opens your first turn with a start message
+(`Legion controller start: …`) — `legion controller start` passes it, and the daemon sends it to a
+controller it launched once that controller is ready — so every start and restart runs this
+procedure with nothing typed.
 At every start, after the claim recheck ([Turn discipline](#turn-discipline)) and before anything
 else:
 
@@ -356,7 +373,7 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
    `unassigned`, `Unassigned — nobody's Inbox shows this tree's questions or its design approval
    until someone takes it from the issue header (Assignee, beside Priority)`. The design approval
    is promised only when the `Design gate policy:` line of your system prompt, which
-   `legion controller start` writes from the daemon's own configuration, says
+   whoever launched you writes from the daemon's own configuration, says
    `gates.design: root-issues`. Under `gates.design: off` nobody approves a design, so drop "and
    its design approval" (and "or its design approval") from the sentence. An unassigned root
    still runs; the architect's asks wait in every Inbox's Unassigned band.

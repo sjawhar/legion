@@ -33,12 +33,6 @@ import (
 // a secret file.
 const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
 
-// controllerStartMessage is the controller's first prompt, which `legion controller start` passes
-// Oh My Pi at launch: Oh My Pi's interactive mode sends its first message as the session's first
-// turn, so every start and restart runs the skill's start procedure with nothing typed, where the
-// plugin alone would leave the session idle until a wake.
-const controllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
-
 // controllerCommands is `legion controller`'s subcommands, the one list of them `legion controller
 // --help` names.
 var controllerCommands = map[string]command{
@@ -68,8 +62,8 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 	return code
 }
 
-// controllerStart is `legion controller start`, the operator's side of a controller the daemon
-// cannot launch itself (LEGION-206 Requirement 11). In order, and nothing is kept, and nothing
+// controllerStart is `legion controller start`, the operator's side of the controller under
+// `controller: operator`, where the daemon launches none. In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
 // file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
@@ -77,8 +71,9 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
-// pi-legion-envoy it does not load, or loads speaking another daemon API contract than this
-// binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
+// pi-legion it does not load, loads without pi-envoy or beside the pre-split package, or loads
+// speaking another daemon API contract than this binary's, each of which would refuse the
+// controller at session start (daemon.ProbeController). The probe
 // runs `omp models`, which starts no session, so it neither registers, takes the controller role,
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
@@ -86,7 +81,8 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // controller's); write it
 // 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
 // deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
-// `--append-system-prompt`, and controllerStartMessage as its one message, no `--resume`, no
+// `--append-system-prompt`, and daemon.ControllerStartMessage as its one message (Oh My Pi's
+// interactive mode sends it as the session's first turn), no `--resume`, no
 // `--mode rpc` — in the foreground with the same environment, and answer its exit code. A refusal
 // before the secret is written removes the directories made for the probe, so the state directory
 // is as it was.
@@ -147,10 +143,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// One environment, probed and then launched: the operator's own with the controller's set on
 	// top, later pairs replacing inherited values of the same name. The controller is pane-side, so
 	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
-	// dropped by value and by pointer; its pane seed pointer is the controller's set's.
+	// dropped by value and by pointer; its pane seed pointer is the controller's set's. A pane's boot
+	// token, which a start from inside a Legion pane inherits, is dropped too: the plugin takes a
+	// controller carrying one for a controller the daemon launched (`controller: daemon`).
 	env := processEnvironment()
 	delete(env, natsauth.DaemonSeedVariable)
 	delete(env, natsauth.DaemonSeedFileVariable)
+	delete(env, "LEGION_BOOT_TOKEN")
+	delete(env, "LEGION_BOOT_TOKEN_FILE")
 	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
@@ -176,7 +176,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
 	}
-	controllerPrompt, err := composer.ControllerPromptPath()
+	controllerPrompts, err := composer.ControllerPromptPaths(false)
 	if err != nil {
 		return 0, err
 	}
@@ -198,10 +198,10 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// message is Oh My Pi's first prompt, so a started or restarted controller runs its start
 	// procedure at once rather than waiting for a wake that, with every slot full, may not come.
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
-		RolePromptPaths:            []string{controllerPrompt},
+		RolePromptPaths:            controllerPrompts,
 		Addressing:                 daemon.DesignGateFragment(designGate),
 		DeploymentInstructionsPath: instructionsFile,
-	}) + " " + shellprefix.Word(controllerStartMessage)
+	}) + " " + shellprefix.Word(daemon.ControllerStartMessage)
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
 	// Interactive and in the foreground: the operator's terminal is Oh My Pi's. The child is not
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to

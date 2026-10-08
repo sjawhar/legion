@@ -167,7 +167,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow `skill://dispatch`'s "Writing a spec" section, except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](skill://dispatch/SKILL.md#writing-a-spec), except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase

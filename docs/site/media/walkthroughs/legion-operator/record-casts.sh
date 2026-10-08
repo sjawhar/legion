@@ -2,8 +2,8 @@
 # Records the Legion section's two terminal casts, `state.cast` and `controller.cast` beside this
 # file, which the `legion-state` and `legion-controller` walkthroughs render. Both come from one
 # local Go daemon in the shape scripts/e2e/controller-start-tmux.sh builds: this checkout's `legion`
-# on a scratch postgres:16, a NATS server and an Envoy listener of its own, and this checkout's
-# plugin in an Oh My Pi profile under the run's own HOME. Every name on screen is example data: the
+# on a scratch postgres:16, a NATS server and an Envoy listener of its own, and this checkout's two
+# plugins in an Oh My Pi profile under the run's own HOME. Every name on screen is example data: the
 # project is SHOP, its one running claim is the architect of SHOP-2, and the model the agents are
 # configured with is an example provider served by a local listener that accepts each request and
 # never answers, so no agent's turn ends, and none fails, on camera.
@@ -109,7 +109,8 @@ until_true 30 "the example model listener" bash -c "exec 3<>/dev/tcp/127.0.0.1/$
 check=plugin
 (cd "$root" && nice -n 19 bun install --frozen-lockfile >/dev/null)
 profile=legion-docs-casts-$$
-bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" >/dev/null
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" >/dev/null
 agent_dir=$omp_home/.omp/profiles/$profile/agent
 mkdir -p "$agent_dir"
 cat >"$agent_dir/models.yml" <<EOF

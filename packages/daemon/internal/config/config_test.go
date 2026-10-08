@@ -124,9 +124,10 @@ func defaultsFor(port int) Config {
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
 		},
-		Linger:         72 * time.Hour,
-		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
+		Linger:           72 * time.Hour,
+		ReviewRoundCap:   3,
+		MaxFixAttempts:   3,
+		ControllerLaunch: ControllerLaunchOperator,
 	}
 }
 

@@ -8,8 +8,9 @@ import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
  * claim wire in `packages/daemon/internal/claim/wire.go` are the source of truth, and every
  * schema here mirrors them field for field. The two are pinned to each other by
  * `packages/contracts/fixtures/daemon-api/*.json`, written by the Go golden tests
- * (`go test ./internal/api/ -update`) and parsed here by `legion-api.test.ts` — no generator
- * runs in either direction, so a Go field added without its line below fails that test.
+ * (`go test ./internal/api/ -update`, and `go test ./internal/projection/ -update` for
+ * `state-controller-claim.json`) and parsed here by `legion-api.test.ts` — no generator runs in
+ * either direction, so a Go field added without its line below fails that test.
  *
  * Reached as `@legion/contracts/legion-api`, never from the barrel.
  */
@@ -191,10 +192,10 @@ const legionAdmission = z.strictObject({
   free: z.number().int().nonnegative().optional(),
 });
 
-/** `api.ControllerLocator` — the external record of the operator-launched controller: the
- * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session that
- * registered with the current controller capability, and when. The daemon has no process of it
- * to address. */
+/** `api.ControllerLocator` — the record of the session registered as the project's controller: the
+ * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session, and
+ * when it registered. `external` is `true` for the operator-launched controller and for the one the
+ * daemon launches itself under `controller: daemon`, whose process is a claim like any other. */
 const legionControllerLocator = z.strictObject({
   runtime: z.enum(["tmux", "kubernetes"]),
   external: z.literal(true),
@@ -212,8 +213,9 @@ const legionAgentSecretsLoginView = z.strictObject({
 });
 
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
- * registers with the capability `legion controller start` fetched; `agentSecretsLogin` is absent
- * when the deployment configures no broker (contract 9). */
+ * registers as the project's controller: with the capability `legion controller start` fetched, or,
+ * under `controller: daemon`, with the boot token of the daemon's own controller launch;
+ * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -239,10 +241,12 @@ export const LegionRegisterResponse = z.strictObject({
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `api.ControllerRegisterResponse`, for a session that registered with the controller capability
+/** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
- * fetched): the project's controller role token, the role `controller`, the capability's
- * generation, and the secret its controller grants authenticate with. No tree, no issue. */
+ * fetched, or a daemon-launched controller's own boot token): the project's controller role token,
+ * the role `controller`, a generation — the capability's for the operator's controller, the
+ * launch's for the daemon's own, which its `claims/ready` names — and the secret its controller
+ * grants authenticate with. No tree, no issue. */
 export const LegionControllerRegisterResponse = z.strictObject({
   claimToken: nonEmptyString,
   role: z.literal("controller"),

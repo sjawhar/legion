@@ -26,6 +26,8 @@ bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
+controller: operator                   # who runs the controller: operator (legion controller start,
+                                       # the default) or daemon (a pod this daemon launches and keeps)
 
 operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read
 dispatch_url: https://dispatch.example.com

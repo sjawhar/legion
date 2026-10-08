@@ -1,50 +1,56 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { stageSkills } from "@legion/pi-shared/test/skills-guard";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dir, "..");
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
+const manifest: {
+  readonly name: string;
+  readonly omp?: {
+    readonly extensions?: readonly string[];
+    readonly skills?: readonly string[];
+  };
+  readonly scripts?: Record<string, string>;
+} = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
 
-describe("omp.skills / prepack.sh manifest contract", () => {
-  test("package.json declares omp.skills alongside omp.extensions, both pointing into dist/", async () => {
-    const manifest: {
-      readonly omp?: {
-        readonly extensions?: readonly string[];
-        readonly skills?: readonly string[];
-      };
-      readonly scripts?: Record<string, string>;
-    } = JSON.parse(await readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
-
+describe("omp.skills / prepack manifest contract", () => {
+  test("package.json declares omp.skills alongside omp.extensions, both pointing into dist/", () => {
     // omp discovers plugin skills only at `<plugin root>/skills` or at directories the
     // manifest's `omp.skills` array names. This package ships skills at `dist/skills` (staged
-    // there by prepack.sh, not the package root), so the manifest must name it explicitly —
-    // dropping this field silently regresses every installed session back to no Legion skills.
+    // there by the prepack, not the package root), so the manifest must name it explicitly —
+    // dropping this field silently regresses every installed session back to no Dispatch skills.
     expect(manifest.omp?.skills).toEqual(["dist/skills"]);
-    // The release workflow rewrites `omp.extensions` (only) to the packed bundle paths right
+    // The release workflow rewrites `omp.extensions` (only) to the packed bundle path right
     // before packing; `omp.skills` ships as committed, so it must already be the `dist/` path a
     // packed tarball actually contains, in both source and released manifests.
     expect(manifest.omp?.extensions?.every((entry) => entry.startsWith("extensions/"))).toBe(true);
   });
 
-  test("prepack.sh stages the exact directory package.json's omp.skills names, and postpack removes it", async () => {
-    const manifest: { readonly scripts?: Record<string, string> } = JSON.parse(
-      await readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8")
-    );
-    const prepackScript = await readFile(path.join(PACKAGE_ROOT, "scripts/prepack.sh"), "utf8");
-
-    // The manifest asserts this exact contract at pack time (see the `prepack.sh` guard on
-    // `omp.extensions`); the `omp.skills` directory it stages must be byte-identical to the one
-    // this package's manifest declares, and `postpack` must remove that same directory again so
-    // a dev checkout's `dist/` doesn't retain packed-only content after a local `bun pm pack`.
-    expect(prepackScript).toContain("cp -r ../../skills dist/skills");
+  test("prepack is the shared script, and postpack removes the directory it stages", () => {
+    // The one script packs both plugins and holds the skills partition; `postpack` removes the
+    // directory it staged so a dev checkout's `dist/` doesn't retain packed-only content after a
+    // local `bun pm pack`.
+    expect(manifest.scripts?.prepack).toBe("../../scripts/pi-plugin-prepack.sh");
     expect(manifest.scripts?.postpack).toBe("rm -rf dist/skills");
   });
 
-  test("the repo skills/ directory prepack.sh copies from exists and is non-empty", async () => {
-    const entries = await readdir(path.join(REPO_ROOT, "skills"));
-    expect(entries.length).toBeGreaterThan(0);
-    expect(entries).toContain("legion-controller");
+  describe("the staged skills", () => {
+    const staged = stageSkills(manifest.name);
+    afterAll(() => {
+      rmSync(path.dirname(staged), { recursive: true, force: true });
+    });
+
+    test("are exactly this plugin's partition: the Dispatch and Envoy skills every session uses", () => {
+      expect(readdirSync(staged).sort()).toEqual([
+        "dispatch",
+        "dispatch-brainstorming",
+        "dispatch-first",
+        "envoy",
+      ]);
+    });
   });
 });
 
@@ -64,7 +70,7 @@ describe("the dispatch CLI the package ships", () => {
   test("prepack.sh gives every bun build its own metafile and reads all of them for the notices", async () => {
     // A chained `bun run build --metafile=…` hands the flag to its last command only, so the
     // extensions' packages would be missing from THIRD_PARTY_NOTICES.
-    const lines = (await readFile(path.join(PACKAGE_ROOT, "scripts/prepack.sh"), "utf8")).split(
+    const lines = (await readFile(path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh"), "utf8")).split(
       "\n"
     );
     const builds = lines.filter((line) => line.startsWith("bun build "));
@@ -85,7 +91,12 @@ describe("the dispatch CLI the package ships", () => {
     const work = await mkdtemp(path.join(tmpdir(), "pi-envoy-pack-"));
     try {
       const pack = Bun.spawnSync(
-        ["bash", path.join(REPO_ROOT, "scripts/e2e/lib/pack-plugin.sh"), path.join(work, "out")],
+        [
+          "bash",
+          path.join(REPO_ROOT, "scripts/e2e/lib/pack-plugin.sh"),
+          "pi-envoy",
+          path.join(work, "out"),
+        ],
         { stderr: "pipe" }
       );
       expect({

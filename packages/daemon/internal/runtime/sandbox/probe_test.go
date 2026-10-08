@@ -277,7 +277,7 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		want  []string
 	}{
 		{"a Failed pod", func(g *probeRig) {
-			g.fails("legion probe-image: pi-legion-envoy at /home/legion/.omp/… speaks daemon API contract 2; this daemon requires 3")
+			g.fails("legion probe-image: pi-legion at /home/legion/.omp/… speaks daemon API contract 2; this daemon requires 3")
 		}, []string{"worker image sha256:" + testDigestHex + " failed its probe", "pod " + probeSandboxName + " Failed", "exit code 1", "speaks daemon API contract 2"}},
 		{"no OK line", func(g *probeRig) { g.succeeds("hello") },
 			[]string{"Succeeded without printing probe-image: OK", "hello"}},
@@ -566,7 +566,7 @@ func TestEveryBootProbesTheImage(t *testing.T) {
 		t.Fatalf("the first boot's probe = %v, want a pass", err)
 	}
 	g.eventually("the first probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
-	g.fails("legion probe-image: Oh My Pi, loading the plugin from /opt/legion/pi-legion-envoy with discovery off, as a pod does, " +
+	g.fails("legion probe-image: Oh My Pi, loading the plugins from /opt/legion/pi-envoy and /opt/legion/pi-legion with discovery off, as a pod does, " +
 		"cannot run task agent oracle (dispatched by roles/core/planner.md) on its model @oracle: role oracle is not configured.")
 
 	err := g.probe(probeOptions(t))
@@ -645,7 +645,7 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			command := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
-			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--pod-safety"}
+			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
 			if want := append(base, testCase.want...); !slices.Equal(command, want) {
 				t.Errorf("the probe's command = %q, want %q", command, want)
 			}

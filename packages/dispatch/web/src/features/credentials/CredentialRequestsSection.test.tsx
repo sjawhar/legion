@@ -119,19 +119,19 @@ test("a row's session naming an id the agents list doesn't carry reads as not ru
   }
 });
 
-// LEGION-587's review (round 2): a request-only session id - the common case for a host Oh My Pi
-// session, which has no enrollment session_id of its own - must still say where it came from, so
-// a reader never mistakes an unsigned claim for the broker's own verified enrollment fact.
-test("a row's request-only session id is labeled, even with no enrollment id to disambiguate against", async () => {
+// A request-only session id - the common case for a host Oh My Pi session, which has no enrollment
+// session_id of its own - is shown as written, with no preamble.
+test("a row's request-only session id is shown with no preamble", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([runningAgent()]);
   try {
     renderSection({
       requests: [pendingSecretRow({ session: { enrollment: null, request: "sess-1" } })],
       status: "listed",
     });
-    expect(await screen.findByText(/The session the request says it came from:/)).toBeDefined();
-    const link = screen.getByRole("link", { name: "Reviewing LEGION-587" });
+    const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
     expect(link.getAttribute("href")).toBe("/agents/sess-1/live");
+    expect(link.parentElement?.textContent?.startsWith("Reviewing LEGION-587")).toBe(true);
+    expect(screen.queryByText(/says it came from/)).toBeNull();
   } finally {
     agents.mockRestore();
   }

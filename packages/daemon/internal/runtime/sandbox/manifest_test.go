@@ -61,6 +61,9 @@ func manifestCases(t *testing.T) map[string]struct {
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
 	recovered := workerSpec(t)
 	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
+	controllerResume := controllerSpec(t)
+	controllerResume.Generation, controllerResume.BootToken = 2, "boot-g2"
+	controllerResume.ResumeSessionFile = ompSessionsDir + "/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl"
 	return map[string]struct {
 		spec         runtime.SpawnSpec
 		colocate     bool
@@ -71,6 +74,8 @@ func manifestCases(t *testing.T) map[string]struct {
 		"worker-no-affinity": {workerSpec(t), false, nil},
 		"resume":             {resume, true, nil},
 		"recovered":          {recovered, true, nil},
+		"controller":         {controllerSpec(t), false, nil},
+		"controller-resume":  {controllerResume, false, nil},
 		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
 			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
@@ -435,7 +440,8 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
 // in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
 // nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
-// Secret, the worker's container included.
+// Secret, the worker's container included; the controller's pod has no workspace-fetch, so none of
+// its containers reaches the token at all.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -491,6 +497,12 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 				if holds := c.Name == fetchContainer; (len(routes) > 0) != holds || pointed != holds {
 					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
 				}
+			}
+			if l.controller {
+				if slices.ContainsFunc(containers, func(c corev1.Container) bool { return c.Name == fetchContainer }) {
+					t.Errorf("the controller's pod runs %s", fetchContainer)
+				}
+				return
 			}
 			fetch := containerNamed(t, pod, fetchContainer)
 			for _, mount := range fetch.VolumeMounts {
@@ -582,10 +594,11 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// runtimeOwned is exactly what the worker container is told by the runtime itself: every name
-// mainEnvironment sets with Env empty and no secret of the spec's, every optional value configured.
-// A name added to the environment and not to runtimeOwned is one a spec could override; a name left
-// in runtimeOwned that the environment no longer sets is one a spec is refused for nothing.
+// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's
+// and the controller's together: every name mainEnvironment sets with Env empty and no secret of the
+// spec's, every optional value configured. A name added to the environment and not to runtimeOwned
+// is one a spec could override; a name left in runtimeOwned that the environment no longer sets is
+// one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -594,11 +607,12 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := workerSpec(t)
-	spec.Env, spec.Secrets = nil, nil
 	told := map[string]bool{}
-	for name := range envOf(podOf(t, r, spec, false).Containers[0]) {
-		told[name] = true
+	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+		spec.Env, spec.Secrets = nil, nil
+		for name := range envOf(podOf(t, r, spec, false).Containers[0]) {
+			told[name] = true
+		}
 	}
 	if !maps.Equal(told, runtimeOwned) {
 		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
@@ -610,7 +624,8 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 // configured: each address-valued argument of the shim (the words before `--`) by its flag, and each
 // address-valued variable the runtime itself sets in the worker container, an address being a value
 // with a scheme. An address added to the pod and not to handedAddresses is one the daemon could move
-// without any pod it re-adopts being replaced (evaluate, row 9).
+// without any pod it re-adopts being replaced (evaluate, row 9). A worker's pod and the
+// controller's are each held to their own list.
 func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
@@ -619,25 +634,34 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := podOf(t, r, workerSpec(t), false).Containers[0]
-	carried := map[string]string{}
-	shim := main.Command[:slices.Index(main.Command, "--")]
-	for i := 1; i < len(shim); i++ {
-		if strings.Contains(shim[i], "://") {
-			carried[shim[i-1]] = shim[i]
-		}
-	}
-	for _, v := range main.Env {
-		if runtimeOwned[v.Name] && strings.Contains(v.Value, "://") {
-			carried[v.Name] = v.Value
-		}
-	}
-	handed := map[string]string{}
-	for _, a := range r.handedAddresses() {
-		handed[a.name] = a.value
-	}
-	if !maps.Equal(carried, handed) {
-		t.Errorf("a pod launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+	for name, spec := range map[string]runtime.SpawnSpec{
+		"a worker":       workerSpec(t),
+		"the controller": controllerSpec(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			main := podOf(t, r, spec, false).Containers[0]
+			carried := map[string]string{}
+			shim := main.Command[:slices.Index(main.Command, "--")]
+			for i := 1; i < len(shim); i++ {
+				if strings.Contains(shim[i], "://") {
+					carried[shim[i-1]] = shim[i]
+				}
+			}
+			for _, v := range main.Env {
+				if runtimeOwned[v.Name] && strings.Contains(v.Value, "://") {
+					carried[v.Name] = v.Value
+				}
+			}
+			handed := map[string]string{}
+			for _, a := range r.handedAddresses(spec.Role) {
+				if a.value != "" {
+					handed[a.name] = a.value
+				}
+			}
+			if !maps.Equal(carried, handed) {
+				t.Errorf("a pod launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+			}
+		})
 	}
 }
 
@@ -1173,12 +1197,12 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 }
 
 // imageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
-// mount there would hide: Oh My Pi, the Legion plugin the agent loads, the Go legion every
-// container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
+// mount there would hide: Oh My Pi, the Envoy and Legion plugins the agent loads, the Go legion
+// every container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
 // profile's agent directory.
 func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	for _, used := range []string{
-		defaultAgent, legionPlugin, testOptions().Tools.Legion,
+		defaultAgent, envoyPlugin, legionPlugin, testOptions().Tools.Legion,
 		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
 	} {
 		if !slices.ContainsFunc(imageOwnedPaths(), func(owned string) bool {

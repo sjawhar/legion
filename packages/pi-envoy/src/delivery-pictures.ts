@@ -1,7 +1,7 @@
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { readPictures, shownPictureAddresses } from "@legion/envoy-client/dispatch-picture-tools";
 import { imageBlocks, pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
-import type { ContentBlock } from "./pi-types";
+import type { ContentBlock } from "@legion/pi-shared/pi-types";
 
 /** What an Inbox delivery hands the model, and the pictures it shows. */
 export interface PictureDelivery {

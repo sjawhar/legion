@@ -10,9 +10,10 @@
 # gh, handoff, push, probe-image and the daemon's own commands), the first PATH entry and the
 # ENTRYPOINT name, with the `agent-secrets` client beside it; the pinned OMP fork build, resolved with
 # mise's github backend exactly as a tmux host resolves an `omp_invocation` naming it;
-# @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and @bopstack/pi-codegraph
-# (from npm, pinned) linked into the isolated OMP profile `legion`, backed by the CodeGraph CLI
-# (@colbymchenry/codegraph, pinned) at /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
+# @sjawhar/pi-envoy and @sjawhar/pi-legion packed from this checkout's packages/pi-envoy and
+# packages/pi-legion, and @bopstack/pi-codegraph (from npm, pinned) linked into the isolated OMP
+# profile `legion`, backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
+# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
 # pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin; and the license of every
@@ -22,8 +23,9 @@
 # repository, and links the plugins into the profile, which fetches Oh My Pi's natives; the second
 # runs every toolchain command; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
-# plus the session-storage probe), holds the plugin to the daemon API contract, and prints the OK line
-# the daemon's probe Sandbox reads. A broken image never publishes.
+# plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
+# loads with the Envoy plugin, and prints the OK line the daemon's probe Sandbox reads. A broken
+# image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -69,11 +71,11 @@ ARG CODEGRAPH_VERSION=1.5.0
 ARG PI_CODEGRAPH_VERSION=0.1.1
 
 # ------------------------------------------------------------------------------------------------
-# plugin: workspace install, the CodeGraph CLI, and the packed plugin.
+# plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
 FROM oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
-# jq: the same omp.extensions rewrite release.yaml's pi_envoy job runs. python3/make/g++: native
-# devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
+# jq: the same omp.extensions rewrite release.yaml's pi_envoy and pi_legion jobs run. python3/make/g++:
+# native devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -98,6 +100,8 @@ COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
+COPY packages/pi-legion/package.json packages/pi-legion/package.json
+COPY packages/pi-shared/package.json packages/pi-shared/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/proof-editor/package.json packages/proof-editor/package.json
@@ -107,20 +111,31 @@ COPY docs/site/package.json docs/site/package.json
 RUN bun install --frozen-lockfile
 COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
+COPY packages/pi-shared packages/pi-shared
 COPY packages/pi-envoy packages/pi-envoy
+COPY packages/pi-legion packages/pi-legion
 COPY skills skills
-# prepack.sh writes the plugin's dist/THIRD_PARTY_NOTICES with this.
+# Each plugin's prepack (scripts/pi-plugin-prepack.sh) builds its one bundle, stages its skills from
+# skills/ into dist/skills, and writes its dist/THIRD_PARTY_NOTICES with scripts/third-party-notices.ts.
+COPY scripts/pi-plugin-prepack.sh scripts/pi-plugin-prepack.sh
 COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
-# The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
-# `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
-# directory: `omp plugin install` links a directory and rejects a tarball path (ENOTDIR).
+# Each plugin ships from this checkout with the steps release.yaml's pi_envoy and pi_legion jobs run
+# before `bun pm pack`: the manifest pointed at the one packed bundle (the prepack refuses to pack
+# with the source manifest). Each tarball is unpacked into a directory: `omp plugin install` links a
+# directory and rejects a tarball path (ENOTDIR).
 WORKDIR /repo/packages/pi-envoy
-RUN jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > tmp.json \
+RUN jq '.omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
     && rm -f ./*.tgz && bun pm pack \
-    && mkdir -p /out/pi-legion-envoy \
-    && tar xzf ./*.tgz -C /out/pi-legion-envoy --strip-components=1
+    && mkdir -p /out/pi-envoy \
+    && tar xzf ./*.tgz -C /out/pi-envoy --strip-components=1
+WORKDIR /repo/packages/pi-legion
+RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
+    && mv tmp.json package.json \
+    && rm -f ./*.tgz && bun pm pack \
+    && mkdir -p /out/pi-legion \
+    && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
 
 # ------------------------------------------------------------------------------------------------
 # tools: mise resolves the pinned OMP fork build, jj, and gh — the same backend and pin string the
@@ -286,14 +301,16 @@ RUN set -eu; \
     crates astral-sh/uv "$UV_VERSION" uv uv-crates
 COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
 COPY --from=go /out/go-notices /in/go-notices
-COPY --from=plugin /out/pi-legion-envoy/dist/THIRD_PARTY_NOTICES /in/plugin-notices
+COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
+COPY --from=plugin /out/pi-legion/dist/THIRD_PARTY_NOTICES /in/pi-legion-notices
 COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
 COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
       "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, and the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
-      "npm packages inlined into the pi-legion-envoy plugin, /opt/legion/pi-legion-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/plugin-notices \
+      "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
+      "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
       "Oh My Pi, /opt/omp and the native modules it fetched into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
@@ -333,11 +350,12 @@ RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-COPY --from=plugin --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
+COPY --from=plugin --chown=legion:legion /out/pi-envoy /opt/legion/pi-envoy
+COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
-# OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
+# OMP_PROFILE=legion: the isolated profile the plugins are linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
 # because OMP's DirResolver derives the profile root from it. DO_NOT_TRACK=1: CodeGraph's telemetry
@@ -360,8 +378,8 @@ WORKDIR /home/legion
 #    container, with no network. A git older than 2.42 fails it (`Git does not recognize required
 #    option: porcelain`), which is how bookworm's 2.39.5 shipped in an image that passed every probe:
 #    `legion probe-image` never runs jj, and the daemon host's own git is newer.
-# 3. Link the packed plugin, and the CodeGraph plugin from npm, into the legion profile
-#    (omp-plugins.lock.json records both enabled). This is OMP's first run in the image, so it
+# 3. Link the two packed plugins, and the CodeGraph plugin from npm, into the legion profile
+#    (omp-plugins.lock.json records all three enabled). This is OMP's first run in the image, so it
 #    also downloads OMP's native modules (~345 MB) into /home/legion/.omp/natives/<version>/;
 #    this layer ships them, a pod never fetches them, and the probes in the final step never wait on
 #    the download.
@@ -372,7 +390,8 @@ RUN set -eu; \
     git init --quiet --bare "$scratch/origin.git"; \
     jj git clone "$scratch/origin.git" "$scratch/clone"; \
     rm -rf "$scratch"; \
-    omp plugin install /opt/legion/pi-legion-envoy; \
+    omp plugin install /opt/legion/pi-envoy; \
+    omp plugin install /opt/legion/pi-legion; \
     omp plugin install "@bopstack/pi-codegraph@${PI_CODEGRAPH_VERSION}"; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
@@ -418,20 +437,21 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
-# pod environment can name all three. The plugin's `dispatch` shim runs its bundled CLI under the
-# image's bun and prints its help, so a plugin packed without bin/ or dist/dispatch.js, or an image
-# without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's own
-# test. Then `legion probe-image` runs the three launch probes through
-# the daemon's own code, loading the plugin the way a Sandbox pod does (--plugin-root: the one
-# explicit extension, discovery off), holds the plugin to the daemon API contract this binary speaks,
-# and resolves by name every task agent and skill Legion's prompts name (shipped in its agents/ and
-# dist/skills directories). It leaves those agents' models unresolved (--skip-agent-models): the build
-# has none of the operator's model configuration, which the pod brings. It prints `probe-image: OK
-# (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`; the daemon's
-# probe Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
-# resolving every agent's model, and refuses a skipped result, before any claim runs on the image
-# (packages/daemon/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
-# the cached probe layer above carries.
+# pod environment can name all three. The Envoy plugin's `dispatch` shim runs its bundled CLI under
+# the image's bun and prints its help, so a pi-envoy packed without bin/ or dist/dispatch.js, or an
+# image without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's
+# own test. Then `legion probe-image` runs the three launch probes through
+# the daemon's own code, loading the plugins the way a Sandbox pod does (--envoy-plugin-root then
+# --plugin-root: the two explicit extensions, discovery off), holds the Legion plugin to the daemon
+# API contract this binary speaks and to the Envoy plugin's interface, and resolves by name every
+# task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
+# plugins' dist/skills directories). It leaves those agents' models unresolved
+# (--skip-agent-models): the build has none of the operator's model configuration, which the pod
+# brings. It prints `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped
+# daemon-api-version=<N>`; the daemon's probe Sandbox runs it again with its own contract, on the
+# pod baseline and under the operator's pod, resolving every agent's model, and refuses a skipped
+# result, before any claim runs on the image (packages/daemon/internal/runtime/sandbox/probe.go).
+# It needs the natives step 3 fetched, which the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
     for dir in /opt/legion /opt/legion/bin; do \
@@ -440,13 +460,13 @@ RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
-      /opt/legion/pi-legion-envoy/bin/dispatch --help > /tmp/dispatch-help; \
+      /opt/legion/pi-envoy/bin/dispatch --help > /tmp/dispatch-help; \
     echo "dispatch: $(sed -n 1p /tmp/dispatch-help)"; grep -q '^Usage: dispatch ' /tmp/dispatch-help; \
     rm /tmp/dispatch-help; \
     agent_secrets="$(command -v agent-secrets)"; test "$agent_secrets" = /opt/legion/bin/agent-secrets; \
     version="$(legion version)"; echo "$version"; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
-    legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
+    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models; \
     agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime sets every container's command explicitly
@@ -454,5 +474,6 @@ RUN set -eu; \
 # workspace-init fetch …` and `legion workspace-init provision …`, and the main container runs `legion
 # worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … -- omp --mode rpc …`.
 # This ENTRYPOINT therefore only makes `docker run <image> version` and `docker run <image>
-# probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models` work.
+# probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy
+# --skip-agent-models` work.
 ENTRYPOINT ["legion"]

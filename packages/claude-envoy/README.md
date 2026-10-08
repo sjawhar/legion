@@ -15,7 +15,7 @@ events and sends them to the current Claude Code session as supported
   through it (see "Dispatch" below).
 - `.omp-plugin/plugin.json` declares an empty `mcpServers`, so Oh My Pi starts no server from this
   plugin: the channel server needs Claude Code's session identity and exits without it, and an omp
-  session already gets Envoy and Dispatch from `@sjawhar/pi-legion-envoy`. omp reads that manifest
+  session already gets Envoy and Dispatch from `@sjawhar/pi-envoy`. omp reads that manifest
   before `.claude-plugin/plugin.json` and a manifest `mcpServers` replaces `.mcp.json` instead of
   merging with it; Claude Code reads only `.claude-plugin/plugin.json`, so it still launches the
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
@@ -156,7 +156,8 @@ they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at 
   the build machine itself. Both scripts now refuse outright when the running Bun does not match
   the pin, rather than commit whatever that other build produced: invoke the pinned binary's own
   path directly — not `bun run` — when a version manager's default differs from it.
-- pi-envoy solves the same problem with `prepack.sh` for npm; this plugin's distribution channel is
+- pi-envoy solves the same problem with `scripts/pi-plugin-prepack.sh` (at the repository root, the
+  prepack of both Oh My Pi plugins) for npm; this plugin's distribution channel is
   the git repository, so its bundle lives in-tree. An npm-published plugin and a `dist` release
   branch were considered and rejected as more moving parts for the same result.
 

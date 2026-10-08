@@ -11,6 +11,3 @@ not poll or run an idle loop. It keeps the project's admission slots full with t
 highest-priority work nobody else is on, posts one daily report on its first turn of each UTC
 day, and judges triage, controller-actionable architect escalations, and direct human messages; it
 never performs phase-worker work or forwards raw events into an architect session.
-This session runs in the operator's terminal, started there by `legion controller start`; a message
-typed directly into this session is a direct human instruction and is answered first, before any
-wake.

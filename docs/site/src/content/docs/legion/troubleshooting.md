@@ -63,6 +63,32 @@ legion start --config legion.yaml --check-config
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running
   the controller. Start it ([Start the controller](/legion/legion/running-legion/#start-the-controller)).
+- **`legion controller start` is refused: `this daemon launches the project's controller itself
+  (controller: daemon), so legion controller start has none to start`.** The daemon runs its own
+  controller as a pod; reach it through Dispatch instead.
+- **The daemon-launched controller keeps failing.** `legion claims list` shows its claim,
+  `legion-<project>-controller`, and the daemon logs why each launch failed and when it retries a
+  failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
+  pod's own side; a `workspace-init` exit 3 means its volume lost the session, and the daemon starts
+  a fresh controller.
+- **The daemon refuses to boot: `stop legion-<project>-controller, the controller an earlier boot
+  under controller: daemon launched, since this daemon leaves the controller to its operator
+  (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
+  daemon could not stop the pod it launched before; the end of the line says why (most often the
+  cluster refused the Sandbox's deletion). The refusal leaves the pod and its registration as they
+  were. Fix the cause and start the daemon again, or set `controller: daemon` back, which re-adopts
+  that controller with its registration, grants and wakes still working.
+- **The daemon refuses to boot: `end the registration of legion-<project>-controller, the controller
+  an earlier boot under controller: daemon launched, since this daemon leaves the controller to its
+  operator (controller: operator): …` (or `read the controller record to end the registration of
+  …`).** The daemon stopped its controller's pod but could not write the controller record; the end
+  of the line is the store's error. Start the daemon again once Postgres answers: the next boot finds
+  the claim retired and ends the registration before it serves anything. The record names the
+  stopped pod's session until then, but no refused boot serves the state; it shows as the state's
+  `controllerLocator` only if you set `controller: daemon` back before an operator boot succeeds.
+  Nothing can act as that session, since the process that held its registration secret ended with
+  the pod; the pod's Secret held no registration secret, only its boot token, which an operator's
+  daemon refuses (409), and the launch's Envoy and Dispatch bearers.
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.

@@ -56,8 +56,9 @@ subscribed to its topic: one issue's events, one session's inbox, or a role, whi
 hands to whichever session holds it. Delivery is at least once. Events stay in the stream for 72
 hours, and the Legion daemon reads them through durable consumers, so an event that arrives while it
 is down is read when it comes back. Agent harnesses connect through the clients in this repository:
-`packages/pi-envoy` for Oh My Pi, `packages/claude-envoy` for Claude Code and `packages/envoy-plugin`
-for OpenCode, all built on `packages/envoy-client`.
+`packages/pi-envoy` for Oh My Pi (with `packages/pi-legion`, the Legion plugin a Legion pane loads
+beside it), `packages/claude-envoy` for Claude Code and `packages/envoy-plugin` for OpenCode, all
+built on `packages/envoy-client`.
 
 [Envoy's documentation](https://sjawhar.github.io/legion/dispatch/envoy/)
 
@@ -113,7 +114,9 @@ bun run docs:dev
 | `packages/proof-editor/` | Dispatch's document editor, copied from [proof-sdk](https://github.com/EveryInc/proof-sdk). |
 | `packages/contracts/` | The event contracts and the Dispatch specs the `dispatch` command is built from, which the packages share, and the Go code generated from them. |
 | `packages/envoy-client/` | The HTTP client, the `dispatch` command, the Envoy tool contract and the message renderer the three Envoy clients share. |
-| `packages/pi-envoy/` | The Oh My Pi extension: the Envoy and Legion tools, the `dispatch` command on the shell's `PATH`, and the agents Legion's workers run with. |
+| `packages/pi-envoy/` | The Oh My Pi extension every session loads: the Envoy tools, the `dispatch` command on the shell's `PATH`, and the Dispatch and Envoy skills. |
+| `packages/pi-legion/` | The Oh My Pi extension a Legion pane loads beside it: the Legion tool and daemon handshake, the agents Legion's workers run with, and the Legion skills. |
+| `packages/pi-shared/` | The private package both Oh My Pi extensions bundle: the in-process interface between them and the modules both use. |
 | `packages/claude-envoy/` | The Claude Code plugin: Envoy events in a Claude Code session, and the `dispatch` command. |
 | `packages/envoy-plugin/` | The OpenCode plugin: the Envoy tools and the `dispatch` command. |
 | `skills/` | The skills Legion's agents load: the architect, the controller, the phase workers, Dispatch, Envoy and the review rubrics. |
@@ -158,7 +161,7 @@ dependency's license cannot be determined:
 
 | Artifact | Notices |
 | --- | --- |
-| `@sjawhar/pi-legion-envoy`, `@sjawhar/opencode-legion-envoy` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
+| `@sjawhar/pi-envoy`, `@sjawhar/pi-legion`, `@sjawhar/opencode-legion-envoy` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
 | `packages/claude-envoy` (committed bundle) | `packages/claude-envoy/dist/THIRD_PARTY_NOTICES` |
 | Dispatch web app | `THIRD_PARTY_NOTICES.txt` beside the bundle, served at `/THIRD_PARTY_NOTICES.txt` |
 | Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://sjawhar.github.io/legion/THIRD_PARTY_NOTICES.txt) |

@@ -4,6 +4,12 @@
 
 ### Added
 
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 - Pictures reach the model (LEGION-541): a Dispatch tool result carries its `images` as image
   blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
   pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn
@@ -42,6 +48,10 @@
 
 ### Changed
 
+- `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
+  native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 15, which
+  makes the daemon's role prompts name that command; install both packages from the same commit.
+
 - `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
   claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
   it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
@@ -67,7 +77,26 @@
   agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
   rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
   skill reaches every installed user of this package, not only its author.
-
+- **Breaking:** the package is renamed `@sjawhar/pi-envoy` and carries the Envoy entry alone
+  (LEGION-247). `@sjawhar/pi-legion-envoy` gets no further release. What stays here is
+  `extensions/envoy.ts` (published as `dist/envoy.js`): Envoy messaging, subscriptions, delivery,
+  the `dispatch` command and the `dispatch-first` context, with the four skills every session
+  with Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) at
+  `dist/skills`. The Legion entry (`extensions/legion.ts`), its modules (the former `src/legion/`),
+  the task agents in `agents/`, the eight Legion skills and the `legion.daemonApiVersion` manifest
+  field moved to `@sjawhar/pi-legion` (`packages/pi-legion`), which a Legion pane loads beside this
+  package; this manifest has no `legion` key. The two entries meet through a versioned in-process
+  interface in the private workspace package `@legion/pi-shared` (`packages/pi-shared`, version 1,
+  one object on `globalThis` under `Symbol.for("legion.pi-shared.envoy-plugin-interface")`): this
+  entry publishes it at factory time, and the Legion entry claims roles, matches injected user turns
+  and reads the bootstrapped session through it, refusing to run in a Legion session when no
+  `@sjawhar/pi-envoy` is loaded, when the loaded one speaks another interface version, or when
+  `@sjawhar/pi-legion-envoy` is still installed beside it. Both plugins release from one commit and
+  the daemon's boot gate refuses a pair whose interface versions differ. A person who installed the
+  one package reinstalls once:
+  `omp plugin uninstall @sjawhar/pi-legion-envoy && omp plugin install @sjawhar/pi-envoy`; a Legion
+  deployment also runs `omp plugin install @sjawhar/pi-legion` in the daemon's profile, and the
+  worker image carries both at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.

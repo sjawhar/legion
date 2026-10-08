@@ -8,7 +8,55 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
+
+// newControllerHarness is a harness that mints controller grants, whose daemon launches the
+// project's controller itself (`controller: daemon`) when launched is true and leaves it to the
+// operator (`controller: operator`) otherwise.
+func newControllerHarness(t *testing.T, launched bool) *harness {
+	t.Helper()
+	h := newHarness(t)
+	h.serve(launched)
+	return h
+}
+
+// serve replaces the harness's server with one over the same store, supervisor, machines and boot
+// tokens, whose daemon launches the project's controller itself when controllerLaunched is true.
+func (h *harness) serve(controllerLaunched bool) {
+	h.t.Helper()
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: controllerLaunched,
+	}).Handler
+}
+
+// restartAPI is a daemon restart as the routes see it: boot tokens that know only what the store
+// holds, so a token of a launch its claim has since replaced is unknown.
+func (h *harness) restartAPI(controllerLaunched bool) {
+	h.t.Helper()
+	h.tokens = NewBootTokens(h.store)
+	h.serve(controllerLaunched)
+}
+
+// launchController creates the daemon's own controller's claim as its keeper does — the
+// controller role, on no issue and no tree — and launches it, returning its token and the boot
+// token its launch minted.
+func (h *harness) launchController() (claim.Token, string) {
+	h.t.Helper()
+	token := claim.ControllerToken(testProject)
+	m, _, err := h.supervisor.Create(h.ctx, supervise.Claim{
+		Token: token, Project: testProject, Role: claim.RoleController, State: supervise.StateQueued,
+	}, "")
+	if err != nil {
+		h.t.Fatalf("create %s: %v", token, err)
+	}
+	if err := m.Handle(h.ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		h.t.Fatalf("spawn %s: %v", token, err)
+	}
+	return token, h.bootToken(token)
+}
 
 func (h *harness) controllerSecret(bearer string) *httptest.ResponseRecorder {
 	h.t.Helper()
@@ -86,7 +134,7 @@ func TestAControllerSecretForAnotherContractLeavesTheIncumbentControllerAsItWas(
 	}
 
 	wantRefusal(t, h.controllerSecretFor(testOperatorToken, DaemonAPIVersion+1), http.StatusConflict, fmt.Sprintf(
-		"legion controller start holds the controller's pi-legion-envoy to daemon API contract %d; this daemon requires %d: run the legion built with this daemon",
+		"legion controller start holds the controller's pi-legion to daemon API contract %d; this daemon requires %d: run the legion built with this daemon",
 		DaemonAPIVersion+1, DaemonAPIVersion))
 	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/controller/secret", "{}", http.Header{"Authorization": {"Bearer " + testOperatorToken}}),
 		http.StatusConflict, fmt.Sprintf(
@@ -120,7 +168,7 @@ func TestAControllerRegistersWithTheMintedCapability(t *testing.T) {
 	}
 	var registration ControllerRegisterResponse
 	decodeInto(t, recorder, &registration)
-	if registration.ClaimToken != claim.ControllerToken(testProject) || registration.Role != ControllerRole ||
+	if registration.ClaimToken != claim.ControllerToken(testProject) || registration.Role != claim.RoleController ||
 		registration.Generation != 1 || registration.Secret == "" || registration.Secret == capability {
 		t.Fatalf("registration = %+v, want %s, role controller, generation 1, and a secret of its own",
 			registration, claim.ControllerToken(testProject))
@@ -143,7 +191,7 @@ func TestAControllerSpeakingAnotherContractIsRefusedNamingBoth(t *testing.T) {
 		AgentID: "agent-ses_controller", PluginContract: DaemonAPIVersion + 1,
 	}, nil)
 	wantRefusal(t, recorder, http.StatusConflict, fmt.Sprintf(
-		"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", DaemonAPIVersion+1, DaemonAPIVersion))
+		"pi-legion speaks daemon API contract %d; this daemon requires %d", DaemonAPIVersion+1, DaemonAPIVersion))
 	record, found, err := h.store.Controller(context.Background(), testProject)
 	if err != nil || !found || record.Registered() {
 		t.Fatalf("controller record = %+v, %v, %v, want the capability minted and no session registered", record, found, err)
@@ -226,6 +274,80 @@ func TestAnUnknownTokenIsRefusedWithOrWithoutAController(t *testing.T) {
 	wantRefusal(t, h.register("never-minted", "ses_unknown"), claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
 	h.mintedSecret()
 	wantRefusal(t, h.register("never-minted", "ses_unknown"), claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
+}
+
+// A daemon that leaves the controller to its operator (`controller: operator`) refuses the
+// registration of a launch of its own controller's claim, as one left from a period under
+// `controller: daemon` would be, before the claim's machine or the controller record hears of it:
+// registering it would mint the controller capability anew and end every controller grant, cutting
+// the operator's controller off for a second one. The operator's controller keeps its registration
+// and its grants.
+func TestAnOperatorsDaemonRefusesTheRegistrationOfALaunchedController(t *testing.T) {
+	h := newControllerHarness(t, false)
+	operator := h.registeredController(h.mintedSecret(), "ses_operator")
+	if recorder := h.controllerSessionGrant("ses_operator", operator.Secret); recorder.Code != http.StatusOK {
+		t.Fatalf("the operator's controller's grant = %d; body %s", recorder.Code, recorder.Body)
+	}
+	token, boot := h.launchController()
+
+	wantRefusal(t, h.register(boot, "ses_pod"), http.StatusConflict, fmt.Sprintf(
+		"%s is a launch of the daemon's own controller, and this daemon leaves the controller to its operator (controller: operator)", token))
+
+	record, _, err := h.store.Controller(context.Background(), testProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Generation != operator.Generation || record.Session != "ses_operator" {
+		t.Fatalf("controller record = %+v, want generation %d still registered to ses_operator", record, operator.Generation)
+	}
+	if recorder := h.controllerSessionGrant("ses_operator", operator.Secret); recorder.Code != http.StatusOK {
+		t.Fatalf("the operator's controller's grant after the refusal = %d; body %s", recorder.Code, recorder.Body)
+	}
+	if stored := h.stored(token); stored.State != supervise.StateLaunching || stored.Session != "" {
+		t.Fatalf("the launched controller's claim = %s with session %q, want it still launching and unregistered", stored.State, stored.Session)
+	}
+}
+
+// A daemon that launches its own controller (`controller: daemon`) registers no controller through
+// the capability path, which is the operator's: a token no launch resolves is refused there before
+// the controller record is read. A daemon restart forgets the tokens of launches since replaced, so
+// the token of a controller pod the daemon replaced is such a token, and the record's registration
+// is left as it was.
+func TestASupersededControllerLaunchNeverRegistersAfterARestart(t *testing.T) {
+	h := newControllerHarness(t, true)
+	token, first := h.launchController()
+	h.registeredController(first, "ses_first")
+	before, _, err := h.store.Controller(context.Background(), testProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.relaunch(token)
+	h.restartAPI(true)
+
+	wantRefusal(t, h.register(first, "ses_stale"), claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
+
+	after, _, err := h.store.Controller(context.Background(), testProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Session != "ses_first" || after.Generation != before.Generation {
+		t.Fatalf("controller record = %+v, want ses_first's registration at generation %d untouched", after, before.Generation)
+	}
+}
+
+// The capability a launched controller's registration records is no launch's boot token but the
+// hash of a secret nobody holds. The operator's capability path compares a token with it, and a
+// daemon restarted under `controller: operator` forgets the tokens of launches since replaced, so a
+// boot token recorded there would register through that path, outside its claim's generation
+// fence, whatever state the restart found the claim in: here one nothing has stopped.
+func TestALaunchedControllersBootTokenNeverRegistersAsTheOperatorsCapability(t *testing.T) {
+	h := newControllerHarness(t, true)
+	token, first := h.launchController()
+	h.registeredController(first, "ses_first")
+	h.relaunch(token)
+	h.restartAPI(false)
+
+	wantRefusal(t, h.register(first, "ses_stale"), claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
 }
 
 // wantFailure holds a response to the status and the stable code of one credential or workflow

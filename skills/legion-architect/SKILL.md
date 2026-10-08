@@ -74,14 +74,14 @@ exercise a criterion end to end, building that path is a child issue of this tre
   answers the tree's asks); under a personal token it goes to that token's owner, whom
   `dispatch whoami` names. Set it only when a human told you a specific person owns that child.
 
-Specifications written into Dispatch follow `skill://dispatch`'s "Writing a spec" section.
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](skill://dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the
 handoffs; do not narrate them into the spec or a `dispatch message`. A to-do only a human can
 clear is a `dispatch ask`.
 
 The issue's primary document **is** the root specification. Extend it in place: a new version
 that adds only the evidence each decision needs and what the human decides, each as a
-decision block (`skill://dispatch`, "Decision blocks"). The decomposition and its waves, how each
+[decision block](skill://dispatch/SKILL.md#decision-blocks). The decomposition and its waves, how each
 outcome is proven, and the integration test are your own calls: they go in the child issues and
 the planner's `.legion/<issue>/plan.json`, not the root spec. Never post a second "spec" artifact beside
 it (`dispatch artifact` with the primary document's name replaces the human's document; do not do
@@ -109,7 +109,7 @@ legion({
 ```
 
 The decision blocks come first: settle every one as
-"Approval of a spec" (`skill://dispatch`) says before you request approval;
+[Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
 `dispatch request-approval` refuses while one is open. Each answer reaches you, since you follow
 every ask you open. An approval request carries nothing new: request it only once the human has
 agreed to every point in the spec, so a point they have not agreed to gets its own decision block

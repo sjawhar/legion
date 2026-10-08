@@ -1,8 +1,8 @@
 package api
 
-// DaemonAPIVersion is the contract this daemon speaks with the Oh My Pi plugin: the claim,
-// credential, workflow, controller and state shapes the plugin's client parses strictly
-// (`packages/pi-envoy/src/legion/daemon-client.ts`, through
+// DaemonAPIVersion is the contract this daemon speaks with the Legion plugin (@sjawhar/pi-legion):
+// the claim, credential, workflow, controller and state shapes the plugin's client parses strictly
+// (`packages/pi-legion/src/daemon-client.ts`, through
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
@@ -45,8 +45,15 @@ package api
 // payload change bumps this number and the image probe pairs the daemon with an image that reads
 // it, rather than removal stopping on every pod still running an older image.
 //
-// 14: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
-// its shell, which the plugin puts on the pane's PATH, rather than the `dispatch_*` tools it no
-// longer registers: a daemon and a plugin from either side of that change would hand agents
+// 14: LEGION-592 -- the daemon-launched controller (`controller: daemon`): a Sandbox pod's worker
+// container may carry `LEGION_CONTROLLER=1` beside `LEGION_BOOT_TOKEN_FILE`, which the plugin must
+// answer by registering on `POST /legion/v1/claims/register` with the launch's boot token and
+// reporting ready on `claims/ready`. A plugin built before it reads that pod as the operator's
+// controller, throws for want of `LEGION_CONTROLLER_SECRET`, and never registers, so the image probe
+// must refuse such an image rather than leave the controller's keeper relaunching it forever.
+//
+// 15: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// its shell, which the Envoy plugin puts on the pane's PATH, rather than the `dispatch_*` tools it
+// no longer registers: a daemon and a plugin from either side of that change would hand agents
 // instructions for a surface they lack.
-const DaemonAPIVersion = 14
+const DaemonAPIVersion = 15

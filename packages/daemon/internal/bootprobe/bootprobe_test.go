@@ -53,10 +53,10 @@ func TestRunStopsAtTheFirstPass(t *testing.T) {
 
 // A refusal is an answer no retry changes: it is returned as it is, at once.
 func TestRunReturnsARefusalWithoutRetrying(t *testing.T) {
-	refusal := errors.New("pi-legion-envoy 1.57.0 is installed but not loaded by omp")
+	refusal := errors.New("pi-legion 1.57.0 is installed but not loaded by omp")
 	p := &plan{outcomes: []Outcome{{Refusal: refusal}, passed}}
 
-	err := Run(context.Background(), "pi-legion-envoy load", quick(6), logger(&bytes.Buffer{}), p.attempt)
+	err := Run(context.Background(), "pi-legion load", quick(6), logger(&bytes.Buffer{}), p.attempt)
 
 	if !errors.Is(err, refusal) || err.Error() != refusal.Error() {
 		t.Fatalf("Run = %v, want the refusal itself", err)
@@ -92,7 +92,7 @@ func TestRunWithoutABoundWaitsOutEveryTransientFailure(t *testing.T) {
 	p := &plan{outcomes: []Outcome{transient("1"), transient("2"), transient("3"), transient("4"), transient("5"), passed}}
 	var logged bytes.Buffer
 
-	if err := Run(context.Background(), "pi-legion-envoy load", quick(0), logger(&logged), p.attempt); err != nil {
+	if err := Run(context.Background(), "pi-legion load", quick(0), logger(&logged), p.attempt); err != nil {
 		t.Fatalf("Run = %v, want the pass after five transient failures", err)
 	}
 	if p.attempts != 6 {
@@ -131,7 +131,7 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 		return Outcome{Refusal: errors.New("OMP launch probe failed (exit -1)")}
 	}
 
-	err := Run(ctx, "pi-legion-envoy load", quick(6), logger(&bytes.Buffer{}), refused)
+	err := Run(ctx, "pi-legion load", quick(6), logger(&bytes.Buffer{}), refused)
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run = %v, want the stop, not the interrupted attempt's refusal", err)

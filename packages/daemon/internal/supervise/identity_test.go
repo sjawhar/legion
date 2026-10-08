@@ -49,3 +49,35 @@ func TestADeliveryAdoptsTheRoleIdentityBeforeThePrompt(t *testing.T) {
 		})
 	}
 }
+
+// controllerClaim is the project controller's claim, queued: the controller role, its token, and no
+// issue and no tree.
+func controllerClaim() Claim {
+	return Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, State: StateQueued}
+}
+
+// The project's controller works no checkout and commits nothing, so a task it is handed — the
+// start message each of its launches gets — reaches it with no working copy adopted and no App
+// identity asked for, where a workflow role's adoption would ask for an App the controller has none
+// of and keep the task from it.
+func TestTheControllersTaskReachesItWithNoWorkingCopyAdopted(t *testing.T) {
+	h := newHarnessOf(t, controllerClaim())
+	var asked []claim.Role
+	h.deps.Identity = func(_ context.Context, role claim.Role) (runtime.GitIdentity, error) {
+		asked = append(asked, role)
+		return runtime.GitIdentity{}, errors.New("no App for the controller role")
+	}
+	h.restart()
+	h.launch()
+	h.connect()
+	h.register()
+	h.ready()
+	h.must(RequestDeliver{Claim: h.token, Task: "Legion controller start"})
+	h.wantPrompts(1)
+	if adoptions := h.rt.CallsOf("AdoptWorkingCopy"); len(adoptions) != 0 {
+		t.Fatalf("adoptions = %+v, want none for the controller", adoptions)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("identity asked for roles %v, want none for the controller", asked)
+	}
+}

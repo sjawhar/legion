@@ -1,0 +1,43 @@
+{
+  "name": "@sjawhar/pi-legion",
+  "version": "8.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "omp": {
+    "extensions": [
+      "extensions/legion.ts"
+    ],
+    "skills": [
+      "dist/skills"
+    ]
+  },
+  "legion": {
+    "daemonApiVersion": 15
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sjawhar/legion"
+  },
+  "files": [
+    "dist",
+    "agents"
+  ],
+  "scripts": {
+    "build": "bun build extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
+    "prepack": "../../scripts/pi-plugin-prepack.sh",
+    "postpack": "rm -rf dist/skills",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome lint extensions/ src/"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@legion/contracts": "workspace:*",
+    "@legion/envoy-client": "workspace:*",
+    "@legion/pi-shared": "workspace:*",
+    "@oh-my-pi/pi-utils": "^18.1.15",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0",
+    "zod": "4.3.6"
+  }
+}

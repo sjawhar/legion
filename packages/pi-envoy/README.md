@@ -1,9 +1,13 @@
 # Pi Envoy Extension
 
-Tracked Oh My Pi extension for Envoy messaging. It shares the Envoy HTTP client, tool
-contract, envelope parsing, and subject helpers with the other Legion adapters while keeping
-OMP's direct NATS subscriptions and Pi steering delivery local (inbound messages steer an
-in-flight turn instead of queueing behind it).
+`@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the native Dispatch tools,
+the plugin every session loads. It shares the Envoy HTTP client, tool contract, envelope parsing,
+and subject helpers with the other Legion adapters while keeping OMP's direct NATS subscriptions
+and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind
+it). The Legion lifecycle — the entry a Legion pane boots a root architect, a phase worker or the
+controller with — is the separate plugin `@sjawhar/pi-legion` (`packages/pi-legion`), installed
+beside this one in a Legion deployment; it reaches this plugin through the in-process interface
+described in `packages/pi-shared/AGENTS.md`.
 
 Normal topic subscriptions are direct NATS subscriptions owned by this extension. A role claim is
 different: the listener arbitrates the core-NATS role lane for the current live holder, then sends
@@ -43,57 +47,58 @@ set -g set-clipboard on
 
 ## Development install
 
-This package declares two OMP extension entries in `package.json`: `extensions/envoy.ts`
-(Envoy messaging, subscriptions, and steering delivery) and `extensions/legion.ts` (the
-Legion lifecycle: root and phase-worker bootstrap from the daemon's environment, and
-daemon capabilities). The Legion daemon spawns every root and phase-worker process with
-the installed plugin already active, so `extensions/legion.ts` loads for them automatically;
-it is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment.
-
-For local development of the messaging extension alone, link the entry into OMP:
+This package declares one OMP extension entry in `package.json`, `extensions/envoy.ts`: Envoy
+messaging, subscriptions, steering delivery, and the Dispatch tools. For local development, link
+the entry into OMP:
 
 ```sh
 ln -sfn "$PWD/packages/pi-envoy/extensions/envoy.ts" \
   ~/.omp/agent/extensions/envoy.ts
 ```
 
-The repository root `package.json` likewise loads only `extensions/envoy.ts` for dev
-sessions inside this repo, since `legion.ts` needs nothing from a repo checkout beyond
-what the installed package already ships.
+The repository root `package.json` likewise loads `extensions/envoy.ts` for dev sessions inside
+this repo. The Legion entry (`packages/pi-legion/extensions/legion.ts`) is inert without
+`LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment and is not loaded there; the
+Legion daemon spawns every root and phase-worker process, and `legion controller start` the
+controller, with both installed packages already active (`packages/pi-legion/README.md`).
 
 ## Published package
 
-Released installs come from npm as `@sjawhar/pi-legion-envoy`. The tarball is
-self-contained: it ships `dist/envoy.js` and `dist/legion.js` — bundling every
-dependency except the OMP host package — and the repo `skills/` tree staged beside it
-at `dist/skills`. The manifest declares `omp.skills: ["dist/skills"]` alongside
-`omp.extensions`: OMP's own plugin discovery only reads `skill://`-resolvable skills from
-`<plugin root>/skills` or from directories a manifest's `omp.skills` array names, and this
-package ships skills at `dist/skills` (not the plugin root itself), so the field is required
-for every session — including a headless Legion controller — to see the Legion skills at all.
-The tarball also ships `agents/`, the task agents Legion's prompts dispatch (`oracle`; the
-reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`,
-which writes the implementer's code; and the planner's checks, `plan-gap-analyst` before it drafts,
-which also reads a spec before a human does, and `plan-reviewer` after), which Oh My Pi discovers
-under any extension package root: an installed plugin in a pane, the explicit `--extension` root in
-a Sandbox pod. Each declares its model as a role the operator maps (`docs/kubernetes.md`,
-"Model roles"). The skills those agents and the
-role prompts load (the pair's rubrics, the implementer's `ce-simplify-code`) ship in
-`dist/skills` with the rest. The Go daemon's boot gate and `legion probe-image` resolve every
-`task(agent="…")` and every `skill://<name>` those prompts name through the same launch, and
-refuse by name an agent or a skill Oh My Pi cannot find.
-`resources_discover` additionally serves the same directory as a secondary, extension-owned
-discovery path. The published manifest exposes `dist/envoy.js` and `dist/legion.js` for
-`omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` is its path in both
-a repo checkout post-`prepack.sh` and the published tarball), while the committed manifest keeps
-the TypeScript entries for repo checkouts. The Legion daemon spawns every session against this
-one installed package instead of also loading a repo checkout with OMP's `--extension` flag, so
-a daemon session ends up with exactly one instance of each extension.
+Released installs come from npm as `@sjawhar/pi-envoy`:
 
-`.github/workflows/release.yaml` performs that manifest rewrite around `bun pm pack`
-and restores the committed file before tagging. Packing with the committed source
-manifest is refused by `scripts/prepack.sh`, because such a tarball would point OMP at
-extension files it does not contain.
+```sh
+omp plugin install @sjawhar/pi-envoy
+```
+
+A session that had the pre-split package installed (the one package that carried both entries
+until 7.x) uninstalls it and installs this one once; the Unreleased entry of `CHANGELOG.md` gives
+the two commands. A Legion deployment installs `@sjawhar/pi-legion` as well
+(`packages/pi-legion/README.md`); the daemon's boot gate refuses a pane that still loads the
+pre-split package beside the new ones.
+
+The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
+host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
+`dist/THIRD_PARTY_NOTICES`, and the four skills every session with Dispatch reads, `dispatch`,
+`dispatch-first`, `dispatch-brainstorming` and `envoy`, staged from the repository's `skills/` at
+`dist/skills`. The manifest declares `omp.skills: ["dist/skills"]` alongside `omp.extensions`:
+OMP's own plugin discovery only reads `skill://`-resolvable skills from `<plugin root>/skills` or
+from directories a manifest's `omp.skills` array names, and this package ships skills at
+`dist/skills` (not the plugin root itself), so the field is required for every session to see them
+at all. `extensions/envoy.ts` reads `dist/skills/dispatch-first/SKILL.md` at load (in a repository
+checkout, the same file under `skills/`) for the `dispatch-first` context it injects, so a package
+without it fails to load naming the file. The Legion skills and the task agents Legion's prompts
+dispatch ship in `@sjawhar/pi-legion`; a link from one of its skills into `dispatch` is written
+`skill://dispatch/...`, which resolves by name once both are installed.
+
+`scripts/pi-plugin-prepack.sh` at the repository root is both plugins' `prepack` and the one place
+that says which skills each ships: it builds this package's one entry, writes the notices and
+stages this package's partition into `dist/skills`. The published manifest exposes `dist/envoy.js`
+for `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` is its path in both
+a repo checkout after the prepack and the published tarball), while the committed manifest keeps
+the TypeScript entry for repo checkouts. `.github/workflows/release.yaml` (job `pi_envoy`)
+performs that manifest rewrite around `bun pm pack` and restores the committed file before tagging.
+Packing with the committed source manifest is refused by the prepack, because such a tarball would
+point OMP at an extension file it does not contain.
 
 ## The `dispatch` command
 
