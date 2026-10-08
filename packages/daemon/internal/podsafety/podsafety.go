@@ -1,13 +1,16 @@
 // Package podsafety is the baseline a Legion pod's Oh My Pi starts with, and nothing in it names a
 // model, a provider, or a route: a settings overlay that holds off the endpoints Oh My Pi posts a
-// conversation to on its own, and four variables through which a repository's .env would move
-// what the agent runs with. The overlay yields to the operator's own (runtime.kubernetes.pod): it is
-// named first, before the operator's overlays. Apply keeps a variable the pod's environment sets,
-// and the operator may set OTEL_SDK_DISABLED and PI_AUTO_QA; the Sandbox runtime refuses
+// conversation to on its own and keeps a long-running bash call inside the turn an abort can still
+// reach (supervise.Machine.Quiesce depends on this), and four variables through which a
+// repository's .env would move what the agent runs with. The overlay yields to the operator's own
+// (runtime.kubernetes.pod): it is named first, before the operator's overlays. Apply keeps a
+// variable the pod's environment sets, and the operator may set OTEL_SDK_DISABLED and PI_AUTO_QA;
+// the Sandbox runtime refuses
 // PI_CONFIG_DIR and OMP_SESSION_STORAGE in the operator's pod, since they decide where a session
-// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). It runs only
-// in a pod (`legion worker-shim --pod-safety`, `legion probe-image --pod-safety`); a tmux pane
-// starts Oh My Pi as it always has.
+// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). Apply, the
+// full baseline, runs only in a pod (`legion worker-shim --pod-safety`, `legion probe-image
+// --pod-safety`); a pane gets the two turn-scoping keys alone, as TurnScopeOverlay, which
+// runtime/tmux writes and names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -26,6 +29,19 @@ var overlay []byte
 
 // OverlayFile is the overlay's file under the state directory Apply is given.
 const OverlayFile = "podsafety-overlay.yml"
+
+// TurnScopeOverlay is the two turn-scoping keys every Legion role's Oh My Pi needs regardless of
+// runtime (turnscope.yml, which says why): bash.autoBackground and async, both off, without the
+// rest of the pod baseline. The pod overlay above already carries both; a runtime with no overlay
+// mechanism of its own (runtime/tmux) writes this one directly, named first in a pane's
+// PI_CONFIG_FILES.
+//
+//go:embed turnscope.yml
+var TurnScopeOverlay []byte
+
+// TurnScopeFile is TurnScopeOverlay's file name, wherever a runtime writes it under its own state
+// directory.
+const TurnScopeFile = "podsafety-turnscope-overlay.yml"
 
 // settingsOverlays is Oh My Pi's list of settings overlays, PATH-separated: each outranks the
 // repository's .omp/config.yml, and a later one outranks an earlier one.
@@ -77,7 +93,7 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 		return nil, fmt.Errorf("pod safety: no state directory to write %s to", OverlayFile)
 	}
 	file := filepath.Join(stateDir, OverlayFile)
-	if err := writeReadOnly(file, overlay); err != nil {
+	if err := WriteReadOnly(file, overlay); err != nil {
 		return nil, fmt.Errorf("pod safety: write %s: %w", file, err)
 	}
 	overlays := file
@@ -109,9 +125,9 @@ func removed(environ []string, name string) []string {
 	return slices.DeleteFunc(environ, func(pair string) bool { return strings.HasPrefix(pair, name+"=") })
 }
 
-// writeReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so
+// WriteReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so
 // a file an earlier start left, read-only, is replaced rather than refusing the write.
-func writeReadOnly(file string, body []byte) error {
+func WriteReadOnly(file string, body []byte) error {
 	temporary, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*.tmp")
 	if err != nil {
 		return err
