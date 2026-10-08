@@ -47,13 +47,6 @@ func promptSignalIgnored(sig syscall.Signal) (bool, error) {
 	return old.handler == 1, nil // SIG_IGN
 }
 
-func preventCoreDumps() error {
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
-		return fmt.Errorf("turn core dumps off: %w", err)
-	}
-	return nil
-}
-
 // stopBy stops the process by the job-control signal sig at its default action, and returns once
 // SIGCONT resumes it, with its handler restored. It sends sig to the calling thread
 // alone, so the stop takes effect as that thread returns from the call, before any more of the

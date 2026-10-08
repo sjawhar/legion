@@ -1,5 +1,5 @@
 // packages/envoy/cmd/agent-secrets/secret_prompt_unix.go
-//go:build linux || darwin
+//go:build (linux || darwin) && (amd64 || arm64)
 
 // The value prompt's reader on Linux and macOS. The reader alone changes the terminal;
 // the signal watcher reports a resume or a terminating signal without touching it.
@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -37,10 +36,6 @@ var (
 	pasteStart        = []byte("\x1b[200~")
 	pasteEnd          = []byte("\x1b[201~")
 )
-
-// Core protection stays in place for the process lifetime, including after the prompt
-// returns a value to the AWS client.
-var disableCoreDumps = sync.OnceValue(preventCoreDumps)
 
 // readHiddenAtTerminal reads one hidden line, drains refused input, and restores the
 // terminal only after joining its signal watcher. Bracketed pastes are read through
@@ -93,19 +88,25 @@ func readHiddenAtTerminal(fd int, onStop func()) (line []byte, err error) {
 				err = errPromptStopped
 			}
 		}
-		// A shell owns the terminal while this job is in the background. Restoring
-		// it there could stop a terminating job on SIGTTOU or overwrite the shell.
-		foreground, fgErr := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
-		if fgErr != nil || foreground == unix.Getpgrp() {
-			_, _ = unix.Write(fd, bracketedPasteOff)
-			if restoreErr := unix.IoctlSetTermios(fd, ioctlSetTermiosFlush, saved); restoreErr != nil && err == nil {
-				line, err = nil, restoreErr
-			}
+		// A tcsetattr from the background blocks, by the kernel's own job control
+		// (SIGTTOU is no longer caught), until the job is foregrounded, then
+		// completes: that block is the ordinary outcome here, not a race to route
+		// around with a foreground snapshot of our own. It can only fail to ever
+		// complete when the group is orphaned (EIO, discarded rather than
+		// blocked) or fd is not this process's controlling terminal at all
+		// (ENOTTY, as the unit tests' bare pseudo-terminal): neither leaves
+		// anything to restore to.
+		_, _ = unix.Write(fd, bracketedPasteOff)
+		if restoreErr := tty.restoreTerminal(saved); restoreErr != nil && err == nil {
+			line, err = nil, restoreErr
 		}
 		if tty.death != 0 {
 			endByPromptSignal(tty.death)
 		}
 	}()
+	if err := tty.waitForeground(); err != nil {
+		return nil, err
+	}
 	if err := tty.apply(); err != nil {
 		return nil, err
 	}
@@ -165,12 +166,29 @@ type promptTerminal struct {
 	wait    int // poll timeout in milliseconds; -1 until the line ends
 	stopped bool
 	onStop  func()
+	resumed bool
+	notice  bool
+	applied bool // whether t.current and bracketed paste are already in effect
 }
 
+// apply is a no-op once the terminal already carries t.current and bracketed
+// paste: a stop-then-resume can reach here through more than one path for the
+// very same kernel event (the watcher's own channel delivery, and a bare
+// EINTR on whichever other blocked syscall that same resume also woke), and
+// neither termios nor paste mode is touched by a stop or a resume by
+// themselves, so repeating the ioctl and the paste-on write would only be
+// redundant, and visibly so over a real terminal. signal clears applied the
+// moment it records a new stop, so the next genuine resume still reapplies.
 func (t *promptTerminal) apply() error {
+	if t.applied {
+		return nil
+	}
 	for {
 		err := unix.IoctlSetTermios(t.fd, ioctlSetTermios, &t.current)
 		if errors.Is(err, unix.EINTR) {
+			if err := t.waitForeground(); err != nil {
+				return err
+			}
 			continue
 		}
 		if err != nil {
@@ -180,6 +198,131 @@ func (t *promptTerminal) apply() error {
 	}
 	// A terminal opened read-only cannot enable bracketed paste.
 	_, _ = unix.Write(t.fd, bracketedPasteOn)
+	t.applied = true
+	return nil
+}
+
+// restoreTerminal puts the terminal back to saved, reached only after the signal watcher has
+// joined. A tcsetattr from a background process group blocks, by the kernel's own job control,
+// until the job is foregrounded, then completes normally; ENOTTY (fd is not this process's
+// controlling terminal, as the unit tests' bare pseudo-terminal) or EIO (the group is orphaned,
+// which the kernel discards rather than blocks) mean there is nothing to restore to.
+func (t *promptTerminal) restoreTerminal(saved *unix.Termios) error {
+	for {
+		err := unix.IoctlSetTermios(t.fd, ioctlSetTermiosFlush, saved)
+		if errors.Is(err, unix.EINTR) {
+			if err := t.waitForeground(); err != nil {
+				return err
+			}
+			continue
+		}
+		if errors.Is(err, unix.ENOTTY) || errors.Is(err, unix.EIO) {
+			return nil
+		}
+		return err
+	}
+}
+
+func (t *promptTerminal) signal(event promptSignal) error {
+	if event.err != nil {
+		return event.err
+	}
+	if promptStopSignal(event.sig) {
+		t.stopped, t.notice, t.applied = true, true, false
+	} else if event.sig != syscall.SIGCONT {
+		t.death = event.sig
+		return fmt.Errorf("value prompt ended by %s", event.sig)
+	}
+	t.resumed = true
+	return nil
+}
+
+// SIGCONT from bg resumes the process, not its ownership of the terminal. Do not
+// apply termios or read again until fg has actually handed the terminal back.
+//
+// A background start races a shell's single fg handshake: the kernel's own
+// SIGTTOU stop on the first termios-changing ioctl can resume and recheck
+// foreground ownership entirely inside that one blocked syscall, with no
+// EINTR ever reaching apply()'s own retry. If that recheck still finds the
+// old group in front (tcsetpgrp has not yet taken effect), the process stops
+// itself again before fg's single SIGCONT-and-wait ever returns control to
+// us, and nothing sends a second SIGCONT. So every caller touches the
+// terminal only after this has independently confirmed foreground with a
+// read-only ioctl of its own, which never triggers that stop.
+func (t *promptTerminal) waitForeground() error {
+	if sid, err := unix.Getsid(0); err == nil && sid == unix.Getpid() {
+		// A session leader is never stopped by this terminal: it either just
+		// acquired it (already foreground, by the kernel's own TIOCSCTTY rule)
+		// or its process group is orphaned, where the kernel skips job control
+		// entirely (tty_check_change's own orphan check) rather than stopping
+		// it. Either way nothing will ever change what TIOCGPGRP answers here.
+		return nil
+	}
+	var retry *time.Ticker
+	defer func() {
+		if retry != nil {
+			retry.Stop()
+		}
+	}()
+	for {
+		foreground, err := unix.IoctlGetInt(t.fd, unix.TIOCGPGRP)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.ENOTTY) {
+			// fd is not this process's controlling terminal at all (a bare
+			// pseudo-terminal opened directly, as the unit tests do): job
+			// control cannot apply to it.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if foreground == unix.Getpgrp() {
+			return nil
+		}
+		// fg need not send SIGCONT to a job that bg already left running.
+		// A timed wake covers that handoff; signals still wake us immediately.
+		if retry == nil {
+			retry = time.NewTicker(50 * time.Millisecond)
+		}
+		select {
+		case event := <-t.events:
+			t.drainWake()
+			if err := t.signal(event); err != nil {
+				return err
+			}
+		case <-retry.C:
+		}
+	}
+}
+
+// drainWake reads the one wake-pipe byte the watcher wrote for an event this
+// call already consumed directly from t.events, bypassing readTerminal's own
+// drain. The watcher guarantees exactly one byte per event, written before
+// posting it (a stop signal, so the reader never touches the terminal while
+// it takes effect) or just after (every other signal), so this always has
+// one to read, immediately or a moment later; left undrained, it would wake
+// a later, unrelated readTerminal call into waiting for an event that already
+// came and went.
+func (t *promptTerminal) drainWake() {
+	var token [1]byte
+	_, _ = unix.Read(t.wake, token[:])
+}
+
+func (t *promptTerminal) resume() error {
+	if err := t.waitForeground(); err != nil {
+		return err
+	}
+	if err := t.apply(); err != nil {
+		return err
+	}
+	if t.notice {
+		t.notice = false
+		if t.onStop != nil {
+			t.onStop()
+		}
+	}
 	return nil
 }
 
@@ -187,25 +330,39 @@ func (t *promptTerminal) read(buf []byte) (int, error) {
 	for {
 		select {
 		case event := <-t.events:
-			if event.err != nil {
-				return 0, event.err
-			}
-			if !promptStopSignal(event.sig) {
-				t.death = event.sig
-				return 0, fmt.Errorf("value prompt ended by %s", event.sig)
-			}
-			if err := t.apply(); err != nil {
+			t.drainWake()
+			if err := t.signal(event); err != nil {
 				return 0, err
 			}
-			t.stopped = true
-			if t.onStop != nil {
-				t.onStop()
+			if err := t.resume(); err != nil {
+				return 0, err
 			}
 		default:
 		}
+		if t.resumed {
+			if err := t.waitForeground(); err != nil {
+				return 0, err
+			}
+		}
 		n, err := readTerminal(t.fd, t.wake, buf, t.wait)
 		if errors.Is(err, unix.EINTR) {
-			if err := t.apply(); err != nil {
+			if err := t.resume(); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if n == -2 {
+			// The watcher's wake pipe fired: either it already posted a
+			// processed event, or it is about to stop the process and woke
+			// us first so we never race a read against that stop. Either
+			// way, wait for the event it posts rather than polling the
+			// terminal again, since the terminal may become unsafe to touch
+			// (backgrounded) before that event arrives.
+			event := <-t.events
+			if err := t.signal(event); err != nil {
+				return 0, err
+			}
+			if err := t.resume(); err != nil {
 				return 0, err
 			}
 			continue
@@ -349,7 +506,9 @@ func onlyLineEndings(b []byte) bool {
 }
 
 // readTerminal waits for input, a watcher event or the quiet window's end. A
-// negative count means retry (a watcher event, or input gone before read).
+// result of -1 means retry (input gone before read); -2 means the watcher's
+// wake pipe fired and the caller must wait for its processed event on t.events
+// before touching the terminal again, since a stop may be about to take effect.
 // Tests wrap it to place signals and hang-ups at these boundaries.
 var readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
 	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}, {Fd: int32(wake), Events: unix.POLLIN}}
@@ -360,7 +519,7 @@ var readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
 	if fds[1].Revents != 0 {
 		var token [1]byte
 		_, err := unix.Read(wake, token[:])
-		return -1, err
+		return -2, err
 	}
 	n, err = unix.Read(fd, buf)
 	if errors.Is(err, unix.EAGAIN) || (n == 0 && err == nil && fds[0].Revents&unix.POLLHUP == 0) {
@@ -378,7 +537,8 @@ type promptSignal struct {
 // the channel carries a resume or death signal. Cancellation joins the watcher,
 // so no late resume can race the reader's final restore.
 func watchPromptSignals(wake *os.File) (<-chan promptSignal, func() promptSignal, []int, error) {
-	var watched []os.Signal
+	// SIGCONT is a wake only; SIGTTIN and SIGTTOU retain their default actions.
+	watched := []os.Signal{syscall.SIGCONT}
 	var ignoredControls []int
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGTSTP} {
 		ignored, err := promptSignalIgnored(sig)
@@ -402,17 +562,25 @@ func watchPromptSignals(wake *os.File) (<-chan promptSignal, func() promptSignal
 	events := make(chan promptSignal, 8)
 	done, joined := make(chan struct{}), make(chan struct{})
 	var pending promptSignal // written by the watcher, read only after joined
-	// Notify with an empty set would subscribe to every signal.
-	if len(watched) != 0 {
-		signal.Notify(signals, watched...)
-	}
+	signal.Notify(signals, watched...)
 	go func() {
 		defer close(joined)
 		for {
 			select {
 			case sig := <-signals:
 				event := promptSignal{sig: sig.(syscall.Signal)}
+				earlyWoke := false
 				if promptStopSignal(sig) {
+					// Wake the reader out of any poll/read on the tty before the
+					// real stop begins: a poll already in flight can report the
+					// tty ready for a reason unrelated to real input (the signal's
+					// own queue flush), and a read issued on that stale readiness
+					// can be caught mid-syscall by the group-stop this is about to
+					// cause, then re-raise SIGTTIN once bg leaves it backgrounded.
+					// Waking it onto the pipe first makes it retry instead and
+					// wait for this event, rather than touching the terminal.
+					_, _ = wake.Write([]byte{1})
+					earlyWoke = true
 					event.err = stopBy(event.sig)
 					// On Darwin stopBy must clear os/signal's handler bookkeeping
 					// before Notify can reinstall it. On Linux it is still installed.
@@ -420,9 +588,13 @@ func watchPromptSignals(wake *os.File) (<-chan promptSignal, func() promptSignal
 				}
 				select {
 				case events <- event:
-					_, _ = wake.Write([]byte{1})
+					if !earlyWoke {
+						_, _ = wake.Write([]byte{1})
+					}
 				case <-done:
-					pending = event
+					if event.sig != syscall.SIGCONT {
+						pending = event
+					}
 					return
 				}
 			case <-done:
@@ -438,6 +610,9 @@ func watchPromptSignals(wake *os.File) (<-chan promptSignal, func() promptSignal
 		// including one Notify queued but the watcher did not receive.
 		for len(events) != 0 {
 			event := <-events
+			if event.sig == syscall.SIGCONT {
+				continue
+			}
 			if event.err != nil {
 				pending.err = event.err
 			}
@@ -447,6 +622,9 @@ func watchPromptSignals(wake *os.File) (<-chan promptSignal, func() promptSignal
 		}
 		for len(signals) != 0 {
 			sig := (<-signals).(syscall.Signal)
+			if sig == syscall.SIGCONT {
+				continue
+			}
 			if pending.sig == 0 || !promptStopSignal(sig) {
 				pending.sig = sig
 			}

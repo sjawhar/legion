@@ -84,16 +84,20 @@ broker: serving DEMO_DEPLOY_TOKEN
 ```
 Ctrl-C, Ctrl-\\, SIGTERM or SIGHUP at the prompt restores the foreground terminal and writes
 nothing, then ends the CLI by that signal. A shell reports 130, 131, 143 or 129 respectively.
-Ctrl-C also stops a shell's `;` list. Core dumps are disabled before the value is read and stay
-disabled for the rest of the process, so a later crash cannot put the value in a core file.
+Ctrl-C also stops a shell's `;` list. On Unix, core dumps are disabled before the value is read and
+stay disabled for the rest of the process. On other platforms, crash-dump policy is OS-managed.
 
 **Ctrl-Z discards the entry.** The kernel flushes unread input on a terminal stop and reports no
 count of lost bytes, so a resumed value could be silently incomplete. The CLI refuses it rather
 than storing a partial secret. After `fg`, input stays hidden only while the remainder is
 discarded: press Enter, then run the command shown in the message and type the whole value again.
-The command exits 2 and stores nothing. The same refusal applies after Ctrl-Z, `bg`, then `fg`.
+The command exits 2 and stores nothing. After `bg`, the reader waits without touching the
+terminal until `fg` gives it back, then discards the entry in the same way.
 A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry. The macOS
 stop/resume path has not been verified on a macOS machine.
+
+The hidden prompt is available on Linux and macOS for amd64 and arm64. Builds for other targets
+refuse an interactive value and ask you to pipe it on stdin instead.
 
 ## Which sign-in may do what
 

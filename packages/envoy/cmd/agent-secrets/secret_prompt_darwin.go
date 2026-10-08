@@ -1,4 +1,5 @@
 // packages/envoy/cmd/agent-secrets/secret_prompt_darwin.go
+//go:build darwin && (amd64 || arm64)
 
 package main
 

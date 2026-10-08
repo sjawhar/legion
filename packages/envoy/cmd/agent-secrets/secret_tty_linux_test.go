@@ -1,5 +1,5 @@
 // packages/envoy/cmd/agent-secrets/secret_tty_linux_test.go
-//go:build linux
+//go:build linux && (amd64 || arm64)
 
 // The value prompt's reader (readHidden) at a real pseudo-terminal: what a person types or pastes
 // at it, Ctrl-D, and what it leaves for the shell once it returns. Linux-only: the pseudo-terminal

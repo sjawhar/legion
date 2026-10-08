@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && (amd64 || arm64)
 
 package main
 
@@ -35,13 +35,6 @@ func promptSignalIgnored(sig syscall.Signal) (bool, error) {
 		return false, fmt.Errorf("read the handler of %s: %w", sig, errno)
 	}
 	return old.handler == 1, nil // SIG_IGN
-}
-
-func preventCoreDumps() error {
-	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
-		return fmt.Errorf("turn core dumps off: %w", err)
-	}
-	return nil
 }
 
 // setDefaultAction sets sig to its default action.

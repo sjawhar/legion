@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && (amd64 || arm64)
 
 package main
 
@@ -22,16 +22,36 @@ import (
 type promptShell struct {
 	t          *testing.T
 	controller *os.File
-	terminal   int
-	bash       *exec.Cmd
-	out        bytes.Buffer
-	pid        int
-	history    string
+	ctlFd      int // controller's fd, read once: (*os.File).Fd() would switch it to
+	// blocking mode, silently breaking every later SetReadDeadline on controller.
+	terminal int
+	bash     *exec.Cmd
+	out      bytes.Buffer
+	pid      int
+	history  string
+}
+
+// rawFd answers f's file descriptor through its SyscallConn, which, unlike
+// (*os.File).Fd(), never switches f to blocking mode.
+func rawFd(f *os.File) (int, error) {
+	raw, err := f.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var fd int
+	if ctlErr := raw.Control(func(sysfd uintptr) { fd = int(sysfd) }); ctlErr != nil {
+		return 0, ctlErr
+	}
+	return fd, nil
 }
 
 func newPromptShell(t *testing.T) *promptShell {
 	t.Helper()
 	controller, terminal := openPTY(t)
+	ctlFd, err := rawFd(controller)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fd, err := unix.Dup(terminal)
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +66,7 @@ func newPromptShell(t *testing.T) *promptShell {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	s := &promptShell{t: t, controller: controller, terminal: terminal, bash: cmd, history: filepath.Join(home, "history")}
+	s := &promptShell{t: t, controller: controller, ctlFd: ctlFd, terminal: terminal, bash: cmd, history: filepath.Join(home, "history")}
 	t.Cleanup(func() {
 		if s.pid != 0 {
 			_ = syscall.Kill(s.pid, syscall.SIGKILL)
@@ -104,6 +124,22 @@ func (s *promptShell) start(wrapper bool, background bool) {
 	s.out.Reset()
 }
 
+func (s *promptShell) waitForeground(pid int) {
+	s.t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		foreground, err := unix.IoctlGetInt(s.ctlFd, unix.TIOCGPGRP)
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		if foreground == pid {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("terminal foreground group = %d, want %d", foreground, pid)
+		}
+	}
+}
+
 func (s *promptShell) noShellValue(markers ...string) {
 	s.t.Helper()
 	s.wait("PROMPT$ ")
@@ -157,19 +193,8 @@ func TestPromptJobBackgroundThenForegroundKeepsValueHidden(t *testing.T) {
 				s.send("bg\r")
 				s.wait("PROMPT$ ")
 			}
-			// The background read or termios write must stop, not spin or steal the shell's tty.
-			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-				stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", s.pid))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+2:])); fields[0] == "T" {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("background prompt did not stop")
-				}
-			}
+			// A stopped main thread is not proof that bash has reclaimed the tty.
+			s.waitForeground(s.bash.Process.Pid)
 			s.out.Reset()
 			s.send("fg\r")
 			s.wait("\x1b[?2004h")
@@ -179,6 +204,49 @@ func TestPromptJobBackgroundThenForegroundKeepsValueHidden(t *testing.T) {
 			} else {
 				s.wait("RETURNED nothing was stored:")
 				s.wait("MATCH=false EMPTY=true")
+			}
+			s.noShellValue("head", "tail")
+		})
+	}
+}
+
+func TestPromptJobFastForegroundDoesNotRestopOrExposeValue(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bg-before-fg=%t", background), func(t *testing.T) {
+			s := newPromptShell(t)
+			s.start(false, false)
+			s.send("\x1a")
+			// Queue fg at the first stopped thread, without waiting for all of the
+			// job's threads or bash to reclaim the terminal.
+			for deadline := time.Now().Add(5 * time.Second); ; {
+				stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", s.pid))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+2:])); fields[0] == "T" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("prompt did not stop")
+				}
+			}
+			if background {
+				s.send("bg\r")
+			}
+			s.send("fg\r")
+			s.wait("\x1b[?2004h")
+			s.out.Reset()
+			s.send("headtail\r")
+			s.wait("RETURNED nothing was stored:")
+			s.wait("MATCH=false EMPTY=true")
+			// Bash's own "Stopped" notice can lag arbitrarily far behind a real
+			// stop-then-resume it already handled (it only prints it once its own
+			// job-table check next runs), so it is not evidence of a second stop by
+			// itself. A second bracketed-paste-on write is: the reader emits
+			// exactly one, from apply(), each time it (re)gains the terminal, so a
+			// second one here means a second, unwanted stop-and-resume cycle.
+			if strings.Contains(s.out.String(), "\x1b[?2004h") {
+				t.Fatalf("prompt reapplied terminal settings after fg (stopped again): %q", s.out.String())
 			}
 			s.noShellValue("head", "tail")
 		})

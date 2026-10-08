@@ -35,6 +35,10 @@ On macOS, build `./cmd/agent-secrets` alone: the helper builds for Linux only. E
 `agent-secrets-arm64.tar.gz`, and `agent-secrets` alone for macOS, as
 `agent-secrets-darwin-amd64.tar.gz` and `agent-secrets-darwin-arm64.tar.gz`.
 
+The hidden value prompt is available on Linux and macOS for amd64 and arm64. Other targets,
+including Windows, FreeBSD and other Linux architectures, build without a prompt and require
+the value on stdin, for example `agent-secrets secret set DEMO_API_KEY < value.txt`.
+
 ## Test
 
 ```sh

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 	"unicode/utf8"
@@ -195,6 +196,10 @@ var stdinTerminal = func(r io.Reader) (fd int, ok bool) {
 	}
 	return int(f.Fd()), true
 }
+
+// Unix core protection stays in place for the process lifetime, including after
+// a prompt or piped value reaches the AWS client.
+var disableCoreDumps = sync.OnceValue(preventCoreDumps)
 
 // readHidden reads one hidden line from terminal fd, less its line ending; tests
 // replace it. The reader drains bracketed pastes through their end, and input
