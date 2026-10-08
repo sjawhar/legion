@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -122,6 +123,15 @@ func populatedState() State {
 			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
 		},
 		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
+		// A kubernetes deployment whose image passed the probe, with the broker gap decided and
+		// one role unreserved, so the fixture carries a decided row and an open row beside the
+		// present, live and withheld ones, rendered by the report itself: a wording change there
+		// rewrites the fixture rather than leaving the pinned words stale.
+		Capabilities: CapabilityStatesOf(capabilities.Deployment{
+			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
+			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			RolesWithoutResources: []claim.Role{claim.RoleTester},
+		}.Report()),
 	}
 }
 

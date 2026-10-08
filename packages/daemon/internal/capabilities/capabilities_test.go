@@ -46,9 +46,9 @@ func TestEveryRowHasASite(t *testing.T) {
 }
 
 // The deployment rows are what a legion.yaml decided line may name, in the table's order.
-func TestDeploymentIsTheDecidedRowsInTableOrder(t *testing.T) {
-	if got, want := Deployment(), []Name{Secrets, ModelFallback, ResourceLimits}; !slices.Equal(got, want) {
-		t.Errorf("Deployment() = %v, want %v", got, want)
+func TestDecidableIsTheDeploymentRowsInTableOrder(t *testing.T) {
+	if got, want := Decidable(), []Name{Secrets, ModelFallback, ResourceLimits}; !slices.Equal(got, want) {
+		t.Errorf("Decidable() = %v, want %v", got, want)
 	}
 }
 

@@ -173,6 +173,15 @@ func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[str
 	return env, nil
 }
 
+// environPairs is env as a command's environment, KEY=VALUE pairs in name order.
+func environPairs(env map[string]string) []string {
+	pairs := make([]string, 0, len(env))
+	for _, name := range slices.Sorted(maps.Keys(env)) {
+		pairs = append(pairs, name+"="+env[name])
+	}
+	return pairs
+}
+
 // label is the name the gate's errors begin with.
 func (g pluginGate) label() string {
 	if g.name == "" {
@@ -855,11 +864,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	defer cancel()
 	job := foregroundOf(g.stdin, g.echo)
 	cmd := exec.CommandContext(attempt, "sh", append([]string{"-c", job.script(script), "sh"}, args...)...)
-	environ := make([]string, 0, len(g.env))
-	for _, name := range slices.Sorted(maps.Keys(g.env)) {
-		environ = append(environ, name+"="+g.env[name])
-	}
-	cmd.Env = environ
+	cmd.Env = environPairs(g.env)
 	cmd.Dir = g.workDir
 	cmd.Stdin = g.stdin
 	var stdout, stderr bytes.Buffer

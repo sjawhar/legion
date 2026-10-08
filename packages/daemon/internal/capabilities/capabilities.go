@@ -93,8 +93,9 @@ func Lookup(name string) (Capability, bool) {
 	return Capability{}, false
 }
 
-// Deployment is the SiteDeployment names in Table order: what a legion.yaml decided line may name.
-func Deployment() []Name {
+// Decidable is the SiteDeployment names in Table order: what a legion.yaml decided line may name,
+// and what the daemon measures from its deployment (Deployment.Report).
+func Decidable() []Name {
 	var names []Name
 	for _, row := range Table {
 		if row.Site == SiteDeployment {

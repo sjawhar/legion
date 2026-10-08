@@ -51,4 +51,10 @@ package api
 // reporting ready on `claims/ready`. A plugin built before it reads that pod as the operator's
 // controller, throws for want of `LEGION_CONTROLLER_SECRET`, and never registers, so the image probe
 // must refuse such an image rather than leave the controller's keeper relaunching it forever.
-const DaemonAPIVersion = 14
+//
+// 15: LEGION-578 -- api.State gains `capabilities`, the deployment's capability report
+// (capabilities.Deployment.Report): one row per capability of the table, each `present`,
+// `unchecked`, `live`, `withheld`, `decided` or `open`, an open row carrying the legion.yaml line
+// that records a decision. Never null, so a plugin built before it refuses the state, and the
+// bump is why the two never meet.
+const DaemonAPIVersion = 15
