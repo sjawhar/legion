@@ -1,63 +1,30 @@
 {
-  "bodyHygiene": "The PR body carries a stale first CI line ('pending — run ids follow the first push (b2364ace)') above the real one; a body edit changes no commit, so it does not gate the approval. The implementer removes it when it next edits the body (retro's path-derived update, or the production check).",
-  "codeHead": "8e25f41e54f03886a0c8ec0b264b7766080cce94",
-  "completed": "2026-10-08T05:38:42.857316009Z",
+  "codeHead": "569f224841d9",
+  "completed": "2026-10-08T22:00:02.425825744Z",
   "critical": 0,
-  "forgeFacts": "PR #1845, base legion/LEGION-462-issue-pod at 42a685d1, mergeable clean. CI at the code head b2364ace (the implement handoff; 8e25f41e is the last code commit): Tests run 37729581888 (lint, typecheck, test success), PR Title run 37729581890 success, Legion Envoy and Contracts run 37729581825 (pi-shared, pi-legion success; the pi-legion job log: omp/18.6.0, extensions/legion-role-tools-omp.test.ts 3 pass, Ran 191 tests across 14 files, 191 pass 0 fail), Docs run 37729581823 success. No check run and no workflow run at 242594f3 (the tester's skip-checks push; .legion/ only); read_record: pullRequest.head 242594f3, checksVerdict green (carried). Threads: reviewThreads 0 nodes, reviews none, comments none (gh api graphql). Both E2E lines present with surface, command, observation, head and negative control: the implementer's at 8e25f41e on the real binary through the omp harness with the before-leg against main's legion.ts; the tester's at b2364ace re-running the same command plus a five-pane throwaway probe (chained bash, write, hashline edit, shell completion against the stand-in) with the before-leg against the base's legion.ts, and CI's own run of the omp test (run 37729581825). Contract change census re-run at the head: CODE_TOOL_REFUSAL, CODE_MUTATION_TOOLS, isSingleLegionCommand, LEGION_HANDOFF_COMPLETE, writeTarget, the three refusal strings, refusal_needle/probe_refusals/subagent_watch/pane-rule- survive only in .legion/ handoffs and docs/solutions (with the dated superseded note); no prompt, skill, AGENTS.md or docs/site page claims a role is refused a tool.",
+  "fingerprint": "Conflict-forced forward merge after the round-1 approval: #1752 (the stacked base) squash-merged to main, the pull request was retargeted to main, and the implementer merged main@origin 41c4d814 into the bookmark in one commit 569f2248 (parents 41c4d814 and retro's dda891d4). Branch diff with '~(.legion | docs/solutions)', hunk headers and index lines dropped: at the last approval dbdc6517 against its stacked base 42a685d1 = 72d72b288186bc3840aa1f83916e46985addbf7f4009b4db2ecc5593d263c05d; at the new head df619375 against fork_point(main@origin | df619375) = 41c4d814 = 72d72b288186bc3840aa1f83916e46985addbf7f4009b4db2ecc5593d263c05d. Equal, and round 1 was an approval: a confirmation, not a round — no thermonuclear pass, no thread pass.",
+  "forgeFacts": "PR #1845 base main at 41c4d814, head df619375, mergeable clean, reviewDecision APPROVED from round 1 (review 5452085589 at dbdc6517). CI at 55b5133e (the implement handoff carrying the merge): Tests 37849035567, Legion Envoy and Contracts 37849035494, PR Title 37849035525, Docs 37849035496, Worker Image 37849035592, all success; df619375 is the tester's skip-checks push and read_record shows checksVerdict green carried to it. The implementer's rebase comment on the pull request names dda891d4 → 55b5133e with the same fingerprint on both sides, unchanged. Threads: none. The tester's round-2 handoff computed the same fingerprint and re-ran only the bare gates. The body now carries one CI line (the stale pending line is gone), both roles' rebase re-check lines, the updated Chain line, and the reviewer's Look at first and Not proven / risk from round 1.",
   "important": 0,
   "issue": "LEGION-630",
-  "keyFindings": [
-    {
-      "description": "extensions/legion-role-tools-omp.test.ts is not in the per-file include list beside legion-phase-stall-omp.test.ts, so the typecheck job never sees it; tsc with it included exits 0 today and CI runs it on the real binary every push. Fast-follow: one include line.",
-      "file": "packages/pi-legion/tsconfig.json:27",
-      "severity": "minor"
-    },
-    {
-      "description": "The reason given for the refused second completion ('the issue has already left your phase') is HANDOFF_ALREADY_RECORDED, not NOT_CURRENT_PHASE, in implementing without a pull request and in production_check (engine.go:361-363, 386-389; handoff.go:115-119); the instruction stands. Same sentence at packages/pi-legion/AGENTS.md:269-270. Fast-follow wording.",
-      "file": "skills/legion-worker/SKILL.md:429",
-      "severity": "minor"
-    },
-    {
-      "description": "No sentence names the task-subagent path: a subagent's bash in the pane can complete the parent's phase (plan D1 names it; the deleted rule's comment named it). Fast-follow: one clause here and in packages/pi-legion/AGENTS.md:268.",
-      "file": "skills/legion-worker/SKILL.md:429",
-      "severity": "minor"
-    },
-    {
-      "description": "'That tool call, not the legion handoff shell command, ends your phase' reads as a mechanism claim now that the shell command also completes the phase at the daemon; the planner judged it guidance and it is #1752's file. Fast-follow wording.",
-      "file": "packages/daemon/internal/prompts/roles/mechanics/headless.md:23",
-      "severity": "minor"
-    },
-    {
-      "description": "runPane duplicates ~70% of legion-phase-stall-omp.test.ts's; the Fast-follow's omp-harness hoist should take the pane runner too, not only isSelfCheck and the stand-in writer.",
-      "file": "packages/pi-legion/extensions/legion-role-tools-omp.test.ts:150",
-      "severity": "minor"
-    },
-    {
-      "description": "stall_at_instruction == open is satisfied by the re-arm the comment at :837-839 describes; the other conjuncts carry the proof. Fast-follow: drop or re-anchor the clause.",
-      "file": "scripts/e2e/stage3-4b13b-acceptance.sh:850",
-      "severity": "minor"
-    },
-    {
-      "description": "The second superseded note splits the two-bullet list introduced at :125. Cosmetic.",
-      "file": "docs/solutions/legion/shell-command-gates-derive-from-bash-word-splitting-not-example-forms.md:132",
-      "severity": "minor"
-    }
-  ],
-  "minor": 7,
+  "keyFindings": [],
+  "minor": 0,
   "notProven": [
-    "A task subagent in a phase worker's pane can run the shell completion inside the parent's 60 s grant window and the daemon accepts it (plan D1 by design); no prompt or skill sentence names the subagent path; not driven on a live daemon.",
-    "What follows a shell completion (the stall's one follow-up; the second completion refused NOT_CURRENT_PHASE/NO_RUN, or ALREADY_RECORDED in a phase the completion does not move) is read from engine.go and handoff.go, not driven against a live daemon; the tester's shell completion ran against the stand-in only.",
-    "apply_patch is not a registered tool on the pin's Oh My Pi in the harness profile; its pass through the hook is pinned by the unit matrix only.",
-    "scripts/e2e/stage3-4b13b-acceptance.sh is devbox-only and was not run: bash -n and a reference sweep only.",
-    "go test ./... beyond internal/prompts is CI's test job (success at b2364ace); the branch changes no Go source.",
-    "extensions/legion-role-tools-omp.test.ts is outside tsconfig.json's include list: clean under tsc today, run on the real binary by CI every push, but a later type error there is invisible to the typecheck job.",
-    "The production check is pending the merge."
+    "Round 1's Not proven / risk lines stand unchanged in the body."
   ],
   "phase": "review",
-  "reviewedHead": "242594f395e049ab4ae5855cadc694a509d1014c",
-  "round": 1,
+  "previousRounds": [
+    {
+      "approvedCommit": "dbdc651760acdc1dff68a6d5f247f80d81257719",
+      "review": "https://github.com/sjawhar/legion/pull/1845#pullrequestreview-5452085589",
+      "reviewedHead": "dbdc651760acdc1dff68a6d5f247f80d81257719",
+      "round": 1,
+      "verdict": "approved"
+    }
+  ],
+  "reviewedHead": "df61937549aafd2295690fa69d3a36f05820acb4",
+  "round": 2,
   "schemaVersion": 1,
-  "securityLine": "Security: authz — no Legion role is refused a tool by the extension after this diff; the one block left is the shared operation-log rule for every tree pane and its task subagents (packages/pi-legion/extensions/legion.ts:266,269-272,524-525) and the pre-existing unregistered-worker grant refusal (:552-557); what still guards the shared clone and the phase is daemon-side and unchanged: the role-owns-the-phase check (packages/daemon/internal/workflow/engine.go:324-326; effects.go never maps a phase to architect, so an architect's shell completion is refused), the completion idempotency key (internal/api/handoff.go:109-119), the handoff commit's author check (cmd/legion/handoff.go), and the gh shim's merge and issue-write refusals; the widening with no replacing check is a task subagent completing its parent's phase from bash inside the parent's 60 s grant window — one trust domain, plan D1 by design (ASVS v5.0.0-1.2.5). agent-def — the diff edits roles/architect.md:13-16, roles/architect-root.md:16-17, skills/legion-worker/SKILL.md:424-432, root AGENTS.md:65 and packages/pi-legion/AGENTS.md:259-270,313; no reviewer-facing prompt, skill or agent definition carries a hunk, each edit removes a claim about an enforcement the same diff deletes and grants no new agency, and internal/prompts' structural tests pass in CI; trustworthy because the deleted code is the only thing the prose stopped describing. secret, untrusted-input, prompt, supply-chain, sandbox, transport — not touched (needsGrant/wrapWithGrant and the grant tail carry no hunk; no dependency, action, image or manifest changes; legion.daemonApiVersion unchanged).",
-  "thermonuclear": "Pair run once at 242594f3. Deep review: no High; one Medium (authz: the deleted handoff-complete rule was the one gate reaching a task subagent, so a subagent in a phase worker's pane may now complete the parent's phase from bash inside the parent's 60 s grant window; the daemon accepts it since engine.go:324 refuses only a role that does not own the phase) — judged not a defect: plan D1 names 'a worker (or its task subagent)' as the decided consequence and a subagent shares the parent's identity by design; recorded in Not proven / risk and as a wording fast-follow. Minors: the new omp test is outside tsconfig.json's per-file include (verified: tsc with it included exits 0 today); the second-refusal reason in SKILL.md/pi-legion AGENTS.md is HANDOFF_ALREADY_RECORDED rather than NOT_CURRENT_PHASE in implementing-without-PR and production_check; the stall predicate's stall_at_instruction conjunct no longer discriminates; the superseded note splits a bullet list. Clean: hook order pane rule → subagent exemption → grant mint unchanged, no new block path, grant tail without hunks, nonFileWriteScheme behaviour-identical with the conflict unwrap pinned by legion.test.ts:1589-1591, no downstream consumer of any removed symbol or string, e2e script references all resolve and bash -n passes, tests non-vacuous (role matrix over seven panes with the jj undo live-hook control; the omp test asserts result counts, is_error, the edit on disk, no handoff). Code quality: no High; Mediums are the tsconfig include, runPane duplicated (~70%) from legion-phase-stall-omp.test.ts (the Fast-follow names only isSelfCheck and the stand-in writer), headless.md:23's 'not the shell command, ends your phase' wording, and nonFileWriteScheme's generality (already in Fast-follow); Minors: active hoisted above the needsGrant guard (left byte-identical for LEGION-631 on purpose), two identical reviewer/merger omp cases with hand-counted results, unwrapped paragraphs.",
+  "securityLine": "Security: unchanged from round 1 — the branch's diff outside .legion/ and docs/solutions is byte-identical to the approved head (fingerprint 72d72b28…); the forward merge brings main's content, reviewed on main, and adds nothing of its own.",
+  "thermonuclear": "Not run this round: the unchanged-diff fingerprint is equal to round 1's approved head, so this is a confirmation; round 1's pair verdict stands (no correctness finding; the fast-follow items are in the round-1 review body).",
   "verdict": "approved"
 }
