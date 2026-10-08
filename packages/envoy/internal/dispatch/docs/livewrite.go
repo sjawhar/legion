@@ -57,16 +57,12 @@ type liveWrite struct {
 	fork     *crdt.Doc
 	// forkedFrom is the room document fork was last brought up to date from, held weakly: a
 	// write open across a room's eviction must not be what keeps its document resident past it.
-	// forkSeq is the room's credit sequence just before it was read for that: each author
-	// credited by then made a change the room held, which the fork took in (Ledger.WroteVersion).
-	// forkGeneration is the room's own creditGeneration at the same moment, which an upload's
-	// durable release must carry too: forkSeq alone is not a total order across two processes'
-	// own rooms for the same document (LEGION-513), and this fork's seq only ever means anything
-	// relative to its own room's generation.
-	forkedFrom     weak.Pointer[crdt.Doc]
-	forkSeq        uint64
-	forkGeneration uint64
-	updates        [][]byte
+	// forkSeq is the room's credit sequence just before it was read for that: each in-flight
+	// credit observed by then is for a change the room held, which the fork took in
+	// (Ledger.WroteVersion).
+	forkedFrom weak.Pointer[crdt.Doc]
+	forkSeq    uint64
+	updates    [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyLive) for the version its transaction may write.
 	// forkLive drops them whenever the fork they describe moves.
@@ -204,7 +200,7 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // may lack state the kept fork still holds (a browser update whose append failed), so the fork is
 // then rebuilt from the reloaded room and the transaction's writes.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	seq, generation := write.state.creditSeq.Load(), write.state.creditGeneration.Load()
+	seq := write.state.creditSeq.Load()
 	var gained []byte
 	var room *crdt.Doc
 	var incremental bool
@@ -228,7 +224,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		write.dropRendering()
 		return nil, err
 	}
-	write.fork, write.forkedFrom, write.forkSeq, write.forkGeneration = fork, weak.Make(room), seq, generation
+	write.fork, write.forkedFrom, write.forkSeq = fork, weak.Make(room), seq
 	if s.afterForkRead != nil {
 		s.afterForkRead(write.artifactID)
 	}

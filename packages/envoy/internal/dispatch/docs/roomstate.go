@@ -29,28 +29,13 @@ import (
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
-	// pending is the room's pending authors, each entry's own credit sequence number (creditSeq)
-	// marking when it was credited, so a version's or a settlement's release can tell an entry
-	// its own capture took from a newer one credited under the same key since (versionPending,
-	// commitVersionLocked, LEGION-503). creditSeq is atomic so forkLive, which every document
-	// write calls, can read it for forkSeq without taking the state lock the far rarer upload
-	// route is its only consumer of.
-	pending   map[string]pendingAuthor
+	// inflight is F (pending_authors.go): each browser edit's credit from the moment the room's
+	// update observer records it (creditContentChange) until the edit's append lands, keyed by its
+	// creditSeq. creditSeq is atomic so forkLive, which every document write calls, can read it
+	// for forkSeq without taking the state lock the far rarer upload route is its only consumer
+	// of; it is process-local and orders only this state's own in-flight credits.
+	inflight  map[uint64]*inflightCredit
 	creditSeq atomic.Uint64
-	// creditGeneration is this room instance's own per-room-load id, set once when the room
-	// loads (onLoadDocument, bumpSettlementCreditGeneration) and never changed again for this
-	// roomState's lifetime: a release durably compares it against each pending row entry's own
-	// generation, since creditSeq alone is not a total order across two processes' own rooms for
-	// the same document - a rolling deploy's two Dispatch tasks each hold their own live room for
-	// one document at once, each with its own in-process creditSeq counter no release may
-	// compare across (LEGION-513). Atomic for the same reason creditSeq is: forkLive reads both
-	// without the state lock.
-	creditGeneration atomic.Uint64
-	// leaseStop stops this room's generation-lease ticker (runGenerationLeaseTicker), started in
-	// onLoadDocument once creditGeneration is set: closing it is the signal to delete the lease
-	// and exit, on a clean unload (releaseUnloadedRoom). Nil once stopped, so a repeat unload
-	// signal does not close twice.
-	leaseStop chan struct{}
 	// askBlocks are the ask blocks the room's document held when its update observer last
 	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
 	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
@@ -64,26 +49,23 @@ type roomState struct {
 	askAuthors        map[string]model.Actor
 	pendingAskAuthors map[string]model.Actor
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
-	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
-	// runs after an edit's own version was committed would otherwise attribute the block asks
-	// it indexes to nobody.
+	// connected peer of a browser edit. A version lists its authors, so a settlement that runs
+	// after an edit's own version was committed would otherwise attribute the block asks it
+	// indexes to nobody.
 	lastActor *model.Actor
-	// unsettled marks authors recorded in pending or lastActor that no settlement has read since:
-	// the settlement they were recorded for credits them, so the state holds them until one
-	// commits (settleRoomWithin). Closing persists them on the pending-settlement row before
-	// clearing them (SetIssueClosed), so that row carries them through a room release or restart.
-	unsettled       bool
-	pendingVersions map[int]versionPending
-	updateClasses   []documentUpdateClass
-	pendingUpdates  int
-	settle          *time.Timer
-	unrecorded      map[pmdoc.MarkRef]time.Time
-	durableAppends  atomic.Int64
+	// unsettled marks a lastActor no settlement has read since: the settlement it was recorded
+	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
+	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
+	// through a room release or restart. The authors themselves are in F and R, never only here.
+	unsettled      bool
+	updateClasses  []documentUpdateClass
+	pendingUpdates int
+	settle         *time.Timer
+	unrecorded     map[pmdoc.MarkRef]time.Time
+	durableAppends atomic.Int64
 	// roomGeneration counts this room's own in-process invalidations (a reload, a failure, a
-	// settlement's own commit) - commitVersionLocked and retrySettleLocked compare a capture's
-	// own value against the room's current one to tell a capture still good from one a change
-	// since has invalidated. Distinct from creditGeneration below, which is a per-room-load
-	// instance id two different rooms, possibly two different processes, can compare.
+	// settlement's own commit): a settlement compares the value it started at against the room's
+	// current one to tell a read still good from one a change since has invalidated.
 	roomGeneration uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
 	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
@@ -105,12 +87,15 @@ type roomState struct {
 	released bool
 }
 
+// documentUpdateClass is what the room's update observer recorded for one update, which its
+// persistence takes (consumeUpdateClass): whether it changed the content, whether it is durable
+// work the room's state waits on, and the browser edit's in-flight credit, nil for an update no
+// browser edit credited.
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
-	credit         settlementCredit
-	creditSeq      uint64
+	credit         *UpdateCredit
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -134,26 +119,13 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 			}
 			fresh := &roomState{
 				connected:         make(map[uint64]model.Actor),
-				pending:           make(map[string]pendingAuthor),
+				inflight:          make(map[uint64]*inflightCredit),
 				askBlocks:         make(map[string]struct{}),
 				askAuthors:        make(map[string]model.Actor),
 				pendingAskAuthors: make(map[string]model.Actor),
-				pendingVersions:   make(map[int]versionPending),
 				unrecorded:        make(map[pmdoc.MarkRef]time.Time),
 			}
-			var loaded bool
-			value, loaded = s.rooms.LoadOrStore(room, fresh)
-			// This call created the state LoadOrStore stored (a concurrent creation would have
-			// returned loaded true, finding this one first): carry forward whatever capture a
-			// forced eviction orphaned for this room (forgetLocked), or it is lost with no
-			// in-memory release left to find it (LEGION-513).
-			if !loaded {
-				if orphaned, ok := s.orphanedVersions.LoadAndDelete(room); ok {
-					for number, capture := range orphaned.(orphanedVersion).versions {
-						fresh.pendingVersions[number] = capture
-					}
-				}
-			}
+			value, _ = s.rooms.LoadOrStore(room, fresh)
 		}
 		state := value.(*roomState)
 		if s.afterStateLookup != nil {
@@ -182,29 +154,8 @@ func (s *Service) releaseIfUnused(room string) {
 }
 
 // releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its state goes too unless
-// something still holds it, whose end releases it instead. ygo's content going means this room
-// can no longer credit anything new under its own generation, so this is also a clean unload:
-// this room's lease-refresh ticker stops, and its lease is deleted here, synchronously, before
-// this hook returns - never left to the ticker goroutine's own, asynchronous handling of the
-// stop signal, which could still be in flight when ygo turns a reload straight into the next
-// onLoadDocument call for the same room: that next load's own adoption check must never see a
-// lease this same process's own last instance only *about to* delete (LEGION-513). The next
-// load, by this process or another, or another live room's own sweep, adopts this generation's
-// still-pending entries at once instead of waiting out generationLeaseTTL.
-func (s *Service) releaseUnloadedRoom(ctx context.Context, room string) {
-	var stop chan struct{}
-	var generation uint64
-	if state := s.lockExistingState(room); state != nil {
-		stop, generation = state.leaseStop, state.creditGeneration.Load()
-		state.leaseStop = nil
-		s.unlockState(room, state)
-	}
-	if stop != nil {
-		close(stop)
-		if err := deleteGenerationLease(ctx, s.store.Pool, room, generation); err != nil {
-			slog.Error("dispatch: delete document generation lease on clean unload", "room", room, "error", err)
-		}
-	}
+// something still holds it, whose end releases it instead.
+func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
 	s.releaseIfUnused(room)
 }
 
@@ -222,52 +173,24 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 	s.forgetLocked(room, state)
 }
 
-// orphanedVersion is one room's pendingVersions, stashed at the moment a forced eviction forgot
-// it, so a sweep (sweepOrphanedVersions) can tell one old enough to drop - its document will
-// never reload, or reloaded and claimed it through some other path already - from one still
-// worth keeping for the next load.
-type orphanedVersion struct {
-	versions  map[int]versionPending
-	stashedAt time.Time
-}
-
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
-// (lookUpState). A version's capture (rememberPendingVersion) that is still outstanding - the
-// normal path never forgets a state that holds one (unusedLocked), but evictRoom's forced path
-// does not check - is stashed in orphanedVersions first, so lookUpState's next fresh state for
-// this room carries it forward instead of losing it (LEGION-513). A live lease-refresh ticker
-// stops and its lease is deleted here too, synchronously, before this call returns: this is the
-// one path every caller that forgets a state - releaseIfUnusedLocked (unlockState's own, the most
-// common: a room becomes unused the instant a write that leaves nothing pending releases it,
-// often within the same request that will reload it next, e.g. a reopen) and evictRoom's forced
-// path alike - goes through, so it is also the one place a stale lease can reliably be caught
-// before the state that held it is gone (releaseUnloadedRoom and Shutdown handle the same
-// concern for a room ygo itself unloads, or the whole service stopping, since forgetLocked is not
-// always reached from there). Its caller holds state.mu.
+// (lookUpState). An in-flight credit the state still holds is reached through its update's
+// UpdateCredit, which holds the state, so a forced eviction (evictRoom) that forgets the state
+// before that update's append lands loses nothing the append writes. Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
-	if len(state.pendingVersions) > 0 {
-		s.orphanedVersions.Store(room, orphanedVersion{versions: state.pendingVersions, stashedAt: s.now()})
-	}
-	if state.leaseStop != nil {
-		close(state.leaseStop)
-		state.leaseStop = nil
-		if err := deleteGenerationLease(context.Background(), s.store.Pool, room, state.creditGeneration.Load()); err != nil {
-			slog.Error("dispatch: delete document generation lease on forget", "room", room, "error", err)
-		}
-	}
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
 }
 
 // unusedLocked is whether state holds nothing that outlasts its room. These are every holder: an
-// open writer, a running or armed settlement, authors no settlement has read, a failure being
-// recovered from (whose eviction forgets the state itself, evictRoom), a connected browser, an
-// update the room's persistence has not taken or appended, and a version whose authors wait on its
-// commit. Its caller holds state.mu.
+// open writer, a running or armed settlement, a latest edit source no settlement has read, a
+// failure being recovered from (whose eviction forgets the state itself, evictRoom), a connected
+// browser, an update the room's persistence has not taken or appended, and an in-flight credit
+// whose append has not landed. Its caller holds state.mu.
 func (s *Service) unusedLocked(state *roomState) bool {
 	return state.liveWriter == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) &&
 		!state.unsettled && state.failed == nil && len(state.connected) == 0 &&
-		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.pendingVersions) == 0
+		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
 }
 
 func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
@@ -395,49 +318,4 @@ func (s *Service) canAddConnection() bool {
 		return count < maxRoomConnections
 	})
 	return count < maxRoomConnections
-}
-
-// pendingAuthor is one pending author's credit: the actor, and the room's creditSeq as of the
-// credit that made it pending (creditPendingLocked). A version's or a settlement's release
-// takes out only an entry whose creditSeq is at or before the point it captured (through), so an
-// author credited again under the same key after that point is a different, newer entry the
-// release must not clear (releasePendingLocked, LEGION-503).
-type pendingAuthor struct {
-	actor     model.Actor
-	creditSeq uint64
-}
-
-// creditPendingLocked makes actor owed at creditSeq, the room's current creditSeq the caller has
-// already advanced for this credit and read once outside any per-actor loop, since state.mu keeps
-// it from changing mid-loop. The caller holds state.mu.
-func (state *roomState) creditPendingLocked(key string, actor model.Actor, creditSeq uint64) {
-	state.pending[key] = pendingAuthor{actor: actor, creditSeq: creditSeq}
-}
-
-// releasePendingLocked takes keys out of the room's pending authors where their credit was given
-// at or before through: the creditSeq a version's or a settlement's own capture named that key at,
-// not merely read the room at. A key this capture did not name - an author credited between this
-// capture and a later, unrelated capture's own creditSeq - is never touched, however its seq
-// compares, since it was never part of what through's capture released (LEGION-513). An entry
-// under a captured key credited again after through is a newer entry the release must not clear,
-// and stays. The caller holds state.mu.
-func (state *roomState) releasePendingLocked(keys map[string]model.Actor, through uint64) {
-	for key := range keys {
-		if entry, owed := state.pending[key]; owed && entry.creditSeq <= through {
-			delete(state.pending, key)
-		}
-	}
-}
-
-// releaseAllPendingLocked takes every pending author out of the room whose credit was given at or
-// before through, whatever key it is under: an upload's capture names no specific authors (its
-// version credits the uploader alone), but its write may have changed or removed any pending edit
-// visible as of its last read of the room, so its release must reach every one of them
-// (versionPending.fullRelease, Ledger.WroteVersion). The caller holds state.mu.
-func (state *roomState) releaseAllPendingLocked(through uint64) {
-	for key, entry := range state.pending {
-		if entry.creditSeq <= through {
-			delete(state.pending, key)
-		}
-	}
 }

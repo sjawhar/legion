@@ -45,16 +45,6 @@ const (
 	// last Server.Apply on a room no peer is in returns (New). A peer that returns within it
 	// rejoins the warm room rather than reloading the document.
 	roomIdleTimeout = time.Minute
-	// generationLeaseRefresh is how often a live room refreshes its own generation's lease
-	// (refreshGenerationLeaseAndAdopt), and the same sweep's own cadence for adopting another,
-	// abandoned generation's entries on the same document.
-	generationLeaseRefresh = 30 * time.Second
-	// generationLeaseTTL is how long a generation's lease survives without a refresh before
-	// another room may adopt its entries: long enough that a refresh tick slipping behind under
-	// load, or one missed cycle, does not cause a false adoption; short enough that a task that
-	// stopped without releasing (a crash, or a rolling deploy's stop grace) does not leave its
-	// authors stuck for long (LEGION-513).
-	generationLeaseTTL = 2 * time.Minute
 )
 
 // Deps configures the live document service.
@@ -71,13 +61,16 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. Document writes that join an API transaction use AppendUpdateTx, classifying
-// the update as content or not the way the room's update observer classifies a live one.
-// RebuildTx replaces an unreadable history inside the rebuild's transaction, through the same
-// persistence boundary as its preflight load. Head is the version Load would fold up to now, which
-// says whether a state loaded earlier is still the stored one.
+// store. AppendUpdateWithCredit is the one way a room's own update reaches the store: it appends
+// the update, classified as content or not, with the browser edit's in-flight credit, which it
+// takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
+// API transaction use AppendUpdateTx, classifying the update the way the room's update observer
+// classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
+// transaction, through the same persistence boundary as its preflight load. Head is the version
+// Load would fold up to now, which says whether a state loaded earlier is still the stored one.
 type VersionedStore interface {
 	persistence.VersionedPersistence
+	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
@@ -97,17 +90,7 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	rooms             sync.Map
 	shutdownRooms     sync.Map
-	// orphanedVersions carries a forgotten state's pendingVersions forward to the next state
-	// lookUpState creates for the same room, when evictRoom forgot it with the check
-	// releaseIfUnusedLocked makes (unusedLocked) unmet - a version's capture
-	// (rememberPendingVersion) still outstanding when an unrelated room failure or Quiesce
-	// forces the eviction through regardless. Without this, that capture is lost with the old
-	// state: the transaction that stored it already durably released its row (recordSettlementCredit,
-	// inside the same commit, before it), but its room-side release (commitVersionLocked) finds
-	// nothing for its version number on the fresh room lockState creates next, and does nothing
-	// (LEGION-513).
-	orphanedVersions sync.Map
-	nextConnection   atomic.Uint64
+	nextConnection atomic.Uint64
 	stopping         atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.

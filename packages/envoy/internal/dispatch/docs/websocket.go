@@ -60,16 +60,6 @@ type servicePersistenceAdapter struct {
 	store   VersionedStore
 	service *Service
 }
-type classifiedUpdateStore interface {
-	AppendUpdateWithClass(context.Context, string, []byte, bool) (persistence.Version, error)
-}
-
-// creditedUpdateStore atomically records an observed update's settlement credit with the durable
-// row that leaves its settlement owed. The wire value keeps test-only stores in other packages
-// able to wrap the method without exposing roomState's private credit representation.
-type creditedUpdateStore interface {
-	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, []byte, uint64) (persistence.Version, error)
-}
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	if update, ok := a.service.takePreload(room); ok {
@@ -87,43 +77,13 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
-	if a.service.roomFailed(room) {
-		return nil
-	}
-	class, found := a.service.consumeUpdateClass(room, update)
-	if found && class.durable {
-		defer a.service.finishDurableAppend(room)
-	}
-	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
-		return nil
-	}
-	var err error
-	creditStored := class.credit.empty()
-	if store, ok := a.store.(creditedUpdateStore); ok {
-		encodedCredit, encodeErr := json.Marshal(class.credit)
-		if encodeErr != nil {
-			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
-		}
-		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit, class.creditSeq)
-		creditStored = true
-	} else if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(context.Background(), room, update, class.contentChanged)
-	} else {
-		_, err = a.store.AppendUpdate(context.Background(), room, update)
-	}
-	if err != nil {
-		a.service.failRoom(room, err)
-		return err
-	}
-	if found && creditStored {
-		a.service.settlementCreditPersisted(room, class.creditSeq)
-	}
-	if found && class.durable && class.contentChanged {
-		a.service.scheduleSettleAfterAppend(room)
-	}
-	return nil
+	return a.StoreUpdateContext(context.Background(), room, update)
 }
 
+// StoreUpdateContext appends a room's update with the in-flight credit its update observer
+// recorded (AppendUpdateWithCredit). An update that never reaches the store - its room failed, or
+// a live write or a settlement already made it durable - lands its credit here instead: the room
+// drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
 		return nil
@@ -132,29 +92,13 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if found && class.durable {
 		defer a.service.finishDurableAppend(room)
 	}
+	defer class.credit.landed()
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
-	var err error
-	creditStored := class.credit.empty()
-	if store, ok := a.store.(creditedUpdateStore); ok {
-		encodedCredit, encodeErr := json.Marshal(class.credit)
-		if encodeErr != nil {
-			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
-		}
-		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit, class.creditSeq)
-		creditStored = true
-	} else if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(ctx, room, update, class.contentChanged)
-	} else {
-		_, err = a.store.AppendUpdate(ctx, room, update)
-	}
-	if err != nil {
+	if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit); err != nil {
 		a.service.failRoom(room, err)
 		return err
-	}
-	if found && creditStored {
-		a.service.settlementCreditPersisted(room, class.creditSeq)
 	}
 	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
@@ -447,27 +391,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	owed, credit, err := pendingSettlementCredit(ctx, rooms, room)
+	// The load takes no advisory lock, which a durable writer can hold for as long as its
+	// transaction runs: the row it reads is written whole by each writer's transaction, so a
+	// plain read sees one writer's commit or the one before it.
+	owed, lastActor, err := readOwedSettlement(ctx, rooms, room)
 	if err != nil {
-		return err
-	}
-	// Every load gets its own generation, the per-room-load instance id a durable release
-	// compares against each row entry's own (releaseSettlementCredit): creditSeq alone is not a
-	// total order across two processes' own rooms for the same document, so a release must never
-	// trust a seq comparison against an entry some other room credited (LEGION-513). This also
-	// durably adopts, into the new generation, every pending entry whose own generation currently
-	// holds no unexpired lease (bumpSettlementCreditGeneration): one whose lease is still live is
-	// left entirely alone, since the room holding it is live and its own release will reach it -
-	// adopting it here would let two rooms credit the same author on their own next versions. It
-	// needs no advisory lock (a room load never waits on one - a durable writer can hold it, and
-	// the load would then hang, the deadlock round 17 fixed): every statement it runs is a plain,
-	// atomic operation whose correctness Postgres's own row-level locking already guarantees
-	// against a concurrent writer's equally brief transaction.
-	generation, adopted, err := bumpSettlementCreditGeneration(ctx, rooms, room, s.now())
-	if err != nil {
-		return err
-	}
-	if err := takeOrRefreshGenerationLease(ctx, rooms, room, generation, s.now()); err != nil {
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
@@ -493,13 +421,6 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (releaseIfUnusedLocked).
 	state := s.lockState(room)
 	state.closed = !open
-	// onLoadDocument fires exactly when ygo genuinely reloads this room's content - never while
-	// an existing, still-live roomState is merely attached to again (that never reaches this
-	// hook) - so the generation this load just bumped durably is this room's own from here on,
-	// whatever the service's own bookkeeping struct happens to be.
-	state.creditGeneration.Store(generation)
-	state.leaseStop = make(chan struct{})
-	go s.runGenerationLeaseTicker(room, generation, state.leaseStop)
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
@@ -510,11 +431,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
 	// that is gone, so an open room settles once rather than waiting for an edit to arm one - unless
-	// the load is a settlement's own warm-up, which settles it next. A closed room keeps the credit
-	// durable on its pending-settlement row; it settles only after its issue reopens. A room that
-	// failed again while this load ran leaves the row for its own replacement.
-	if owed && open {
-		state.mergeSettlementCreditLocked(settlementCredit{Pending: adopted, LastActor: credit.LastActor})
+	// the load is a settlement's own warm-up, which settles it next. Its authors are in the
+	// document's pending authors, which that settlement reads; the room restores only the latest
+	// edit source the settlement names. A closed room keeps the row; it settles only after its
+	// issue reopens. A room that failed again while this load ran leaves the row for its own
+	// replacement.
+	if owed && open && lastActor != nil {
+		state.lastActor = lastActor
+		state.unsettled = true
 	}
 	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
@@ -541,7 +465,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		})
 		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
-			class.credit, class.creditSeq = s.creditContentChange(room, origin)
+			class.credit = s.creditContentChange(room, origin)
 			if s.afterCreditUpdate != nil {
 				s.afterCreditUpdate(room)
 			}
@@ -593,46 +517,31 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
 // happened is not credited either. A committed transaction's live write, which Ledger.Commit
 // applies, was credited when the transaction committed and is not credited again. Any other update
 // is a browser edit by one of the peers, which ygo applies while that peer's connection is
-// registered. ygo does not say which connection sent it, so every connected peer joins `pending`:
-// when exactly one is connected it is the latest edit source and replaces `lastActor`, and
+// registered. ygo does not say which connection sent it, so every connected peer is credited with
+// it: when exactly one is connected it is the latest edit source and replaces `lastActor`, and
 // otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
 //
-// The returned credit names only the peers connected for this update, never the room's whole
-// accumulated `state.pending`: that map can hold an author a concurrent version's transaction has
-// already released from the durable row but not yet taken out of this room (Ledger.commit locks
-// state.mu only for its own versions' artifacts), and bundling that author into this later-sequenced
-// credit would put them back past the watermark that discards a stale credit (upsertSettlementCredit).
-func (s *Service) creditContentChange(room string, origin any) (settlementCredit, uint64) {
+// The credit goes to F, the room's in-flight credits, until the edit's append lands it
+// (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
+// no advisory lock and touches no database: nothing reads F without holding state.mu.
+func (s *Service) creditContentChange(room string, origin any) *UpdateCredit {
 	if _, published := origin.(*liveWriteOrigin); published {
-		return settlementCredit{}, 0
+		return nil
 	}
 	if _, service := s.serviceOrigins.Load(origin); service {
-		return settlementCredit{}, 0
+		return nil
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	state.creditSeq.Add(1)
-	creditSeq := state.creditSeq.Load()
-	generation := state.creditGeneration.Load()
-	pending := make(map[string]model.Actor, len(state.connected))
-	var sole *model.Actor
-	ambiguous := false
+	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: make(map[string]model.Actor, len(state.connected))}
 	for _, actor := range state.connected {
-		key := actorKey(actor)
-		state.creditPendingLocked(key, actor, creditSeq)
-		pending[key] = actor
-		if sole == nil {
-			sole = new(actor)
-		} else if key != actorKey(*sole) {
-			ambiguous = true
-		}
+		record.authors[actorKey(actor)] = actor
 	}
-	if ambiguous {
-		sole = nil
-	}
-	state.lastActor = sole
+	record.lastActor, _ = soleConnectedActor(state.connected)
+	state.inflight[record.seq] = record
+	state.lastActor = record.lastActor
 	state.unsettled = true
-	return settlementCreditFor(pending, sole, creditSeq, generation), creditSeq
+	return &UpdateCredit{service: s, room: room, state: state, record: record}
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

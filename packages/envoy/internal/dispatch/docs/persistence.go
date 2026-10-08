@@ -87,34 +87,28 @@ func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Versio
 
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, true, settlementCredit{})
+	return p.appendUpdate(ctx, room, update, true, nil)
 }
 
-// AppendUpdateWithClass validates and stores one incremental V1 update with its rendered-content classification.
-func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, contentChanged, settlementCredit{})
-}
-
-// AppendUpdateWithSettlementCredit validates and stores one incremental V1 update with the authors
-// its pending settlement must retain if the room goes before it runs. creditSeq is the room's
-// creditSeq when encodedCredit was captured (settlementCredit.CreditSeq, upsertSettlementCredit);
-// it travels as its own parameter here because encodedCredit crosses this interface as a JSON
-// blob, where CreditSeq (json:"-") would not survive the round trip.
-func (p *PgVersioned) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, encodedCredit []byte, creditSeq uint64) (persistence.Version, error) {
-	var credit settlementCredit
-	if err := json.Unmarshal(encodedCredit, &credit); err != nil {
-		return 0, fmt.Errorf("decode document settlement authors: %w", err)
-	}
-	credit.CreditSeq = creditSeq
+// AppendUpdateWithCredit validates and stores one incremental V1 update of a room, with its
+// rendered-content classification and the browser edit's in-flight credit: in the update's own
+// transaction, under the document's advisory lock, it writes the credit's authors to the
+// document's pending authors unless a committed version already listed them (UpdateCredit.take),
+// and it lands the credit before it releases that lock (UpdateCredit.landed).
+func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
 
-func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit settlementCredit) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
 	var version persistence.Version
 	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+		// The credit lands while withRoomLock still holds the document's lock, whether the
+		// transaction committed or not: no version reads the pending authors between its
+		// commit and its leaving the room's in-flight credits.
+		defer credit.landed()
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin document update: %w", err)
@@ -145,7 +139,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 		}
 		return 0, err
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, settlementCredit{})
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -190,7 +184,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit settlementCredit) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -212,20 +206,19 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
-	if err := markSettlementPending(ctx, tx, room, credit); err != nil {
+	authors, lastActor, include := credit.take()
+	// An edit credited to authors names its latest edit source, none included when no one
+	// peer made it; an update no one is credited with keeps the row's.
+	setLastActor := include && (len(authors) > 0 || lastActor != nil)
+	if err := markSettlementPending(ctx, tx, room, lastActor, setLastActor, true); err != nil {
 		return 0, err
 	}
+	if include {
+		if err := upsertPendingAuthors(ctx, tx, room, authors); err != nil {
+			return 0, err
+		}
+	}
 	return version, nil
-}
-
-// markSettlementPending records, in the transaction that appends a document update, that the
-// document owes a settlement and the authors that settlement must retain. The timer that runs it
-// lives only in memory, so a settlement a shutdown cuts short is found here by the room's next load
-// (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that covers the
-// update deletes the row in the transaction that commits its writes (clearSettlementPending). The
-// caller holds the document's advisory lock, which orders this row's writers as it orders updates.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit) error {
-	return upsertSettlementCredit(ctx, tx, room, credit, true)
 }
 
 // clearSettlementPending deletes the document's pending settlement inside the settlement
@@ -239,10 +232,9 @@ func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-// settlementPending reports whether room owes a settlement, without reading which authors it owes
-// (pendingSettlementCredit, which also decodes the row's credit, serves a caller that needs that
-// too). Shutdown's drain uses this to skip settling a document that already has none owed, rather
-// than spending its budget repeating work a settlement already finished.
+// settlementPending reports whether room owes a settlement. Shutdown's drain uses this to skip
+// settling a document that already has none owed, rather than spending its budget repeating work
+// a settlement already finished.
 func settlementPending(ctx context.Context, q Queryer, room string) (bool, error) {
 	var pending bool
 	if err := q.QueryRow(ctx, `
