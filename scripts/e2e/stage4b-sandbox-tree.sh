@@ -1031,7 +1031,8 @@ relaunch_ends() {
 # records an action by pod uid (driver_action). A `kill-container` ended one role, so it accounts
 # for a death of that role, of any generation, in its pod and no other role's; a `delete-pod` or
 # `close` ended the whole pod, so it accounts for a death of any role in it. A record line in any
-# other form is named, so the verdict never judges against a record it cannot read.
+# other form is named and accounts for nothing, so the verdict never judges against a record it
+# cannot read.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
 # resume that finds the tree volume lost dies by design (the runtime's detail begins "the tree volume
 # was lost: "), and
@@ -1044,10 +1045,11 @@ relaunch_ends() {
 pod_watch_verdict() {
   local watch=$1 actions=$2 log=$3
   jq -s -r --rawfile actions "$actions" --rawfile log "$log" --arg unscheduled "$(never_scheduled_deaths "$watch" "$log")" '
+    def readable: (.[0] == "kill-container" and length == 4) or ((.[0] == "delete-pod" or .[0] == "close") and length == 3);
     ($actions | split("\n") | map(select(. != "") | split(" "))) as $lines
-    | [ $lines[] | select(((.[0] == "kill-container" and length == 4) or ((.[0] == "delete-pod" or .[0] == "close") and length == 3)) | not)
+    | [ $lines[] | select(readable | not)
         | "driver action \(join(" ")) is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME" ] as $unreadable
-    | [ $lines[] | {kind: .[0], uid: .[1], role: .[3]} ] as $driver
+    | [ $lines[] | select(readable) | {kind: .[0], uid: .[1], role: .[3]} ] as $driver
     | ($unscheduled | split("\n") | map(select(. != ""))) as $retired
     | ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died"))) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods

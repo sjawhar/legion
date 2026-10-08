@@ -745,6 +745,22 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
     ]);
   });
 
+  // An unreadable line accounts for nothing: a death in its pod is named beside the line, whatever
+  // the line's kind (an old kind, a deletion with a field too many, a kill with one too many).
+  test("an unreadable line accounts for no death in its pod, and the verdict names both", () => {
+    for (const line of [
+      "kill uid-a",
+      "delete-pod uid-a extra",
+      "kill-container uid-a tester extra",
+    ]) {
+      const [kind, uid, ...rest] = line.split(" ");
+      expect(verdict([["uid-a/1", "tester"]], [line])).toEqual([
+        `driver action ${[kind, uid, "2026-10-08T14:00:00.000Z", ...rest].join(" ")} is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME`,
+        "uid-a/1",
+      ]);
+    }
+  });
+
   // The checkpoint's live control (sibling_death_line): from the run's own record, a death of
   // another role in the pod of the last kill no deletion or close also ended, which the verdict must
   // name.
