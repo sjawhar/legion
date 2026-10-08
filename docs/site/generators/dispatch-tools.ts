@@ -39,6 +39,9 @@ writePage({
   title: "The dispatch command",
   description:
     "Every dispatch command an agent runs: what it does, its flags, and an example command line.",
-  source: "packages/contracts/src/dispatch-tools.ts",
+  sources: [
+    "packages/contracts/src/dispatch-tools.ts",
+    "packages/envoy-client/src/dispatch-command.ts",
+  ],
   body: render,
 });

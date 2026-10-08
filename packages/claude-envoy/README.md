@@ -88,9 +88,9 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 
 ## Envoy tools
 
-The server exposes the shared Envoy messaging contract, the eight `envoy_*` tools, including
-`envoy_inbox` and `envoy_role_get`. It exposes no Dispatch tool: a `dispatch_*` call is an unknown
-tool.
+The server exposes the shared Envoy messaging contract, all ten `envoy_*` tools of
+`envoyToolSpecs`, `envoy_inbox` and `envoy_role_get` among them. It exposes no Dispatch tool: a
+`dispatch_*` call is an unknown tool.
 
 ## Dispatch
 

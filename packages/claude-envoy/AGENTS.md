@@ -9,9 +9,9 @@ One MCP stdio process is the channel ingress. It subscribes NATS directly to the
 envelope through `@legion/envoy-client/delivery`, then writes a supported
 `notifications/claude/channel` notification. A core-NATS direct delivery gets its empty receipt
 when the server enqueues the notification; that means adapter-accepted, not processed by Claude.
-There is no Monitor and no native Claude messaging socket path. The server's tools are the eight
-`envoy_*` tools only: agents reach Dispatch through the `dispatch` command, which `bin/dispatch`
-puts on the Bash tool's `PATH`.
+There is no Monitor and no native Claude messaging socket path. The server's tools are the ten
+`envoy_*` tools of `envoyToolSpecs` only: agents reach Dispatch through the `dispatch` command,
+which `bin/dispatch` puts on the Bash tool's `PATH`.
 
 The session advertises only the `aside` capability - never `btw`, never `steer`. `btw` remains
 intentionally unsupported until there is a server-owned pending-delivery/reply-ack design; `steer`

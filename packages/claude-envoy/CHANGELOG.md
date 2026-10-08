@@ -11,7 +11,7 @@
 
 ### Removed
 
-- The MCP server's twenty-one `dispatch_*` tools: it lists the eight `envoy_*` tools only, and a
+- The MCP server's twenty-one `dispatch_*` tools: it lists the ten `envoy_*` tools only, and a
   `dispatch_*` call is an unknown tool. The follow announcement on the channel and the MCP image
   blocks went with them, since no MCP tool returns a Dispatch result.
 

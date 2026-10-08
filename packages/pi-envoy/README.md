@@ -1,6 +1,6 @@
 # Pi Envoy Extension
 
-`@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the native Dispatch tools,
+`@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the `dispatch` command,
 the plugin every session loads. It shares the Envoy HTTP client, tool contract, envelope parsing,
 and subject helpers with the other Legion adapters while keeping OMP's direct NATS subscriptions
 and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind
