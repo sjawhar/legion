@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,7 +66,10 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // and the only exclusive step on this filesystem is that create: a stale lease is removed under a
 // second exclusive create, the takeover marker (takeOverWarmLease), so two contenders that both
 // judged one lease stale cannot both remove it and both build — a rename would not do, since a
-// rename moves whatever is at the path, the winner's fresh lease included.
+// rename moves whatever is at the path, the winner's fresh lease included. Nothing here judges a
+// lease by its inode: the tree volume (v9fs) gives a file created at a path the inode the removed
+// one had, so os.SameFile reads a successor's fresh lease as the file it replaced; a lease is
+// judged by its mtime (stale or live) and known as this holder's by the token written into it.
 const (
 	warmLeaseHeartbeat = 10 * time.Second
 	warmLeaseStale     = 60 * time.Second
@@ -246,13 +250,14 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 		// Two tries: the create, and one more after a released or taken-over lease.
 		lease, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			created, err := lease.Stat()
+			token := rand.Text()
+			_, err := lease.WriteString(token)
 			_ = lease.Close()
 			if err != nil {
 				_ = os.Remove(path)
 				return failed(err)
 			}
-			return holdWarmLease(path, created), true
+			return holdWarmLease(path, token), true
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return failed(err)
@@ -268,7 +273,7 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 			return skipped("holds")
 		}
 		leaseStep("judged stale")
-		switch took, err := takeOverWarmLease(path, info); {
+		switch took, err := takeOverWarmLease(path); {
 		case err != nil:
 			return failed(err)
 		case !took:
@@ -278,15 +283,19 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 	return skipped("holds")
 }
 
-// takeOverWarmLease removes the lease at path a contender judged stale (its FileInfo) under the
-// takeover marker beside it, an exclusive create of its own: of two contenders that both judged
-// the same lease stale, exactly one creates the marker, and the other finds it and leaves the
-// takeover to the holder (false). Under the marker the lease is read again, since the first
-// contender may already have replaced it: one that is still the file judged stale (os.SameFile) is
-// removed; one that is not — a new holder's, fresh — is left for the caller's create to find; one
-// already gone was released. Either way the caller's create decides (true). A marker older than
-// warmLeaseStale is a contender's killed inside these few syscalls, removed before the one retry.
-func takeOverWarmLease(path string, stale os.FileInfo) (bool, error) {
+// takeOverWarmLease removes the lease at path a contender judged stale, under the takeover marker
+// beside it, an exclusive create of its own: of two contenders that both judged the same lease
+// stale, exactly one creates the marker, and the other finds it and leaves the takeover to the
+// holder (false). Under the marker the file at the path is judged again, by its mtime, since the
+// first contender may already have replaced it: one still older than warmLeaseStale is the dead
+// holder's and is removed; a fresh one is a new holder's and is left for the caller's create to
+// find; one already gone was released. Either way the caller's create decides (true). The judgment
+// is the mtime and never the file's identity: the tree volume a pod's workspace lives on (v9fs)
+// hands a file created at a path the inode the removed one had, so os.SameFile would read the new
+// holder's fresh lease as the stale file it was asked about and remove it from under its build —
+// the tester's finding on this issue. A marker older than warmLeaseStale is a contender's killed
+// inside these few syscalls, removed before the one retry.
+func takeOverWarmLease(path string) (bool, error) {
 	marker := path + ".takeover"
 	for range 2 {
 		held, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -294,7 +303,7 @@ func takeOverWarmLease(path string, stale os.FileInfo) (bool, error) {
 			_ = held.Close()
 			leaseStep("marker held")
 			current, err := os.Stat(path)
-			if err == nil && os.SameFile(stale, current) {
+			if err == nil && time.Since(current.ModTime()) >= warmLeaseStale {
 				_ = os.Remove(path)
 			}
 			_ = os.Remove(marker)
@@ -320,10 +329,12 @@ func takeOverWarmLease(path string, stale os.FileInfo) (bool, error) {
 
 // holdWarmLease keeps the lease at path fresh, its mtime set to now every warmLeaseHeartbeat so a
 // live holder's lease is never read as stale, until release. release stops the heartbeat and
-// removes the file, but only while it is still the one created (os.SameFile): the lease of a
-// holder stalled past warmLeaseStale and taken over belongs to its successor by then, and the
-// stalled holder must not remove it from under the successor's build.
-func holdWarmLease(path string, created os.FileInfo) (release func()) {
+// removes the file, but only while it still holds this holder's token: the lease of a holder
+// stalled past warmLeaseStale and taken over belongs to its successor by then, and the stalled
+// holder must not remove it from under the successor's build. The token, written at the create,
+// is the lease's identity — never its inode, which the tree volume (v9fs) hands a successor's
+// file created at the same path, so os.SameFile would call the successor's lease this holder's.
+func holdWarmLease(path, token string) (release func()) {
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
@@ -342,7 +353,7 @@ func holdWarmLease(path string, created os.FileInfo) (release func()) {
 	return func() {
 		close(stop)
 		<-stopped
-		if current, err := os.Stat(path); err == nil && os.SameFile(created, current) {
+		if current, err := os.ReadFile(path); err == nil && string(current) == token {
 			_ = os.Remove(path)
 		}
 	}
