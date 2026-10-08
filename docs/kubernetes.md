@@ -1051,8 +1051,11 @@ claim's pod and the image probe's.
   approver at all; each secret's owner and tier tags pick the approver for the pod's later
   credential requests at request time) — hands the enrollment id back to the shim, and revokes it
   wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the
-  tree's close). Without the block, pods carry none of this. An older worker image is refused at
-  the image probe: the block's pod variables are daemon API contract 8.
+  tree's close). The daemon's login is the service `legion-daemon`'s, so its pods are too: on a
+  broker configured with `BROKER_SERVICES=legion-daemon`, a secret tagged `owner=legion-daemon`
+  reaches every pod at once and no other session (the broker's concepts page, "Owner and tier").
+  Without the block, pods carry none of this. An older worker image is refused at the image probe:
+  the block's pod variables are daemon API contract 8.
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
   `provider_keys` names and no other key of the Secret, each at a file named for its variable, and

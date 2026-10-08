@@ -63,8 +63,11 @@ approve it, the machine is listed under **Your machine logins** on the same page
 A Legion daemon's login names its service, so the sentence reads "Approving lets
 `legion-daemon on <host>` start worker pods as `legion-daemon`, not as you: no secret of yours
 reaches its pods unless you approve the request for it." A pod has no operator, so its requests for
-your secrets come to you for approval. The login you approve is listed under **Your machine
-logins** as `legion-daemon on <host>`, and revoking it ends every pod it enrolled.
+your secrets come to you for approval. Its pods are `legion-daemon`'s, though: when the broker is
+configured with that service (`BROKER_SERVICES`), every secret `legion-daemon` owns reaches them at
+once, with no further approval ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
+Approve a service's login only if you run that service. The login you approve is listed under
+**Your machine logins** as `legion-daemon on <host>`, and revoking it ends every pod it enrolled.
 
 Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval

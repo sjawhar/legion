@@ -99,7 +99,7 @@ one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tie
 
 Who gets a secret follows from those two tags alone:
 
-| The secret | Its owner's own session | Another person's session, or a pod |
+| The secret | Its owner's own session | Any other session or pod |
 | --- | --- | --- |
 | A person's, `tier=agent` | Granted at once. | Sent to the owner for approval. |
 | A person's, `tier=human` | Sent to the owner for approval. | Sent to the owner for approval. |
@@ -110,10 +110,11 @@ Who gets a secret follows from those two tags alone:
 A session is its owner's own when its operator is the owner: the owner approved the machine login
 it enrolled under. A pod has no operator, so a pod asking for a person's agent-tier secret sends it
 to that person for approval. An owner may also be a service the broker is configured with,
-`BROKER_SERVICES`: its secrets go to the sessions a launcher logged in as that service enrolls (the
-Legion daemon's pods, for `legion-daemon`) and to no one else, a person's own session included. A
-service's secret is agent tier, since no person approves it: the broker refuses one tagged
-`tier=human`, and one whose owner names a service it is not configured with.
+`BROKER_SERVICES`. A service's own sessions are the sessions a launcher logged in as that service
+enrolls (the Legion daemon's pods, for `legion-daemon`). Its secrets go to them and to no one else,
+a person's own session included. A service's secret is agent tier, since no person approves it:
+the broker refuses one tagged `tier=human`, and one whose owner names a service it is not
+configured with.
 
 One thing besides the tags changes what a session gets at once: a session's own person, its
 operator, who revokes a grant the session got without asking **withholds** its secrets from that
