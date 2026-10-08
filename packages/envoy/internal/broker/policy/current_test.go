@@ -314,26 +314,31 @@ func TestARereadWaitsForTheWriterLockOnlyWhileItsCallerDoes(t *testing.T) {
 
 // hangingLister answers page until hang; from then on it holds each call until unhang releases
 // every held call with page, or until the call's context ends and it answers that context's error,
-// as the SDK does: a Secrets Manager that stops answering, then answers again. waits counts the
-// calls it has held.
+// as the SDK does: a Secrets Manager that stops answering, then answers again. heldCalls counts the
+// calls it has held. hang and unhang pair: a repeated hang keeps holding, and an unhang with
+// nothing held does nothing.
 type hangingLister struct {
-	page  *secretsmanager.ListSecretsOutput
-	waits atomic.Int64
-	mu    sync.Mutex
-	held  chan struct{} // closed by unhang; nil while it answers
+	page      *secretsmanager.ListSecretsOutput
+	heldCalls atomic.Int64
+	mu        sync.Mutex
+	held      chan struct{} // closed by unhang; nil while it answers
 }
 
 func (h *hangingLister) hang() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.held = make(chan struct{})
+	if h.held == nil {
+		h.held = make(chan struct{})
+	}
 }
 
 func (h *hangingLister) unhang() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	close(h.held)
-	h.held = nil
+	if h.held != nil {
+		close(h.held)
+		h.held = nil
+	}
 }
 
 func (h *hangingLister) ListSecrets(ctx context.Context, _ *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
@@ -341,7 +346,7 @@ func (h *hangingLister) ListSecrets(ctx context.Context, _ *secretsmanager.ListS
 	held := h.held
 	h.mu.Unlock()
 	if held != nil {
-		h.waits.Add(1)
+		h.heldCalls.Add(1)
 		select {
 		case <-held:
 		case <-ctx.Done():
@@ -402,8 +407,8 @@ func TestAReloadItsShutdownEndsLogsNothing(t *testing.T) {
 		lister.hang()
 		time.Sleep(time.Minute + time.Second)
 		synctest.Wait()
-		if waits := lister.waits.Load(); waits != 1 {
-			t.Fatalf("%d reloads waiting on the listing a minute in, want the first", waits)
+		if held := lister.heldCalls.Load(); held != 1 {
+			t.Fatalf("%d reloads held on the listing a minute in, want the first", held)
 		}
 		shutdown()
 		synctest.Wait() // the reload has returned, and its goroutine with it
