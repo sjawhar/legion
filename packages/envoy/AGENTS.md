@@ -593,8 +593,10 @@ commit. `Ledger.commit` holds `state.mu` from before that commit through consump
 that gets the document lock next cannot restore an author the version listed. A version on another
 task sees and removes R but never that task's F. Thus a room can disappear or the process can
 restart after every pending author has reached R, without losing or duplicating a later version's
-authors; a service repair is credited to no one. An in-flight credit keeps its local state alive
-until its append lands, including across a forced eviction.
+authors; a service repair is credited to no one. An in-flight credit holds its state until its
+append lands (`unusedLocked`). A forced eviction (`evictRoom`) forgets the state anyway, and the
+append still reaches the credit through its `UpdateCredit`, so it writes or skips the author all
+the same.
 
 The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms,
 never documents touched since the process started (LEGION-513). A room an `Apply` opened with no
