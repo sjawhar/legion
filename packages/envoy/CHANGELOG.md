@@ -314,6 +314,9 @@
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's
   `ref` is unchanged (LEGION-622).
+- Agent bearer tokens can now list repository-to-project mappings and architecture sources, and set
+  or remove repository mappings, architecture sources, and delivery settings. Settings writes record
+  the bearer-supplied session actor, as other agent-authenticated writes do.
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,
