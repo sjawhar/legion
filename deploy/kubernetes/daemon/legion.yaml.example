@@ -56,8 +56,13 @@ runtime:
   kubernetes:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
-    storage_class: standard
-    tree_volume: 20Gi
+    storage_class: standard            # the issue volumes' class; required, the cluster has no default
+    issue_volume: 20Gi                 # each issue pod's own volume (and the daemon-launched controller's); 20Gi is the default
+    # resources:                       # each role's reservation, cpu and memory, each both the container's request and
+    #   tester: { cpu: 1, memory: 4Gi }  # its limit, so every Legion pod is Guaranteed; a field or role left out takes the
+    #   reviewer: { memory: 4Gi }      # daemon's default: implementer, tester, reviewer 750m and 3Gi; architect, planner,
+    #   controller: { cpu: 2, memory: 8Gi }  # merger 250m and 1Gi; controller 1 and 4Gi (controller: daemon only, else refused).
+    #                                  # A six-role issue pod sums to 3 CPU and 12Gi at the defaults
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml

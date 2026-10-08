@@ -153,9 +153,12 @@ new work.
 - **Before pushing, check ancestry:** `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`
   — verify only your issue's commits are in the chain, not unrelated work.
 
-**Shared operation safety:** Every Legion issue workspace is a `jj workspace` of one shared
-clone, so they all share one operation log: `jj undo`, `jj abandon`, and
-`jj op restore|revert|abandon|undo` rewrite it for every tree at once. The extension refuses them in every
+**Shared operation safety:** Under the tmux runtime every Legion issue workspace is a `jj workspace`
+of one shared clone, so they all share one operation log; under Kubernetes each issue pod has a clone
+of its own on its own volume, shared by the roles of that one issue and by no other issue, whose
+workspace is on another volume. Either way `jj undo`, `jj abandon`, and
+`jj op restore|revert|abandon|undo` rewrite an operation log other agents work in — every tree's at
+once under tmux, every role of your issue's under Kubernetes. The extension refuses them in every
 phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
 chain, with or without `-R`, judged on the whole argument list (a supervised service's start
 included); `eval` code; and stdin written to a service (a `write` to `proc://<id>`) — from your
@@ -395,8 +398,9 @@ re-runs it at once. While the pull request conflicts with its base (GitHub shows
 a body edit re-judges nothing there either; a push cures both, but only once the pull request is
 mergeable, so the implementer forward-merges a conflicting one first (*Reintegrating the base* in
 `skill://legion-worker/references/conflicts-and-rewrites.md`). Its ancestry check refuses
-unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every issue
-workspace shares one clone, so another role's push moves `legion/<KEY>@origin` here at once, and
+unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every role
+of your issue pushes from the one clone your workspace belongs to (under tmux every issue workspace
+of the daemon shares that clone too), so another role's push moves `legion/<KEY>@origin` here at once, and
 a push that did not descend from it would move the remote branch sideways onto your commit and
 drop theirs. A handoff commit never sits on an implementer's unpushed chain: when the issue moves
 back to planning, the implementer's unpushed commits stay off the bookmark until the implementer
