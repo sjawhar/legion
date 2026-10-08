@@ -50,6 +50,18 @@ type Admission struct {
 	// first record behind: every key in pending releases once the Dispatch consumer's position
 	// has Reached it. Zero means nothing is held.
 	target int64
+
+	// openCapabilities answers the deployment capabilities with no decision, by name
+	// (capabilities.Deployment.Open), for the tick notice to carry; nil until the daemon registers
+	// it (ReportCapabilities), when a tick names none.
+	openCapabilities func() []string
+}
+
+// ReportCapabilities registers open, whose answer every tick controller notice carries as its
+// openCapabilities: the daemon's report of the deployment capabilities with no decision, so the
+// controller's periodic turn names each gap in the day's report. No other wake carries it.
+func (a *Admission) ReportCapabilities(open func() []string) {
+	a.openCapabilities = open
 }
 
 var _ intake.Handler = (*Admission)(nil)
@@ -222,7 +234,8 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 // wakeController queues a controller notice of kind on issue, due at dueAt, when a controller is
 // registered and no notice of the same kind still waits in the outbox, so a burst of events or
 // ticks queues one wake. The wake needs no record: the controller reads Dispatch and the daemon's
-// state (skill://legion-controller).
+// state (skill://legion-controller). A tick alone carries the daemon's open capabilities
+// (ReportCapabilities), the turn that posts the day's report.
 func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.NoticeKind, issue string, dueAt time.Time) error {
 	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
 	if err != nil || !registered {
@@ -232,7 +245,11 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.N
 	if err != nil || pending {
 		return err
 	}
-	return a.enqueue(ctx, tx, issue, record.ControllerNotice{Kind: kind}, dueAt)
+	notice := record.ControllerNotice{Kind: kind}
+	if kind == record.TickNotice && a.openCapabilities != nil {
+		notice.OpenCapabilities = a.openCapabilities()
+	}
+	return a.enqueue(ctx, tx, issue, notice, dueAt)
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
