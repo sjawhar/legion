@@ -1,7 +1,12 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as Y from "yjs";
 
-import { deletePendingEdits, openPendingEdits, type PendingEdits } from "./pending-edits";
+import {
+  deletePendingEdits,
+  openPendingEdits,
+  type PendingEdits,
+  type PendingKey,
+} from "./pending-edits";
 
 // Each test names its own artifact: fake-indexeddb keeps one database for the whole test process.
 let next = 0;
@@ -46,10 +51,18 @@ function edit(clientId: number, text: string): Uint8Array {
   return update;
 }
 
-function textOf(update: Uint8Array): string {
+/** The text the document reads after applying `updates` in order. */
+function textOf(updates: readonly Uint8Array[]): string {
   const doc = new Y.Doc();
-  Y.applyUpdate(doc, update);
+  for (const update of updates) {
+    Y.applyUpdate(doc, update);
+  }
   return doc.getText("t").toString();
+}
+
+/** The keys a document's rows hold, as `restoreRows` reads them. */
+async function keysOf(store: PendingEdits): Promise<PendingKey[]> {
+  return (await store.restoreRows()).map((row) => row.key);
 }
 
 test("two clients on one document keep their own rows, under the same sequence numbers", async () => {
@@ -65,7 +78,7 @@ test("two clients on one document keep their own rows, under the same sequence n
   expect(await first.count()).toBe(2);
   await first.clear(1);
   expect(await second.count()).toBe(1);
-  expect(textOf((await second.restore())?.update ?? new Uint8Array())).toBe("b");
+  expect(textOf((await second.restoreRows()).map((row) => row.update))).toBe("b");
 });
 
 test("clear deletes this client's row at exactly that sequence number", async () => {
@@ -77,7 +90,7 @@ test("clear deletes this client's row at exactly that sequence number", async ()
 
   await store.clear(2);
 
-  expect((await store.restore())?.keys).toEqual([
+  expect(await keysOf(store)).toEqual([
     [artifact, 7, 1],
     [artifact, 7, 3],
   ]);
@@ -96,37 +109,40 @@ test("clearThrough leaves a row recorded after the clear was queued", async () =
   await Promise.all([cleared, third.written]);
 
   expect(third.seq).toBe(3);
-  expect((await store.restore())?.keys).toEqual([[artifact, 9, 3]]);
+  expect(await keysOf(store)).toEqual([[artifact, 9, 3]]);
 });
 
-test("restore merges every client's rows for the document, with the keys it read", async () => {
+test("restoreRows reads every client's rows for the document, each with its key, update and time", async () => {
   const artifact = artifactId();
   const first = await open(artifact, 11);
   const second = await open(artifact, 12);
   const other = await open(artifactId(), 11);
+  const before = Date.now();
+  const firstUpdates = edits(11, ["one ", "two "]);
+  const secondUpdate = edit(12, "three");
   await Promise.all([
-    ...edits(11, ["one ", "two "]).map((update) => first.record(update).written),
-    second.record(edit(12, "three")).written,
+    ...firstUpdates.map((update) => first.record(update).written),
+    second.record(secondUpdate).written,
     other.record(edit(11, "elsewhere")).written,
   ]);
 
-  const restored = await first.restore();
+  const rows = await first.restoreRows();
 
-  expect(restored?.keys).toEqual([
+  expect(rows.map((row) => row.key)).toEqual([
     [artifact, 11, 1],
     [artifact, 11, 2],
     [artifact, 12, 1],
   ]);
-  const merged = textOf(restored?.update ?? new Uint8Array());
-  expect(merged).toContain("one two ");
-  expect(merged).toContain("three");
-  expect(merged).not.toContain("elsewhere");
-  expect(restored?.at).toBeLessThanOrEqual(Date.now());
+  expect(rows.map((row) => row.update)).toEqual([...firstUpdates, secondUpdate]);
+  for (const row of rows) {
+    expect(row.at).toBeGreaterThanOrEqual(before);
+    expect(row.at).toBeLessThanOrEqual(Date.now());
+  }
 });
 
-test("restore of a document with no rows answers undefined", async () => {
+test("restoreRows of a document with no rows reads none", async () => {
   const store = await open(artifactId(), 3);
-  expect(await store.restore()).toBeUndefined();
+  expect(await store.restoreRows()).toEqual([]);
 });
 
 test("drop deletes exactly the keys it is given", async () => {
@@ -143,7 +159,7 @@ test("drop deletes exactly the keys it is given", async () => {
     [artifact, 22, 1],
   ]);
 
-  expect((await first.restore())?.keys).toEqual([[artifact, 21, 2]]);
+  expect(await keysOf(first)).toEqual([[artifact, 21, 2]]);
 });
 
 test("a client reopened on a document continues after its last sequence number", async () => {

@@ -1,9 +1,10 @@
 import { MessageType } from "@hocuspocus/provider";
-import { createDecoder, type Decoder, readVarUint } from "lib0/decoding";
+import { createDecoder, readVarUint } from "lib0/decoding";
 import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
 import * as Y from "yjs";
 
-import type { PendingEdits } from "./pending-edits";
+import type { PendingEdits, PendingKey } from "./pending-edits";
+import { readField } from "./sync-frame";
 
 export interface PendingState {
   /** Rows this document holds across every tab in this browser. */
@@ -50,21 +51,6 @@ function equals(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
-/**
- * Reads one length-prefixed field as a view of the frame. lib0's own `readVarUint8Array` builds
- * its view from the frame's backing buffer, so a frame that is a view into a larger buffer reads
- * past its own end instead of failing; this refuses a field longer than what is left.
- */
-function readField(decoder: Decoder): Uint8Array {
-  const length = readVarUint(decoder);
-  const start = decoder.pos;
-  decoder.pos += length;
-  if (decoder.pos > decoder.arr.length) {
-    throw new RangeError("truncated document sync frame");
-  }
-  return decoder.arr.subarray(start, decoder.pos);
-}
-
 function covers(
   ranges: readonly { clock: number; len: number }[],
   clock: number,
@@ -105,15 +91,21 @@ function addsPendingDeletes(before: Uint8Array | null, after: Uint8Array | null)
   return false;
 }
 
-/**
- * Applying a restore to a scratch document protects the live document from a history rebuild.
- * yjs 13.6.32 exposes parked structs and deletes only through these `StructStore` internals.
- * `encodeStateAsUpdate` includes the live document's current parked structs and deletes, so only
- * parking the restore adds is a rebuild signal.
- */
-function addsParking(doc: Y.Doc, update: Uint8Array): boolean {
+/** A copy of `doc` to test restored rows on, so the live document never takes a row that parks. */
+function scratchOf(doc: Y.Doc): Y.Doc {
   const scratch = new Y.Doc();
   Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+  return scratch;
+}
+
+/**
+ * Applies a restored row to `scratch` and says whether it parked something the scratch did not
+ * already park: a missing client, or a delete of items it does not hold, which is what a row typed
+ * against a history the server rebuilt since does. yjs 13.6.32 exposes parked structs and deletes
+ * only through these `StructStore` internals. `encodeStateAsUpdate` carries the live document's
+ * own parked structs and deletes into the scratch, so only what the row adds counts.
+ */
+function addsParking(scratch: Y.Doc, update: Uint8Array): boolean {
   const beforeMissing = new Set(scratch.store.pendingStructs?.missing.keys() ?? []);
   const beforeDeletes = scratch.store.pendingDs;
 
@@ -141,7 +133,7 @@ export function startPendingSync({
   let reportAgain = false;
   let storageAvailable: boolean | undefined;
   const persistedSeqByOrdinal = new Map<number, number>();
-  const recorded: RecordedUpdate[] = [];
+  let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
 
   const ready = store
@@ -152,7 +144,7 @@ export function startPendingSync({
     .then((edits) => {
       storageAvailable = edits !== undefined;
       if (!storageAvailable) {
-        recorded.length = 0;
+        recorded = [];
         sent = [];
       }
       return edits;
@@ -261,27 +253,24 @@ export function startPendingSync({
     if (edits === undefined || through === 0) {
       return;
     }
-    const covered: RecordedUpdate[] = [];
-    const remaining: RecordedUpdate[] = [];
-    for (const entry of recorded) {
-      (entry.ordinal <= through ? covered : remaining).push(entry);
-    }
-    await Promise.all(covered.map((entry) => entry.written));
-    recorded.length = 0;
-    recorded.push(...remaining);
+    const covered = new Set(recorded.filter((entry) => entry.ordinal <= through));
+    await Promise.all([...covered].map((entry) => entry.written));
+    // Filter the list as it is now, not as it was before the await: an edit typed while those
+    // writes were pending was appended since, and stays tracked for its own acknowledgement.
+    recorded = recorded.filter((entry) => !covered.has(entry));
 
     let seq = 0;
+    const acknowledged: number[] = [];
     for (const [ordinal, persistedSeq] of persistedSeqByOrdinal) {
       if (ordinal <= through) {
         seq = Math.max(seq, persistedSeq);
+        acknowledged.push(ordinal);
       }
     }
     if (seq > 0) {
       await edits.clearThrough(seq);
-      for (const ordinal of persistedSeqByOrdinal.keys()) {
-        if (ordinal <= through) {
-          persistedSeqByOrdinal.delete(ordinal);
-        }
+      for (const ordinal of acknowledged) {
+        persistedSeqByOrdinal.delete(ordinal);
       }
     }
     await report();
@@ -369,26 +358,33 @@ export function startPendingSync({
           await report();
           return;
         }
+        // Every row is judged and applied in one synchronous pass, so the scratch copy stays the
+        // live document's equal: it takes each row the live document takes, and is copied afresh
+        // only after a row it refused, whose parked structs would otherwise hide the next stale
+        // row from the same lost history. One document encode, plus one per refused row.
+        let scratch = scratchOf(doc);
+        const handled: PendingKey[] = [];
+        const rerecorded: Promise<void>[] = [];
         for (const row of restored) {
-          if (addsParking(doc, row.update)) {
+          handled.push(row.key);
+          if (addsParking(scratch, row.update)) {
             rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
-            await edits.drop([row.key]);
+            scratch = scratchOf(doc);
             continue;
           }
-
           const before = nextOrdinal;
           // Applying through the live document deliberately reuses the normal local-update path:
           // the provider sends this restored diff and this listener records its new client row.
           Y.applyUpdate(doc, row.update, { restored: true });
           const restoredEntry = recorded.at(-1);
-          if (nextOrdinal === before || restoredEntry === undefined) {
-            await edits.drop([row.key]);
-          } else {
-            await restoredEntry.written;
-            if (!destroyed) {
-              await edits.drop([row.key]);
-            }
+          if (nextOrdinal !== before && restoredEntry !== undefined) {
+            rerecorded.push(restoredEntry.written);
           }
+        }
+        // The old rows go only once every re-recorded row is stored, in one IndexedDB write.
+        await Promise.all(rerecorded);
+        if (!destroyed) {
+          await edits.drop(handled);
         }
         await report();
       } catch (error) {

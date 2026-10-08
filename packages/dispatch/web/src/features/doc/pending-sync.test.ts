@@ -60,7 +60,7 @@ async function storeFor(artifact: string, clientId: number): Promise<PendingEdit
 
 /** The keys a document's rows hold, read through a store of a client that wrote none. */
 async function rowsOf(artifact: string): Promise<PendingKey[]> {
-  return (await (await storeFor(artifact, -1)).restore())?.keys ?? [];
+  return (await (await storeFor(artifact, -1)).restoreRows()).map((row) => row.key);
 }
 
 interface Scripted {
@@ -306,6 +306,61 @@ test("a stale saved row does not discard another row that still applies", async 
   expect(states.at(-1)?.rebuiltAt).toBeDefined();
 });
 
+test("a stale row does not let a later row from the same lost history through", async () => {
+  const artifact = artifactId();
+  // Two browsers typed against a history the server lost to a rebuild: each row parks on the
+  // same missing client, so a check that kept the first row's parked structs as its baseline
+  // would let the second row onto the live document.
+  const lost = serverWith("shared", 100);
+  await savedEdit(artifact, lost, " stale one");
+  await savedEdit(artifact, lost, " stale two");
+  const server = serverWith("shared", 200);
+  await savedEdit(artifact, server, " valid");
+  const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(false);
+
+  expect(doc.getText("t").toString()).toBe("shared valid");
+  expect(doc.store.pendingStructs).toBeNull();
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+  expect(states.at(-1)?.rebuiltAt).toBeDefined();
+});
+
+test("a first sync deletes every row it handled in one IndexedDB write", async () => {
+  const artifact = artifactId();
+  await savedEdit(artifact, serverWith("shared", 100), " stale");
+  const server = serverWith("shared", 200);
+  await savedEdit(artifact, server, " one");
+  await savedEdit(artifact, server, " two");
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, Y.encodeStateAsUpdate(server), SERVER);
+  const edits = await storeFor(artifact, doc.clientID);
+  const drops: (readonly PendingKey[])[] = [];
+  const store: PendingEdits = {
+    ...edits,
+    drop(keys) {
+      drops.push(keys);
+      return edits.drop(keys);
+    },
+  };
+  const sync = startPendingSync({
+    doc,
+    onChange() {},
+    remoteOrigin: SERVER,
+    store: Promise.resolve(store),
+  });
+  cleanups.push(() => sync.destroy());
+
+  await sync.firstSync(false);
+
+  expect(drops).toHaveLength(1);
+  expect(drops[0]).toHaveLength(3);
+  expect(await rowsOf(artifact)).toEqual([
+    [artifact, doc.clientID, 1],
+    [artifact, doc.clientID, 2],
+  ]);
+});
+
 test("a later SyncStep2 acknowledgement retries an earlier row whose individual clear failed", async () => {
   const artifact = artifactId();
   const doc = new Y.Doc();
@@ -350,6 +405,80 @@ test("a later SyncStep2 acknowledgement retries an earlier row whose individual 
     sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
     await sync.frameReceived(syncStatusFrame(true));
 
+    expect(await rowsOf(artifact)).toEqual([]);
+  } finally {
+    logged.mockRestore();
+  }
+});
+
+test("an edit recorded while a SyncStep2 acknowledgement is clearing stays tracked for its own acknowledgement", async () => {
+  const artifact = artifactId();
+  const doc = new Y.Doc();
+  const edits = await storeFor(artifact, doc.clientID);
+  let releaseFirstWrite = () => {};
+  const firstWriteHeld = new Promise<void>((resolve) => {
+    releaseFirstWrite = resolve;
+  });
+  let reachedHold = () => {};
+  const holdReached = new Promise<void>((resolve) => {
+    reachedHold = resolve;
+  });
+  let holdNextWrite = true;
+  // The first row's IndexedDB write stays open, as a slow readwrite transaction does, so the
+  // SyncStep2 acknowledgement that covers it waits on it while the reader keeps typing.
+  const store: PendingEdits = {
+    ...edits,
+    record(update) {
+      const row = edits.record(update);
+      if (!holdNextWrite) {
+        return row;
+      }
+      holdNextWrite = false;
+      return {
+        seq: row.seq,
+        written: row.written.then(() => {
+          reachedHold();
+          return firstWriteHeld;
+        }),
+      };
+    },
+  };
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  const sync = startPendingSync({
+    doc,
+    onChange() {},
+    remoteOrigin: SERVER,
+    store: Promise.resolve(store),
+  });
+  cleanups.push(() => sync.destroy());
+  const typeAtEnd = (text: string): Uint8Array => {
+    let emitted: Uint8Array | undefined;
+    const capture = (update: Uint8Array) => {
+      emitted = update;
+    };
+    doc.on("update", capture);
+    doc.getText("t").insert(doc.getText("t").length, text);
+    doc.off("update", capture);
+    if (emitted === undefined) {
+      throw new Error("a local edit emits an update");
+    }
+    return emitted;
+  };
+  try {
+    sync.socketOpened();
+    typeAtEnd("first");
+    sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
+    const clearing = sync.frameReceived(syncStatusFrame(true));
+    // The acknowledgement has passed its read of the recorded rows and now waits on the held write.
+    await holdReached;
+
+    const second = typeAtEnd(" second");
+    releaseFirstWrite();
+    await clearing;
+    sync.frameWritten(updateFrame(second));
+    await sync.frameReceived(syncStatusFrame(true));
+
+    expect(logged).not.toHaveBeenCalled();
     expect(await rowsOf(artifact)).toEqual([]);
   } finally {
     logged.mockRestore();

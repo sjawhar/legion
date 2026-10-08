@@ -1,5 +1,3 @@
-import { mergeUpdates } from "yjs";
-
 /**
  * The edits a browser made to a live document that the server has not yet said it applied, kept
  * in IndexedDB so a reload does not lose them. One database for every document, one object store
@@ -22,15 +20,6 @@ interface PendingRow {
   at: number;
 }
 
-export interface RestoredEdits {
-  /** Every row's update, merged into one. */
-  update: Uint8Array;
-  /** The rows read, so the caller deletes exactly those. */
-  keys: PendingKey[];
-  /** When the oldest of them was recorded, in milliseconds since the epoch. */
-  at: number;
-}
-
 export interface RestoredEdit {
   /** The exact persisted row key to delete only after this update is handled. */
   key: PendingKey;
@@ -50,8 +39,6 @@ export interface PendingEdits {
   clearThrough(seq: number): Promise<void>;
   /** Every row this document holds, from any client, in IndexedDB key order. */
   restoreRows(): Promise<readonly RestoredEdit[]>;
-  /** Every row this document holds, merged; `undefined` when there are none. */
-  restore(): Promise<RestoredEdits | undefined>;
   /** Deletes exactly the rows `keys` names. */
   drop(keys: readonly PendingKey[]): Promise<void>;
   /** How many rows this document holds, from every client. */
@@ -133,19 +120,6 @@ export async function openPendingEdits(
     return committed(transaction);
   };
 
-  const restoreRows = async (): Promise<readonly RestoredEdit[]> => {
-    const rows = (await settled(
-      database.transaction(STORE, "readonly").objectStore(STORE).getAll(documentRange(artifactId))
-    )) as PendingRow[];
-    return rows.map(
-      (row): RestoredEdit => ({
-        at: row.at,
-        key: [row.artifactId, row.clientId, row.seq],
-        update: row.update,
-      })
-    );
-  };
-
   return {
     record(update) {
       seq += 1;
@@ -160,17 +134,17 @@ export async function openPendingEdits(
         store.delete(IDBKeyRange.bound([artifactId, clientId, 0], [artifactId, clientId, through]))
       );
     },
-    restoreRows,
-    async restore() {
-      const rows = await restoreRows();
-      if (rows.length === 0) {
-        return undefined;
-      }
-      return {
-        at: Math.min(...rows.map((row) => row.at)),
-        keys: rows.map((row) => row.key),
-        update: mergeUpdates(rows.map((row) => row.update)),
-      };
+    async restoreRows() {
+      const rows = (await settled(
+        database.transaction(STORE, "readonly").objectStore(STORE).getAll(documentRange(artifactId))
+      )) as PendingRow[];
+      return rows.map(
+        (row): RestoredEdit => ({
+          at: row.at,
+          key: [row.artifactId, row.clientId, row.seq],
+          update: row.update,
+        })
+      );
     },
     drop(keys) {
       return write((store) => {

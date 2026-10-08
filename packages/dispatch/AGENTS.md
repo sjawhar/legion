@@ -526,12 +526,15 @@ so the retry can reject too); a failure while online, or a retry that rejects, r
 `DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
 `pending-edits.ts` keeps each local Yjs update in IndexedDB until its own Hocuspocus `SyncStatus`
 acknowledgement arrives: `pending-sync.ts` pairs acknowledgements with frames by update payload
-rather than a provider counter, so reconnect queues cannot clear an earlier unconfirmed edit.
-The first synced admission validates each saved row on its own scratch `Y.Doc` before applying
-it, so a row a rebuild leaves parked is dropped and reported alone while the others apply; a
-read-only admission keeps them all, and an `ARTIFACT_NOT_FOUND` admission removes rows for the
-document that is gone. The connection indicator names saved edits while disconnected and warns
-when IndexedDB cannot retain them across a reload.
+rather than a provider counter, so reconnect queues cannot clear an earlier unconfirmed edit, and
+reads every frame field through `sync-frame.ts`'s bounds-checked `readField`. The first synced
+admission judges each saved row on a scratch copy of the live document before applying it: the
+copy takes every row the live document takes and is copied afresh after a row it refuses, so a
+row a rebuild leaves parked is dropped and reported alone while the others apply, and the rows it
+handled are deleted in one IndexedDB write once their re-recorded rows are stored. A read-only
+admission keeps them all, and an `ARTIFACT_NOT_FOUND` admission removes rows for the document that
+is gone. The connection indicator names saved edits while disconnected and warns when IndexedDB
+cannot retain them across a reload.
 
 The one exception is a page being left: from `beforeunload` no failure reloads it, because WebKit
 and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new

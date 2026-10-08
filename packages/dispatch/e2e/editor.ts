@@ -7,7 +7,8 @@ import {
   type Route,
   type WebSocketRoute,
 } from "@playwright/test";
-import { createDecoder, readVarString, readVarUint } from "lib0/decoding";
+import { createDecoder, readVarUint } from "lib0/decoding";
+import { readField } from "../web/src/features/doc/sync-frame";
 
 import { createIssue, createProject, getArtifactText } from "./api";
 import { asUser } from "./users";
@@ -261,7 +262,7 @@ function isSyncStatusFrame(message: string | Buffer): boolean {
   }
   try {
     const decoder = createDecoder(message);
-    readVarString(decoder);
+    readField(decoder); // the document name
     return readVarUint(decoder) === MessageType.SyncStatus;
   } catch {
     return false;
