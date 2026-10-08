@@ -742,6 +742,17 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return err
 	}
+	// Every return to implementing counts a round: the tester's fail, a review's request for changes
+	// and the worker's own backward move count it before they get here, and the move the daemon makes
+	// on its own, for a red CI verdict or a head that conflicts with its base, counts it here. The
+	// round tells the implementer's completion of this pass from its last (api/handoff.go): a pass
+	// that counted none would give a completion reporting the last pass's carrying commit that
+	// pass's key, answered as already received instead of refused as a handoff not written anew.
+	if trigger == TriggerChecksRed {
+		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
+			return err
+		}
+	}
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
 		return err
 	}
