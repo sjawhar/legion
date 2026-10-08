@@ -19,8 +19,10 @@ import (
 // A red CI verdict settled on the head while the issue is in testing or reviewing is a regression
 // the implementer has to fix: nothing else moves the tree, since the tester's pass and the
 // reviewer's decision are both of code CI has now found broken. The issue goes back to
-// implementing, the implementer's task names the failing checks, and the architect is told with
-// the same checks. Its next push is then a counted fix attempt, as a red verdict makes any new head.
+// implementing, the implementer's task names the failing checks, the architect is told with the
+// same checks, and the round is counted, as every return to implementing counts one: the
+// implementer's completion of this pass is told from its last by it. Its next push is then a
+// counted fix attempt, as a red verdict makes any new head.
 // A red the review App planned (its failing tests) sends nothing back, and neither does a red in
 // implementing, where the implementer is already at work. Nor does a red on a head a handoff-only
 // push reached, whose code is the head it replaced: in reviewing that is the reviewer's own
@@ -90,6 +92,9 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 					t.Fatalf("notices %v, want no checks-red", got)
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
+				if rounds := implementerRounds(t, pool); rounds != 0 {
+					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				}
 				if tc.settles != "" {
 					var verdict string
 					seedRecord(t, pool, func(tx pgx.Tx) error {
@@ -111,10 +116,7 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 			}
 			want := "CI is red at head: python-cli-tests / test (pytest)"
 			if tc.decided {
-				var rounds int
-				if err := pool.QueryRow(context.Background(), "select rounds from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&rounds); err != nil {
-					t.Fatalf("read the implementer's rounds: %v", err)
-				}
+				rounds := implementerRounds(t, pool)
 				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") || !strings.Contains(task, "rename the widget") || strings.Contains(task, want) || rounds != 1 {
 					t.Fatalf("task %q, notices %v, rounds %d; want the reviewer's body, no checks-red and the round counted", task, got, rounds)
 				}
@@ -124,8 +126,8 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 			if err := pool.QueryRow(context.Background(), "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason); err != nil {
 				t.Fatalf("read the architect's checks-red notice: %v", err)
 			}
-			if !strings.Contains(task, want) || !strings.Contains(reason, want) {
-				t.Fatalf("task %q and notice %q; want both to say %q", task, reason, want)
+			if rounds := implementerRounds(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || rounds != 1 {
+				t.Fatalf("task %q, notice %q and rounds %d; want both to say %q and the round counted", task, reason, rounds, want)
 			}
 		})
 	}
@@ -136,11 +138,12 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 // or a newly required one - keeps GitHub from merging it, and no worker would hear of it: the
 // issue goes back to implementing exactly as a red in testing does, the implementer's task and the
 // architect's checks-red notice naming the red checks, the project's merge queue role told the
-// READY is withdrawn, and the round returns through testing, review and READY. A head a push that
-// changed only .legion/ reached is no exception, unlike in testing or reviewing, where such a
-// head's red is a round's to decide: no round is open in awaiting_merge. A red carried to the READY
-// head from the code head before it moves nothing: READY found the head's own CI green on GitHub,
-// which is what GitHub merges by. Nor does a red only on a check the base branch does not require.
+// READY is withdrawn, the return counted as a round, and the round returns through testing, review
+// and READY. A head a push that changed only .legion/ reached is no exception, unlike in testing
+// or reviewing, where such a head's red is a round's to decide: no round is open in
+// awaiting_merge. A red carried to the READY head from the code head before it moves nothing:
+// READY found the head's own CI green on GitHub, which is what GitHub merges by. Nor does a red
+// only on a check the base branch does not require.
 func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
 	const required = "pr-checks-result"
 	for _, tc := range []struct {
@@ -185,6 +188,9 @@ func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) 
 				if len(published) != 0 {
 					t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
 				}
+				if rounds := implementerRounds(t, pool); rounds != 0 {
+					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				}
 				return
 			}
 			want := "CI is red at head: " + required
@@ -197,6 +203,9 @@ func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) 
 			}
 			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != string(phase.AwaitingMerge) || status != "in_progress" {
 				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return to implementing counted", rounds)
 			}
 			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
 				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
@@ -282,11 +291,13 @@ func TestASettlementLeavesARedOnlyRequiredWorkflowsMakeToTheNextRead(t *testing.
 // would ever tell the daemon the READY cannot be merged. The daemon's own read of GitHub's
 // mergeability (workflow's mergeability) is the only path to it, and a conflicting read sends the
 // tree back to implementing exactly as RedWithdrawsReady does, naming the base the implementer
-// must merge forward. GitHub reports mergeability UNKNOWN until it has computed it - that is "not
-// yet known", never a conflict - so an unknown or a mergeable read moves nothing. Outside
-// awaiting_merge a conflict moves nothing either: in testing the tester is already at work and
-// will see the conflict on GitHub when its pass runs, and in reviewing no round is open to decide
-// a conflict the way a red CI verdict is (RedSendsBack decides a red only where a round is open).
+// must merge forward, and counts the return as a round, so the implementer's completion of the
+// merge is told from its completion of the round before. GitHub reports mergeability UNKNOWN until
+// it has computed it - that is "not yet known", never a conflict - so an unknown or a mergeable
+// read moves nothing. Outside awaiting_merge a conflict moves nothing either: in testing the
+// tester is already at work and will see the conflict on GitHub when its pass runs, and in
+// reviewing no round is open to decide a conflict the way a red CI verdict is (RedSendsBack
+// decides a red only where a round is open).
 func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -325,6 +336,9 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 					t.Fatalf("merge queue publishes %v, want none: nothing moved", published)
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
+				if rounds := implementerRounds(t, pool); rounds != 0 {
+					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				}
 				return
 			}
 			want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
@@ -337,6 +351,9 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 			}
 			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != string(phase.AwaitingMerge) || status != "in_progress" {
 				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return to implementing counted", rounds)
 			}
 			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
 				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)

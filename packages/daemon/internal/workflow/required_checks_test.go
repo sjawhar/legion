@@ -42,6 +42,16 @@ func implementerTask(t *testing.T, pool *pgxpool.Pool) string {
 	return startTask(t, pool, claim.RoleImplementer)
 }
 
+// implementerRounds is the implementer's count of the issue's returns to implementing.
+func implementerRounds(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var rounds int
+	if err := pool.QueryRow(context.Background(), "select rounds from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&rounds); err != nil {
+		t.Fatalf("read the implementer's rounds: %v", err)
+	}
+	return rounds
+}
+
 // Only a check the base branch requires makes CI red at a head: a red beside a passing required
 // gate sends nothing back from testing or reviewing, and a required check that failed does and
 // names only itself.
