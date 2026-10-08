@@ -1,5 +1,5 @@
 {
-  "completed": "2026-10-08T08:16:01.900970267Z",
+  "completed": "2026-10-08T09:12:03.938197893Z",
   "deviations": [
     "Scope narrowed by the architect (dispatch://LEGION-578 comment 38d3fcaa, envoy c5df61a4): Tasks 1, 2, 4, 6 and 8 of the plan are LEGION-630's, LEGION-631's and LEGION-629's; this pull request carries the image, the capability check, the deployment report, the example operator route and their docs. Recorded in .legion/LEGION-578/plan.json",
     "The image sets no PUPPETEER_EXECUTABLE_PATH (the plan's option (a)); Oh My Pi's own system-Chromium detection picks /usr/bin/chromium, and the variable stays the operator's",
@@ -7,7 +7,8 @@
     "legion start --check-config prints the secrets row only when no broker is configured: a configured broker's login is boot's fact, not the file's",
     "Under tmux the daemon reads retry.modelFallback through the plugin gate's environment after the gate passes (a Warn and 'not read' on failure), so the model-fallback row is measured on both runtimes rather than only by the probe pod",
     "Stage 1's script gained an assertion that the running daemon's state carries the 19-row report with resource-limits open under tmux — the plan named Stage 1's daemon as where `legion state` shows the list",
-    "Round 1 answered the review: the stand-in fix, the three wording threads (each replied Fixed in f5037e0e), the contract change census the review asked for written into the PR body, and the reviewer structural findings recorded as the Fast-follow line (a cleanup pull request after the merge)"
+    "Round 1 answered the review: the stand-in fix, the three wording threads (each replied Fixed in f5037e0e), the contract change census the review asked for written into the PR body, and the reviewer structural findings recorded as the Fast-follow line (a cleanup pull request after the merge)",
+    "Round 2 answered the review: the codegraph row is installed (a new status on both surfaces) rather than present, live rows say their check is pending, the Dockerfile comments describe this head and name LEGION-629 in the future tense, the README says contract 15, the probe-log comment's arithmetic is fixed, the census row on record.Notice says CI's test run is the check; the probe pod's refusal on a failed model-fallback read is LEGION-636's, per the architect"
   ],
   "discoveredComplexity": [
     "The worker image grows from 369 MiB to 1007 MiB compressed (the Debian layer 307 MiB, almost all Chromium's library closure; Go 64 MiB + gopls 20 MiB; Node's tree with the servers 66 MiB); the cold-node pull time is Stage 4a's to measure and this change moves no deadline",
@@ -32,14 +33,16 @@
     "docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md, AGENTS.md, docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-….md, packages/daemon/internal/notify/notify.go (comment)",
     ".legion/LEGION-578/plan.json: the task list narrowed to the architect's scope",
     "Round 1 (f5037e0e): packages/pi-legion/scripts/grant-rig/daemon-standin.ts (capabilities: [] in the state literal contract 15 requires), packages/daemon/docker/worker.Dockerfile and docs/kubernetes.md (the build OK line reads model-fallback=on), AGENTS.md (legion state --json), packages/daemon/internal/daemon/daemon.go and docs/kubernetes.md (the re-log runs at the first controller tick after a change), packages/daemon/internal/runtime/sandbox/probe.go (why the 64 KiB read bound holds the OK line)",
-    "Round 1 (57cf6a62), at the architect request: packages/daemon/docker/worker.Dockerfile header and publish-gate comments worded for LEGION-629 (#1848): the two Legion plugins are the pod explicit extension roots and never linked into the profile (CodeGraph alone is), discovery on, the OK line carries extensions=discovered before agent-models; #1848 own hunk (step 3 and the omp plugin install lines) untouched"
+    "Round 1 (57cf6a62), at the architect request: packages/daemon/docker/worker.Dockerfile header and publish-gate comments worded for LEGION-629 (#1848): the two Legion plugins are the pod explicit extension roots and never linked into the profile (CodeGraph alone is), discovery on, the OK line carries extensions=discovered before agent-models; #1848 own hunk (step 3 and the omp plugin install lines) untouched",
+    "Round 2 (4dcac7c5, 7fa314e3): packages/daemon/internal/capabilities/{capabilities.go,image.go,deployment.go} + tests (Capability.Awaits, the installed status, live rows as the pending check), packages/daemon/internal/api/{state.go,version.go} (status list), packages/contracts/src/legion-api.ts (+test; the installed enum member), packages/contracts/fixtures/daemon-api/state.json (regenerated), packages/daemon/cmd/legion/probe_image_test.go, docs/kubernetes.md, packages/pi-legion/{CHANGELOG.md,README.md}, packages/daemon/docker/worker.Dockerfile (header and publish-gate comments true now and after LEGION-629), packages/daemon/internal/runtime/sandbox/probe.go (the log-bound arithmetic)"
   ],
   "issue": "LEGION-578",
   "openQuestions": [
     "Stage 4a on the pull request's image digest (ghcr.io/sjawhar/legion-worker@sha256:… from Worker Image run 37736231904 at 00127cd3c61f) needs a devbox operator: `image-probe` (the OK line with capabilities=checked and model-fallback=on under the fixture overlay, which turns retry.modelFallback on), `image-probe-negative` and the new `image-probe-capability-negative` (operator pod env PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium → refusal naming `capability browser is missing`), and the launch time from pod creation to registration against the 360 s deadline with the 1007 MiB image (docs/kubernetes.md 'Image size and pull time' records the size and that the pull time is measured there)",
     "The deployment's own operator overlay still sets retry.modelFallback: false; on the repin to this image the daemon will report `capability model-fallback is open` at boot and in legion state until the deployment turns it on or writes capabilities.decided.model-fallback",
     "A dogfood tmux daemon reports secrets and resource-limits open at every boot (and the tick names them) until its legion.yaml decides them; the example lines are in docs/kubernetes.md 'The deployment's capability report'",
-    "Until #1848 lands (on #1752 branch), the Dockerfile header and publish-gate comments name the extensions=discovered mark and the unlinked profile that #1848 code delivers; the plugin-install step and docs/kubernetes.md:31 are #1848 own and still say the pre-629 shape here"
+    "Until #1848 lands (on #1752 branch), the Dockerfile header and publish-gate comments name the extensions=discovered mark and the unlinked profile that #1848 code delivers; the plugin-install step and docs/kubernetes.md:31 are #1848 own and still say the pre-629 shape here",
+    "When LEGION-629 lands and the pod lane loads profile plugins, the codegraph row's Awaits sentence should go (the row then reads present): one line in internal/capabilities/capabilities.go, for #1848 or the integration check LEGION-633"
   ],
   "phase": "implement",
   "proof": [
@@ -66,6 +69,14 @@
       "negativeControl": "the same file with the `capabilities: [],` line deleted (the literal as it stood at c88a3502) → ZodError, code invalid_type at path capabilities, before any listening line: the reviewer reproduction",
       "observed": "listening on http://127.0.0.1:62907; GET /legion/v1/state 200; parses: true; capabilities: []; phase: implementing; the log carries one {\"path\":\"/legion/v1/state\",\"status\":200} line",
       "surface": "the stand-in daemon as the grant rig and the skill-scenario rig start it (packages/pi-legion/scripts/grant-rig/daemon-standin.ts), run as a child process with stdin closed in this worker pod; its phase read runs go run -overlay in packages/daemon on a HOME-provisioned Go 1.26.8"
+    },
+    {
+      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models --daemon-api-version 14; go test ./internal/api/ -update; bun test packages/contracts",
+      "criterion": "Round 2, the reviewer's blocking finding: the codegraph row says what the probe proved (the CLI and the enabled plugin in the image) and that a pod's agent gets the tool only once its launch loads profile plugins (LEGION-629), on both surfaces, never reading as a worker capability already present",
+      "headSha": "7fa314e3eac52fc186d699349fc4796f56877f10",
+      "negativeControl": "the codegraph stub removed from the test PATH (TestProbeImageRefusesAnImageMissingACapability, unchanged) → the row reads missing (codegraph is not on PATH) and the probe exits 1 naming capability codegraph is missing: the gate still refuses an image without the CLI",
+      "observed": "probe-image: capability codegraph: installed (/opt/codegraph/bin/codegraph on PATH; @bopstack/pi-codegraph enabled in /home/legion/.omp/profiles/legion/plugins/omp-plugins.lock.json; a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)); capability repository-extensions: live (to be proved by a live check against a running pod (dispatch://LEGION-629): …); state.json's codegraph row {status: installed, detail: the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)}; 183 contract tests pass",
+      "surface": "the branch binary (go build ./cmd/legion at 7fa314e3) in this worker pod on the current image, from a scratch directory; legion state's row through the regenerated contract fixture a real Deployment{Probed: true}.Report() writes and the strict TypeScript schema parses"
     }
   ],
   "schemaVersion": 1,
