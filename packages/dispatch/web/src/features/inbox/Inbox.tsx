@@ -1,13 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import {
-  type FocusEvent,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { inboxQuery, whoAmIQuery } from "../../api/queries";
@@ -17,14 +9,11 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
-import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   checkboxAccent,
   dangerText,
   focusVisibleRing,
-  linkHoverText,
-  linkText,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -41,25 +30,19 @@ import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
-import { referenceTriggerProps } from "../refs/RefPreview";
-import {
-  buildInboxPath,
-  buildIssuePath,
-  buildProjectPath,
-  type InboxRoute,
-  type InboxView,
-  parseInboxSearch,
-} from "../refs/routes";
+import { buildInboxPath, type InboxRoute, type InboxView, parseInboxSearch } from "../refs/routes";
 import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
+import { InboxOwnerLink } from "./AskOwnerLink";
 import { outsideAskCard } from "./ask-card";
-import { type AskOrdinal, askIssueKey, askOrdinals, controlName } from "./ask-name";
+import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
-import { type CrossBandCount, crossBandCounts, groupRows, type InboxGroup } from "./grouping";
+import { crossBandCounts, groupRows } from "./grouping";
+import { bandGroupItems, useGroupJump } from "./InboxGroups";
 import { useMotionHold } from "./motion-hold";
 import { SnoozeControl } from "./SnoozeControl";
 import {
@@ -154,53 +137,6 @@ function AssignToMe({
   );
 }
 
-/** The owning issue or document link shared by an ask row and its group header. */
-function InboxOwnerLink({
-  ask,
-  rowOwner,
-}: {
-  ask: InboxRow;
-  /** The row's `o` binding only follows links inside a row; headers must not be targets. */
-  rowOwner: boolean;
-}): ReactNode {
-  const owner = askIssueKey(ask);
-  const title = ask.issue?.title ?? owner ?? "Document ask";
-  if (ask.document === undefined) {
-    if (owner === null) return <p className={`truncate text-sm ${textMutedOnCanvas}`}>{title}</p>;
-    return (
-      <Link
-        className={`flex min-w-0 grow items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
-        data-inbox-owner={rowOwner ? "" : undefined}
-        to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
-        {...referenceTriggerProps({ key: owner, kind: "issue" })}
-      >
-        <span className="shrink-0 font-semibold">{owner}</span>
-        <TruncatedText>{title}</TruncatedText>
-      </Link>
-    );
-  }
-  return (
-    <Link
-      className={`min-w-0 grow truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
-      data-inbox-owner={rowOwner ? "" : undefined}
-      to={buildProjectPath({
-        item: { id: ask.id, kind: "ask" },
-        kind: "document",
-        project: ask.document.project,
-        slug: ask.document.slug,
-      })}
-      {...referenceTriggerProps({
-        kind: "document",
-        project: ask.document.project,
-        slug: ask.document.slug,
-      })}
-    >
-      <TruncatedText>
-        {ask.document.project} · {ask.document.name}
-      </TruncatedText>
-    </Link>
-  );
-}
 function InboxItem({
   ask,
   assignLive,
@@ -313,42 +249,6 @@ function InboxItem({
         initialThreadUpdatedAt={threadUpdatedAt}
         onAnswered={onAnswered}
       />
-    </li>
-  );
-}
-
-/** A visual grouping label only: rows stay the flat list's keyboard and viewport targets. */
-function InboxGroupHeader({
-  group,
-  notes,
-  onJump,
-}: {
-  group: InboxGroup;
-  notes: readonly CrossBandCount[];
-  onJump: (section: InboxSection, ownerKey: string) => void;
-}): ReactNode {
-  const first = group.rows[0];
-  if (first === undefined) return null;
-  return (
-    <li data-inbox-group-header={group.owner.key} role="presentation">
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-1 text-sm">
-        <InboxOwnerLink ask={first} rowOwner={false} />
-        <span className={textSecondaryOnCanvas}>· {group.rows.length} asks</span>
-        {notes.map((note) => {
-          const title = SECTION_TITLES[note.section];
-          return (
-            <button
-              aria-label={`Jump to ${group.owner.label}'s asks ${title}`}
-              className={`text-xs ${linkText} ${linkHoverText}`}
-              key={note.section}
-              onClick={() => onJump(note.section, group.owner.key)}
-              type="button"
-            >
-              {note.count} more {title.toLowerCase()}
-            </button>
-          );
-        })}
-      </div>
     </li>
   );
 }
@@ -557,7 +457,7 @@ export function Inbox({
   const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
-  const [jumpTo, setJumpTo] = useState<{ ownerKey: string; section: InboxSection } | null>(null);
+  const jumpToGroup = useGroupJump(listRef, () => setLaterOpen(true));
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn band
   // on the first render after its moment passes. Computed here, with the selection, rather than
   // after the early returns, because the bar's count and the bindings both read it.
@@ -625,17 +525,6 @@ export function Inbox({
     release();
   };
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
-  useLayoutEffect(() => {
-    if (jumpTo === null) return;
-    const target = [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])].find(
-      (row) =>
-        row.dataset.inboxOwnerKey === jumpTo.ownerKey && row.dataset.inboxSection === jumpTo.section
-    );
-    setJumpTo(null);
-    if (target === undefined) return;
-    target.scrollIntoView({ block: "center" });
-    target.focus();
-  }, [jumpTo]);
   const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
   const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
   // The bar is reached through its own ref: the empty state a pick can leave behind renders it
@@ -888,7 +777,7 @@ export function Inbox({
     // `presented` and the bar all see exactly what the reader sees.
     return { groups: groupRows(shownRows), rows, section, shownRows };
   }).filter(({ rows }) => rows.length > 0);
-  // Cross-band counts include folded rows: a Later target is opened before this effect focuses it.
+  // Cross-band counts include folded rows: a Later target is opened before the jump focuses it.
   const notes = crossBandCounts(sections);
   presented.current = sections.flatMap(({ groups, section }) =>
     groups.flatMap((group) => group.rows.map((ask) => ({ ask, section })))
@@ -897,10 +786,6 @@ export function Inbox({
   // never sits above "ask 1 of 2", and a twin folded away in `Later` leaves the row on screen
   // with the short name rather than a count of something the reader cannot see.
   const ordinals = askOrdinals(presented.current.map(({ ask }) => ask));
-  const jumpToGroup = (section: InboxSection, ownerKey: string) => {
-    setJumpTo({ ownerKey, section });
-    if (section === "later") setLaterOpen(true);
-  };
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
@@ -935,38 +820,30 @@ export function Inbox({
               )}
             </h2>
           </li>,
-          ...groups.flatMap((group) => {
-            const grouped = group.rows.length > 1;
-            const groupNotes = notes.get(section)?.get(group.owner.key) ?? [];
-            return [
-              grouped ? (
-                <InboxGroupHeader
-                  group={group}
-                  key={`group-${section}-${group.owner.key}`}
-                  notes={groupNotes}
-                  onJump={jumpToGroup}
-                />
-              ) : null,
-              ...group.rows.map((ask) => (
-                <InboxItem
-                  ask={ask}
-                  assignLive={assigning.has(ask.id)}
-                  grouped={grouped}
-                  key={ask.id}
-                  marked={marked.has(ask.id)}
-                  ordinal={ordinals.get(ask.id)}
-                  ownerKey={group.owner.key}
-                  onAnswered={recordAnswered}
-                  onAssignLive={onAssignLive}
-                  onMark={onMark}
-                  onSnoozeLive={onSnoozeLive}
-                  onRelease={ask.id === held?.ask.id ? release : undefined}
-                  section={section}
-                  threadUpdatedAt={inbox.dataUpdatedAt}
-                  viewer={viewer}
-                />
-              )),
-            ];
+          ...bandGroupItems({
+            groups,
+            notes: notes.get(section),
+            onJump: jumpToGroup,
+            renderRow: (ask, group) => (
+              <InboxItem
+                ask={ask}
+                assignLive={assigning.has(ask.id)}
+                grouped={group.rows.length > 1}
+                key={ask.id}
+                marked={marked.has(ask.id)}
+                ordinal={ordinals.get(ask.id)}
+                ownerKey={group.owner.key}
+                onAnswered={recordAnswered}
+                onAssignLive={onAssignLive}
+                onMark={onMark}
+                onSnoozeLive={onSnoozeLive}
+                onRelease={ask.id === held?.ask.id ? release : undefined}
+                section={section}
+                threadUpdatedAt={inbox.dataUpdatedAt}
+                viewer={viewer}
+              />
+            ),
+            section,
           }),
         ])}
       </ul>

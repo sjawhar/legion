@@ -7,7 +7,6 @@ import type { MyAnswerRow, MyAnswersResponse } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
-import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   card,
@@ -18,43 +17,13 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
+import { AskOwnerLink } from "../inbox/AskOwnerLink";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
-import { referenceTriggerProps } from "../refs/RefPreview";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 
 const PAGE_SIZE = 50;
-
-/** The issue or project document an answered ask belongs to, as the Inbox row names it. */
-function OwnerLink({ row }: { row: MyAnswerRow }): ReactNode {
-  if ("issue" in row.owner) {
-    const { key, title } = row.owner.issue;
-    return (
-      <Link
-        className={`flex min-w-0 items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
-        to={buildIssuePath({ key, kind: "issue" })}
-        {...referenceTriggerProps({ key, kind: "issue" })}
-      >
-        <span className="shrink-0 font-semibold">{key}</span>
-        <TruncatedText>{title}</TruncatedText>
-      </Link>
-    );
-  }
-  const { name, project, slug } = row.owner.document;
-  return (
-    <Link
-      className={`min-w-0 truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
-      to={buildProjectPath({ kind: "document", project, slug })}
-      {...referenceTriggerProps({ kind: "document", project, slug })}
-    >
-      <TruncatedText>
-        {project} · {name}
-      </TruncatedText>
-    </Link>
-  );
-}
 
 /** The ask a row's Change answer opens, read through the same `["ask-thread", id]` key the
  *  card's own thread query uses, so one fetch serves both; mounted in `change` mode, the card
@@ -92,7 +61,8 @@ function AnswerRow({
     <li className={`rounded-xl border p-3 ${card} ${borderDefault}`} data-answer-row={row.ask_id}>
       <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${textMutedOnCanvas}`}>
         <Timestamp at={row.at} />
-        <OwnerLink row={row} />
+        {/* The owner itself, not the ask: the row's Open already goes to the ask. */}
+        <AskOwnerLink owner={row.owner} />
         {row.kind === "answer" && !row.current ? <LabelPill>Changed since</LabelPill> : null}
       </div>
       <MarkdownPreview

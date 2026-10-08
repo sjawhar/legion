@@ -114,6 +114,7 @@ export type {
   MessageRead,
   MyAnswerRow,
   MyAnswersResponse,
+  OpenAskOwner,
   ProgressCount,
   Project,
   RepoProject,

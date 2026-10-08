@@ -50,27 +50,32 @@ export function groupRows(rows: readonly InboxRow[]): InboxGroup[] {
 
 /**
  * Counts an owner's asks in every other band for each band it appears in. The input keeps folded
- * Later rows, so a header can open that fold before it hands focus to a target row.
+ * Later rows, so a header can open that fold before it hands focus to a target row. One pass
+ * counts each band's owners; the groups themselves are the render's, so nothing groups twice.
  */
 export function crossBandCounts(
   bands: readonly InboxBand[]
 ): ReadonlyMap<InboxSection, ReadonlyMap<string, readonly CrossBandCount[]>> {
+  const owners = bands.map((band) => {
+    const counts = new Map<string, number>();
+    for (const row of band.rows) {
+      const key = askOwner(row).key;
+      if (key !== "none") counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return { counts, section: band.section };
+  });
   const notes = new Map<InboxSection, ReadonlyMap<string, readonly CrossBandCount[]>>();
-
-  for (const band of bands) {
+  for (const band of owners) {
     const byOwner = new Map<string, readonly CrossBandCount[]>();
-    for (const group of groupRows(band.rows)) {
-      if (group.owner.key === "none") continue;
+    for (const key of band.counts.keys()) {
       const counts: CrossBandCount[] = [];
-      for (const other of bands) {
-        if (other.section === band.section) continue;
-        const count = other.rows.filter((row) => askOwner(row).key === group.owner.key).length;
-        if (count > 0) counts.push({ count, section: other.section });
+      for (const other of owners) {
+        const count = other.section === band.section ? undefined : other.counts.get(key);
+        if (count !== undefined) counts.push({ count, section: other.section });
       }
-      if (counts.length > 0) byOwner.set(group.owner.key, counts);
+      if (counts.length > 0) byOwner.set(key, counts);
     }
     notes.set(band.section, byOwner);
   }
-
   return notes;
 }
