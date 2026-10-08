@@ -242,6 +242,18 @@ func (d *launchers) request(ctx context.Context, token claim.Token, podUID strin
 	}
 }
 
+// startRefusal is a Start the launcher answered without starting the generation: the one start
+// error after which no child of that generation can be running (stopIssuedChild).
+type startRefusal struct {
+	token      claim.Token
+	generation uint64
+	reason     string
+}
+
+func (e startRefusal) Error() string {
+	return fmt.Sprintf("launcher %s start generation %d: %s", e.token, e.generation, e.reason)
+}
+
 func (d *launchers) start(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherStart) error {
 	answer, _, err := d.request(ctx, token, podUID, command, command.ID)
 	if err != nil {
@@ -252,7 +264,7 @@ func (d *launchers) start(ctx context.Context, token claim.Token, podUID string,
 		return fmt.Errorf("launcher %s start: got %T", token, answer)
 	}
 	if !result.OK || result.RunningGeneration != command.Generation {
-		return fmt.Errorf("launcher %s start generation %d: %s", token, command.Generation, result.Error)
+		return startRefusal{token: token, generation: command.Generation, reason: result.Error}
 	}
 	return nil
 }
@@ -316,8 +328,8 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 // pod an older runtime made (one worker container, no launchers) or one whose binding never landed
 // is replaced rather than trusted. Any other failure to read a Secret, such as a timeout, a
 // throttled request or a server error, proves nothing about the pod: it is returned, so only the
-// launch that read it fails. When that launch resumes a role, relaunch stops the role's previous
-// child before returning the error; the pod and every other role running in it are left as they are.
+// launch that read it fails, and the caller stops that role's previous process (runtime.Runtime's
+// Spawn and Resume); the pod and every other role running in it are left as they are.
 func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
 	for _, role := range roles {
 		name := roleSecretName(s.Name, role)

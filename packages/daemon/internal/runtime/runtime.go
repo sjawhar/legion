@@ -38,13 +38,16 @@ import (
 type Runtime interface {
 	// Spawn starts an agent and returns the locator that identifies the process it started —
 	// including the incarnation, captured at spawn, that later observations are fenced against.
+	// On an error the caller owns stopping any previous process of the claim, and Spawn has
+	// stopped any process it started itself.
 	Spawn(ctx context.Context, spec SpawnSpec) (Locator, error)
 	// Resume starts the same agent again from the session file the spec names, after waiting
 	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, nil
 	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
 	// place, as a sandbox finds a role's container in its issue's pod, waits out whatever runs
 	// there even when prev is nil. A claim resumes the agent it recorded or none: a fresh agent on
-	// a claim that had one is the failure the same-agent refusal exists to catch.
+	// a claim that had one is the failure the same-agent refusal exists to catch. On an error the
+	// caller owns stopping prev (Suspend), and Resume has stopped any process it started itself.
 	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
 	// Suspend stops the process gracefully, within the runtime's stop grace, and keeps everything
 	// a later Resume needs: the agent's session, and whatever the runtime holds for the claim. The
