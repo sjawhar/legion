@@ -366,6 +366,12 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		deadline.Stop()
 	}
 
+	// The stop cancelled store queries in flight, and a pooled connection one of them ran on can
+	// still carry the read deadline that cancellation set: without this reset, full runs of this
+	// package failed the stamp with `stop boot N: timeout: read tcp …: i/o timeout` (a socket
+	// deadline, not the stamp's context) in 3 runs of 5, and in none of 3 with it. The stamp runs on
+	// a connection opened after the reset.
+	st.Pool().Reset()
 	stamp, cancelStamp := context.WithTimeout(context.WithoutCancel(ctx), stampTimeout)
 	defer cancelStamp()
 	stopErr := st.StopBoot(stamp, bootID, time.Now().UTC())
@@ -816,7 +822,7 @@ func (s *supervision) launchUnfinished(tokens []claim.Token) {
 		if !ok {
 			continue
 		}
-		released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
+		released, err := m.ReleaseUncertainLaunch()
 		if err != nil {
 			s.log.Error("supervise: release an uncertain launch", "claim", token, "error", err)
 			continue

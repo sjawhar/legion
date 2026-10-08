@@ -434,17 +434,17 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 
 // ReleaseUncertainLaunch is the only path out of the persisted uncertain-launch state. The daemon
 // calls it only after reconciliation proves the unrecorded predecessor absent or reaped; concurrent
-// old-pane hellos move the state first, so the caller does not open a second pane.
-func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
+// old-pane hellos move the state first, so the caller does not open a second pane. The release is
+// memory only: the launch that follows writes it, as its next generation launching, in its first
+// write. A stop between the two leaves the store holding launch_uncertain, which the next boot
+// reconciles and relaunches, never a claim stored queued with no process that nothing launches.
+func (m *Machine) ReleaseUncertainLaunch() (bool, error) {
 	m.mu.Lock()
 	defer m.unlock()
 	if m.claim.State != StateLaunchUncertain || m.claim.Locator != nil {
 		return false, nil
 	}
 	m.claim.State = StateQueued
-	if err := m.persist(ctx); err != nil {
-		return false, err
-	}
 	return true, nil
 }
 

@@ -785,6 +785,33 @@ func TestViewAnswersWhileARelaunchWaitsInTheRuntime(t *testing.T) {
 	}
 }
 
+// Releasing an uncertain launch and launching its next generation are one write: until the launch
+// records its generation, the store keeps the claim launch_uncertain. A stop between the two —
+// the daemon's stop cancels the launch's own write — must leave a claim the next boot relaunches,
+// never one stored queued with no process that nothing launches again (LEGION-650).
+func TestReleasingAnUncertainLaunchWritesNothingUntilItsLaunchDoes(t *testing.T) {
+	h := newBareHarness(t)
+	uncertain := queuedClaim()
+	uncertain.State, uncertain.Generation = StateLaunchUncertain, 1
+	if err := h.store.PutClaim(h.ctx, uncertain); err != nil {
+		t.Fatal(err)
+	}
+	h.start(uncertain)
+
+	released, err := h.m.ReleaseUncertainLaunch()
+	if err != nil || !released {
+		t.Fatalf("release = %v, %v; want released", released, err)
+	}
+	h.store.fail("PutClaim", errBoom)
+	if err := h.handle(RequestSpawn{Claim: testToken}); err == nil {
+		t.Fatal("the launch succeeded although its write failed")
+	}
+	if stored := h.store.load(testToken); stored.State != StateLaunchUncertain || stored.Generation != 1 || stored.Locator != nil {
+		t.Fatalf("the store holds %s at generation %d with locator %+v after the launch's write failed, want launch_uncertain at 1 with none",
+			stored.State, stored.Generation, stored.Locator)
+	}
+}
+
 func TestAstraDuplicateObservations(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
