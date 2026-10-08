@@ -48,7 +48,7 @@ land on a session that is gone
 Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
 chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service rather than
-as a person.
+as a person; it records the service account the pod's projected token proved instead.
 
 ## Machine login
 
@@ -92,23 +92,36 @@ one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tie
 - **Its name** under the prefix is the name a session asks for, in lowercase with each underscore a
   hyphen: `production/agent-secrets/deel-api-key` is `DEEL_API_KEY`. It is lowercase letters, digits
   and single hyphens, starting with a letter.
-- **`owner`** is `shared`, or a person's email in lowercase, the email they sign in to Dispatch with.
+- **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
+  or a service the broker is configured with (`BROKER_SERVICES`).
 - **`tier`** is `agent` or `human`.
 
 Who gets a secret follows from those two tags alone:
 
-| The secret | Its owner's own session | Another person's session, or a pod |
+| The secret | Its owner's own session | Any other session or pod |
 | --- | --- | --- |
 | A person's, `tier=agent` | Granted at once. | Sent to the owner for approval. |
 | A person's, `tier=human` | Sent to the owner for approval. | Sent to the owner for approval. |
 | `owner=shared`, `tier=agent` | Granted at once. | Granted at once. |
 | `owner=shared`, `tier=human` | Approved by anyone signed in to Dispatch. | Approved by anyone signed in to Dispatch. |
+| A service's, `tier=agent` | Granted at once. | Denied; no one can approve it. |
 
 A session is its owner's own when its operator is the owner: the owner approved the machine login
 it enrolled under. A pod has no operator, so a pod asking for a person's agent-tier secret sends it
-to that person for approval. An owner may also be a service, whose secrets go only to that
-service's own sessions; the broker has no way yet to register a service, so it refuses a secret
-whose owner tag names one.
+to that person for approval.
+
+An owner may also be a service the broker is configured with. `BROKER_SERVICES` binds each
+service's name to the Kubernetes service account its pods run as, for example
+`legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the pods
+that a launcher logged in as that service enrolled, and whose projected token proved that service
+account: the Legion daemon's worker pods, for `legion-daemon`. A machine login's service name is
+the machine's own claim, approved by whoever the login names, so the service account the cluster
+vouches for is what proves the service.
+
+A service's secrets go to its own sessions and to no one else. That includes a person's own
+session, and a pod run under another service account even when a launcher logged in as the service
+enrolled it. A service's secret is agent tier, since no person approves it: the broker refuses one
+tagged `tier=human`, and one whose owner names a service it is not configured with.
 
 One thing besides the tags changes what a session gets at once: a session's own person, its
 operator, who revokes a grant the session got without asking **withholds** its secrets from that
