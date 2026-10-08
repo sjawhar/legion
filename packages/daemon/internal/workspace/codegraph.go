@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,32 @@ const codegraphTimeout = 30 * time.Minute
 // its repair for a held lock: the repair waits for the next claim's provisioning of the workspace.
 const codegraphEmptyLockGrace = 5 * time.Second
 
+// warmLeaseHeartbeat is how often a warm-up holding `.codegraph/legion-warm.lock` sets the lease's
+// mtime to now, and warmLeaseStale is how old that mtime may be before another process reads the
+// holder as dead and takes the lease over: six missed heartbeats, so a holder stalled through one
+// slow tick or a filesystem hiccup keeps its lease, and a dead one (a shim killed mid-build, a pod
+// that went away) costs the next warm-up at most a minute. The lease is the one cross-process
+// guard here; everything else is this process's. `warming` is a map in this process.
+// nextCodegraphStep lets a live CodeGraph lock veto a repair but not an `init`: an uninitialized
+// workspace has no `codegraph.lock` to read, so two processes that both find it uninitialized would
+// both run `init`. codegraphLockHeldByLiveProcess judges liveness by PID, which another
+// container's PID namespace makes meaningless; it stays as it is for the one-process case. The
+// contenders are the six role containers of one issue pod, which share the issue's workspace and
+// each warm it once their Oh My Pi starts (`legion worker-shim --warm-codegraph`), and a draining
+// pod overlapping its replacement. flock would not do: under gVisor a pod's flock never reaches
+// another pod (initWaitSeconds, internal/runtime/sandbox/manifest.go), where a file's existence
+// and mtime on the shared volume do. So the lease is an exclusive create its holder keeps fresh,
+// and a stale one is taken over by a rename, the one step exactly one of two contenders wins.
+const (
+	warmLeaseHeartbeat = 10 * time.Second
+	warmLeaseStale     = 60 * time.Second
+)
+
+// warmLeaseName is the lease file a warm-up holds under `.codegraph/`, beside the index itself, so
+// every process that shares the index shares the lease; CodeGraph's own `.gitignore` there (`*`)
+// keeps it out of the repository.
+const warmLeaseName = "legion-warm.lock"
+
 // warming holds the workspace directories with a background warm-up in flight in this process.
 var warming sync.Map
 
@@ -44,9 +71,12 @@ var indexed sync.Map
 
 // WarmCodegraphIndexInBackground starts warmCodegraphIndex for dir in its own goroutine and
 // returns at once, so no launch ever waits on an index build; a second call for a directory whose
-// warm-up is still running does nothing. Only a long-lived process calls it (the Go daemon's host
-// provisioning for tmux panes, internal/daemon/outbox.go): the pod init container builds no index,
-// since it runs on the pod's registration path and its goroutines die with it.
+// warm-up is still running in this process does nothing, and one running in another process is
+// what the lease settles (warmLeaseHeartbeat). A long-lived process calls it: the daemon's host
+// provisioning for tmux panes (internal/daemon/outbox.go) and a role's `legion worker-shim
+// --warm-codegraph` once Oh My Pi is spawned (internal/shim's Config.WarmCodegraph). The pod init
+// container still builds no index: it runs on the pod's registration path and its goroutines die
+// with it.
 func WarmCodegraphIndexInBackground(dir string) {
 	if _, busy := warming.LoadOrStore(dir, struct{}{}); busy {
 		return
@@ -75,7 +105,9 @@ func WarmCodegraphIndexInBackground(dir string) {
 // (observed: the second process exits on "Could not acquire file lock", and the live build still
 // fails with "database disk image is malformed") — so this never lets a second process even
 // attempt it, and never relies on CodeGraph's own mtime-based (2-minute) staleness check, which
-// can hand the lock to a second writer regardless.
+// can hand the lock to a second writer regardless. The whole warm-up, `status` included, runs
+// under the workspace's cross-process lease (acquireWarmLease, warmLeaseHeartbeat): a second
+// process that finds the lease held leaves the build to its holder.
 // Every codegraph invocation gets a minimal, explicit environment — PATH, HOME, TMPDIR when set,
 // and DO_NOT_TRACK=1 — never the process's full environment: a provisioning caller may hold a
 // one-shot GitHub token or other secrets in its own environment, and codegraph gets none of them.
@@ -88,12 +120,28 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up skipped for %s: %s\n", dir, err)
 		return
 	}
-	status, err := runCodegraph(ctx, codegraphPath, dir, "status", "--json")
+	// dirExists is read before the lease's directory is made: nextCodegraphStep's fallback (a
+	// status that failed or didn't parse) reads an existing `.codegraph/` as an index to repair,
+	// and a workspace never initialized must still read as directory-less there. `codegraph init`
+	// tolerates the directory — a committed `.codegraph/.gitignore` leaves it present anyway.
+	codegraphDir := filepath.Join(dir, ".codegraph")
+	dirExists, err := pathExists(codegraphDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
 	}
-	dirExists, err := pathExists(filepath.Join(dir, ".codegraph"))
+	if !dirExists {
+		if err := os.Mkdir(codegraphDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
+			return
+		}
+	}
+	release, held := acquireWarmLease(dir, filepath.Join(codegraphDir, warmLeaseName))
+	if !held {
+		return
+	}
+	defer release()
+	status, err := runCodegraph(ctx, codegraphPath, dir, "status", "--json")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
@@ -129,6 +177,87 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 	}
 	if result.exitCode != 0 {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph %s failed for %s (exit %d): %s\n", subcommand, dir, result.exitCode, strings.TrimSpace(result.stderr))
+	}
+}
+
+// acquireWarmLease takes dir's warm-up lease, the file at path, or reports that another process
+// holds it. An exclusive create either wins the lease or finds a holder's file. One whose mtime is
+// within warmLeaseStale is a live warm-up elsewhere, and the caller leaves the build to it. An
+// older one is a dead holder's: it is taken over by renaming it aside — the one step two
+// contenders cannot both win, the loser's rename failing with ENOENT — and the create is tried
+// once more, an EEXIST then being a contender that got there first. A file gone between the
+// failed create and its stat was just released, and gets the same one retry.
+func acquireWarmLease(dir, path string) (release func(), held bool) {
+	skipped := func(what string) (func(), bool) {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: another process %s %s\n", dir, what, path)
+		return nil, false
+	}
+	failed := func(err error) (func(), bool) {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
+		return nil, false
+	}
+	for attempt := 0; ; attempt++ {
+		lease, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			created, err := lease.Stat()
+			_ = lease.Close()
+			if err != nil {
+				_ = os.Remove(path)
+				return failed(err)
+			}
+			return holdWarmLease(path, created), true
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return failed(err)
+		}
+		if attempt > 0 {
+			return skipped("holds")
+		}
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return failed(err)
+		}
+		if time.Since(info.ModTime()) < warmLeaseStale {
+			return skipped("holds")
+		}
+		stale := path + ".stale-" + rand.Text()
+		if err := os.Rename(path, stale); err != nil {
+			return skipped("took over")
+		}
+		_ = os.Remove(stale)
+	}
+}
+
+// holdWarmLease keeps the lease at path fresh, its mtime set to now every warmLeaseHeartbeat so a
+// live holder's lease is never read as stale, until release. release stops the heartbeat and
+// removes the file, but only while it is still the one created (os.SameFile): the lease of a
+// holder stalled past warmLeaseStale and taken over belongs to its successor by then, and the
+// stalled holder must not remove it from under the successor's build.
+func holdWarmLease(path string, created os.FileInfo) (release func()) {
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(warmLeaseHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case now := <-ticker.C:
+				_ = os.Chtimes(path, now, now)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-stopped
+		if current, err := os.Stat(path); err == nil && os.SameFile(created, current) {
+			_ = os.Remove(path)
+		}
 	}
 }
 

@@ -945,6 +945,25 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 	}
 }
 
+// A tree role's shim is told --warm-codegraph, before `--`, and the LEGION_WORKSPACE the flag
+// needs: once its Oh My Pi has started, the shim builds that workspace's CodeGraph index behind
+// the launch (cmd/legion/worker_shim.go). The controller's shim, whose pod has no workspace, is
+// not (TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree).
+func TestATreeRolesShimIsToldToWarmTheWorkspacesCodegraphIndex(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := workerOf(t, r, workerSpec(t), false)
+	shim := worker.Command[:slices.Index(worker.Command, "--")]
+	if !slices.Contains(shim, "--warm-codegraph") {
+		t.Fatalf("the shim runs as %v, want --warm-codegraph before --", worker.Command)
+	}
+	if envOf(worker)["LEGION_WORKSPACE"] == "" {
+		t.Fatalf("the shim is told --warm-codegraph with no LEGION_WORKSPACE to warm; env %v", worker.Env)
+	}
+}
+
 // New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,
 // an expiry outside the API server's floor (10m) and the cluster's admission cap (1h), or the image's
 // agent-secrets binary missing.

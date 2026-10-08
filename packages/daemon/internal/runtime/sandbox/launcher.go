@@ -336,9 +336,18 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 	return true, nil
 }
 
+// launcherCommand is the start command a role's launcher receives for one generation: the shim's
+// argv (its flags, then `--`, then the agent's own argv), the generation's plain environment, the
+// launch credentials it writes into its private directory, and the session a resume continues.
+// A tree role's shim is told --warm-codegraph: once its Oh My Pi has started it builds the
+// CodeGraph index of the workspace LEGION_WORKSPACE names, which launchEnvironment carries for
+// every role but the controller (issuePod.agentEnv, podkind.go), whose pod has no workspace.
 func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	dir := generationDir(l.spec.Generation)
 	shim := []string{r.tools.Legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety"}
+	if l.spec.Role != claim.RoleController {
+		shim = append(shim, "--warm-codegraph")
+	}
 	if r.mountsProviders() {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}

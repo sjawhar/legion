@@ -80,6 +80,16 @@ func fakeOMP() int {
 		}
 	}()
 
+	// FAKE_OMP_HOLD_READY names a file the fake waits for before its first line, so a test can
+	// tell what the shim does at the spawn from what it does on the child's first frame.
+	if hold := os.Getenv("FAKE_OMP_HOLD_READY"); hold != "" {
+		for {
+			if _, err := os.Stat(hold); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	emit(fmt.Sprintf(`{"type":"fake_ready","pid":%d}`, os.Getpid()))
 	if message := os.Getenv("FAKE_OMP_EXTENSION_ERROR"); message != "" {
 		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion/dist/legion.js","event":"session_start","error":%q}`, message))
@@ -526,6 +536,90 @@ func TestOMPIsSpawnedOnlyAfterTheHelloAck(t *testing.T) {
 	if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
 		t.Fatalf("OMP read %v; the pre-ack prompt must never reach it", got)
 	}
+}
+
+// The workspace's CodeGraph warm-up (Config.WarmCodegraph) starts on the first line the child
+// writes, with the workspace LEGION_WORKSPACE names: not before the ack, not at the spawn — Oh My
+// Pi's first frame is its `ready`, once its extensions are loaded — and exactly once for the shim's
+// life, so neither a later frame nor a connection redialled while the child runs starts a second
+// one. A Config without the hook, a tmux pane's or the controller's, runs nothing.
+func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
+	const workspace = "/legion/workspaces/acme/widgets/widgets-7"
+	path := socketPath(t)
+	daemon := listen(t, path)
+	hold := filepath.Join(t.TempDir(), "ready")
+	child := newOMP(t, "LEGION_WORKSPACE="+workspace, "FAKE_OMP_HOLD_READY="+hold)
+	var mu sync.Mutex
+	var warmed []string
+	calls := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(warmed)
+	}
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = func(dir string) {
+		mu.Lock()
+		defer mu.Unlock()
+		warmed = append(warmed, dir)
+	}
+	sh := run(t, cfg, newClock())
+
+	p := daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	sh.log.await(t, "[worker-shim] spawned ", 1)
+	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline) && !child.started(); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls(); len(got) != 0 {
+		t.Fatalf("the warm-up started at the spawn, before the child wrote anything: %v", got)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.expectRaw(t, "fake_ready")
+	for deadline := time.Now().Add(waitLimit); len(calls()) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the warm-up never started after the child's first frame; log:\n%s", sh.log)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls(); !slices.Equal(got, []string{workspace}) {
+		t.Fatalf("the warm-up was started with %v, want once with %q", got, workspace)
+	}
+
+	p.send(t, shimwire.Prompt{ID: "p1", DeliveryID: "d1", Message: "go"})
+	p.expect(t, shimwire.Response{ID: "p1", Command: "prompt", Success: true})
+	p.expect(t, shimwire.AgentStart{})
+	p.expect(t, shimwire.AgentEnd{})
+	_ = p.conn.Close()
+	sh.log.await(t, "reconnecting", 1)
+	p = daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	p.send(t, shimwire.GetState{ID: "probe"})
+	if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+		t.Fatalf("the probe was answered as %#v", raw)
+	}
+	if got := calls(); !slices.Equal(got, []string{workspace}) {
+		t.Fatalf("later frames and a redial started the warm-up again: %v", got)
+	}
+
+	t.Run("nothing runs without the hook", func(t *testing.T) {
+		path := socketPath(t)
+		daemon := listen(t, path)
+		child := newOMP(t, "LEGION_WORKSPACE="+workspace)
+		sh := run(t, config(t, path, child), newClock())
+		p := daemon.accept(t)
+		p.open(t)
+		p.send(t, shimwire.GetState{ID: "probe"})
+		if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+			t.Fatalf("the probe was answered as %#v", raw)
+		}
+		if sh.log.count("warm-up") != 0 {
+			t.Fatalf("a shim with no hook said something of a warm-up; log:\n%s", sh.log)
+		}
+	})
 }
 
 // A daemon that refuses the hello — closing the stream, as it does for an unknown or stale boot

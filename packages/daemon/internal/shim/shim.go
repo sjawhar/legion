@@ -77,6 +77,13 @@ type Config struct {
 	// AgentSecrets is the pod's enrollment with the secrets broker (agentsecrets.go); nil on a
 	// tmux pane, which is never enrolled.
 	AgentSecrets *AgentSecrets
+	// WarmCodegraph, when set, is called once with the workspace the shim's LEGION_WORKSPACE
+	// names, on the first line the wrapped process writes: Oh My Pi's `ready` frame comes once its
+	// extensions are loaded and its RPC loop serves, so the index build the pod needs starts
+	// behind the launch, never on it (workspace.WarmCodegraphIndexInBackground; `legion
+	// worker-shim --warm-codegraph`). Nil on a tmux pane, whose workspace the daemon warms itself,
+	// and on the controller, which has no workspace: nothing runs.
+	WarmCodegraph func(dir string)
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -140,6 +147,10 @@ type shim struct {
 	// renewers is the agent-secrets renewer goroutine (agentsecrets.go's startRenewer), reaped by
 	// Run's deferred Wait before it returns.
 	renewers sync.WaitGroup
+
+	// warmed guards cfg.WarmCodegraph: called on the child's first line and never again, not for
+	// a later frame and not when a redialled connection finds the child already running.
+	warmed sync.Once
 
 	once sync.Once
 	code int
@@ -333,7 +344,9 @@ func (s *shim) spawnOnce() bool {
 
 // pump carries OMP's stdout to the daemon, line by line and unchanged, after the dedupe has seen
 // each frame; the answers the dedupe owes other requests follow the frame that settled them
-// (createShimBridge's forwardToSocket, worker-shim.ts).
+// (createShimBridge's forwardToSocket, worker-shim.ts). The child's first line is also when the
+// workspace's CodeGraph warm-up starts (Config.WarmCodegraph), in its own goroutine so the pump
+// never waits on it.
 func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 	defer close(done)
 	defer stdout.Close()
@@ -354,6 +367,7 @@ func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 			}
 			return
 		}
+		s.warmed.Do(s.warmCodegraph)
 		line = bytes.Clone(line)
 		frame, err := shimwire.Decode(line)
 		s.order.Lock()
@@ -372,6 +386,21 @@ func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 			}
 		}
 	}
+}
+
+// warmCodegraph starts cfg.WarmCodegraph for the workspace LEGION_WORKSPACE names, once the
+// wrapped process has written its first line (pump). The command refuses --warm-codegraph without
+// the variable (cmd/legion/worker_shim.go), so an empty value here is a Config built by hand.
+func (s *shim) warmCodegraph() {
+	if s.cfg.WarmCodegraph == nil {
+		return
+	}
+	dir := envValue(s.cfg.Env, "LEGION_WORKSPACE")
+	if dir == "" {
+		s.log.Printf("[worker-shim] no CodeGraph warm-up: LEGION_WORKSPACE is unset")
+		return
+	}
+	go s.cfg.WarmCodegraph(dir)
 }
 
 // reap waits for the wrapped process, lets the pump forward what it wrote before exiting, and

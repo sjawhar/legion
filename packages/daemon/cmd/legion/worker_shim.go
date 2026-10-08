@@ -10,21 +10,29 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/shim"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:port> --boot-token-file <path> [--provider-env-dir <dir>] [--pod-safety] [--agent-secrets-key-dir <dir> --pod-token-file <path> --agent-secrets-bin <path>] -- <omp argv…>"
+const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:port> --boot-token-file <path> [--provider-env-dir <dir>] [--pod-safety] [--warm-codegraph] [--agent-secrets-key-dir <dir> --pod-token-file <path> --agent-secrets-bin <path>] -- <omp argv…>"
 
 // runWorkerShim is `legion worker-shim`, the command a runtime puts in front of every phase
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
 // go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
-// (podsafety.Apply, its overlay written to LEGION_STATE_DIR).
+// (podsafety.Apply, its overlay written to LEGION_STATE_DIR). With --warm-codegraph, which the
+// Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose workspace the
+// daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has no workspace
+// — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the background
+// once Oh My Pi has started (shim.Config.WarmCodegraph). On a relaunch the warm-up runs again:
+// `codegraph status` on the volume's existing index answers complete and nothing runs, or an
+// index an earlier build left partial is repaired as workspace.nextCodegraphStep decides.
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
 	bootTokenFile := flags.String("boot-token-file", "", "the file holding the pane's boot token")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files become NAME=contents in OMP's environment only")
 	podSafety := flags.Bool("pod-safety", false, "start OMP on a pod's baseline (internal/podsafety), writing its overlay to LEGION_STATE_DIR")
+	warmCodegraph := flags.Bool("warm-codegraph", false, "once Oh My Pi has started, build the CodeGraph index of the workspace LEGION_WORKSPACE names, in the background (a role's shim in an issue pod; never a tmux pane's or the controller's)")
 	keyDir := flags.String("agent-secrets-key-dir", "", "the pod's tmpfs directory for its agent-secrets key and enrollment id")
 	tokenFile := flags.String("pod-token-file", "", "the projected service-account token for the secrets broker's audience")
 	agentSecretsBin := flags.String("agent-secrets-bin", "", "the agent-secrets binary that generates the key and renews the lease")
@@ -34,7 +42,7 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	set := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
-	cfg, err := workerShimConfig(set, *connect, *bootTokenFile, *providerEnvDir, *keyDir, *tokenFile, *agentSecretsBin, flags.Args())
+	cfg, err := workerShimConfig(set, *connect, *bootTokenFile, *providerEnvDir, *keyDir, *tokenFile, *agentSecretsBin, *warmCodegraph, flags.Args())
 	if err == nil && *podSafety {
 		cfg.Env, err = podSafeEnvironment(cfg.Env)
 	}
@@ -64,12 +72,18 @@ func podSafeEnvironment(environ []string) ([]string, error) {
 // workerShimConfig is every refusal the command makes, each before anything is dialled or
 // spawned and each naming the flag or path at fault (worker-shim.ts:630-676). `set` is which
 // flags were given: a flag given an empty value is refused by its reader, not taken as absent.
-func workerShimConfig(set map[string]bool, connect, bootTokenFile, providerEnvDir, keyDir, tokenFile, agentSecretsBin string, argv []string) (shim.Config, error) {
+// warmCodegraph is --warm-codegraph, refused without LEGION_WORKSPACE in the environment: a shim
+// told to warm a workspace it was not told of has nothing to build, and the runtime that passes
+// the flag (internal/runtime/sandbox's launcherCommand) is the one that sets the variable.
+func workerShimConfig(set map[string]bool, connect, bootTokenFile, providerEnvDir, keyDir, tokenFile, agentSecretsBin string, warmCodegraph bool, argv []string) (shim.Config, error) {
 	if !set["connect"] {
 		return shim.Config{}, fmt.Errorf("--connect is required: %s", workerShimUsage)
 	}
 	if !set["boot-token-file"] {
 		return shim.Config{}, errors.New("--connect requires --boot-token-file <path>")
+	}
+	if warmCodegraph && os.Getenv("LEGION_WORKSPACE") == "" {
+		return shim.Config{}, errors.New("--warm-codegraph needs LEGION_WORKSPACE, the workspace whose CodeGraph index it builds")
 	}
 	network, address, err := shim.ParseAddress(connect)
 	if err != nil {
@@ -92,7 +106,7 @@ func workerShimConfig(set map[string]bool, connect, bootTokenFile, providerEnvDi
 	if err != nil {
 		return shim.Config{}, err
 	}
-	return shim.Config{
+	cfg := shim.Config{
 		Network:      network,
 		Address:      address,
 		BootToken:    token,
@@ -101,5 +115,9 @@ func workerShimConfig(set map[string]bool, connect, bootTokenFile, providerEnvDi
 		ProviderEnv:  providerEnv,
 		AgentSecrets: agentSecrets,
 		Grace:        shim.DefaultGrace,
-	}, nil
+	}
+	if warmCodegraph {
+		cfg.WarmCodegraph = workspace.WarmCodegraphIndexInBackground
+	}
+	return cfg, nil
 }

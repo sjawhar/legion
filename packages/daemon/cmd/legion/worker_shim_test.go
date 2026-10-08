@@ -44,6 +44,9 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_SHIM_TEST_SHADOWED", "")
+	// This test may itself run inside a pod that names a workspace; the refusal is about a shim
+	// told to warm one it was never told of.
+	t.Setenv("LEGION_WORKSPACE", "")
 
 	marker := filepath.Join(dir, "spawned")
 	omp := []string{"--", "sh", "-c", "touch " + marker}
@@ -62,6 +65,7 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 		{"an unreadable providers directory", append([]string{"--connect", connect, "--boot-token-file", token, "--provider-env-dir", filepath.Join(dir, "absent")}, omp...), 1, []string{"--provider-env-dir " + filepath.Join(dir, "absent") + " is unreadable"}},
 		{"no wrapped command", []string{"--connect", connect, "--boot-token-file", token, "--"}, 1, []string{"no wrapped command"}},
 		{"--agent-secrets-key-dir alone", append([]string{"--connect", connect, "--boot-token-file", token, "--agent-secrets-key-dir", dir}, omp...), 1, []string{"given together or not at all"}},
+		{"--warm-codegraph without LEGION_WORKSPACE", append([]string{"--connect", connect, "--boot-token-file", token, "--warm-codegraph"}, omp...), 1, []string{"--warm-codegraph", "LEGION_WORKSPACE"}},
 		{"--socket mode, which is not ported", append([]string{"--socket", socket}, omp...), 2, []string{"-socket"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,6 +156,80 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv("LEGION_SHIM_TEST_PROVIDED"); ok {
 		t.Fatal("the providers key leaked into the shim's own environment")
+	}
+}
+
+// With --warm-codegraph (the Sandbox runtime passes it for a role in an issue pod; a pane never
+// does) and LEGION_WORKSPACE set, the shim starts and, once the agent has written its first line,
+// builds that workspace's CodeGraph index in the background: `codegraph status --json` on the
+// workspace, then `init` on one never initialized. The agent's own exit status is still the
+// shim's, and the build never holds it up.
+func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "codegraph"), []byte(fakeCodegraph), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	workspaceDir := t.TempDir()
+	t.Setenv("LEGION_WORKSPACE", workspaceDir)
+
+	daemon := make(chan error, 1)
+	go func() {
+		daemon <- func() error {
+			conn, err := ln.Accept()
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
+				return err
+			}
+			if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
+				return err
+			}
+			_, err = io.Copy(io.Discard, conn)
+			return err
+		}()
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"legion", "worker-shim",
+		"--connect", "unix://" + socket, "--boot-token-file", token, "--warm-codegraph",
+		"--", "sh", "-c", `echo '{"type":"fake_ready"}'; exit 7`}, &stdout, &stderr)
+	if code != 7 {
+		t.Fatalf("exit %d, want the child's 7; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if err := <-daemon; err != nil {
+		t.Fatalf("the daemon side: %v", err)
+	}
+	codegraphLog := filepath.Join(dir, "codegraph.log")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		calls := logLines(t, codegraphLog)
+		if len(calls) >= 2 {
+			if calls[0] != "status --json" || calls[1] != "init" {
+				t.Fatalf("codegraph calls = %v, want status --json then init on the workspace", calls)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the shim never warmed the workspace's index; codegraph calls: %v; stdout: %s", calls, stdout.String())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

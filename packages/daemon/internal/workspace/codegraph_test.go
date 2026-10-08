@@ -446,6 +446,138 @@ esac
 	}
 }
 
+// stubCalls is the argv of every invocation stubCodegraph recorded, in order; nil when it was
+// never run.
+func stubCalls(t *testing.T, callLog string) []string {
+	t.Helper()
+	calls, err := os.ReadFile(callLog)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read codegraph call log: %v", err)
+	}
+	var argv []string
+	for line := range strings.Lines(strings.TrimSpace(string(calls))) {
+		args, _, _ := strings.Cut(line, "\t")
+		argv = append(argv, args)
+	}
+	return argv
+}
+
+// TestWarmCodegraphIndexHoldsACrossProcessLease: the six role shims of one issue pod, and a
+// draining pod beside its replacement, each warm the one workspace they share, and only one may
+// build. `.codegraph/legion-warm.lock` settles it across processes, where `warming` cannot: a
+// fresh lease (its holder's heartbeat within warmLeaseStale) makes a warm-up skip without even
+// running `status`, and leaves the file to its holder; one older than warmLeaseStale is a dead
+// holder's, taken over and built behind, with nothing of the takeover left in the directory; and a
+// warm-up that ran leaves no lease behind for the next to find.
+func TestWarmCodegraphIndexHoldsACrossProcessLease(t *testing.T) {
+	leaseOf := func(t *testing.T, dir string, age time.Duration) string {
+		t.Helper()
+		lease := filepath.Join(dir, ".codegraph", warmLeaseName)
+		if err := os.Mkdir(filepath.Dir(lease), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(lease, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mtime := time.Now().Add(-age)
+		if err := os.Chtimes(lease, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return lease
+	}
+	leaseFiles := func(t *testing.T, dir string) []string {
+		t.Helper()
+		entries, err := os.ReadDir(filepath.Join(dir, ".codegraph"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), warmLeaseName) {
+				names = append(names, entry.Name())
+			}
+		}
+		return names
+	}
+
+	t.Run("a fresh lease held by another process skips the warm-up", func(t *testing.T) {
+		callLog := filepath.Join(t.TempDir(), "calls.log")
+		stubCodegraph(t, callLog)
+		dir := t.TempDir()
+		lease := leaseOf(t, dir, 0)
+
+		warmCodegraphIndex(context.Background(), dir)
+		if calls := stubCalls(t, callLog); calls != nil {
+			t.Fatalf("codegraph calls = %v, want none while another process holds the lease", calls)
+		}
+		if _, err := os.Stat(lease); err != nil {
+			t.Fatalf("the holder's lease: %v, want it left in place", err)
+		}
+	})
+	t.Run("a stale lease is taken over and the build runs", func(t *testing.T) {
+		callLog := filepath.Join(t.TempDir(), "calls.log")
+		stubCodegraph(t, callLog)
+		dir := t.TempDir()
+		leaseOf(t, dir, warmLeaseStale+time.Minute)
+
+		warmCodegraphIndex(context.Background(), dir)
+		if calls := stubCalls(t, callLog); !slices.Equal(calls, []string{"status --json", "init"}) {
+			t.Fatalf("codegraph calls = %v, want status --json then init behind the taken-over lease", calls)
+		}
+		if left := leaseFiles(t, dir); left != nil {
+			t.Fatalf(".codegraph/ holds %v after the warm-up, want neither the lease nor the stale file renamed aside", left)
+		}
+	})
+	t.Run("the lease is released after a run", func(t *testing.T) {
+		callLog := filepath.Join(t.TempDir(), "calls.log")
+		stubCodegraph(t, callLog)
+		dir := t.TempDir()
+
+		warmCodegraphIndex(context.Background(), dir)
+		if calls := stubCalls(t, callLog); !slices.Equal(calls, []string{"status --json", "init"}) {
+			t.Fatalf("codegraph calls = %v, want status --json then init", calls)
+		}
+		if left := leaseFiles(t, dir); left != nil {
+			t.Fatalf(".codegraph/ holds %v after the warm-up, want the lease released", left)
+		}
+	})
+}
+
+// TestWarmCodegraphIndexStillInitializesAFreshWorkspaceWhenStatusFails: the lease lives under
+// `.codegraph/`, so the warm-up makes that directory before `status` runs, and nextCodegraphStep's
+// fallback for a `status` that failed reads an existing directory as an index to repair. A
+// workspace that had no `.codegraph/` before the warm-up must still be judged directory-less
+// there: `init`, never `index`, which refuses on an uninitialized workspace.
+func TestWarmCodegraphIndexStillInitializesAFreshWorkspaceWhenStatusFails(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+printf '%s\n' "$1" >> '` + callLog + `'
+case "$1" in
+status) echo 'database disk image is malformed' >&2; exit 1 ;;
+index) echo 'CodeGraph not initialized' >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codegraph"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	warmCodegraphIndex(context.Background(), dir)
+	calls, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read codegraph call log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if !slices.Equal(lines, []string{"status", "init"}) {
+		t.Fatalf("codegraph calls = %v, want exactly status then init (the lease's directory must not read as an index to repair)", lines)
+	}
+}
+
 // TestNextCodegraphStep table-tests the pure decision warmCodegraphIndex runs on: a parsed
 // status decides outright (its `initialized:false` always means init, even when `.codegraph/`
 // exists); dirExists is consulted only when status failed or didn't parse; and a live lock

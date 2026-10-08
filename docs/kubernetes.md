@@ -287,6 +287,9 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 Only the transcript moves. Tool artifacts and image blobs stay under the agent directory on local disk
 (`~/.omp/profiles/legion/agent/…`), as do OMP's logs and `models.db`; `.legion/` handoffs live in the
 repository. A pod that dies loses those local files as it does today — the conversation it does not.
+The workspace's CodeGraph index, `.codegraph/` in the workspace on the tree volume (185 MB for this
+repository), is built by a role's shim after its Oh My Pi starts ([Anatomy of a Sandbox
+pod](#anatomy-of-a-sandbox-pod)) and outlives the pod with the workspace.
 
 ### The extension under SQL storage
 
@@ -840,8 +843,22 @@ share, at the cost of one download per issue. uv copies each package from the sh
 made in place inside one workspace's `.venv` would change the cache and every other `.venv` of the tree
 that installed the package, including ones installed later. So each `.venv` is a full copy of its
 packages on the tree volume, beside the cache, and a deployment sizes `tree_volume` for one copy per
-workspace of a tree. `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
+workspace of a tree, and for one CodeGraph index per workspace (`.codegraph/`, 185 MB for this
+repository). `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
 stops at the pod, so neither may run while another pod of the tree is using uv.
+
+Each role's shim is started with `--warm-codegraph`: once its Oh My Pi has written its first frame —
+its extensions loaded, its RPC loop serving — the shim builds the workspace's CodeGraph index in the
+background (`codegraph init`, or `codegraph index` to repair one an earlier build left partial, as
+`codegraph status --json` decides). Nothing waits on it: not the launch, not the role's registration,
+not a prompt. Six role shims share one workspace, and a draining pod can overlap its replacement, so
+the warm-up holds a lease at `.codegraph/legion-warm.lock` for its run — an exclusive create whose
+holder refreshes its mtime every 10 s, taken over once it is 60 s stale — and a shim that finds the
+lease held leaves the build to its holder (a pod's `flock` reaches no other pod under gVisor, so the
+lease is a file, not a lock). A relaunch runs the warm-up again, and `status` on the volume's existing
+index answers complete, so nothing runs. The tester's `affected` and the reviewer's `impact`/`callers`
+queries answer once `codegraph status --json` reports `index.state: "complete"`; before that a role
+falls back to grep, as its prompt says. The init containers never call `codegraph`.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;
