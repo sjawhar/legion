@@ -1010,8 +1010,10 @@ relaunch_ends() {
   ' --args "$@"
 }
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
-# a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`,
-# naming the pod uid as the incarnation) that no driver action ended, and exits 1 when there is any.
+# a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`)
+# that no driver action ended, and exits 1 when there is any. The daemon names the process by its
+# incarnation, `<pod uid>/<generation>`, and a driver action by the pod uid alone (driver_action), so
+# an action on a pod accounts for a death of any generation of a role in that pod, and of no other.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
 # resume that finds the tree volume lost dies by design (the runtime's detail begins "the tree volume
 # was lost: "), and
@@ -1038,7 +1040,8 @@ pod_watch_verdict() {
         | select($podReason == "Evicted" or any($terms[]; .reason == "OOMKilled"))
         | "\($p.metadata.name) uid \($p.metadata.uid): \($podReason) \([$terms[] | "\(.reason) exit \(.exitCode)"] | join(", "))" ]
       + [ $died[] | select((.detail // "") | startswith("the tree volume was lost: ") | not)
-          | .incarnation as $i | select(($driver | index($i)) == null and ($retired | index($i)) == null)
+          | .incarnation as $i | ($i | split("/")[0]) as $pod
+          | select(($driver | index($pod)) == null and ($retired | index($i)) == null)
           | "incarnation \($i) died with no driver action: observed \(.observed), \((.detail // "") | .[0:200])" ]
       | unique as $bad
     | if $hog then $bad[] else ("the memory hog was never seen OOMKilled", $bad[]) end
@@ -1046,17 +1049,17 @@ pod_watch_verdict() {
   [ ! -s "$work/pod-watch-verdict.txt" ]
 }
 # never_scheduled_deaths WATCH DAEMONLOG prints, one a line, each incarnation the daemon found dead
-# (`supervise: process died`) whose pod the watch saw `PodScheduled=False` with reason
-# `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon retired at its
-# boot deadline because the scheduler never placed it. It reads the pod's own conditions, never the
-# daemon's detail text.
+# (`supervise: process died`) whose pod, the incarnation's pod uid, the watch saw `PodScheduled=False`
+# with reason `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon
+# retired at its boot deadline because the scheduler never placed it. It reads the pod's own
+# conditions, never the daemon's detail text.
 never_scheduled_deaths() {
   local watch=$1 log=$2
   jq -s -r --rawfile log "$log" '
     ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died") | .incarnation)) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
-    | $died[] | . as $i
-    | [ $pods[] | select(.metadata.uid == $i) ] as $seen
+    | $died[] | . as $i | ($i | split("/")[0]) as $uid
+    | [ $pods[] | select(.metadata.uid == $uid) ] as $seen
     | select(($seen | length) > 0
         and any($seen[]; any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))
         and (any($seen[]; (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True")) | not))
@@ -3516,14 +3519,15 @@ jq -c 'select(.object.kind == "Pod") | .object' "$evidence/pod-watch.json" | tai
   jq -c '{kind: "Pod", object: (.status.containerStatuses[0].state = {terminated: {reason: "OOMKilled", exitCode: 137}})}' >"$work/injected.json"
 cat "$evidence/pod-watch.json" "$work/injected.json" >"$evidence/controls/pod-watch-with-oom.json"
 expect_failure pod-watch-synthetic-oom pod_watch_verdict "$evidence/controls/pod-watch-with-oom.json" "$evidence/driver-actions.txt" "$daemon_log"
-{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-control", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-with-death.log"
+{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-control/1", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-with-death.log"
 expect_failure pod-watch-synthetic-death pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-with-death.log"
 # Controls for the unscheduled-retirement rule: a pod that was only ever Unschedulable and then died
-# is accounted for, and the same death is unexplained once its pod was scheduled.
+# is accounted for, and the same death is unexplained once its pod was scheduled. Each death names its
+# process as the daemon does, `<pod uid>/<generation>`.
 jq -cn '{kind: "Pod", object: {kind: "Pod", metadata: {name: "control-unscheduled", uid: "00000000-e2e4-unscheduled", labels: {}},
   spec: {}, status: {phase: "Pending", conditions: [{type: "PodScheduled", status: "False", reason: "Unschedulable"}]}}}' >"$work/unscheduled.json"
 cat "$evidence/pod-watch.json" "$work/unscheduled.json" >"$evidence/controls/pod-watch-unscheduled.json"
-{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-unscheduled", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-unscheduled-death.log"
+{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-unscheduled/1", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-unscheduled-death.log"
 pod_watch_verdict "$evidence/controls/pod-watch-unscheduled.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-unscheduled-death.log" ||
   fail "the verdict counted a pod retired unscheduled as an unexplained death: $(tr '\n' ';' <"$work/pod-watch-verdict.txt")"
 jq -c '.object.spec.nodeName = "control-node" | .object.status.conditions = [{type: "PodScheduled", status: "True"}]' "$work/unscheduled.json" >"$work/scheduled.json"
