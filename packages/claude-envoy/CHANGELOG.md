@@ -5,8 +5,8 @@
 ### Changed
 
 - Agents reach Dispatch through the `dispatch` command (LEGION-588): `bin/dispatch` puts it on the
-  Bash tool's `PATH`, running the committed `dist/dispatch.js`, and the `open-asks` hook appends
-  `export DISPATCH_HOST=claude` to `CLAUDE_ENV_FILE` on every `SessionStart`. The command acts as
+  Bash tool's `PATH`, running the committed `dist/dispatch.js`, and the `open-asks` hook writes
+  `export DISPATCH_HOST=claude` to `CLAUDE_ENV_FILE` once per session. The command acts as
   the session `CLAUDE_CODE_SESSION_ID` names and prints the follow notice itself, once per ask.
 
 ### Removed

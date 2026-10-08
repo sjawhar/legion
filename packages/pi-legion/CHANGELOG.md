@@ -16,6 +16,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- An architect's one shell command is held to one scan whatever its head: a `legion` command now
+  refuses `$()`, backticks, redirects and comments as a `dispatch` command does, where it refused
+  only `;`, `&`, `|` and a newline (found in LEGION-588's review). A here-document opened with
+  plain `<<` ends only at a line that is exactly its delimiter, as bash ends it; a tab-indented
+  delimiter ends only a `<<-` one, so a command bash would leave open is refused.
 - `legion.daemonApiVersion` is 15 (LEGION-588). Contract 15 moves the daemon's role prompts from
   native Dispatch tools to the `dispatch` command bundled by `@sjawhar/pi-envoy`; pair this
   release with a Go `legion` built from the same commit, so an agent is never instructed to use a

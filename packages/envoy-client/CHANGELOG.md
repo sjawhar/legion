@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
+  Under Claude Code the 25,000-character limit counts the whole output, so the result text is cut
+  to fit and its full text written to a file the output names, and the picture lines and follow
+  notice are never cut. A `state.json` that is not JSON exits 2 naming the file before any request;
+  a picture, ledger or memory write that fails after Dispatch took the call prints the result and
+  one line saying so. `readResultsSince` names a ledger line that is not JSON, with its file and
+  line number, to the callback it now takes, and reads past it. An ask option whose label holds
+  `: ` is written `--options-json`, so every option list round-trips through `commandLine`.
+- A refusal names a Dispatch tool by its `dispatch` command and flags always; `ToolInputError`
+  and `formatZodIssues` no longer take a `syntax` option.
+
+### Removed
+
+- `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
+
 ### Added
 
 - Pictures in Dispatch (LEGION-541). `dispatch_message`, `dispatch_comment` and `dispatch_ask` take
