@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -625,7 +626,7 @@ func TestAFinishedWorkerThatDiesIsRelaunchedAndItsFailureHoldsNothing(t *testing
 		}
 		return len(notices) > 0
 	})
-	if len(notices) != 1 || notices[0] != record.OutboxPayload(died) {
+	if len(notices) != 1 || !reflect.DeepEqual(notices[0], record.OutboxPayload(died)) {
 		t.Fatalf("notices = %+v, want the one worker-died %+v", notices, died)
 	}
 	var current phase.Phase
