@@ -692,7 +692,8 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	}
 	// The table is the guard: a move no backward row serves - to awaiting_merge, which no worker
 	// holds, or to anything but an earlier phase - is refused rather than answered as if it moved.
-	if _, ok := e.row(issue.Phase, TriggerBackward, fact.To, Snapshot{Phase: issue.Phase}); !ok || RoleFor(issue.Phase) != fact.Requester {
+	// An empty target is refused first, since the row lookup takes it to match any row.
+	if _, ok := e.row(issue.Phase, TriggerBackward, fact.To, Snapshot{Phase: issue.Phase}); fact.To == "" || !ok || RoleFor(issue.Phase) != fact.Requester {
 		return refused("BACKWARD_REFUSED", fmt.Sprintf("a backward move needs the role running %s of %s and an earlier phase a backward move reaches from it; the %s's move to %s changed nothing",
 			issue.Phase, issue.Key, fact.Requester, fact.To)), nil
 	}

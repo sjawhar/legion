@@ -764,7 +764,8 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 
 // A backward move no backward row serves is refused, and nothing moves or is counted: to
 // awaiting_merge, which no worker holds; to the phase the issue is already in or a later one; out
-// of awaiting_merge, where no worker holds a phase; or by a role that does not run the phase.
+// of awaiting_merge, where no worker holds a phase; by a role that does not run the phase; or to no
+// phase at all, which the row lookup would otherwise take to match any row.
 func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -777,6 +778,7 @@ func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 		{"testing to a later phase", phase.Testing, claim.RoleTester, phase.Reviewing},
 		{"out of awaiting_merge", phase.AwaitingMerge, claim.RoleImplementer, phase.Implementing},
 		{"by a role that does not run the phase", phase.Testing, claim.RoleReviewer, phase.Implementing},
+		{"to no phase", phase.Testing, claim.RoleTester, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
