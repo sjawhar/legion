@@ -59,8 +59,7 @@ package api
 // 16: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
 // grant the plugin redeems: the three credential routes, `POST /legion/v1/gh-token`,
 // `POST /legion/v1/git-credential` and `POST /legion/v1/provisioning-credential`, and
-// `GrantRequest.push` on `POST /legion/v1/grants` are gone from the contract (a later task deletes
-// their code; a plugin on 16 calls none of them). The pane and pod environment gains
+// `GrantRequest.push` on `POST /legion/v1/grants` are deleted. The pane and pod environment gains
 // `GH_CONFIG_DIR`, the role's directory of gh files (`hosts.yml` and `config.yml` rendered from
 // its App token and rewritten as the lease turns over), with `GH_TOKEN`, `GITHUB_TOKEN` and
 // `GH_HOST` set to the empty string so nothing in the environment outranks the file — all four
@@ -73,6 +72,6 @@ package api
 // directory first alone. The plugin mints a grant only before a bash command that invokes
 // `legion` (`legion push`, say), never before every command. A plugin or
 // image built before 16 would still shim gh over a token file it never reads and mint a grant
-// before every command, against routes a daemon on 16 may no longer serve, so the boot gate and
+// before every command, against routes a daemon on 16 no longer serves, so the boot gate and
 // `legion probe-image` refuse the mixed pair.
 const DaemonAPIVersion = 16

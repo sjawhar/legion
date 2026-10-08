@@ -152,9 +152,6 @@ test("reads the daemon's state strictly, refusing the TypeScript daemon's shape"
 test("posts every Stage 3 workflow request through its matching route", async () => {
   type WorkflowClient = {
     readonly grant: (body: object) => Promise<unknown>;
-    readonly githubToken: (body: object) => Promise<unknown>;
-    readonly gitCredential: (body: object) => Promise<unknown>;
-    readonly provisioningCredential: (body: object) => Promise<unknown>;
     readonly handoffComplete: (body: object) => Promise<unknown>;
     readonly issueStatus: (body: object) => Promise<unknown>;
     readonly gateRegister: (body: object) => Promise<unknown>;
@@ -171,14 +168,6 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       "/legion/v1/grants",
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
       "grant.json",
-    ],
-    ["githubToken", "/legion/v1/gh-token", { grantId: "grant-208" }, "github-token.json"],
-    ["gitCredential", "/legion/v1/git-credential", { grantId: "grant-208" }, "git-credential.json"],
-    [
-      "provisioningCredential",
-      "/legion/v1/provisioning-credential",
-      { grantId: "grant-208" },
-      "provisioning-credential.json",
     ],
     [
       "handoffComplete",

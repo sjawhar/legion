@@ -325,25 +325,12 @@ export const LegionOperatorClaimsResponse = z.strictObject({
   claims: z.array(LegionOperatorClaimResponse),
 });
 
-/** Credential grant, GitHub token, and git-helper bodies from `internal/api/credentials.go`. */
+/** The credential grant body from `internal/api/credentials.go`. */
 export const LegionGrantResponse = z.strictObject({
   grantId: nonEmptyString,
   expiresAt: timestamp,
 });
 export type LegionGrant = z.output<typeof LegionGrantResponse>;
-/** A GitHub App's git identity, `<slug>[bot]`, with a slug. */
-const appLogin = z.string().regex(/^[^[\]]+\[bot\]$/);
-export const LegionGitHubTokenResponse = z.strictObject({
-  token: nonEmptyString,
-  appLogin: z.string().endsWith("[bot]"),
-  /** `api.GitHubTokenResponse.LegionAppLogins`: each Legion role App's login, keyed by its App role,
-   * on gh-token alone; absent when the daemon could not read every one. */
-  legionAppLogins: z.strictObject({ implement: appLogin, review: appLogin }).optional(),
-});
-export const LegionGitCredentialResponse = z.strictObject({
-  username: z.literal("x-access-token"),
-  password: nonEmptyString,
-});
 
 /** `api.ThreadsResolveRequest`, the reviewer pane's `legion threads resolve`: its grant, and the
  * pull request it names, which must be its issue's. */
@@ -385,16 +372,12 @@ export const LegionWaveReleaseResponse = z.strictObject({
 });
 
 /** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every
- * redemption for sixty seconds while its claim holds the registration that minted it — or, when
- * `push` is true (the extension judged the bash command to run `legion push`), for the daemon's
- * longer push grant lifetime, since jj's own working-copy snapshot before the network push can
- * outrun sixty seconds on a near-full tree volume (dispatch://LEGION-583). */
+ * redemption for sixty seconds while its claim holds the registration that minted it. */
 export const LegionGrantRequest = z.strictObject({
   sessionId: nonEmptyString,
   secret: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
-  push: z.boolean().optional(),
 });
 
 /** `api.GrantRequest`, the controller-session form: the session registered with the current

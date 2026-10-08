@@ -14,13 +14,6 @@ import (
 
 const ttl = 60 * time.Second
 
-// pushTTL is the grant `legion push` redeems: long enough to cover jj's own working-copy snapshot
-// before the network push, measured at 63 to 100 seconds on a near-full tree volume
-// (dispatch://LEGION-583), with margin. Every other command keeps ttl; the extension
-// requests this only for a bash command that runs `legion push` (pi-legion's commandsRunPush), so
-// no grant is any longer than its command needs.
-const pushTTL = 5 * time.Minute
-
 // expiredRetention is how long an expired grant's record is kept, so a command that outran its
 // grant still learns it expired; after it, Mint prunes the record and the id is unavailable.
 const expiredRetention = time.Hour
@@ -68,20 +61,15 @@ func New(now func() time.Time) *Grants {
 }
 
 // Mint records a grant for the authenticated claim a route already proved with the exact same
-// capability comparison as /claims/ready and /claims/exit: ttl, unless forPush asks for pushTTL
-// (a bash command the extension judged to run `legion push`). The capability hash is copied so a
+// capability comparison as /claims/ready and /claims/exit. The capability hash is copied so a
 // later registration replacement cannot retain the old session's authority.
-func (g *Grants) Mint(c supervise.Claim, forPush bool) (Grant, error) {
+func (g *Grants) Mint(c supervise.Claim) (Grant, error) {
 	if c.Token == "" || c.Project == "" || c.Tree == "" || c.Issue == "" || c.Role == "" || len(c.CapabilityHash) == 0 {
 		return Grant{}, ErrUnauthenticated
 	}
 	id, err := grantID()
 	if err != nil {
 		return Grant{}, err
-	}
-	lifetime := ttl
-	if forPush {
-		lifetime = pushTTL
 	}
 	grant := Grant{
 		ID:             id,
@@ -90,7 +78,7 @@ func (g *Grants) Mint(c supervise.Claim, forPush bool) (Grant, error) {
 		Tree:           c.Tree,
 		Role:           c.Role,
 		Claim:          c.Token,
-		ExpiresAt:      g.now().Add(lifetime),
+		ExpiresAt:      g.now().Add(ttl),
 		capabilityHash: append([]byte(nil), c.CapabilityHash...),
 	}
 	g.record(grant)
@@ -136,11 +124,10 @@ func (g *Grants) record(grant Grant) {
 	g.issued[grant.ID] = grant
 }
 
-// Redeem answers id's grant for as long as its lifetime lasts — ttl ordinarily, or pushTTL for a
-// `legion push` invocation's own grant. A grant is the credential of one bash command, which may
-// run `legion gh` several times and whose git may call the credential helper more than once, so it
-// serves every redemption until it expires — as the shipped daemon's resolveGrant does. Redeem
-// knows nothing of the claim: a route refuses a grant whose claim no
+// Redeem answers id's grant for as long as ttl lasts. A grant is the credential of one bash
+// command, which may run `legion gh` several times and whose git may call the credential helper
+// more than once, so it serves every redemption until it expires — as the shipped daemon's
+// resolveGrant does. Redeem knows nothing of the claim: a route refuses a grant whose claim no
 // longer holds the capability that minted it (StillMatches), on every redemption.
 func (g *Grants) Redeem(id string) (Grant, error) {
 	g.mu.Lock()

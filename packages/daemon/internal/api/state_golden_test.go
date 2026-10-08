@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -333,16 +332,6 @@ func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
 func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "grant.json", GrantResponse{
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
-	})
-	golden(t, "github-token.json", GitHubTokenResponse{
-		Token: "installation-token", AppLogin: "legion-implementer[bot]",
-		LegionAppLogins: map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"},
-	})
-	golden(t, "git-credential.json", GitCredentialResponse{
-		Username: "x-access-token", Password: "installation-token",
-	})
-	golden(t, "provisioning-credential.json", GitHubTokenResponse{
-		Token: "installation-token", AppLogin: "legion-implementer[bot]",
 	})
 	golden(t, "threads-resolve.json", ThreadsResolveResponse{Threads: []reviewthreads.Outcome{
 		{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"},

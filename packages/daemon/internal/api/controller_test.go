@@ -210,9 +210,6 @@ func TestTheRegisteredControllerMintsControllerGrants(t *testing.T) {
 	}
 	var grant GrantResponse
 	decodeInto(t, recorder, &grant)
-	// A controller grant, by what it may redeem: no repository credential.
-	answer := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil)
-	wantFailure(t, answer, http.StatusForbidden, "CONTROLLER_HAS_NO_REPOSITORY")
 
 	for _, attempt := range []struct{ session, secret string }{
 		{"ses_other", registration.Secret},
@@ -372,9 +369,6 @@ func TestCredentialAndWorkflowRoutesRefuseAMissingFieldWithACode(t *testing.T) {
 	for _, route := range []struct{ path, body, field string }{
 		{"/legion/v1/grants", `{"sessionId":"s","tree":"LEGION-208","issue":"LEGION-208"}`, "secret"},
 		{"/legion/v1/grants", `{"sessionId":"s"}`, "secret"},
-		{"/legion/v1/gh-token", `{}`, "grantId"},
-		{"/legion/v1/git-credential", `{}`, "grantId"},
-		{"/legion/v1/provisioning-credential", `{}`, "grantId"},
 		{"/legion/v1/handoff/complete", `{"grantId":"g","commit":"c"}`, "summary"},
 		{"/legion/v1/issues/status", `{"grantId":"g","issue":"LEGION-208"}`, "status"},
 		{"/legion/v1/signoff", `{"grantId":"g"}`, "issue"},
