@@ -266,7 +266,7 @@ func TestAWorkersExtensionErrorIsLogged(t *testing.T) {
 	p := dial(t, h.listener.Addr())
 	p.hello(testToken)
 	p.expect(shimwire.TypeHelloAck)
-	p.send(shimwire.Raw{Type: "extension_error", JSON: json.RawMessage(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion-envoy/dist/legion.js","event":"session_start","error":"LEGION_DAEMON_URL is required for Legion"}`)})
+	p.send(shimwire.Raw{Type: "extension_error", JSON: json.RawMessage(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion/dist/legion.js","event":"session_start","error":"LEGION_DAEMON_URL is required for Legion"}`)})
 	p.conn.Close()
 	for _, want := range []Event{Hello{Claim: testClaim, Generation: testGeneration}, Closed{Claim: testClaim}} {
 		if got := h.next(); got != want {
@@ -277,7 +277,7 @@ func TestAWorkersExtensionErrorIsLogged(t *testing.T) {
 	logs := h.logs.Lines()
 	if len(logs) != 1 || !strings.HasPrefix(logs[0], "worker-stream: an extension of the worker's Oh My Pi failed") ||
 		!strings.Contains(logs[0], "claim="+string(testClaim)) ||
-		!strings.Contains(logs[0], "extension=/opt/legion/pi-legion-envoy/dist/legion.js") ||
+		!strings.Contains(logs[0], "extension=/opt/legion/pi-legion/dist/legion.js") ||
 		!strings.Contains(logs[0], "event=session_start") ||
 		!strings.Contains(logs[0], "error=LEGION_DAEMON_URL is required for Legion") {
 		t.Fatalf("logs = %q, want one warning naming the claim, the extension, its event and its error", logs)
@@ -554,6 +554,38 @@ func TestGetStateRefusesAnAnswerWithoutIsStreaming(t *testing.T) {
 	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeGetState, Success: true, Data: mustJSON(t, map[string]any{"model": "m"})})
 	if err := awaitResult(t, result); err == nil {
 		t.Fatal("GetState read an answer without isStreaming as a state")
+	}
+}
+
+// Abort sends OMP's abort frame and returns on OMP's answer; the turn's end is the agent_end that
+// follows the answer, which is still a TurnEnd. A refusal is the agent's answer, never a refused
+// prompt.
+func TestAbortReturnsOnTheAnswerAndTheTurnEndsOnItsAgentEnd(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	conn := h.conn()
+	result := async(func() error { return conn.Abort(context.Background()) })
+	p.negotiate()
+	request := p.expect(shimwire.TypeAbort).(shimwire.Abort)
+	if request.ID == "" {
+		t.Fatal("the abort frame carries no request id, so its answer could not be told apart")
+	}
+	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Abort = %v, want nil on OMP's answer", err)
+	}
+	p.send(shimwire.AgentEnd{})
+	if event := h.next(); event != (TurnEnd{Claim: testClaim}) {
+		t.Fatalf("event after the abort's answer = %#v, want the agent_end's TurnEnd", event)
+	}
+
+	refused := async(func() error { return conn.Abort(context.Background()) })
+	request = p.expect(shimwire.TypeAbort).(shimwire.Abort)
+	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: false, Error: "no"})
+	err := awaitResult(t, refused)
+	var refusal *RefusedError
+	if !errors.As(err, &refusal) || errors.Is(err, runtime.ErrPromptRefused) {
+		t.Fatalf("a refused abort = %v, want a *RefusedError that is not a refused prompt", err)
 	}
 }
 

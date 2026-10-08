@@ -28,7 +28,7 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 // beside a tree's architect, completed as the state route completes it (internal/daemon's
 // source.State), and it is packages/contracts' state-controller-claim fixture: the contract's own
 // schema parses it (packages/contracts/src/legion-api.test.ts), and the plugin's daemon-launched
-// controller reads it as its daemon's state (packages/pi-envoy/extensions/legion.test.ts).
+// controller reads it as its daemon's state (packages/pi-legion/extensions/legion.test.ts).
 func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	const issue = "LEGION-208"
 	architect, err := claim.NewToken("legion", issue, claim.RoleArchitect)
@@ -45,11 +45,11 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	state, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{
 		{
 			Token: architect, Project: "legion", Tree: issue, Issue: issue, Role: claim.RoleArchitect,
-			State: supervise.StateReady, Session: "ses_architect_208", Locator: sandboxLocator(architect, "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04"),
+			State: supervise.StateReady, Session: "ses_architect_208", Locator: sandboxLocator(architect, "legion-legion-legion-208", "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04", 1),
 		},
 		{
 			Token: controller, Project: "legion", Role: claim.RoleController,
-			State: supervise.StateReady, Session: "ses_controller", Locator: sandboxLocator(controller, "9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57"),
+			State: supervise.StateReady, Session: "ses_controller", Locator: sandboxLocator(controller, "legion-legion-controller", "9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57", 1),
 		},
 	})
 	if err != nil {
@@ -67,16 +67,20 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		t.Errorf("%s's architect = %+v, want its ready claim", issue, view.Architect)
 	}
 
-	state.Daemon = api.DaemonInfo{Project: "LEGION", SchemaVersion: 32, Boots: 2, FirstBootAt: admitted.Add(-time.Hour), StartedAt: admitted.Add(-time.Minute)}
+	state.Daemon = api.DaemonInfo{Project: "LEGION", SchemaVersion: 35, Boots: 2, FirstBootAt: admitted.Add(-time.Hour), StartedAt: admitted.Add(-time.Minute)}
 	state.Admission.Cap = 2
 	state.ControllerLocator = &api.ControllerLocator{Runtime: "kubernetes", External: true, SessionID: "ses_controller", RegisteredAt: admitted.Add(-30 * time.Second)}
 	golden(t, "state-controller-claim.json", state)
 }
 
-func sandboxLocator(token claim.Token, uid string) *runtime.Locator {
+// sandboxLocator is one role process in a Sandbox (contract 15): the Sandbox's name, the pod's uid,
+// the role's container (the role the token names, the controller's included) and the process
+// generation, its incarnation `<pod uid>/<generation>`.
+func sandboxLocator(token claim.Token, sandbox, podUID string, generation uint64) *runtime.Locator {
+	role, _ := token.Role()
 	return &runtime.Locator{
-		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: uid,
-		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: string(token)},
+		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: runtime.SandboxIncarnation(podUID, generation),
+		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: sandbox, PodUID: podUID, Container: string(role), Generation: generation},
 	}
 }
 

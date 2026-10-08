@@ -17,7 +17,7 @@ const ttl = 60 * time.Second
 // pushTTL is the grant `legion push` redeems: long enough to cover jj's own working-copy snapshot
 // before the network push, measured at 63 to 100 seconds on a near-full tree volume
 // (dispatch://LEGION-583), with margin. Every other command keeps ttl; the extension
-// requests this only for a bash command that runs `legion push` (pi-envoy's commandsRunPush), so
+// requests this only for a bash command that runs `legion push` (pi-legion's commandsRunPush), so
 // no grant is any longer than its command needs.
 const pushTTL = 5 * time.Minute
 

@@ -1493,7 +1493,7 @@ describe("executeDispatchTool", () => {
         asks: [
           {
             id: "ask-1",
-            ref: "/issues/LEGION-1?ask=ask-1",
+            ref: "/issues/LEGION-1/asks/ask-1",
             question: releaseQuestion,
             kind: "question",
             urgency: "high",
@@ -1543,7 +1543,7 @@ describe("executeDispatchTool", () => {
         "2 unanswered asks you authored on active issues and project documents.",
         "",
         "Waiting on human (1):",
-        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1?ask=ask-1`,
+        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1/asks/ask-1`,
         "",
         "Waiting on agent (1):",
         "- 2h · OPS / Runbook · Which region? · http://dispatch.test/projects/OPS/documents/runbook?ask=ask-2",
@@ -3837,7 +3837,8 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
-    expect(result.text).toContain("`plan-gap-analyst`");
+    expect(result.text).toContain('`task(agent="scout")`');
+    expect(result.text).toContain("Legion plugin's `plan-gap-analyst`");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
@@ -5706,6 +5707,20 @@ describe("executeDispatchTool", () => {
               created_at: "2026-09-08T23:59:00Z",
             },
           ],
+          answers: [
+            {
+              user: "sami",
+              selected: ["MCP API"],
+              text: null,
+              at: "2026-09-08T23:58:00Z",
+            },
+            {
+              user: "sami",
+              selected: ["JSON"],
+              text: "Ship JSON.",
+              at: "2026-09-09T00:00:00Z",
+            },
+          ],
         });
       }
       if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
@@ -5770,6 +5785,8 @@ describe("executeDispatchTool", () => {
         "- By: sami",
         "- Selected: JSON",
         "- Text: Ship JSON.",
+        "Earlier answers:",
+        "- 2026-09-08T23:58:00Z · sami · MCP API",
         "Replies:",
         "comment-1 · user sami",
         "Body: JSON, please.",
@@ -6315,6 +6332,7 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
@@ -6397,6 +6415,7 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("node"));
@@ -6656,6 +6675,7 @@ describe("executeDispatchTool", () => {
               created_at: "2026-09-08T23:59:00Z",
             },
           ],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
@@ -7072,6 +7092,7 @@ describe("executeDispatchTool", () => {
             payload: {
               question: releaseQuestion,
               answer: { selected: ["Keep the limits"], text: "No, trim the asks." },
+              previous_answer: { selected: ["Trim the asks"], text: null },
             },
           },
           {
@@ -7124,7 +7145,7 @@ describe("executeDispatchTool", () => {
         "Events:",
         `- #2 comment.created · user sami · 2026-09-09T00:02:00Z · Looks good. ${"x".repeat(108)}…`,
         `- #3 ask.opened · session s1 · 2026-09-09T00:03:00Z · ${releaseQuestion}`,
-        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks.`,
+        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks. (was: Trim the asks)`,
         "- #5 artifact.version · session s1 · 2026-09-09T00:05:00Z · spec.md v3: Record D1",
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
         "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
@@ -7301,6 +7322,7 @@ describe("executeDispatchTool", () => {
           },
           replies: [],
           edits: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));

@@ -496,6 +496,7 @@ test("a reply typed into an answered ask's thread survives leaving the Comments 
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: anchoredAsk,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -700,6 +701,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
   queryClient.setQueryData(["comments", issue.key], [askReply]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: anchoredAsk,
+    answers: [],
     edits: [],
     followers: [],
     replies: [askReply],

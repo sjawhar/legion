@@ -19,6 +19,8 @@
     "packages/contracts",
     "packages/envoy-client",
     "packages/pi-envoy",
+    "packages/pi-legion",
+    "packages/pi-shared",
     "packages/envoy-plugin",
     "packages/claude-envoy",
     "packages/proof-editor",

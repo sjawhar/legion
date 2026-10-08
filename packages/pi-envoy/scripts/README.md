@@ -2,7 +2,7 @@
 
 ## smoke-delivery.sh
 
-Real end-to-end delivery smoke test against the *installed* pi-legion-envoy
+Real end-to-end delivery smoke test against the *installed* pi-envoy
 plugin. It launches a real, interactive `omp` session (TUI mode, never `-p`)
 in a scratch tmux session and a throwaway directory outside any repo
 checkout, so the only extension that loads is whatever is materialized at
@@ -31,9 +31,9 @@ Env overrides:
 Run from a host with:
 
 - A live Envoy listener reachable at `ENVOY_URL`, with NATS behind it.
-- The `pi-legion-envoy` plugin installed for every `omp` session on the
+- The `pi-envoy` plugin installed for every `omp` session on the
   machine, materialized at
-  `~/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy`. The script fails
+  `~/.omp/plugins/node_modules/@sjawhar/pi-envoy`. The script fails
   fast and names the path if that package.json is missing, is not valid
   JSON, or has no `.version` — the smoke is meaningless without the real
   installed artifact.
@@ -110,7 +110,7 @@ stand-ins and the scratch Dispatch recorded (`rig.sh score`). `rig.sh live-read 
 has one session read every file of a skill and reports whether each arrived whole.
 
 ```bash
-cd packages/pi-envoy/scripts/skill-scenarios
+cd packages/pi-legion/scripts/skill-scenarios
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
 ./rig.sh batch ask-on-message 5 head base   # starts and stops the scratch Dispatch, Postgres, NATS, listener
 ./rig.sh batch tester-proof 5 head base

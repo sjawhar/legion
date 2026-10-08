@@ -27,88 +27,21 @@
           {
             "command": [
               "/opt/legion/bin/legion",
-              "worker-shim",
+              "launcher",
               "--connect",
               "tcp://192.0.2.250:13371",
-              "--boot-token-file",
-              "/var/run/legion/boot/LEGION_BOOT_TOKEN",
-              "--pod-safety",
-              "--",
-              "/opt/omp/bin/omp",
-              "--no-extensions",
-              "--extension",
-              "/opt/legion/pi-legion-envoy",
-              "--resume=/home/legion/.omp/profiles/legion/agent/sessions/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl",
-              "--mode",
-              "rpc",
-              "--append-system-prompt",
-              "You are the controller.\n\nLegion addressing: your role topic is `notifications.role.legion-legion-controller`.\n\nDeployment instructions."
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-controller",
+              "--role",
+              "controller",
+              "--private-dir",
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
-              {
-                "name": "LEGION_CONTROLLER",
-                "value": "1"
-              },
-              {
-                "name": "LEGION_ROLE",
-                "value": "controller"
-              },
-              {
-                "name": "LEGION_GENERATION",
-                "value": "2"
-              },
-              {
-                "name": "LEGION_PROJECT",
-                "value": "legion"
-              },
-              {
-                "name": "LEGION_DAEMON_URL",
-                "value": "http://192.0.2.250:13370"
-              },
-              {
-                "name": "LEGION_STATE_DIR",
-                "value": "/var/run/legion/state"
-              },
-              {
-                "name": "ENVOY_NATS_URL",
-                "value": "nats://192.0.2.250:4222"
-              },
-              {
-                "name": "ENVOY_URL",
-                "value": "http://192.0.2.250:9020"
-              },
-              {
-                "name": "PATH",
-                "value": "/legion/worker-bin:/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
-              },
-              {
-                "name": "PI_SHELL_PREFIX",
-                "value": "__legion_path=:$${PATH//:/::}: && __legion_path=$${__legion_path//:'/legion/worker-bin':/} && __legion_path=$${__legion_path//:'/opt/legion/bin':/} && __legion_path=$${__legion_path//::/:} && __legion_path=$${__legion_path#:} && PATH='/legion/worker-bin:/opt/legion/bin'$${__legion_path:+:$${__legion_path%:}} && unset __legion_path && hash -r &&"
-              },
-              {
-                "name": "GIT_TERMINAL_PROMPT",
-                "value": "0"
-              },
-              {
-                "name": "LEGION_GRANT_FILE",
-                "value": "/var/run/legion/state/secrets/legion-legion-controller-grant"
-              },
-              {
-                "name": "XDG_CONFIG_HOME",
-                "value": "/home/legion/.config"
-              },
-              {
-                "name": "XDG_CACHE_HOME",
-                "value": "/home/legion/.cache"
-              },
-              {
-                "name": "XDG_DATA_HOME",
-                "value": "/home/legion/.local/share"
-              },
-              {
-                "name": "XDG_STATE_HOME",
-                "value": "/home/legion/.local/state"
-              },
               {
                 "name": "POD_UID",
                 "valueFrom": {
@@ -116,18 +49,10 @@
                     "fieldPath": "metadata.uid"
                   }
                 }
-              },
-              {
-                "name": "ENVOY_TOKEN_FILE",
-                "value": "/var/run/legion/boot/ENVOY_TOKEN"
-              },
-              {
-                "name": "LEGION_BOOT_TOKEN_FILE",
-                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "worker",
+            "name": "controller",
             "resources": {},
             "securityContext": {
               "allowPrivilegeEscalation": false,
@@ -151,13 +76,17 @@
                 "subPath": "sessions"
               },
               {
-                "mountPath": "/var/run/legion/boot",
-                "name": "boot",
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-controller",
                 "readOnly": true
               },
               {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-controller"
+              },
+              {
                 "mountPath": "/var/run/legion/state",
-                "name": "state"
+                "name": "state-controller"
               },
               {
                 "mountPath": "/home/legion/.config",
@@ -214,7 +143,7 @@
           "legion.dev/pool": "legion"
         },
         "priorityClassName": "legion",
-        "restartPolicy": "Never",
+        "restartPolicy": "Always",
         "runtimeClassName": "gvisor",
         "securityContext": {
           "fsGroup": 1000,
@@ -239,33 +168,35 @@
             }
           },
           {
-            "name": "boot",
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "config"
+          },
+          {
+            "name": "launcher-controller",
             "secret": {
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "ENVOY_TOKEN",
-                  "path": "ENVOY_TOKEN"
-                },
-                {
-                  "key": "LEGION_BOOT_TOKEN",
-                  "path": "LEGION_BOOT_TOKEN"
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
                 }
               ],
-              "secretName": "legion-legion-controller-boot"
+              "secretName": "legion-legion-controller-controller-boot"
             }
           },
           {
             "emptyDir": {
               "medium": "Memory"
             },
-            "name": "state"
+            "name": "private-controller"
           },
           {
             "emptyDir": {
               "medium": "Memory"
             },
-            "name": "config"
+            "name": "state-controller"
           }
         ]
       }

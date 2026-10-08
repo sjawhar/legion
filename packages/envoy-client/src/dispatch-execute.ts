@@ -188,7 +188,7 @@ export function resetAdviceMemory(): void {
 
 // Appended where a spec is created or sent to a human for approval; it never blocks the write.
 const SPEC_CHECK_REMINDER =
-  'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent (`plan-gap-analyst` on Oh My Pi) check it now and fix what it finds. See the `dispatch-first` skill, "Design in the spec".';
+  'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent check it now and fix what it finds: on Oh My Pi, `task(agent="scout")`, or whatever read-only agent your host bundles; a Legion architect\'s own spec uses the Legion plugin\'s `plan-gap-analyst` agent instead, which only a Legion session has. See the `dispatch-first` skill, "Design in the spec".';
 
 function renderAdvice(
   tool: string,
@@ -1441,8 +1441,10 @@ function eventHead(event: Event): string | undefined {
     case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
-    case "ask.answered":
-      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
+    case "ask.answered": {
+      const previousAnswer = event.payload.previous_answer;
+      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}${previousAnswer === undefined ? "" : ` (was: ${textHead(askAnswerText(previousAnswer))})`}`;
+    }
     case "comment.created":
     case "comment.answered":
     case "comment.anchor_refreshed":
@@ -1495,8 +1497,9 @@ function childrenSummary(issue: IssueDetails): string {
   ].join("\n");
 }
 
-function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string {
+function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]): string {
   const answer = ask.answer;
+  const earlierAnswers = answers.slice(0, -1);
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
@@ -1518,6 +1521,14 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
           `- By: ${answer.user}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
+        ]),
+    ...(earlierAnswers.length === 0
+      ? []
+      : [
+          "Earlier answers:",
+          ...earlierAnswers.map(
+            (earlier) => `- ${earlier.at} · ${earlier.user} · ${askAnswerText(earlier)}`
+          ),
         ]),
     ...(ask.resolution === undefined
       ? []

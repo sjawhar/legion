@@ -1,5 +1,5 @@
+import type { CommandContext, PiApi } from "@legion/pi-shared/pi-types";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent";
-import type { CommandContext, PiApi } from "../src/pi-types";
 
 export function registerEnvoyWhoamiCommand(
   api: Pick<PiApi, "registerCommand">,

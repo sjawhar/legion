@@ -71,20 +71,21 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
 // controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
-// pi-legion-envoy it does not load, or loads speaking another daemon API contract than this
-// binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
+// pi-legion it does not load, loads without pi-envoy or beside the pre-split package, or loads
+// speaking another daemon API contract than this binary's, each of which would refuse the
+// controller at session start (daemon.ProbeController). The probe
 // runs `omp models`, which starts no session, so it neither registers, takes the controller role,
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
 // mints when it is not its own (the daemon mints a fresh capability and revokes the previous
 // controller's); write it
 // 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
-// deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
-// `--append-system-prompt`, and daemon.ControllerStartMessage as its one message (Oh My Pi's
-// interactive mode sends it as the session's first turn), no `--resume`, no
-// `--mode rpc` — in the foreground with the same environment, and answer its exit code. A refusal
-// before the secret is written removes the directories made for the probe, so the state directory
-// is as it was.
+// deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved
+// invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`, and
+// daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the
+// extension to send as the first turn — in the foreground with the same environment, and answer
+// its exit code. A refusal before the secret is written removes the directories made for the
+// probe, so the state directory is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
 	absolute, err := filepath.EvalSymlinks(configPath)
 	if err == nil {
@@ -194,13 +195,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	}
 	// The daemon's design gate policy is the controller's addressing, the line its take comment
 	// reads before it promises anyone a design approval (skill://legion-controller). The start
-	// message is Oh My Pi's first prompt, so a started or restarted controller runs its start
-	// procedure at once rather than waiting for a wake that, with every slot full, may not come.
+	// message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather than a CLI
+	// word: the pi-legion extension sends it as the session's first turn once its claim
+	// succeeds, before it opens the live wake subscription, so a started or restarted controller
+	// runs its start procedure at once and deterministically, never racing a wake for the one
+	// first-turn slot.
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
 		Addressing:                 daemon.DesignGateFragment(designGate),
 		DeploymentInstructionsPath: instructionsFile,
-	}) + " " + shellprefix.Word(daemon.ControllerStartMessage)
+	})
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
 	// Interactive and in the foreground: the operator's terminal is Oh My Pi's. The child is not
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to
@@ -226,9 +230,11 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 
 // controllerEnvironment is what the controller's Oh My Pi is told on top of the operator's own
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
-// GitHub and Dispatch settings every pane carries, and PI_SHELL_PREFIX, which keeps this state
-// directory's gh shim and legion launcher first in the agent's bash tool as on every pane. Secrets
-// travel as `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the same name.
+// GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
+// directory's gh shim and legion launcher first in the agent's bash tool as on every pane, and
+// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
+// once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
+// pointers only. Later pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
 	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
 	separator := string(filepath.ListSeparator)
@@ -249,6 +255,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
 		{"LEGION_GRANT_FILE", runtime.GrantFile(stateDir, legionclaim.Token(token))},
+		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})

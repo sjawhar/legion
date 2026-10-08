@@ -19,6 +19,7 @@ import (
 	"regexp"
 	goruntime "runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,14 +34,19 @@ import (
 
 // pluginLoadProbe is the Oh My Pi extension the load probe hands `omp models`, which prints
 // whether the plugin's `legion.ts` set its load marker
-// (`Symbol.for("legion.pi-envoy.legion-loaded")`, packages/pi-envoy/extensions/legion.ts) — which
+// (`Symbol.for("legion.pi-legion.loaded")`, packages/pi-legion/extensions/legion.ts) — which
 // only a plugin Oh My Pi actually loaded has done — and, beside it, the marker's value: the
-// `import.meta.url` of that `legion.ts`, where the plugin
-// loaded from. Given LEGION_PROMPT_AGENTS and LEGION_PROMPT_SKILLS (promptrefs), it also resolves
-// those task agents and skills through Oh My Pi's own discovery over the launch's extension roots,
-// as the task tool resolves an agent's name and a `skill://` read a skill's, and prints which it
-// could not find; and, unless LEGION_SKIP_AGENT_MODELS is set, whether each of those agents runs
-// on its own model as the task tool would select and resolve it.
+// `import.meta.url` of that `legion.ts`, where the plugin loaded from, and the Envoy plugin
+// interface version it speaks. It also prints the version the Envoy plugin publishes, and where
+// from (`Symbol.for("legion.pi-shared.envoy-plugin-interface")`, packages/pi-shared/src/interface.ts),
+// or `none` when no Envoy entry published; and where the pre-split @sjawhar/pi-legion-envoy loaded
+// from (`Symbol.for("legion.pi-envoy.legion-loaded")`) when a pane still loads it. The symbol
+// strings are the wire, and a change to one is a change here and in the probe
+// (packages/pi-shared/AGENTS.md). Given LEGION_PROMPT_AGENTS and LEGION_PROMPT_SKILLS (promptrefs),
+// it also resolves those task agents and skills through Oh My Pi's own discovery over the launch's
+// extension roots, as the task tool resolves an agent's name and a `skill://` read a skill's, and
+// prints which it could not find; and, unless LEGION_SKIP_AGENT_MODELS is set, whether each of
+// those agents runs on its own model as the task tool would select and resolve it.
 //
 //go:embed probe.mjs
 var pluginLoadProbe []byte
@@ -56,9 +62,23 @@ const (
 	loadedMarker     = "LEGION_PLUGIN_LOADED=yes"
 	notLoadedMarker  = "LEGION_PLUGIN_LOADED=no"
 	loadedFromMarker = "LEGION_PLUGIN_LOADED_FROM="
+	// speaksMarker begins the Envoy plugin interface version the loaded pi-legion speaks;
+	// envoyMarker the version the loaded pi-envoy publishes, or envoyNone when none loaded, and
+	// envoyFromMarker where it loaded from; legacyFromMarker where the pre-split package loaded from.
+	speaksMarker     = "LEGION_PLUGIN_ENVOY_INTERFACE="
+	envoyMarker      = "LEGION_ENVOY_INTERFACE="
+	envoyNone        = "none"
+	envoyFromMarker  = "LEGION_ENVOY_LOADED_FROM="
+	legacyFromMarker = "LEGION_LEGACY_PLUGIN_LOADED_FROM="
 	agentsMarker     = "LEGION_OMP_AGENTS=available"
 	noAgentsMarker   = "LEGION_OMP_AGENTS=missing"
-	pluginPackage    = "@sjawhar/pi-legion-envoy"
+	// pluginPackage is the Legion plugin, whose manifest declares the daemon API contract;
+	// envoyPackage the Envoy plugin it claims its role through, which every session loads; and
+	// legacyPackage the one package that carried both before the split, which no pane may still
+	// load beside pluginPackage.
+	pluginPackage = "@sjawhar/pi-legion"
+	envoyPackage  = "@sjawhar/pi-envoy"
+	legacyPackage = "@sjawhar/pi-legion-envoy"
 	// maxProbeStderr bounds how much of a failed probe's stderr a refusal quotes, keeping the tail,
 	// where the error usually is (MAX_PROBE_STDERR_LENGTH, boot-probes.ts).
 	maxProbeStderr = 2048
@@ -73,16 +93,20 @@ const (
 // pluginGate runs the Oh My Pi launch probes, for three callers: the daemon's boot gate, `legion
 // probe-image` in the worker image (ProbeImage), and `legion controller start` on the operator's
 // machine (ProbeController), which runs the load probe alone, before any contract check, at the
-// operator's terminal. As the daemon's boot gate on the plugin every pane loads, it runs before
+// operator's terminal. As the daemon's boot gate on the plugins every pane loads, it runs before
 // the daemon opens its store, so no pane launches until it passes, and it
 // runs under the environment a pane will have (tmux.PaneEnvironment: the allow-listed variables,
 // the XDG directories under `<state_dir>/home`), because the daemon's own HOME, profile, and XDG
 // directories are not what a pane's Oh My Pi reads. Two probes, in this order: the contract probe
-// reads the installed manifest and refuses a plugin that does not declare the gate's contract; the
-// load probe runs Oh My Pi the way a pane does and refuses a plugin it did not load — installed but
-// disabled, or not registered — or one it loaded from another root than the manifest the contract
-// probe read, and refuses, by name, a task agent or a skill Legion's prompts name that the same Oh
-// My Pi cannot find, and a task agent it would not run on the agent's own model.
+// reads the installed pi-legion manifest and refuses a plugin that does not declare the gate's
+// contract; the load probe runs Oh My Pi the way a pane does and refuses a pi-legion it did not
+// load — installed but disabled, or not registered — or one it loaded from another root than the
+// manifest the contract probe read, one loaded beside the pre-split package, or one without the
+// pi-envoy it claims its role through, or with a pi-envoy publishing another interface version
+// than it speaks; and refuses, by name, a task agent or a skill Legion's prompts name that the
+// same Oh My Pi cannot find, and a task agent it would not run on the agent's own model. Only
+// pi-legion declares a contract: pi-envoy is held to the interface version the probe reports, and
+// to an owning manifest of its own name.
 //
 // Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds the two
 // probes only the image runs: pi.agents and the session-storage setting.
@@ -102,11 +126,12 @@ type pluginGate struct {
 	// contract is the daemon API contract the plugin must declare: the daemon's own
 	// DaemonAPIVersion, or the one `legion probe-image` is asked for.
 	contract int
-	// pluginRoot is the plugin directory a pod passes Oh My Pi as its one explicit extension
-	// (ImageProbe): the load probe then runs as a pod runs, with discovery off, and the contract
-	// probe reads that root's manifest. Empty on tmux, where a pane loads the installed plugin
-	// through discovery.
-	pluginRoot string
+	// pluginRoot is the Legion plugin directory a pod passes Oh My Pi as an explicit extension, and
+	// envoyPluginRoot the Envoy plugin directory it passes beside it (ImageProbe): the load probe
+	// then runs as a pod runs, with discovery off, and the contract probe reads pluginRoot's
+	// manifest. Both empty on tmux, where a pane loads the installed plugins through discovery.
+	pluginRoot      string
+	envoyPluginRoot string
 	// roleReferences are the task agents and skills the role prompts the probed Oh My Pi is handed
 	// name (prompts.RoleReferences), resolved beside the plugin's own. The zero Names resolves the
 	// plugin's alone.
@@ -173,42 +198,54 @@ func (g pluginGate) verify(ctx context.Context) error {
 	}
 	names.Merge(g.roleReferences)
 	check := promptCheck{names: names, skipAgentModels: g.skipAgentModels}
-	loadedFrom, err := g.loadedFrom(ctx, lane, plugin.version, check)
+	from, err := g.loadedFrom(ctx, lane, plugin.version, check)
 	if err != nil {
 		return err
 	}
-	if err := lane.verifyLoadedFrom(loadedFrom, g.contract); err != nil {
+	if err := lane.verifyLoadedFrom(from.legion, g.contract); err != nil {
 		return err
 	}
-	g.log.Info("boot gate: pi-legion-envoy speaks this daemon's contract and loads",
-		"lane", lane.described, "manifest", lane.manifest, "version", plugin.version, "daemonApiVersion", g.contract)
+	g.log.Info("boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy",
+		"lane", lane.described, "manifest", lane.manifest, "version", plugin.version, "daemonApiVersion", g.contract,
+		"envoyInterface", from.envoyInterface, "envoyFrom", from.envoy)
 	return nil
 }
 
-// pluginLane is how the probed Oh My Pi loads pi-legion-envoy, resolved once for the gate (lane):
-// a pane's installed plugin through discovery, or, given a plugin root, a pod's lane, that root as
-// Oh My Pi's one explicit extension with discovery off. It carries the manifest the contract probe
-// reads, the load probe's arguments, and the words every refusal uses, so none of them sends the
-// operator to the other lane's remedy: in a pod's lane, discovery is off and the profile's plugin
-// install is never loaded. Only lane knows there are two.
+// pluginLane is how the probed Oh My Pi loads pi-legion and pi-envoy, resolved once for the gate
+// (lane): a pane's installed plugins through discovery, or, given the plugin roots, a pod's lane,
+// those roots as Oh My Pi's two explicit extensions with discovery off. It carries the manifest
+// the contract probe reads, the load probe's arguments, and the words every refusal uses, so none
+// of them sends the operator to the other lane's remedy: in a pod's lane, discovery is off and the
+// profile's plugin install is never loaded. Only lane knows there are two.
 type pluginLane struct {
-	// manifest is the pi-legion-envoy manifest the contract probe reads.
+	// manifest is the pi-legion manifest the contract probe reads.
 	manifest string
 	// installInto is where the contract refusal says to install the release built from this
 	// daemon's commit.
 	installInto string
-	// described is how the probed Oh My Pi loaded the plugin, as a refusal of a task agent or skill
-	// it could not find says it.
+	// described is how the probed Oh My Pi loaded the plugins, as a refusal of a task agent or
+	// skill it could not find says it.
 	described string
 	// flags are the load probe's extension flags, and roots their arguments before the probe's own
 	// path, which comes last; exports are the variables the probe reads besides the check's names.
 	flags   string
 	roots   []string
 	exports []string
-	// notLoaded is the refusal for an Oh My Pi that answered without loading the plugin at version;
-	// elsewhere, for one that loaded it from owner when the contract probe held read to contract.
-	notLoaded func(version string) error
-	elsewhere func(owner, read string, contract int) error
+	// envoyRoot is the pi-envoy root a pod passes as an explicit extension, which the pi-envoy Oh
+	// My Pi loaded must be the one under (verifyEnvoyLoadedFrom); empty in a pane's lane and the
+	// controller's, which hold it to an owning manifest of its name alone.
+	envoyRoot string
+	// notLoaded is the refusal for an Oh My Pi that answered without loading pi-legion at version;
+	// elsewhere, for one that loaded it from owner when the contract probe held read to contract;
+	// envoyAbsent, for one that loaded pi-legion at legionVersion and no pi-envoy; envoyMismatch,
+	// for one whose pi-envoy, loaded from from, publishes interface version found where its
+	// pi-legion speaks expected; legacyLoaded, for one that loaded the pre-split package from from
+	// beside pi-legion.
+	notLoaded     func(version string) error
+	elsewhere     func(owner, read string, contract int) error
+	envoyAbsent   func(legionVersion string) error
+	envoyMismatch func(found, expected int, from string) error
+	legacyLoaded  func(from string) error
 }
 
 // discoveryFlags adds the load probe, "$1", beside what Oh My Pi's discovery loads.
@@ -216,29 +253,46 @@ const discoveryFlags = `--extension "$1"`
 
 // lane resolves the gate's plugin lane. A relative plugin root is resolved against this process's
 // working directory, so the directory the load probe hands Oh My Pi and the manifest the contract
-// probe reads are the same one, and the loaded-from check compares absolute paths.
+// probe reads are the same one, and the loaded-from checks compare absolute paths.
 func (g pluginGate) lane() (pluginLane, error) {
 	if g.pluginRoot != "" {
 		root, err := filepath.Abs(g.pluginRoot)
 		if err != nil {
 			return pluginLane{}, fmt.Errorf("%s: resolve the plugin root %s: %w", g.label(), g.pluginRoot, err)
 		}
+		envoyRoot, err := filepath.Abs(g.envoyPluginRoot)
+		if err != nil {
+			return pluginLane{}, fmt.Errorf("%s: resolve the Envoy plugin root %s: %w", g.label(), g.envoyPluginRoot, err)
+		}
 		return pluginLane{
 			manifest:    filepath.Join(root, "package.json"),
-			installInto: "the plugin root " + root + ", which a pod loads as its one explicit extension",
-			described:   "loading the plugin from " + root + " with discovery off, as a pod does",
-			// Discovery off, the plugin root, then the probe; the root is also the one extension
-			// root the probe's own discovery of task agents and skills reads.
-			flags:   `--no-extensions --extension "$1" --extension "$2"`,
-			roots:   []string{root},
-			exports: []string{`LEGION_PROMPT_ROOT="$1"`},
+			installInto: "the plugin root " + root + ", which a pod loads as an explicit extension beside the Envoy plugin root " + envoyRoot,
+			described:   "loading the plugins from " + envoyRoot + " and " + root + " with discovery off, as a pod does",
+			// Discovery off, the Envoy plugin root, the Legion plugin root, then the probe, in the
+			// order a pod's argv names them (internal/runtime/sandbox agentArgv); the two roots are
+			// also the extension roots the probe's own discovery of task agents and skills reads.
+			flags:     `--no-extensions --extension "$1" --extension "$2" --extension "$3"`,
+			roots:     []string{envoyRoot, root},
+			exports:   []string{`LEGION_PROMPT_ROOTS="$1:$2"`},
+			envoyRoot: envoyRoot,
 			notLoaded: func(version string) error {
-				return fmt.Errorf("pi-legion-envoy %s at %s did not load with discovery off and %s as Oh My Pi's one explicit extension, as a pod loads it: the plugin root holds no plugin Oh My Pi can load; build the worker image from this daemon's commit",
+				return fmt.Errorf("pi-legion %s at %s did not load with discovery off and %s as one of Oh My Pi's two explicit extensions, as a pod loads it: the plugin root holds no plugin Oh My Pi can load; build the worker image from this daemon's commit",
 					version, root, root)
 			},
 			elsewhere: func(owner, read string, contract int) error {
-				return fmt.Errorf("pi-legion-envoy loads from %s, but the probe passed %s as Oh My Pi's one explicit extension, with discovery off, and held its manifest %s to daemon API contract %d: the OMP invocation, or its launch prefix, loads another copy of the plugin",
+				return fmt.Errorf("pi-legion loads from %s, but the probe passed %s as one of Oh My Pi's two explicit extensions, with discovery off, and held its manifest %s to daemon API contract %d: the OMP invocation, or its launch prefix, loads another copy of the plugin",
 					owner, root, read, contract)
+			},
+			envoyAbsent: func(legionVersion string) error {
+				return fmt.Errorf("pi-legion %s loaded from %s, but no pi-envoy loaded from %s, the other explicit extension a pod passes: the worker image is incomplete; build it from this daemon's commit",
+					legionVersion, root, envoyRoot)
+			},
+			envoyMismatch: func(found, expected int, from string) error {
+				return fmt.Errorf("pi-envoy at %s publishes plugin interface %d; the pi-legion at %s speaks %d: build the worker image from this daemon's commit",
+					from, found, root, expected)
+			},
+			legacyLoaded: func(from string) error {
+				return fmt.Errorf("the worker image loads %s from %s beside pi-legion: build the worker image from this daemon's commit", legacyPackage, from)
 			},
 		}, nil
 	}
@@ -246,21 +300,34 @@ func (g pluginGate) lane() (pluginLane, error) {
 	if err != nil {
 		return pluginLane{}, err
 	}
+	// The `omp` a remedy tells the operator to run, under the profile the pane environment names.
+	omp := "omp"
+	if profile != "" {
+		omp = "OMP_PROFILE=" + profile + " omp"
+	}
 	return pluginLane{
 		manifest:    manifest,
 		installInto: profileWords(profile),
 		described:   "in a pane of " + profileWords(profile),
 		flags:       discoveryFlags,
 		notLoaded: func(version string) error {
-			list := "omp plugin list"
-			if profile != "" {
-				list = "OMP_PROFILE=" + profile + " " + list
-			}
-			return fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list)
+			return fmt.Errorf("pi-legion %s is installed but not loaded by omp (disabled or unregistered): run %s plugin list", version, omp)
 		},
 		elsewhere: func(owner, read string, contract int) error {
-			return fmt.Errorf("pi-legion-envoy loads in a pane from %s, but the manifest this gate held to daemon API contract %d is %s, at the plugin root of %s in the pane environment: the launch prefix, or a dotenv file Oh My Pi reads, selects another plugin root. Select the OMP profile in the daemon's own environment, which every pane inherits",
+			return fmt.Errorf("pi-legion loads in a pane from %s, but the manifest this gate held to daemon API contract %d is %s, at the plugin root of %s in the pane environment: the launch prefix, or a dotenv file Oh My Pi reads, selects another plugin root. Select the OMP profile in the daemon's own environment, which every pane inherits",
 				owner, contract, read, profileWords(profile))
+		},
+		envoyAbsent: func(legionVersion string) error {
+			return fmt.Errorf("pi-legion %s is loaded in a pane of %s, but no pi-envoy is: install the %s release built from this daemon's commit into %s",
+				legionVersion, profileWords(profile), envoyPackage, profileWords(profile))
+		},
+		envoyMismatch: func(found, expected int, from string) error {
+			return fmt.Errorf("pi-envoy at %s publishes plugin interface %d; pi-legion speaks %d: install both releases built from this daemon's commit into %s",
+				from, found, expected, profileWords(profile))
+		},
+		legacyLoaded: func(from string) error {
+			return fmt.Errorf("a pane of %s still loads %s from %s: run `%s plugin uninstall %s`",
+				profileWords(profile), legacyPackage, from, omp, legacyPackage)
 		},
 	}, nil
 }
@@ -273,7 +340,7 @@ var (
 	windowsReservedProfile = regexp.MustCompile(`(?i)^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$`)
 )
 
-// pluginManifestPath is the installed pi-legion-envoy manifest where Oh My Pi, started under env in
+// pluginManifestPath is the installed pi-legion manifest where Oh My Pi, started under env in
 // workDir, looks for its plugins, and the profile that decided it ("" for the default profile). It
 // ports Oh My Pi's resolution (@oh-my-pi/pi-utils 18.1.21, src/dirs.ts) over env alone:
 //
@@ -342,7 +409,7 @@ func pluginManifestPath(env map[string]string, workDir string) (string, string, 
 			root = candidate
 		}
 	}
-	return filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json"), profile, nil
+	return filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion", "package.json"), profile, nil
 }
 
 // normalizeProfile is a profile name as Oh My Pi reads it (normalizeProfileName): trimmed, with an
@@ -380,7 +447,7 @@ func profileWords(profile string) string {
 	return "OMP profile " + profile
 }
 
-// pluginManifest is what the gate reads from a pi-legion-envoy manifest: its package version and
+// pluginManifest is what the gate reads from a pi-legion manifest: its package version and
 // the skills directories it ships (`omp.skills`, relative to the plugin root).
 type pluginManifest struct {
 	version string
@@ -393,14 +460,14 @@ type pluginManifest struct {
 // call such a plugin merely "not loaded" and send the operator to `omp plugin list` when the fix
 // is a reinstall. installInto names where the refusal says to install the release.
 func readPluginManifest(manifest, installInto string, contract int) (pluginManifest, error) {
-	install := fmt.Sprintf("Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into %s.", installInto)
+	install := fmt.Sprintf("Install the %s release built from this daemon's commit into %s.", pluginPackage, installInto)
 	raw, err := os.ReadFile(manifest)
 	var parsed any
 	if err == nil {
 		err = json.Unmarshal(raw, &parsed)
 	}
 	if err != nil {
-		return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s could not be read (%v); this daemon requires a plugin speaking daemon API contract %d. %s",
+		return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s could not be read (%v); this daemon requires a plugin speaking daemon API contract %d. %s",
 			manifest, err, contract, install)
 	}
 	record, _ := parsed.(map[string]any)
@@ -416,16 +483,16 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 		// cannot read the shipped skills from, and every agent they dispatch would go unchecked.
 		omp, isObject := record["omp"].(map[string]any)
 		if value := record["omp"]; value != nil && !isObject {
-			return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s has an `omp` that is not an object (%v). %s", manifest, value, install)
+			return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s has an `omp` that is not an object (%v). %s", manifest, value, install)
 		}
 		listed, isList := omp["skills"].([]any)
 		if value := omp["skills"]; value != nil && !isList {
-			return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s has an `omp.skills` that is not a list of directories (%v). %s", manifest, value, install)
+			return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s has an `omp.skills` that is not a list of directories (%v). %s", manifest, value, install)
 		}
 		for _, entry := range listed {
 			dir, ok := entry.(string)
 			if !ok {
-				return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s lists a skills entry %v that is not a directory name. %s", manifest, entry, install)
+				return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s lists a skills entry %v that is not a directory name. %s", manifest, entry, install)
 			}
 			plugin.skills = append(plugin.skills, dir)
 		}
@@ -436,52 +503,63 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 		encoded, _ := json.Marshal(declared)
 		spoken = string(encoded)
 	}
-	return pluginManifest{}, fmt.Errorf("pi-legion-envoy at %s (package %s) speaks daemon API contract %s; this daemon requires %d. %s",
+	return pluginManifest{}, fmt.Errorf("pi-legion at %s (package %s) speaks daemon API contract %s; this daemon requires %d. %s",
 		manifest, version, spoken, contract, install)
 }
 
+// loaded is what a passed load probe reports: where pi-legion loaded from (its `legion.ts`, a
+// `file:` URL as import.meta.url renders it), the Envoy plugin interface version pi-envoy
+// publishes, and where pi-envoy loaded from.
+type loaded struct {
+	legion         string
+	envoyInterface int
+	envoy          string
+}
+
 // loadedFrom is the load probe (verifyLegionPluginLoaded, boot-probes.ts), under the gate's
-// retry, and answers where the plugin loaded from: Oh My Pi, launched as a pane or a pod launches
+// retry, and answers where the plugins loaded from: Oh My Pi, launched as a pane or a pod launches
 // it — through the launch prefix, under the gate's environment, with its XDG directories created
 // first as a spawn creates them — lists its models with the probe extension added in lane's way,
-// and passes only when the probe saw the plugin's load marker, found every task agent and skill
-// check names (none for the controller probe), and answered that each of those agents runs on its
-// own model (unless the gate skips that). An Oh My Pi that answered without loading it gets the
-// lane's notLoaded, naming version, the plugin the contract probe read ("" when it read none). The
-// classification is the shipped one (killedOutcome, and verifyLegionPluginLoaded's own transient
-// and definitive rule).
-func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, version string, check promptCheck) (string, error) {
+// and passes only when the probe saw pi-legion's load marker and no pre-split package's, saw
+// pi-envoy publishing the interface version pi-legion speaks from a manifest of its name (under
+// the lane's Envoy root, when it has one), found every task agent and skill check names (none for
+// the controller probe), and answered that each of those agents runs on its own model (unless the
+// gate skips that). An Oh My Pi that answered without loading pi-legion gets the lane's notLoaded,
+// naming version, the plugin the contract probe read ("" when it read none). The classification is
+// the shipped one (killedOutcome, and verifyLegionPluginLoaded's own transient and definitive
+// rule).
+func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, version string, check promptCheck) (loaded, error) {
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if dir := g.env[name]; dir != "" {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
-				return "", fmt.Errorf("%s: create the %s Oh My Pi runs under: %w", g.label(), name, err)
+				return loaded{}, fmt.Errorf("%s: create the %s Oh My Pi runs under: %w", g.label(), name, err)
 			}
 		}
 	}
 	dir, probe, err := g.writeProbe("legion-plugin-probe-", pluginLoadProbe)
 	if err != nil {
-		return "", err
+		return loaded{}, err
 	}
 	defer os.RemoveAll(dir)
 	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
-	location := ""
-	err = bootprobe.Run(ctx, "pi-legion-envoy load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
-		outcome, from := g.probeLoad(ctx, launch, probe, lane, version, check)
-		location = from
+	var from loaded
+	err = bootprobe.Run(ctx, "pi-legion load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
+		outcome, passed := g.probeLoad(ctx, launch, probe, lane, version, check)
+		from = passed
 		return outcome
 	})
-	return location, err
+	return from, err
 }
 
-// verifyLoadedFrom holds the plugin Oh My Pi loaded to the manifest the contract probe read: the
-// load probe reports the URL its `legion.ts` loaded from, and the pi-legion-envoy manifest above
-// that file must be the same file, links resolved, as the lane's manifest. In a pane's lane they
-// part when something in the launch picks its own plugin root — a launch prefix that sets
-// OMP_PROFILE (`env OMP_PROFILE=… --`), a dotenv file Oh My Pi reads; in a pod's, when the
-// invocation or its launch prefix loads another copy beside the explicit root. Either way the
-// contract probe would otherwise have vouched for a plugin no pane or pod runs.
+// verifyLoadedFrom holds the pi-legion Oh My Pi loaded to the manifest the contract probe read: the
+// load probe reports the URL its `legion.ts` loaded from, and the pi-legion manifest above that
+// file must be the same file, links resolved, as the lane's manifest. In a pane's lane they part
+// when something in the launch picks its own plugin root — a launch prefix that sets OMP_PROFILE
+// (`env OMP_PROFILE=… --`), a dotenv file Oh My Pi reads; in a pod's, when the invocation or its
+// launch prefix loads another copy beside the explicit root. Either way the contract probe would
+// otherwise have vouched for a plugin no pane or pod runs.
 func (l pluginLane) verifyLoadedFrom(location string, contract int) error {
-	owner, err := loadedManifest(location)
+	owner, err := loadedManifest(location, pluginPackage)
 	if err != nil {
 		return err
 	}
@@ -495,43 +573,99 @@ func (l pluginLane) verifyLoadedFrom(location string, contract int) error {
 	return l.elsewhere(owner, read, contract)
 }
 
-// loadedManifest is the pi-legion-envoy manifest of the file the load probe reported the plugin
-// loaded from (a `file:` URL, as import.meta.url renders it), links resolved.
-func loadedManifest(location string) (string, error) {
-	loaded, err := url.Parse(location)
-	if err != nil || loaded.Scheme != "file" || loaded.Path == "" {
-		return "", fmt.Errorf("the pi-legion-envoy load probe reported the plugin loaded from %q, which is not a file the gate can hold to a manifest", location)
-	}
-	owner, err := owningManifest(loaded.Path)
+// verifyEnvoyLoadedFrom holds the pi-envoy Oh My Pi loaded to a manifest of its name: the load
+// probe reports the URL the Envoy entry published from, and an @sjawhar/pi-envoy manifest must own
+// that file. In a pod's lane that manifest must be the Envoy root's, links resolved, as the Legion
+// root's must be pi-legion's (verifyLoadedFrom); a pane's lane and the controller's read no
+// pi-envoy manifest of their own, since pi-envoy declares no contract to hold it to — only the
+// interface version the probe reports — so any owning manifest will do there.
+func (l pluginLane) verifyEnvoyLoadedFrom(location string) error {
+	owner, err := loadedManifest(location, envoyPackage)
 	if err != nil {
-		return "", fmt.Errorf("pi-legion-envoy loads from %s, and the gate cannot hold it to a manifest: %w", loaded.Path, err)
+		return err
+	}
+	if l.envoyRoot == "" {
+		return nil
+	}
+	read, err := filepath.EvalSymlinks(filepath.Join(l.envoyRoot, "package.json"))
+	if err != nil {
+		return fmt.Errorf("boot gate: resolve the Envoy plugin root's manifest under %s: %w", l.envoyRoot, err)
+	}
+	if owner == read {
+		return nil
+	}
+	return fmt.Errorf("pi-envoy loads from %s, but the probe passed %s as one of Oh My Pi's two explicit extensions, with discovery off: the OMP invocation, or its launch prefix, loads another copy of the plugin",
+		owner, l.envoyRoot)
+}
+
+// loadedManifest is the manifest named pkg of the file the load probe reported a plugin loaded
+// from (a `file:` URL, as import.meta.url renders it), links resolved.
+func loadedManifest(location, pkg string) (string, error) {
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme != "file" || parsed.Path == "" {
+		return "", fmt.Errorf("the load probe reported %s loaded from %q, which is not a file the gate can hold to a manifest", pkg, location)
+	}
+	owner, err := owningManifest(parsed.Path, pkg)
+	if err != nil {
+		return "", fmt.Errorf("%s loads from %s, and the gate cannot hold it to a manifest: %w", pkg, parsed.Path, err)
 	}
 	return owner, nil
 }
 
-// owningManifest is the pi-legion-envoy `package.json` nearest above file, links resolved.
-func owningManifest(file string) (string, error) {
+// owningManifest is the `package.json` named pkg nearest above file, links resolved.
+func owningManifest(file, pkg string) (string, error) {
 	for dir := filepath.Dir(file); ; {
 		candidate := filepath.Join(dir, "package.json")
 		if raw, err := os.ReadFile(candidate); err == nil {
-			var pkg struct {
+			var manifest struct {
 				Name string `json:"name"`
 			}
-			if json.Unmarshal(raw, &pkg) == nil && pkg.Name == pluginPackage {
+			if json.Unmarshal(raw, &manifest) == nil && manifest.Name == pkg {
 				return filepath.EvalSymlinks(candidate)
 			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", fmt.Errorf("no %s package.json above %s", pluginPackage, file)
+			return "", fmt.Errorf("no %s package.json above %s", pkg, file)
 		}
 		dir = parent
 	}
 }
 
-// probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. An Oh My Pi
-// that answered without loading the plugin gets the lane's notLoaded for version.
-func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pluginLane, version string, check promptCheck) (bootprobe.Outcome, string) {
+// loadAnswer is what the load probe printed about the plugins once it saw pi-legion's load marker:
+// each line's value after its marker, read by probeLoad.
+type loadAnswer struct {
+	legion, speaks, envoy, envoyFrom, legacyFrom string
+}
+
+// readLoadAnswer reads the probe's lines from output; a line that is repeated keeps its last value.
+func readLoadAnswer(output string) loadAnswer {
+	var answer loadAnswer
+	for line := range strings.Lines(output) {
+		line = strings.TrimSpace(line)
+		for _, field := range [...]struct {
+			marker string
+			into   *string
+		}{
+			{loadedFromMarker, &answer.legion}, {speaksMarker, &answer.speaks}, {envoyMarker, &answer.envoy},
+			{envoyFromMarker, &answer.envoyFrom}, {legacyFromMarker, &answer.legacyFrom},
+		} {
+			if rest, ok := strings.CutPrefix(line, field.marker); ok {
+				*field.into = rest
+			}
+		}
+	}
+	return answer
+}
+
+// probeLoad is one load-probe attempt, and, on a pass, where the plugins loaded from. An Oh My Pi
+// that answered without loading pi-legion gets the lane's notLoaded for version; one that loaded
+// it is then judged in this order, each a definitive refusal: the pre-split package loaded beside
+// it, no pi-envoy, a pi-envoy at another interface version than pi-legion speaks, a pi-envoy from
+// no manifest of its name (or another than the lane's Envoy root), then the task agents and skills
+// the check names and their models. So an operator with no pi-envoy installed reads "install
+// @sjawhar/pi-envoy", never that a skill it ships is missing.
+func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pluginLane, version string, check promptCheck) (bootprobe.Outcome, loaded) {
 	script := `exec ` + launch + ` models ` + lane.flags + ` --json >/dev/null`
 	if exports := append(check.assignments(), lane.exports...); len(exports) > 0 {
 		script = "export " + strings.Join(exports, " ") + "; " + script
@@ -539,37 +673,63 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pl
 	args := append(slices.Clone(lane.roots), probe)
 	r, err := g.run(ctx, script, args...)
 	if err != nil {
-		return bootprobe.Outcome{Refusal: fmt.Errorf("%s: run the pi-legion-envoy load probe: %w", g.label(), err)}, ""
+		return bootprobe.Outcome{Refusal: fmt.Errorf("%s: run the pi-legion load probe: %w", g.label(), err)}, loaded{}
 	}
 	// A budget kill is transient when the probe never answered; a probe that said "not loaded" and
 	// only then hung has answered, and is judged below like any other answer.
 	if r.timedOut && !strings.Contains(r.output, notLoadedMarker) {
-		return bootprobe.Outcome{Detail: r.killed(launch, g.timeout)}, ""
+		return bootprobe.Outcome{Detail: r.killed(launch, g.timeout)}, loaded{}
 	}
-	loaded := strings.Contains(r.output, loadedMarker)
-	if r.exit == 0 && loaded {
-		location := ""
-		for _, line := range strings.Split(r.output, "\n") {
-			if rest, ok := strings.CutPrefix(line, loadedFromMarker); ok {
-				location = strings.TrimSpace(rest)
-			}
+	isLoaded := strings.Contains(r.output, loadedMarker)
+	if r.exit == 0 && isLoaded {
+		from, err := lane.judgeLoaded(readLoadAnswer(r.output), version)
+		if err == nil {
+			err = check.refusal(r.output, lane.described)
 		}
-		if refusal := check.refusal(r.output, lane.described); refusal != nil {
-			return bootprobe.Outcome{Refusal: refusal}, ""
+		if err != nil {
+			return bootprobe.Outcome{Refusal: err}, loaded{}
 		}
-		return bootprobe.Outcome{Passed: true}, location
+		return bootprobe.Outcome{Passed: true}, from
 	}
 	// Oh My Pi loaded the plugin and then died: under load, not for want of the plugin.
-	if r.exit != 0 && loaded {
-		return bootprobe.Outcome{Detail: r.tail}, ""
+	if r.exit != 0 && isLoaded {
+		return bootprobe.Outcome{Detail: r.tail}, loaded{}
 	}
 	// The launch failed before Oh My Pi answered — the launch prefix refusing a key, an invocation
 	// that is not Oh My Pi: its own refusal, since "not loaded" would send the operator to
 	// `omp plugin list` when the fix is the prefix or the invocation.
 	if r.exit != 0 && !strings.Contains(r.output, notLoadedMarker) {
-		return bootprobe.Outcome{Refusal: errors.New(r.quoting(fmt.Sprintf("OMP launch probe failed (exit %d) for launch command %q", r.exit, launch)))}, ""
+		return bootprobe.Outcome{Refusal: errors.New(r.quoting(fmt.Sprintf("OMP launch probe failed (exit %d) for launch command %q", r.exit, launch)))}, loaded{}
 	}
-	return bootprobe.Outcome{Refusal: lane.notLoaded(version)}, ""
+	return bootprobe.Outcome{Refusal: lane.notLoaded(version)}, loaded{}
+}
+
+// judgeLoaded is probeLoad's judgement of a loaded pi-legion against the Envoy lines the probe
+// printed beside its marker, in probeLoad's order, and what a pass reports. A line the gate cannot
+// read — a probe answering in another shape than this daemon's — is refused as such rather than
+// taken for any answer.
+func (l pluginLane) judgeLoaded(answer loadAnswer, version string) (loaded, error) {
+	if answer.legacyFrom != "" {
+		return loaded{}, l.legacyLoaded(answer.legacyFrom)
+	}
+	if answer.envoy == envoyNone {
+		return loaded{}, l.envoyAbsent(version)
+	}
+	expected, err := strconv.Atoi(answer.speaks)
+	if err != nil {
+		return loaded{}, fmt.Errorf("the load probe answered %q on the Envoy plugin interface pi-legion speaks, which the gate cannot read", speaksMarker+answer.speaks)
+	}
+	found, err := strconv.Atoi(answer.envoy)
+	if err != nil {
+		return loaded{}, fmt.Errorf("the load probe answered %q on the Envoy plugin interface pi-envoy publishes, which the gate cannot read", envoyMarker+answer.envoy)
+	}
+	if found != expected {
+		return loaded{}, l.envoyMismatch(found, expected, answer.envoyFrom)
+	}
+	if err := l.verifyEnvoyLoadedFrom(answer.envoyFrom); err != nil {
+		return loaded{}, err
+	}
+	return loaded{legion: answer.legion, envoyInterface: found, envoy: answer.envoyFrom}, nil
 }
 
 // verifyAgentsCapability is the pi.agents probe (verifyOmpAgentsCapability, boot-probes.ts):
@@ -747,11 +907,13 @@ type ImageProbe struct {
 	WorkDir string
 	// Log receives each transient failure the retry waits out.
 	Log *slog.Logger
-	// PluginRoot is the plugin directory the pod's Oh My Pi loads as its one explicit extension
-	// (`--no-extensions --extension <root>`), and is required: the load probe runs the same way,
-	// and the contract probe reads that root's manifest, so the probe certifies the lane a pod
-	// uses. A relative root is resolved against this process's working directory.
-	PluginRoot string
+	// PluginRoot is the Legion plugin directory the pod's Oh My Pi loads as an explicit extension,
+	// and EnvoyPluginRoot the Envoy plugin directory it loads beside it (`--no-extensions
+	// --extension <envoy root> --extension <legion root>`); both are required: the load probe runs
+	// the same way, and the contract probe reads PluginRoot's manifest, so the probe certifies the
+	// lane a pod uses. A relative root is resolved against this process's working directory.
+	PluginRoot      string
+	EnvoyPluginRoot string
 	// RoleReferences are the task agents and skills the role prompts a pod is handed name
 	// (prompts.RoleReferences), and are required: the daemon's own, which it inlines into every
 	// Sandbox pod, or the image's when the command is given none.
@@ -766,16 +928,19 @@ type ImageProbe struct {
 // (IMAGE_PROBE_TIMEOUT_MS, boot-probes.ts).
 const defaultProbeTimeout = 300 * time.Second
 
-// ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — the plugin
-// held to Contract, then loaded, from the manifest it was held by; then the session-storage
-// setting, which only the image runs (the launch probes' comment atop boot-probes.ts). The
-// contract comes before the load, as in the daemon's gate, so a plugin of another contract is
-// refused as a reinstall rather than sent to `omp plugin list`. Each attempt is bounded by
-// defaultProbeTimeout and retried under bootprobe.Image: an image build has no supervisor and must
-// finish.
+// ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — pi-legion
+// held to Contract, then loaded with pi-envoy, from the manifest it was held by; then the
+// session-storage setting, which only the image runs (the launch probes' comment atop
+// boot-probes.ts). The contract comes before the load, as in the daemon's gate, so a plugin of
+// another contract is refused as a reinstall rather than sent to `omp plugin list`. Each attempt
+// is bounded by defaultProbeTimeout and retried under bootprobe.Image: an image build has no
+// supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	if p.PluginRoot == "" {
-		return errors.New("image probe: ImageProbe.PluginRoot is required: the plugin directory a pod loads as its one explicit extension")
+		return errors.New("image probe: ImageProbe.PluginRoot is required: the Legion plugin directory a pod loads as an explicit extension")
+	}
+	if p.EnvoyPluginRoot == "" {
+		return errors.New("image probe: ImageProbe.EnvoyPluginRoot is required: the Envoy plugin directory a pod loads as its other explicit extension")
 	}
 	if p.RoleReferences.Zero() {
 		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
@@ -783,7 +948,8 @@ func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract,
-		pluginRoot: p.PluginRoot, roleReferences: p.RoleReferences, skipAgentModels: p.SkipAgentModels,
+		pluginRoot: p.PluginRoot, envoyPluginRoot: p.EnvoyPluginRoot,
+		roleReferences: p.RoleReferences, skipAgentModels: p.SkipAgentModels,
 		log: p.Log,
 	}.verifyImage(ctx)
 }
@@ -832,8 +998,8 @@ type ControllerProbe struct {
 var controllerProbeRetry = bootprobe.Retry{Initial: 2 * time.Second, Max: 10 * time.Second, Attempts: 3}
 
 // ProbeController launches Oh My Pi as the controller launches it — the launch prefix and the
-// invocation, under the controller's environment, in its directory — and holds the pi-legion-envoy
-// it loaded to Contract: the manifest of the file Oh My Pi reports loading it from. Which copy loads
+// invocation, under the controller's environment, in its directory — and holds the pi-legion it
+// loaded to Contract: the manifest of the file Oh My Pi reports loading it from. Which copy loads
 // is Oh My Pi's own resolution rather than a port of it, so a `--profile` in the invocation, a
 // project plugin root above the directory, a dotenv file Oh My Pi reads itself, the launch prefix,
 // or a symlinked state directory cannot make the check read another copy than the one the
@@ -847,23 +1013,37 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 		retry: controllerProbeRetry, contract: p.Contract, stdin: p.Stdin, echo: p.Stderr,
 		name: "controller probe", log: p.Log,
 	}
-	// Neither refusal names a profile: which one Oh My Pi reads is its own resolution, which this
-	// does not port, so the words say only what Oh My Pi did, where it ran, and how.
+	// No refusal names a profile: which one Oh My Pi reads is its own resolution, which this does
+	// not port, so the words say only what Oh My Pi did, where it ran, and how.
 	launch := omplaunch.WithPrefix(p.Prefix, p.Omp)
-	// The controller's lane is discovery's, with its own refusal: it reads no manifest, so it names
-	// no version, and a check that names nothing needs no words for how the plugin loaded.
+	where := fmt.Sprintf("Oh My Pi, launched as the controller launches it (%q, in %s),", launch, p.WorkDir)
+	check := fmt.Sprintf("`cd %s && %s plugin", shellprefix.Word(p.WorkDir), launch)
+	// The controller's lane is discovery's, with its own refusals: it reads no manifest, so it
+	// names no version, and a check that names nothing needs no words for how the plugin loaded.
 	lane := pluginLane{
 		flags: discoveryFlags,
 		notLoaded: func(string) error {
-			return fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
-				launch, p.WorkDir, shellprefix.Word(p.WorkDir), launch)
+			return fmt.Errorf("%s did not load pi-legion (not installed, disabled, or unregistered). Install the %s release built from this daemon's commit into the Oh My Pi the controller runs, and check it with %s list` under the controller's environment: a .env or a project plugin root there applies",
+				where, pluginPackage, check)
+		},
+		envoyAbsent: func(string) error {
+			return fmt.Errorf("%s loaded pi-legion but no pi-envoy. Install the %s release built from this daemon's commit into the Oh My Pi the controller runs, and check it with %s list`",
+				where, envoyPackage, check)
+		},
+		envoyMismatch: func(found, expected int, from string) error {
+			return fmt.Errorf("%s loaded pi-envoy from %s, which publishes plugin interface %d, and a pi-legion that speaks %d. Install both releases built from this daemon's commit into the Oh My Pi the controller runs, and check them with %s list`",
+				where, from, found, expected, check)
+		},
+		legacyLoaded: func(from string) error {
+			return fmt.Errorf("%s loaded %s from %s beside pi-legion. Run %s uninstall %s` under the controller's environment",
+				where, legacyPackage, from, check, legacyPackage)
 		},
 	}
-	location, err := g.loadedFrom(ctx, lane, "", promptCheck{})
+	from, err := g.loadedFrom(ctx, lane, "", promptCheck{})
 	if err != nil {
 		return err
 	}
-	manifest, err := loadedManifest(location)
+	manifest, err := loadedManifest(from.legion, pluginPackage)
 	if err != nil {
 		return err
 	}

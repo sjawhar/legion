@@ -126,3 +126,12 @@ export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
     queryKey: ["delivery", "timeline", filters],
     queryFn: () => api.getDeliveryTimeline(filters),
   });
+
+/** The delivery timeline's configuration record, or `null` until someone sets it: the Settings
+ *  section's form reads it, while the Delivery page's setup form starts from the `null` the
+ *  timeline's `DELIVERY_NOT_CONFIGURED` already implies and reads nothing. */
+export const deliverySettingsQuery = () =>
+  queryOptions({
+    queryKey: ["delivery-settings"],
+    queryFn: () => api.getDeliverySettings(),
+  });
