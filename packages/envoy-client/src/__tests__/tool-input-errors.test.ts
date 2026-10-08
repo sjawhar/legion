@@ -10,20 +10,16 @@ function specFor(name: string) {
   return spec;
 }
 
-function problemsFor(name: string, args: unknown, syntax: "json" | "cli" = "json"): string[] {
+function problemsFor(name: string, args: unknown): string[] {
   const schema: z.ZodType = dispatchToolSchema(specFor(name), zodSchemaApi(z), { strict: true });
   const parsed = schema.safeParse(args, { reportInput: true });
   if (parsed.success) throw new Error("expected the call to be refused");
-  return syntax === "cli"
-    ? formatZodIssues(parsed.error.issues, schema, { syntax: "cli", tool: name })
-    : formatZodIssues(parsed.error.issues, schema);
+  return formatZodIssues(parsed.error.issues, schema, name);
 }
 
 describe("ToolInputError", () => {
   test("counts the problems and lists each on its own line", () => {
-    const error = new ToolInputError("dispatch_message", ["--body is required (string)"], {
-      syntax: "cli",
-    });
+    const error = new ToolInputError("dispatch_message", ["--body is required (string)"]);
     expect(error.message).toBe(
       [
         "dispatch message was not called: 1 problem",
@@ -34,7 +30,7 @@ describe("ToolInputError", () => {
     );
     expect(error.problems).toEqual(["--body is required (string)"]);
 
-    const two = new ToolInputError("dispatch_ask", ["a", "b"], { syntax: "cli" });
+    const two = new ToolInputError("dispatch_ask", ["a", "b"]);
     expect(two.message.split("\n").slice(0, 3)).toEqual([
       "dispatch ask was not called: 2 problems",
       "- a",
@@ -51,7 +47,7 @@ describe("ToolInputError", () => {
   test("gives every Dispatch refusal the command's flags and an example that parses", () => {
     for (const spec of dispatchToolSpecs) {
       const schema = dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
-      const error = new ToolInputError(spec.name, ["invalid input"], { syntax: "cli" });
+      const error = new ToolInputError(spec.name, ["invalid input"]);
 
       expect(error.message, spec.name).toContain(
         `- Allowed flags: ${commandFlags(spec.name).join(", ")}`
@@ -64,42 +60,37 @@ describe("ToolInputError", () => {
   });
 });
 
-describe("formatZodIssues in command syntax", () => {
+describe("formatZodIssues", () => {
   test("names each field by the flag that sets it, and an element by its position", () => {
     expect(
-      problemsFor(
-        "dispatch_ask",
-        { issue: "DSP-42", question: "q", options: [{ label: "a" }, {}], urgency: "now" },
-        "cli"
-      )
+      problemsFor("dispatch_ask", {
+        issue: "DSP-42",
+        question: "q",
+        options: [{ label: "a" }, {}],
+        urgency: "now",
+      })
     ).toEqual([
       "--option[1] label is required (string)",
       '--urgency must be one of low|med|high|blocking; got "now"',
     ]);
     expect(
-      problemsFor(
-        "dispatch_doc_edit",
-        { issue: "DSP-42", artifact: "spec", ops: [{ op: "replace", find: 3 }] },
-        "cli"
-      )
+      problemsFor("dispatch_doc_edit", {
+        issue: "DSP-42",
+        artifact: "spec",
+        ops: [{ op: "replace", find: 3 }],
+      })
     ).toEqual(["--ops-json[0] find must be a string, not 3"]);
   });
-});
 
-describe("formatZodIssues", () => {
-  test("names a missing field, an unknown field with the allowed keys, and a bad enum value", () => {
+  test("names a missing field, an unknown flag, and a bad enum value", () => {
     expect(
       problemsFor("dispatch_message", { issue: "DSP-42", message: "x", urgency: "no" })
-    ).toEqual([
-      "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to, images',
-      'unknown field "urgency"; allowed: issue, body, in_reply_to, images',
-    ]);
+    ).toEqual(["--body is required (string)", "unknown flag --message", "unknown flag --urgency"]);
     expect(problemsFor("dispatch_resolve_ask", { ask: "a", kind: "no", reason: "r" })).toEqual([
-      'kind must be one of retracted|resolved; got "no"',
+      '--kind must be one of retracted|resolved; got "no"',
     ]);
     expect(problemsFor("dispatch_request_approval", { issue: "DSP-42" })).toEqual([
-      "summary is required (string)",
+      "--summary is required (string)",
     ]);
   });
 
@@ -107,8 +98,8 @@ describe("formatZodIssues", () => {
     expect(
       problemsFor("dispatch_ask", { issue: "DSP-42", question: "q", options: ["a", "b"] })
     ).toEqual([
-      "options.0 must be an object {label, description?}, not a string",
-      "options.1 must be an object {label, description?}, not a string",
+      "--option[0] must be an object {label, description?}, not a string",
+      "--option[1] must be an object {label, description?}, not a string",
     ]);
   });
 
@@ -123,8 +114,8 @@ describe("formatZodIssues", () => {
         ops: [{ op: "replace", find: "old", replace: "new" }],
       })
     ).toEqual([
-      'unknown field "replace" in ops.0; allowed: op, find, with, occurrence, markdown, after, ' +
-        "before, block, index, type, attributes",
+      'unknown field "replace" in --ops-json[0]; allowed: op, find, with, occurrence, markdown, ' +
+        "after, before, block, index, type, attributes",
     ]);
   });
 
@@ -136,26 +127,26 @@ describe("formatZodIssues", () => {
         options: Array.from({ length: 9 }, (_, index) => ({ label: `o${index}` })),
       })
     ).toEqual([
-      "question is 50 characters over the 800-character limit (850/800)",
-      "options has 9 items; the limit is 8",
+      "--question is 50 characters over the 800-character limit (850/800)",
+      "--option has 9 items; the limit is 8",
     ]);
   });
 
-  test("passes a cross-field refine message through verbatim and falls back to path: message", () => {
+  test("passes a cross-field refine message through verbatim and falls back to flag: message", () => {
     expect(problemsFor("dispatch_artifact", { issue: "DSP-42", name: "n" })).toEqual([
       "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.",
     ]);
     expect(problemsFor("dispatch_search", { query: "a" })).toEqual([
-      "query: Too small: expected string to have >=2 characters",
+      "--query: Too small: expected string to have >=2 characters",
     ]);
     expect(problemsFor("dispatch_issue", { project: "P", title: "t", priority: 1.5 })).toEqual([
-      "priority must be an integer, not 1.5",
+      "--priority must be an integer, not 1.5",
     ]);
     expect(problemsFor("dispatch_issue_update", { issue: "DSP-1", priority: 4 })).toEqual([
-      "priority Too big: expected number to be <=3",
+      "--priority Too big: expected number to be <=3",
     ]);
     expect(problemsFor("dispatch_issue_update", { issue: "DSP-1", priority: "P1" })).toEqual([
-      "priority must be a number, not a string",
+      "--priority must be a number, not a string",
     ]);
   });
 });

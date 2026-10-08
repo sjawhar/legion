@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
-  existsSync,
+  type Dirent,
+  fstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -80,6 +81,21 @@ function ensureDirectory(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 
+/** Whether a filesystem call failed because the path is not there. */
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
+/** A file's text, or undefined when it is not there. */
+function readIfPresent(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
 /** Writes `text` to `path` through a temporary file and `rename`, so a reader sees all or none. */
 function writeAtomically(path: string, text: string): void {
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -95,14 +111,21 @@ function stringList(value: unknown): string[] {
 
 /**
  * Reads `state.json`, seeds the advice and picture memories the library consults, and returns the
- * asks this session already printed a follow notice for. A missing file is an empty memory.
+ * asks this session already printed a follow notice for. A missing file is an empty memory; one
+ * that is not JSON throws, naming it.
  */
 export function loadSessionMemory(dir: string, sessionId: string): Set<string> {
   const path = join(dir, "state.json");
-  if (!existsSync(path)) return new Set();
-  const state = JSON.parse(readFileSync(path, "utf-8")) as Partial<
-    Record<keyof SessionMemory, unknown>
-  >;
+  const text = readIfPresent(path);
+  if (text === undefined) return new Set();
+  let state: Partial<Record<keyof SessionMemory, unknown>>;
+  try {
+    state = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `the session state ${path} is not JSON (${(error as Error).message}); remove it to start this session's memory over`
+    );
+  }
   const advice = adviceMemory();
   for (const key of stringList(state.advice)) advice.add(key);
   const pictures = shownPictures(sessionId);
@@ -113,6 +136,10 @@ export function loadSessionMemory(dir: string, sessionId: string): Set<string> {
 /** Writes the advice and picture memories and `follows` back to `state.json`. */
 export function saveSessionMemory(dir: string, sessionId: string, follows: Set<string>): void {
   ensureDirectory(dir);
+  writeMemory(dir, sessionId, follows);
+}
+
+function writeMemory(dir: string, sessionId: string, follows: Set<string>): void {
   const state: SessionMemory = {
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
@@ -121,49 +148,99 @@ export function saveSessionMemory(dir: string, sessionId: string, follows: Set<s
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}\n`);
 }
 
+type ResultInput = { readonly tool: string; readonly details?: unknown; readonly error?: string };
+
 /** Appends one call's result, with `at` added, to the ledger as one JSON line. */
-export function appendResult(
-  dir: string,
-  entry: { readonly tool: string; readonly details?: unknown; readonly error?: string }
-): void {
+export function appendResult(dir: string, entry: ResultInput): void {
   ensureDirectory(dir);
+  writeResult(dir, entry);
+}
+
+function writeResult(dir: string, entry: ResultInput): void {
   const line: ResultEntry = { at: new Date().toISOString(), ...entry };
   appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}\n`, { mode: PRIVATE_FILE });
 }
 
+/** What one call leaves behind: its ledger line, then the session's memory. */
+export function recordOutcome(
+  dir: string,
+  sessionId: string,
+  follows: Set<string>,
+  entry: ResultInput
+): void {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
+  writeMemory(dir, sessionId, follows);
+}
+
 /**
  * The ledger entries appended after byte `offset`, and the offset that follows them. A trailing
- * line still being written is left for the next read.
+ * line still being written is left for the next read. A complete line that is not JSON (two
+ * processes' appends interleaved, a truncated write) is skipped and named to `onMalformed` with the
+ * file and its line number, and the offset moves past it, so one bad line never stalls a reader.
  */
 export function readResultsSince(
   dir: string,
-  offset: number
+  offset: number,
+  onMalformed: (problem: string) => void
 ): { entries: ResultEntry[]; offset: number } {
   const path = join(dir, "results.jsonl");
-  if (!existsSync(path)) return { entries: [], offset };
-  const size = statSync(path).size;
-  if (size <= offset) return { entries: [], offset: size };
-  const buffer = Buffer.alloc(size - offset);
-  const fd = openSync(path, "r");
+  let fd: number;
   try {
+    fd = openSync(path, "r");
+  } catch (error) {
+    if (isMissing(error)) return { entries: [], offset };
+    throw error;
+  }
+  let buffer: Buffer;
+  try {
+    const size = fstatSync(fd).size;
+    if (size <= offset) return { entries: [], offset: size };
+    buffer = Buffer.alloc(size - offset);
     readSync(fd, buffer, 0, buffer.length, offset);
   } finally {
     closeSync(fd);
   }
   const complete = buffer.lastIndexOf(0x0a) + 1;
-  const entries = buffer
-    .subarray(0, complete)
-    .toString("utf-8")
-    .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as ResultEntry);
+  const lines = buffer.subarray(0, complete).toString("utf-8").split("\n");
+  const entries: ResultEntry[] = [];
+  let firstLine: number | undefined;
+  lines.forEach((line, index) => {
+    if (line === "") return;
+    try {
+      entries.push(JSON.parse(line) as ResultEntry);
+    } catch (error) {
+      firstLine ??= linesBefore(path, offset) + 1;
+      onMalformed(
+        `${path}:${firstLine + index}: skipped a ledger line that is not JSON (${(error as Error).message})`
+      );
+    }
+  });
   return { entries, offset: offset + complete };
+}
+
+/** How many lines end before byte `offset`: read only to name a malformed line. */
+function linesBefore(path: string, offset: number): number {
+  const prefix = Buffer.alloc(offset);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, prefix, 0, offset, 0);
+  } finally {
+    closeSync(fd);
+  }
+  let count = 0;
+  for (const byte of prefix) if (byte === 0x0a) count += 1;
+  return count;
 }
 
 /** The ledger's size in bytes, 0 when there is none: a reader starting there sees only later calls. */
 export function resultsEnd(dir: string): number {
-  const path = join(dir, "results.jsonl");
-  return existsSync(path) ? statSync(path).size : 0;
+  try {
+    return statSync(join(dir, "results.jsonl")).size;
+  } catch (error) {
+    if (isMissing(error)) return 0;
+    throw error;
+  }
 }
 
 /** Writes a picture under `pictures/<sha256 first 16 hex>.<ext>`, once; returns its path and size. */
@@ -172,9 +249,12 @@ export function writePicture(dir: string, image: ToolImage): { path: string; byt
   const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
   const pictures = join(dir, "pictures");
   const path = join(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
-  if (!existsSync(path)) {
-    ensureDirectory(pictures);
-    writeFileSync(path, bytes, { mode: PRIVATE_FILE });
+  ensureDirectory(pictures);
+  try {
+    writeFileSync(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+  } catch (error) {
+    // The same bytes, already written under their hash.
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
   return { path, bytes: bytes.length };
 }
@@ -196,9 +276,7 @@ export function writeSessionTitle(dir: string, title: string): void {
 
 /** The session's title, or undefined when the file is missing or empty. */
 export function readSessionTitle(dir: string): string | undefined {
-  const path = join(dir, "title");
-  if (!existsSync(path)) return undefined;
-  return readFileSync(path, "utf-8") || undefined;
+  return readIfPresent(join(dir, "title")) || undefined;
 }
 
 /**
@@ -207,14 +285,28 @@ export function readSessionTitle(dir: string): string | undefined {
  */
 export function pruneSessions(root: string, now: number): void {
   const stamp = join(root, PRUNED_STAMP);
-  if (existsSync(stamp) && now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS) return;
+  try {
+    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS) return;
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
   const sessions = join(root, "sessions");
-  if (existsSync(sessions)) {
-    for (const entry of readdirSync(sessions, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const dir = join(sessions, entry.name);
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS)
+  let entries: Dirent[] = [];
+  try {
+    entries = readdirSync(sessions, { withFileTypes: true });
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(sessions, entry.name);
+    try {
+      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
         rmSync(dir, { recursive: true, force: true });
+      }
+    } catch (error) {
+      // Another process removed it since the listing.
+      if (!isMissing(error)) throw error;
     }
   }
   ensureDirectory(root);

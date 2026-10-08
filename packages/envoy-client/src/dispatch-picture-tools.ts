@@ -145,11 +145,9 @@ export async function textWithPictures(
     )
   );
   if (predicted.length > limit.cap) {
-    throw new ToolInputError(
-      tool,
-      [`${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`],
-      { syntax: "cli" }
-    );
+    throw new ToolInputError(tool, [
+      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`,
+    ]);
   }
   const lines: string[] = [];
   const addresses: string[] = [];

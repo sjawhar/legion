@@ -599,7 +599,8 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // The ledger lines appended since the last read, under the id the `dispatch` command writes
-  // under, which is the environment's and not a fresh `getSessionId()`.
+  // under, which is the environment's and not a fresh `getSessionId()`. A line that is not JSON is
+  // logged with its file and line number and skipped, so it never stalls the run-end check.
   const readNewDispatchResults = () => {
     const id = process.env.DISPATCH_SESSION_ID;
     if (id === undefined || id === "") return [];
@@ -608,7 +609,9 @@ export default function envoyExtension(pi: PiApi): void {
       dispatchLedger = { sessionID: id, offset: resultsEnd(dir) };
       return [];
     }
-    const read = readResultsSince(dir, dispatchLedger.offset);
+    const read = readResultsSince(dir, dispatchLedger.offset, (problem) =>
+      logger.warn(`envoy: ${problem}`)
+    );
     dispatchLedger.offset = read.offset;
     return read.entries;
   };

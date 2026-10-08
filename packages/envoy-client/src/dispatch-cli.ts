@@ -3,11 +3,10 @@ import { type ActiveDispatchConfig, activeDispatchConfig } from "./dispatch-conf
 import type { DispatchHost } from "./dispatch-cwd";
 import { executeDispatchTool } from "./dispatch-execute";
 import {
-  appendResult,
   loadSessionMemory,
   pruneSessions,
   readSessionTitle,
-  saveSessionMemory,
+  recordOutcome,
   sessionDirectory,
   sessionStateRoot,
   writeLongOutput,
@@ -34,8 +33,13 @@ const USAGE = 2;
 const HOSTS: Record<string, DispatchHost> = { omp: "omp", claude: "claude", opencode: "opencode" };
 
 /** Claude Code reads back at most 30,000 characters of a command's output by default
- *  (`BASH_MAX_OUTPUT_LENGTH`); a longer result is written to a file the agent opens. */
+ *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare: past it,
+ *  the result text is shortened and the full text is written to a file the agent opens, while the
+ *  picture lines and the follow notice after it are kept whole. */
 const CLAUDE_OUTPUT_MAX = 25_000;
+
+/** What the CLI prints when the call reached Dispatch but its local record could not be written. */
+const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
 
 /**
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
@@ -71,7 +75,7 @@ export async function runDispatchCli(
       print([`dispatch: ${parsed.problems.join("\n")}`, "Run dispatch --help."].join("\n"));
       return USAGE;
     }
-    print(new ToolInputError(parsed.tool, parsed.problems, { syntax: "cli" }).message);
+    print(new ToolInputError(parsed.tool, parsed.problems).message);
     return REFUSED;
   }
 
@@ -120,9 +124,18 @@ export async function runDispatchCli(
     return USAGE;
   }
 
-  pruneSessions(sessionStateRoot(env), Date.now());
-  const follows = loadSessionMemory(dir, sessionId);
+  let follows: Set<string>;
+  try {
+    pruneSessions(sessionStateRoot(env), Date.now());
+    follows = loadSessionMemory(dir, sessionId);
+  } catch (error) {
+    print(`dispatch: ${messageFor(error)}`);
+    return USAGE;
+  }
   const { tool, args } = parsed;
+  let lines: string[];
+  let entry: { tool: string; details?: unknown; error?: string };
+  let code: number;
   try {
     const result = await executeDispatchTool({
       tool,
@@ -135,30 +148,49 @@ export async function runDispatchCli(
       env,
       ...(io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }),
     });
-    let text = result.text;
-    if (host === "claude" && text.length > CLAUDE_OUTPUT_MAX) {
-      const path = writeLongOutput(dir, text);
-      text = `${text.slice(0, CLAUDE_OUTPUT_MAX)}\n(the full result, ${text.length} characters: ${path})`;
-    }
-    const lines = [text];
-    for (const image of result.images ?? []) {
-      const picture = writePicture(dir, image);
-      lines.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
+    const after: string[] = [];
+    let stateProblem: string | undefined;
+    try {
+      for (const image of result.images ?? []) {
+        const picture = writePicture(dir, image);
+        after.push(`- picture: ${picture.path} (${image.mimeType}, ${picture.bytes} bytes)`);
+      }
+    } catch (error) {
+      stateProblem = messageFor(error);
     }
     const notice = dispatchFollowNotice(result.details);
     if (notice !== null && !follows.has(notice.ask)) {
       follows.add(notice.ask);
-      lines.push(notice.text);
+      after.push(notice.text);
     }
-    print(lines.join("\n"));
-    appendResult(dir, { tool, details: result.details });
-    saveSessionMemory(dir, sessionId, follows);
-    return OK;
+    let text = result.text;
+    const tail = after.map((line) => `\n${line}`).join("");
+    if (host === "claude" && text.length + tail.length > CLAUDE_OUTPUT_MAX) {
+      try {
+        const path = writeLongOutput(dir, text);
+        const marker = `\n(the full result, ${text.length} characters: ${path})`;
+        text = `${text.slice(0, Math.max(0, CLAUDE_OUTPUT_MAX - tail.length - marker.length))}${marker}`;
+      } catch (error) {
+        stateProblem ??= messageFor(error);
+      }
+    }
+    lines = [`${text}${tail}`];
+    if (stateProblem !== undefined) {
+      lines.push(`${STATE_WRITE_FAILED} could not be written: ${stateProblem}`);
+    }
+    entry = { tool, details: result.details };
+    code = OK;
   } catch (error) {
     const message = messageFor(error);
-    print(message);
-    appendResult(dir, { tool, error: message });
-    saveSessionMemory(dir, sessionId, follows);
-    return REFUSED;
+    lines = [message];
+    entry = { tool, error: message };
+    code = REFUSED;
   }
+  try {
+    recordOutcome(dir, sessionId, follows, entry);
+  } catch (error) {
+    lines.push(`${STATE_WRITE_FAILED} could not be written: ${messageFor(error)}`);
+  }
+  print(lines.join("\n"));
+  return code;
 }

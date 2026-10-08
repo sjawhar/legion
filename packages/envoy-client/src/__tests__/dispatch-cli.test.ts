@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDispatchCli } from "../dispatch-cli";
@@ -15,6 +15,10 @@ interface Recorded {
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 const requests: Recorded[] = [];
 let triage = false;
+/** The length of the reply body the long message thread carries. */
+let replyLength = 1;
+const LONG_THREAD = "11111111-1111-4111-8111-111111111111";
+const human = { kind: "human", id: "h" };
 
 const issue = {
   key: "DSP-1",
@@ -71,6 +75,32 @@ const server = Bun.serve({
     }
     if (pathname === "/api/v1/artifacts/pic-1/versions/1") {
       return new Response(PNG, { headers: { "Content-Type": "image/png" } });
+    }
+    if (pathname === `/api/v1/messages/${LONG_THREAD}`) {
+      return Response.json({
+        message: {
+          id: LONG_THREAD,
+          issue_key: null,
+          author: human,
+          body: "![shot.png](dispatch://agent/ses-pic/artifact/shot-png@v1)",
+          target: null,
+          in_reply_to: null,
+          deliveries: [],
+          created_at: "2026-10-08T00:00:00Z",
+        },
+        replies: [
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            issue_key: null,
+            author: human,
+            body: "x".repeat(replyLength),
+            target: null,
+            in_reply_to: LONG_THREAD,
+            deliveries: [],
+            created_at: "2026-10-08T00:01:00Z",
+          },
+        ],
+      });
     }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
@@ -222,5 +252,67 @@ describe("the dispatch CLI", () => {
       "dispatch_read",
     ]);
     expect(ledger("ses-1")[1]?.error).toBeDefined();
+  });
+
+  test("Claude Code's whole output stays under its read-back limit, picture lines kept, and names the full result", async () => {
+    const limit = 25_000;
+    const read = ["read", "--message", LONG_THREAD];
+    // The result's text without the reply body, measured on a host that never shortens output.
+    replyLength = 1;
+    const short = await run(read, { DISPATCH_HOST: "omp", DISPATCH_SESSION_ID: "ses-long-1" });
+    const textOf = (stdout: string): string => stdout.slice(0, stdout.indexOf("\n- picture: "));
+    const overhead = textOf(short.stdout).length - 1;
+    // The text alone is 10 characters under the limit; the picture line carries the output past it.
+    replyLength = limit - overhead - 10;
+    const full = await run(read, { DISPATCH_HOST: "omp", DISPATCH_SESSION_ID: "ses-long-2" });
+    const text = textOf(full.stdout);
+    expect(text.length).toBe(limit - 10);
+    expect(full.stdout.length).toBeGreaterThan(limit);
+
+    const claude = await run(read, {
+      DISPATCH_HOST: "claude",
+      CLAUDE_CODE_SESSION_ID: "ses-long-3",
+    });
+    expect(claude.code).toBe(0);
+    // print() ends the output with one newline.
+    expect(claude.stdout.length).toBeLessThanOrEqual(limit + 1);
+    expect(claude.stdout).toContain("\n- picture: ");
+    const marker = /\(the full result, (\d+) characters: (\S+)\)/.exec(claude.stdout);
+    expect(marker?.[1]).toBe(String(text.length));
+    expect(readFileSync(marker?.[2] ?? "", "utf-8")).toBe(text);
+  });
+
+  test("a corrupted state.json is refused with exit 2, naming the file, and sends nothing", async () => {
+    const dir = join(stateDir, "sessions", "ses-1");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), "{not json");
+    const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
+    expect(code).toBe(2);
+    expect(stdout).toStartWith("dispatch: ");
+    expect(stdout).toContain(join(dir, "state.json"));
+    expect(requests).toEqual([]);
+  });
+
+  test("a ledger the call cannot be recorded in still reports the call, which Dispatch took", async () => {
+    mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"), { recursive: true });
+    const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
+    expect(code).toBe(0);
+    expect(requests.map((request) => request.path)).toContain("/api/v1/issues/DSP-1/messages");
+    expect(stdout).toContain("message-1");
+    expect(stdout).toContain("dispatch: Dispatch took the call, but this session's state");
+  });
+
+  test("a picture that cannot be saved still prints the result text, naming the failure", async () => {
+    const dir = join(stateDir, "sessions", "ses-2");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "pictures"), "a file where the directory goes");
+    const { code, stdout } = await run(
+      ["doc-read", "--ref", "dispatch://agent/ses-pic/artifact/shot-png@v1"],
+      { DISPATCH_HOST: "omp", DISPATCH_SESSION_ID: "ses-2" }
+    );
+    expect(code).toBe(0);
+    expect(stdout).toContain("Picture shot.png");
+    expect(stdout).not.toContain("- picture: ");
+    expect(stdout).toContain("dispatch: Dispatch took the call, but this session's state");
   });
 });

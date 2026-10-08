@@ -3,27 +3,18 @@ import type { z } from "zod";
 import { commandFlags, commandLine, commandName, fieldFlag } from "./dispatch-command";
 
 /**
- * How a refusal names the call: `json` for a native tool (`envoy_send was not called`, field names
- * as written in its JSON arguments), `cli` for a `dispatch` command (`dispatch message was not
- * called`, each field by the flag that sets it, then the command's flags and an example).
- */
-export type RefusalSyntax = "json" | "cli";
-
-/**
  * A tool call refused before any request left the process. `problems` lists every
- * defect found in one pass so the caller fixes them all with a single retry.
+ * defect found in one pass so the caller fixes them all with a single retry. A Dispatch tool is
+ * named as its `dispatch` command (`dispatch message was not called`), followed by the command's
+ * flags and an example; an Envoy tool by its own name (`envoy_send was not called`).
  */
 export class ToolInputError extends Error {
   readonly tool: string;
   readonly problems: readonly string[];
 
-  constructor(
-    tool: string,
-    problems: readonly string[],
-    options: { readonly syntax?: RefusalSyntax } = {}
-  ) {
+  constructor(tool: string, problems: readonly string[]) {
     const count = problems.length;
-    const cli = options.syntax === "cli" && isDispatchTool(tool);
+    const cli = isDispatchTool(tool);
     const help = cli
       ? [
           `Allowed flags: ${commandFlags(tool).join(", ")}`,
@@ -158,15 +149,15 @@ function pathText(path: readonly PropertyKey[], cliTool: string | undefined): st
  * what is unknown (and what would be accepted), what the allowed values are, and how far
  * over a cap a value is. `schema` is the strict object schema that produced the issues;
  * it supplies the allowed top-level keys and nested object shapes. Parse with
- * `{ reportInput: true }` so string lengths and rejected values are available. With
- * `syntax: "cli"`, each field is named by the `dispatch` flag that sets it.
+ * `{ reportInput: true }` so string lengths and rejected values are available. For a Dispatch
+ * tool, each field is named by the `dispatch` flag that sets it; for an Envoy tool, by its key.
  */
 export function formatZodIssues(
   issues: readonly z.core.$ZodIssue[],
   schema: z.ZodType,
-  options: { readonly syntax?: "json" } | { readonly syntax: "cli"; readonly tool: string } = {}
+  tool: string
 ): string[] {
-  const cliTool = options.syntax === "cli" ? options.tool : undefined;
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue) => {
     const path = pathText(issue.path, cliTool);

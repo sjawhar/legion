@@ -256,7 +256,7 @@ export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
   }
   const parsed = schema.safeParse(parameters, { reportInput: true });
   if (!parsed.success) {
-    throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema));
+    throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema, spec.name));
   }
   return parsed.data as ToolArgumentsByOperation[Operation];
 }

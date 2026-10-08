@@ -1427,6 +1427,45 @@ describe("envoy OMP extension", () => {
     expect(session.asked).toHaveLength(1);
   });
 
+  test("a malformed ledger line is logged with its file and line and never stalls the check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-malformed-ledger");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_malformed_ledger", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+    const ledger = join(
+      sessionDirectory(process.env, "ses_nudge_malformed_ledger"),
+      "results.jsonl"
+    );
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(entry.message);
+    });
+    try {
+      await session.userTurn();
+      await session.stop();
+      expect(session.asked).toHaveLength(1);
+
+      // Two appends that interleaved into one line, then a dispatch ask that opened an ask.
+      mkdirSync(dirname(ledger), { recursive: true });
+      writeFileSync(ledger, '{"tool":"dispatch_se{"tool":"dispatch_ask"}\n', { flag: "a" });
+      await session.dispatch("dispatch ask --issue DSP-1 --question x", "dispatch_ask", {
+        issue: "DSP-1",
+        ask: "ask-1",
+      });
+      await session.stop();
+      // The ask the agent opened still counts: it spent the check rather than owing another.
+      expect(session.asked).toHaveLength(1);
+
+      // A later command reads on from past the bad line, which is named once.
+      await session.dispatch("dispatch search --query x", "dispatch_search", {});
+      await session.stop();
+      expect(session.asked).toHaveLength(1);
+    } finally {
+      stopSink();
+    }
+    expect(warnings.filter((warning) => warning.includes(`${ledger}:1:`))).toHaveLength(1);
+  });
+
   test("one armed period pays for at most five checks however much work happens", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-cap");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_cap", () => ({}), {

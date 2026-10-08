@@ -630,24 +630,18 @@ async function resolveIdPrefix(
   const fullID = normalizeUUID(id);
   if (fullID !== undefined) return fullID;
   if (!idPrefixPattern.test(id)) {
-    throw new ToolInputError(
-      tool,
-      [`${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`],
-      { syntax: "cli" }
-    );
+    throw new ToolInputError(tool, [
+      `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`,
+    ]);
   }
   const prefix = id.toLowerCase();
   const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
   if (matches.length === 1 && matches[0] !== undefined) return matches[0].id;
-  throw new ToolInputError(
-    tool,
-    [
-      matches.length === 0
-        ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id`
-        : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`,
-    ],
-    { syntax: "cli" }
-  );
+  throw new ToolInputError(tool, [
+    matches.length === 0
+      ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id`
+      : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`,
+  ]);
 }
 
 const askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
@@ -686,11 +680,9 @@ async function resolveAskArgument(
   const id = askId(args);
   if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => undefined);
-    throw new ToolInputError(
-      tool,
-      [asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`],
-      { syntax: "cli" }
-    );
+    throw new ToolInputError(tool, [
+      asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,
+    ]);
   }
   return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
 }
@@ -2051,14 +2043,14 @@ export async function executeDispatchTool(
               issue.message.startsWith("issue is required unless in_reply_to")))
         )
     );
-    problems.push(...formatZodIssues(issues, schema, { syntax: "cli", tool: input.tool }));
+    problems.push(...formatZodIssues(issues, schema, input.tool));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
   const pictures =
     pictureSendingTools[input.tool] === true
       ? await localPictures(ownerArguments.args.images, input.cwd, problems)
       : [];
-  if (problems.length > 0) throw new ToolInputError(input.tool, problems, { syntax: "cli" });
+  if (problems.length > 0) throw new ToolInputError(input.tool, problems);
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
@@ -2622,11 +2614,9 @@ export async function executeDispatchTool(
       const replyToAsk =
         replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
-        throw new ToolInputError(
-          input.tool,
-          [await invalidReplyToAskProblem(client, owner, resolved)],
-          { syntax: "cli" }
-        );
+        throw new ToolInputError(input.tool, [
+          await invalidReplyToAskProblem(client, owner, resolved),
+        ]);
       }
       // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
       // and a turn outside agent|human, so the value is the contract's shape.
