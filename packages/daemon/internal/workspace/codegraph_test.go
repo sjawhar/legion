@@ -670,6 +670,69 @@ func TestTwoContendersThatJudgedOneLeaseStaleCannotBothHoldIt(t *testing.T) {
 	})
 }
 
+// TestATakeoverLeavesAFreshLeaseThatReusedTheStaleOnesInode: the tree volume a pod's workspace
+// lives on reuses inode numbers (measured in the LEGION-629 tester pod: v9fs over the issue
+// volume gives a file removed and re-created at one path the inode it had; the overlayfs under
+// /tmp does not), and os.SameFile compares device and inode alone. So in the interleaving the
+// first subtest above drives — B judges the lease stale, A takes it over, holds a fresh lease at
+// the same path and starts building, then B acts — B's takeover, finding the path's file to be
+// "the one it judged stale" by inode, removes A's live lease, creates its own, and both build: the
+// SQLite corruption the lease exists to prevent, on exactly the filesystem it runs on. A fresh
+// lease at the path is never the stale one, whatever its inode: the takeover leaves it and B
+// skips. The inode is pinned here with a hard link, so the case runs the same on every filesystem
+// rather than only where the allocator happens to hand the number back.
+func TestATakeoverLeavesAFreshLeaseThatReusedTheStaleOnesInode(t *testing.T) {
+	dir := t.TempDir()
+	lease := filepath.Join(dir, ".codegraph", warmLeaseName)
+	if err := os.Mkdir(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lease, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-warmLeaseStale - time.Minute)
+	if err := os.Chtimes(lease, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	// Once B has judged the lease stale, A's takeover runs to completion: A removes the stale
+	// lease and creates its own fresh one at the path, and the filesystem hands the new file the
+	// freed inode — kept alive through a hard link for the moment between A's remove and A's
+	// create, which is what makes the reuse certain here.
+	warmLeaseStep = func(step string) {
+		if step != "judged stale" {
+			return
+		}
+		warmLeaseStep = nil
+		kept := lease + ".kept"
+		for _, err := range []error{os.Link(lease, kept), os.Remove(lease), os.Link(kept, lease), os.Remove(kept)} {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		now := time.Now()
+		if err := os.Chtimes(lease, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { warmLeaseStep = nil })
+
+	release, held := acquireWarmLease(dir, lease)
+	if held {
+		release()
+		t.Fatal("B took the lease over although A, acting first, holds a fresh lease at the path: two builds would run on one index")
+	}
+	current, err := os.Stat(lease)
+	if err != nil {
+		t.Fatalf("A's fresh lease after B's takeover: %v, want it still in place", err)
+	}
+	if current.ModTime().Before(time.Now().Add(-warmLeaseStale)) {
+		t.Fatalf("the lease at the path is stale again after B's takeover (mtime %s), want A's fresh one untouched", current.ModTime())
+	}
+	if _, err := os.Stat(lease + ".takeover"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the takeover marker: %v, want it gone once the takeover ended", err)
+	}
+}
+
 // TestWarmCodegraphIndexStillInitializesAFreshWorkspaceWhenStatusFails: the lease lives under
 // `.codegraph/`, so the warm-up makes that directory before `status` runs, and nextCodegraphStep's
 // fallback for a `status` that failed reads an existing directory as an index to repair. A
