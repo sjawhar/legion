@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
 
-// Stage 4b's reads of a pod's addresses: the pod shape's --connect rule (shape_problems and
-// record_stream) and the address-moved checkpoints' readers (claims_on_handed_addresses and the
-// helpers restart-mid-tree's negative control and the two moves use), taken from the script by name
-// (script-functions.ts) and run on the runtime's golden root issue pod, whose six role launchers dial
-// tcp://192.0.2.250:13371 (packages/daemon/internal/runtime/sandbox/testdata/golden).
+// Stage 4b's reads of a pod's addresses and reservations: the pod shape's --connect rule and its
+// reservation rule (shape_problems, with record_stream and lib/stage4b-pods.jq), and the
+// address-moved checkpoints' readers (claims_on_handed_addresses and the helpers restart-mid-tree's
+// negative control and the two moves use), taken from the script by name (script-functions.ts) and
+// run on the runtime's golden root issue pod, whose six role launchers dial tcp://192.0.2.250:13371
+// and whose every container carries the daemon's default reservation
+// (packages/daemon/internal/runtime/sandbox/testdata/golden).
 const root = join(import.meta.dir, "..", "..", "..");
 const lib = join(root, "scripts", "e2e", "lib");
 const fn = scriptFunctions(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"));
@@ -35,21 +37,37 @@ const golden = JSON.parse(
 );
 // The issue pod's role containers, in the order the runtime builds them (claim.Roles).
 const roles = ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
+// The daemon's default reservations (config.DefaultResources, packages/daemon/internal/config/
+// kubernetes.go), which the golden pod carries: the run's run_resources when it overrides none.
+const defaults: Record<string, { cpu: string; memory: string }> = {
+  architect: { cpu: "250m", memory: "1Gi" },
+  planner: { cpu: "250m", memory: "1Gi" },
+  implementer: { cpu: "750m", memory: "3Gi" },
+  tester: { cpu: "750m", memory: "3Gi" },
+  reviewer: { cpu: "750m", memory: "3Gi" },
+  merger: { cpu: "250m", memory: "1Gi" },
+  controller: { cpu: "1", memory: "4Gi" },
+};
 const goldenStream = "tcp://192.0.2.250:13371";
 // A moved stream: a restart on the run's other port, so the worker stream takes the API's.
 const movedStream = "tcp://192.0.2.250:13370";
 const created = "2026-10-06T12:00:00Z";
 const moved = "2026-10-06T12:30:00Z";
 
+interface Resources {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+}
 interface Container {
   name: string;
   command?: string[];
+  resources?: Resources;
 }
 // withConnect is an argv edit that points a role launcher's --connect at STREAM.
 const withConnect = (stream: string) => (command: string[]) =>
   command.map((word, i) => (command[i - 1] === "--connect" ? stream : word));
-// pod is the golden root issue pod created at AT, the command of each role container ONLY names
-// (every role's by default) edited by argv.
+// pod is the golden root issue pod created at AT, Guaranteed as the API server classes it, the
+// command of each role container ONLY names (every role's by default) edited by argv.
 function pod(
   argv: (command: string[]) => string[] = (command) => command,
   at = created,
@@ -61,8 +79,28 @@ function pod(
       ? { ...container, command: argv(container.command ?? []) }
       : container
   );
-  return { metadata: { name: "pod", uid: "uid", creationTimestamp: at }, spec };
+  return {
+    metadata: { name: "pod", uid: "uid", creationTimestamp: at },
+    spec,
+    status: { qosClass: "Guaranteed" },
+  };
 }
+// reserving is a pod() whose container NAME (a role's or an init container's) carries RESOURCES
+// in place of its own.
+function reserving(name: string, resources: Resources) {
+  const object = pod();
+  for (const list of [object.spec.containers, object.spec.initContainers]) {
+    for (const container of list as Container[]) {
+      if (container.name === name) container.resources = resources;
+    }
+  }
+  return object;
+}
+// reservation is a container's RESOURCES with cpu and memory as both request and limit.
+const reservation = (cpu: string, memory: string): Resources => ({
+  requests: { cpu, memory },
+  limits: { cpu, memory },
+});
 // eachLauncher is the line shape_problems prints for every role launcher, in container order.
 const eachLauncher = (line: (role: string) => string) => roles.map(line);
 
@@ -79,11 +117,13 @@ interface Run {
   // streams is what record_stream wrote as each daemon started; by default one daemon serving
   // advertise_host at the port since before the pod was created.
   streams?: Stream[];
+  // resources is run_resources, each role's expected reservation; the defaults by default.
+  resources?: Record<string, { cpu: string; memory: string }>;
 }
-// connectProblems runs shape_problems on the pod and prints only its --connect lines: the golden
-// pod departs from the run's other rules (its route ConfigMap and audience are the golden's own),
-// which are not under test here.
-function connectProblems(object: object, run: Run = {}): string[] {
+// shapeProblemLines runs shape_problems on the pod and returns every line it prints. The golden
+// pod departs from the run's route and audience rules (its route ConfigMap and audience are the
+// golden's own), so each rule's tests keep only their own lines.
+function shapeProblemLines(object: object, run: Run = {}): string[] {
   const host = run.host ?? "192.0.2.250";
   const port = run.port ?? 13371;
   const evidence = join(dir, `run-${++runs}`);
@@ -101,6 +141,7 @@ function connectProblems(object: object, run: Run = {}): string[] {
       "-c",
       `set -Eeuo pipefail
 root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=route gateway_audience=audience host=${host} port_worker_stream=${port}
+run_resources=${JSON.stringify(JSON.stringify(run.resources ?? defaults))}
 ${shapeProblems}
 shape_problems`,
     ],
@@ -108,10 +149,20 @@ shape_problems`,
   );
   if (result.exitCode !== 0)
     throw new Error(`shape_problems exited ${result.exitCode}: ${result.stderr}`);
-  return result.stdout
-    .toString()
-    .split("\n")
-    .filter((line) => line.includes("launcher dials") || line.includes("launchers dial"));
+  return result.stdout.toString().split("\n");
+}
+// connectProblems is shape_problems' --connect lines alone.
+function connectProblems(object: object, run: Run = {}): string[] {
+  return shapeProblemLines(object, run).filter(
+    (line) => line.includes("launcher dials") || line.includes("launchers dial")
+  );
+}
+// reservationProblems is shape_problems' reservation lines alone: a container's reservation, the
+// pod's QoS class, or an affinity.
+function reservationProblems(object: object, run: Run = {}): string[] {
+  return shapeProblemLines(object, run).filter(
+    (line) => line.includes("reserv") || line.includes("qosClass") || line.includes("affinity")
+  );
 }
 
 describe("the pod shape's --connect rule", () => {
@@ -216,6 +267,93 @@ describe("the pod shape across a move of the worker stream", () => {
     expect(connectProblems(pod(undefined, "2026-10-06T10:59:59Z"), { streams })).toEqual([
       `the role launchers dial ${goldenStream}, but no worker stream was served when the pod was created (2026-10-06T10:59:59Z)`,
     ]);
+  });
+});
+
+describe("the pod shape's reservation rule", () => {
+  test("a pod whose every container carries its role's reservation, Guaranteed and with no affinity, passes it", () => {
+    expect(reservationProblems(pod())).toEqual([]);
+  });
+
+  test("the run's overrides are what a role container is held to, each field on its own", () => {
+    // The run overrides the tester's cpu and memory and the merger's cpu alone; the golden pod
+    // carries the defaults, so those two containers depart and the others pass.
+    const overrides = {
+      ...defaults,
+      tester: { cpu: "1", memory: "4Gi" },
+      merger: { cpu: "200m", memory: "1Gi" },
+    };
+    expect(reservationProblems(pod(), { resources: overrides })).toEqual([
+      "the tester container reserves cpu 750m, memory 3Gi, not the run's cpu 1, memory 4Gi for its role",
+      "the merger container reserves cpu 250m, memory 1Gi, not the run's cpu 200m, memory 1Gi for its role",
+    ]);
+    const overridden = reserving("tester", reservation("1000m", "4096Mi"));
+    overridden.spec.containers = overridden.spec.containers.map((container: Container) =>
+      container.name === "merger"
+        ? { ...container, resources: reservation("200m", "1Gi") }
+        : container
+    );
+    // Quantities compare as amounts: 1000m is 1 and 4096Mi is 4Gi.
+    expect(reservationProblems(overridden, { resources: overrides })).toEqual([]);
+  });
+
+  test("a container whose request is not its limit departs, naming both", () => {
+    expect(
+      reservationProblems(
+        reserving("tester", {
+          requests: { cpu: "750m", memory: "3Gi" },
+          limits: { cpu: "1", memory: "3Gi" },
+        })
+      )
+    ).toEqual([
+      'container tester requests {"cpu":"750m","memory":"3Gi"} but is limited to {"cpu":"1","memory":"3Gi"}; a reservation is one value as both',
+    ]);
+  });
+
+  test("a container reserving no cpu or memory departs", () => {
+    expect(
+      reservationProblems(reserving("merger", { limits: { cpu: "250m", memory: "1Gi" } }))
+    ).toEqual([
+      'container merger reserves {"limits":{"cpu":"250m","memory":"1Gi"}}, want cpu and memory as both request and limit',
+    ]);
+    expect(reservationProblems(reserving("workspace-init", {}))).toEqual([
+      "container workspace-init reserves {}, want cpu and memory as both request and limit",
+    ]);
+  });
+
+  test("an init container carries the reservation of a role of the pod, whichever launch created it", () => {
+    // The golden pod's init containers carry the architect's, the launching role's; a child's pod,
+    // created by its planner's launch, carries the planner's, and one created by a relaunch of the
+    // tester the tester's. A reservation no role of the pod has departs.
+    expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "3Gi")))).toEqual(
+      []
+    );
+    expect(reservationProblems(reserving("workspace-fetch", reservation("2", "1Gi")))).toEqual([
+      "init container workspace-fetch reserves cpu 2, memory 1Gi, the reservation of no role of the pod",
+    ]);
+  });
+
+  test("a pod that is not Guaranteed, or carries an affinity, departs", () => {
+    const burstable = { ...pod(), status: { qosClass: "Burstable" } };
+    expect(reservationProblems(burstable)).toEqual(["qosClass Burstable, want Guaranteed"]);
+    const pinned = pod();
+    pinned.spec.affinity = {
+      podAffinity: {
+        requiredDuringSchedulingIgnoredDuringExecution: [{ topologyKey: "kubernetes.io/hostname" }],
+      },
+    };
+    expect(reservationProblems(pinned)).toEqual([
+      'affinity {"podAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname"}]}}: a Legion pod asks nothing of its placement beyond the pool',
+    ]);
+  });
+
+  test("quantity reads the API server's forms as amounts", () => {
+    expect(
+      runJq(
+        ["-c", "-L", lib, 'include "stage4b-pods"; map(quantity)'],
+        JSON.stringify(["750m", "1", 2, "1.5", "1Gi", "4096Mi", "1k", "2M", "100m", null])
+      )
+    ).toBe("[0.75,1,2,1.5,1073741824,4294967296,1000,2000000,0.1,null]\n");
   });
 });
 

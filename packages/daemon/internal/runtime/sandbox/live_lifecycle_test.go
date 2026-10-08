@@ -9,16 +9,20 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -101,6 +105,119 @@ func (r *liveRig) checkGVisor() error {
 	return nil
 }
 
+// resources: every container of the root's pod, its init containers included, reserves cpu and
+// memory with the request equal to the limit and equal to what the rig configured for the
+// container's role (liveResources: some roles from liveOverrides, the rest from
+// config.DefaultResources(), and the root pod carries both), so the pod is Guaranteed; and it
+// carries no affinity. The init containers take the reservation of the role whose launch created the
+// pod (issuePod.initContainers): the root's own Spawn at root-ready, which no later launch of the
+// issue replaces. Inside the pod, gVisor sizes the sandbox from the pod's cgroup, which the kubelet
+// sets to the regular containers' summed limits once the init containers are done (the pod's
+// effective request is max(the largest init container, the sum of the containers), and no init
+// container's reservation exceeds the sum): nproc is max(2, ceil(Σ cpu limits)) and /proc/meminfo's
+// MemTotal is within 3% of Σ memory limits. The per-container values are read from the API, since
+// a gVisor pod exposes no cgroup files.
+func (r *liveRig) checkResources() error {
+	root := r.claim("root")
+	if err := r.ensureRunning(root); err != nil {
+		return err
+	}
+	name := SandboxName(root.token)
+	pod, err := r.getPod(name)
+	if err != nil {
+		return err
+	}
+	if pod.Spec.Affinity != nil {
+		return fmt.Errorf("pod %s carries an affinity, which no Legion pod asks for: %+v", name, pod.Spec.Affinity)
+	}
+	if pod.Status.QOSClass != corev1.PodQOSGuaranteed {
+		return fmt.Errorf("pod %s is %q, want %s", name, pod.Status.QOSClass, corev1.PodQOSGuaranteed)
+	}
+	want := liveResources()
+	var cpuSum, memorySum resource.Quantity
+	overrides, defaults := 0, 0
+	check := func(c corev1.Container, role claim.Role) error {
+		expected, ok := want[role]
+		if !ok {
+			return fmt.Errorf("container %s names no role the rig configured a reservation for", c.Name)
+		}
+		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			request, limit := c.Resources.Requests[resourceName], c.Resources.Limits[resourceName]
+			reserved := expected.Requests[resourceName]
+			if request.IsZero() || limit.IsZero() {
+				return fmt.Errorf("container %s reserves no %s: requests %v, limits %v", c.Name, resourceName, c.Resources.Requests, c.Resources.Limits)
+			}
+			if request.Cmp(limit) != 0 {
+				return fmt.Errorf("container %s requests %s %s but is limited to %s; a reservation is one value as both", c.Name, resourceName, request.String(), limit.String())
+			}
+			if request.Cmp(reserved) != 0 {
+				return fmt.Errorf("container %s reserves %s %s, not the %s the rig configured for the %s", c.Name, resourceName, request.String(), reserved.String(), role)
+			}
+		}
+		return nil
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if err := check(c, root.role); err != nil {
+			return fmt.Errorf("init container: %w", err)
+		}
+		note("runtime", "init container %s: cpu %s, memory %s, the %s's reservation, request = limit", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), root.role)
+	}
+	for _, c := range pod.Spec.Containers {
+		role := claim.Role(c.Name)
+		if err := check(c, role); err != nil {
+			return err
+		}
+		cpuSum.Add(*c.Resources.Limits.Cpu())
+		memorySum.Add(*c.Resources.Limits.Memory())
+		source := []string{}
+		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			if overridden(role, resourceName) {
+				overrides++
+				source = append(source, string(resourceName)+" overridden")
+			} else {
+				defaults++
+				source = append(source, string(resourceName)+" default")
+			}
+		}
+		note("runtime", "container %s: cpu %s, memory %s, request = limit (%s)", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), strings.Join(source, ", "))
+	}
+	if overrides == 0 || defaults == 0 {
+		return fmt.Errorf("the root pod's reservations come from %d overrides and %d defaults; the rig must configure both paths (liveOverrides)", overrides, defaults)
+	}
+	note("operator", "pod %s: qosClass %s, no affinity; %d reservation fields from liveOverrides and %d from config.DefaultResources()", name, pod.Status.QOSClass, overrides, defaults)
+
+	wantCPUs := max(2, int(math.Ceil(cpuSum.AsApproximateFloat64())))
+	nproc, err := r.exec(root, "nproc")
+	if err != nil {
+		return err
+	}
+	cpus, err := strconv.Atoi(strings.TrimSpace(nproc))
+	if err != nil {
+		return fmt.Errorf("nproc in the pod printed %q, not a number", nproc)
+	}
+	if cpus != wantCPUs {
+		return fmt.Errorf("nproc in the pod is %d, want max(2, ceil(%s cpu)) = %d, the pod cgroup's quota as gVisor sizes the sandbox", cpus, cpuSum.String(), wantCPUs)
+	}
+	meminfo, err := r.exec(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(meminfo)
+	if len(fields) != 3 || fields[2] != "kB" {
+		return fmt.Errorf("/proc/meminfo's MemTotal line is %q, want `MemTotal: <n> kB`", meminfo)
+	}
+	memTotalKB, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("/proc/meminfo's MemTotal %q is not a number", fields[1])
+	}
+	memTotal, wantMemory := float64(memTotalKB)*1024, memorySum.AsApproximateFloat64()
+	if math.Abs(memTotal-wantMemory) > 0.03*wantMemory {
+		return fmt.Errorf("MemTotal in the pod is %d kB (%.2f GiB), not within 3%% of the containers' summed memory limits %s, the pod cgroup's limit as gVisor sizes the sandbox", memTotalKB, memTotal/(1<<30), memorySum.String())
+	}
+	note("operator", "exec %s -- nproc: %d = max(2, ceil(%s)); MemTotal %d kB, within 3%% of the summed memory limits %s", name, cpus, cpuSum.String(), memTotalKB, memorySum.String())
+	return nil
+}
+
 // adopt-working-copy: the root's shim sets its working copy's author, in the pod's workspace.
 func (r *liveRig) checkAdoptWorkingCopy() error {
 	root := r.claim("root")
@@ -162,8 +279,8 @@ func (r *liveRig) checkWorkerSharesIssuePod() error {
 	return nil
 }
 
-// suspend: stopping the worker's process leaves its issue Sandbox, pod, root role and tree PVC
-// intact. The stopped locator probes Gone; the root remains Alive in its separate role container.
+// suspend: stopping the worker's process leaves its issue Sandbox, pod, root role and the issue's
+// PVC intact. The stopped locator probes Gone; the root remains Alive in its separate role container.
 func (r *liveRig) checkSuspend() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
@@ -206,13 +323,14 @@ func (r *liveRig) checkSuspend() error {
 		return fmt.Errorf("the root process after Suspend(%s) is %s: %v", worker.token, rootObs.Kind, err)
 	}
 	worker.loc, worker.state = nil, stateSuspended
-	pvc := IssueClaimName(root.token)
+	// The worker and the root are claims of one issue, so either token names the issue's PVC.
+	pvc := IssueClaimName(worker.token)
 	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
 	if err != nil {
 		return err
 	}
 	if phase != "Bound" {
-		return fmt.Errorf("the issue PVC %s is %q", pvc, phase)
+		return fmt.Errorf("the issue's PVC %s is %q", pvc, phase)
 	}
 	note("runtime", "Suspend(%s) stopped only its role process; issue Sandbox %s and root process stayed running in pod uid %s", worker.token, name, pod.UID)
 	note("operator", "PVC %s: Bound; Probe(stopped %s): Gone", pvc, short(loc.Incarnation))
@@ -292,7 +410,7 @@ func (r *liveRig) checkResume() error {
 	return nil
 }
 
-// same-agent-negative: a resume naming a session the tree volume does not hold never starts a
+// same-agent-negative: a resume naming a session the issue's volume does not hold never starts a
 // fresh agent. The role launcher's start refuses before any child runs (manager.start's stat of
 // ResumeFile, packages/daemon/internal/launcher/launcher.go), so Resume fails synchronously —
 // there is no process to observe Gone — and the shared pod stays available to peers.
@@ -306,7 +424,7 @@ func (r *liveRig) checkSameAgentNegative() error {
 	}
 	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
 	// it; second's own "tester:" lines include role-container-isolation's gen-1 line only once
-	// its stub agent's write has actually landed on the tree volume — a race against how quickly
+	// its stub agent's write has actually landed on the issue's volume — a race against how quickly
 	// that check moved on to suspend it (it waits only for the hello, never the write). Snapshot
 	// second's own lines now, before this check's own writes, so what follows asserts only what
 	// this check itself causes.
@@ -519,12 +637,15 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 	return nil
 }
 
-// concurrent-provision: two claims of a new tree launched at once each provision their
-// workspace, one after the other, from one clone. Which node each pod lands on is not checked: no
-// pod keeps off another tree's node any more (LEGION-632). What a pod asks of its node is the
-// `resources` check's, and `independent-provision` takes this check's place once no two pods share
-// a clone.
-func (r *liveRig) checkConcurrentProvision() error {
+// independent-provision: a new tree's root and its child, spawned at once, each get an issue pod of
+// their own: a Sandbox with one `issue` claim template, a PersistentVolumeClaim of its own selected
+// by the issue's label and Bound, a clone with no lock beside it and a jj workspace of that issue
+// alone, each clone passing git fsck. Nothing orders the two provisions: each works on its own
+// volume. Its negative control is the other issue's workspace: the root's pod cannot list the
+// child's workspace directory, which exists in the child's pod, and the child's pod cannot list the
+// root's. Which node each pod lands on is not checked: no pod asks for or keeps off another pod's
+// node (LEGION-632), and what a pod asks of its node is the `resources` check's.
+func (r *liveRig) checkIndependentProvision() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
 		return err
@@ -541,8 +662,9 @@ func (r *liveRig) checkConcurrentProvision() error {
 		return err
 	}
 	note("runtime", "Spawn(%s) and Spawn(%s) called at once", root2.token, child.token)
-	type window struct{ start, end time.Time }
-	windows := map[string]window{}
+	owner, repo := r.env.repo.Owner(), r.env.repo.Name()
+	clone := TreeRoot + "/repos/github.com/" + owner + "/" + repo
+	pvcs := map[string]string{}
 	for _, c := range []*liveClaim{root2, child} {
 		if _, err := r.awaitRunning(c, since); err != nil {
 			return err
@@ -557,54 +679,77 @@ func (r *liveRig) checkConcurrentProvision() error {
 		if !strings.Contains(log, want) {
 			return fmt.Errorf("%s's init log lacks %q: %s", c.name, want, strings.TrimSpace(log))
 		}
-		pod, err := r.getPod(name)
+		s, err := r.getSandbox(name)
 		if err != nil {
 			return err
 		}
-		for _, s := range pod.Status.InitContainerStatuses {
-			if s.Name == initContainer && s.State.Terminated != nil {
-				windows[c.name] = window{s.State.Terminated.StartedAt.Time, s.State.Terminated.FinishedAt.Time}
-			}
+		if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
+			return fmt.Errorf("Sandbox %s carries %d volume claim templates %v, want one named %s", name, len(s.Spec.VolumeClaimTemplates), templateNames(s), issueVolume)
 		}
-		w := windows[c.name]
-		note("runtime", "%s: init log %q; workspace-init ran %s → %s", c.name, want, w.start.UTC().Format(time.TimeOnly), w.end.UTC().Format(time.TimeOnly))
-	}
-	a, b := windows["root2"], windows["child2"]
-	if a.start.IsZero() || b.start.IsZero() {
-		return fmt.Errorf("an init container's terminated state is missing: %+v", windows)
-	}
-	if a.start.Before(b.end) && b.start.Before(a.end) {
-		return fmt.Errorf("the two workspace-init runs overlapped: root2 %v–%v, child2 %v–%v", a.start, a.end, b.start, b.end)
-	}
-	note("runtime", "the two workspace-init runs did not overlap: the runtime serialized them")
-	owner, repo := r.env.repo.Owner(), r.env.repo.Name()
-	clone := TreeRoot + "/repos/github.com/" + owner + "/" + repo
-	listing, err := r.exec(root2, "ls", "-A", filepath.Dir(clone))
-	if err != nil {
-		return err
-	}
-	entries := strings.Fields(listing)
-	slices.Sort(entries)
-	if !slices.Equal(entries, []string{repo, repo + ".lock"}) {
-		return fmt.Errorf("%s holds %v, want one clone and its lock", filepath.Dir(clone), entries)
-	}
-	workspaces, err := r.exec(root2, "jj", "-R", clone, "workspace", "list")
-	if err != nil {
-		return err
-	}
-	for _, issue := range []string{root2.issue, child.issue} {
-		if !strings.Contains(workspaces, strings.ToLower(issue)+":") {
-			return fmt.Errorf("jj workspace list lacks %s: %s", strings.ToLower(issue), workspaces)
+		bound, err := r.issuePVCs(c.issue)
+		if err != nil {
+			return err
 		}
+		if want := IssueClaimName(c.token) + " Bound"; !slices.Equal(bound, []string{want}) {
+			return fmt.Errorf("the PVCs labelled %s=%s are %v, want exactly [%s]", labelIssue, labelValue(c.issue), bound, want)
+		}
+		pvcs[c.name] = IssueClaimName(c.token)
+		listing, err := r.exec(c, "ls", "-A", filepath.Dir(clone))
+		if err != nil {
+			return err
+		}
+		entries := strings.Fields(listing)
+		if !slices.Equal(entries, []string{repo}) {
+			return fmt.Errorf("%s's %s holds %v, want the clone %s alone and no lock beside it", c.name, filepath.Dir(clone), entries, repo)
+		}
+		workspaces, err := r.exec(c, "jj", "-R", clone, "workspace", "list")
+		if err != nil {
+			return err
+		}
+		other := root2
+		if c == root2 {
+			other = child
+		}
+		if !strings.Contains(workspaces, strings.ToLower(c.issue)+":") || strings.Contains(workspaces, strings.ToLower(other.issue)+":") {
+			return fmt.Errorf("%s's clone lists workspaces %q, want %s's own and not %s's", c.name, oneLine(workspaces), strings.ToLower(c.issue), strings.ToLower(other.issue))
+		}
+		fsck, err := r.exec(c, "git", "--git-dir="+clone+"/.git", "fsck", "--connectivity-only", "--no-progress")
+		if err != nil {
+			return fmt.Errorf("git fsck of %s's clone: %w", c.name, err)
+		}
+		note("runtime", "%s: init log %q; Sandbox %s owns one claim template %s", c.name, want, name, issueVolume)
+		note("operator", "%s: PVC %s (by %s=%s): Bound; exec ls -A %s: %v; jj workspace list: %s; git fsck --connectivity-only: ok %s",
+			c.name, IssueClaimName(c.token), labelIssue, labelValue(c.issue), filepath.Dir(clone), entries, oneLine(workspaces), oneLine(fsck))
 	}
-	fsck, err := r.exec(root2, "git", "--git-dir="+clone+"/.git", "fsck", "--connectivity-only", "--no-progress")
-	if err != nil {
-		return fmt.Errorf("git fsck of the clone: %w", err)
+	if pvcs["root2"] == pvcs["child2"] {
+		return fmt.Errorf("root2 and child2 share PVC %s", pvcs["root2"])
 	}
-	note("operator", "exec ls -A %s: %v", filepath.Dir(clone), entries)
-	note("operator", "exec jj -R %s workspace list: %s", clone, oneLine(workspaces))
-	note("operator", "exec git fsck --connectivity-only: ok %s", oneLine(fsck))
+	// The negative control: each pod holds its own issue's workspace and cannot see the other's.
+	for _, pair := range [][2]*liveClaim{{root2, child}, {child, root2}} {
+		own, other := pair[0], pair[1]
+		theirs, _ := workspace.Location(TreeRoot, r.env.repo, other.issue)
+		if _, err := r.exec(other, "ls", theirs.Dir); err != nil {
+			return fmt.Errorf("%s's own workspace %s is not in its pod: %w", other.name, theirs.Dir, err)
+		}
+		out, err := r.exec(own, "ls", theirs.Dir)
+		if err == nil {
+			return fmt.Errorf("%s's pod lists %s's workspace %s: %s", own.name, other.name, theirs.Dir, oneLine(out))
+		}
+		if !strings.Contains(err.Error(), "No such file or directory") {
+			return fmt.Errorf("%s's pod failed to list %s's workspace %s for another reason than its absence: %w", own.name, other.name, theirs.Dir, err)
+		}
+		note("operator", "exec %s -- ls %s: No such file or directory; the same path exists in %s's pod", SandboxName(own.token), theirs.Dir, other.name)
+	}
 	return nil
+}
+
+// templateNames are the names of a Sandbox's volume claim templates.
+func templateNames(s *sandbox) []string {
+	names := make([]string, 0, len(s.Spec.VolumeClaimTemplates))
+	for _, t := range s.Spec.VolumeClaimTemplates {
+		names = append(names, t.Metadata.Name)
+	}
+	return names
 }
 
 // re-adopt: a fresh runtime and listener take over every live claim, with nothing relaunched; a
@@ -726,8 +871,10 @@ func (r *liveRig) checkReAdopt() error {
 // orphan-sweep: a Sandbox of the project that no claim records survives a sweep inside the grace;
 // past it, it survives while its tree's lifecycle is open (a claim launched after the daemon read
 // the claims it sweeps with), and is deleted once its tree's cleanup confirmed, by a fresh runtime
-// as by any: what a launch that reached the API after its tree's cleanup listed it leaves. A
-// suspended claim's Sandbox, of a live tree, survives every sweep.
+// as by any: what a launch that reached the API after its tree's cleanup listed it leaves. The
+// issue's volume goes with its Sandbox, which owns it (the sweep's delete propagates in the
+// background, so the PVC follows the Sandbox through its owner reference). A suspended claim's
+// Sandbox, of a live tree, survives every sweep.
 func (r *liveRig) checkOrphanSweep() error {
 	orphan, suspended := r.claim("orphan"), r.claim("second")
 	if err := r.ensureRunning(r.claim("root")); err != nil {
@@ -784,6 +931,13 @@ func (r *liveRig) checkOrphanSweep() error {
 		}
 	}
 	note("runtime", "sweep with grace 1s: %s deleted; every known claim's Sandbox, the suspended %s included, survives", name, keep)
+	if err := r.poll(liveGoneLimit, "the swept issue "+orphan.issue+"'s PVC to be gone", func() (bool, error) {
+		pvcs, err := r.issuePVCs(orphan.issue)
+		return len(pvcs) == 0, err
+	}); err != nil {
+		return err
+	}
+	note("operator", "get pvc -l %s=%s: none; the swept Sandbox took the issue's volume %s with it", labelIssue, labelValue(orphan.issue), IssueClaimName(orphan.token))
 	orphan.loc, orphan.state = nil, stateReleased
 	for _, c := range r.live() {
 		if _, err := r.awaitHelloAgain(c, restarted); err != nil {
@@ -794,8 +948,8 @@ func (r *liveRig) checkOrphanSweep() error {
 }
 
 // release-preserves-issue: release ends only the named role process. The shared issue Sandbox,
-// root process and tree PVC stay until the daemon's durable whole-issue cleanup effect runs; this
-// direct runtime harness deliberately has no store/outbox and never substitutes a local cleanup.
+// root process and the issue's PVC stay until the daemon's durable whole-issue cleanup effect runs;
+// this direct runtime harness deliberately has no store/outbox and never substitutes a local cleanup.
 func (r *liveRig) checkReleasePreservesIssue() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -823,10 +977,11 @@ func (r *liveRig) checkReleasePreservesIssue() error {
 	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
 		return fmt.Errorf("root after Release(%s) is %s: %v", worker.name, rootObs.Kind, err)
 	}
-	pvc := IssueClaimName(root.token)
+	// The released worker and the root are claims of one issue, so either token names its PVC.
+	pvc := IssueClaimName(worker.token)
 	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
 	if err != nil || phase != "Bound" {
-		return fmt.Errorf("issue PVC %s after Release(%s) is %q: %v", pvc, worker.name, phase, err)
+		return fmt.Errorf("the issue's PVC %s after Release(%s) is %q: %v", pvc, worker.name, phase, err)
 	}
 	note("runtime", "Release(%s) ended only that role; issue Sandbox %s and root %s stayed Alive", worker.name, name, root.token)
 	note("operator", "PVC %s: Bound", pvc)

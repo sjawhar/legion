@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
@@ -355,13 +356,16 @@ func (r *liveRig) checkImageProbeRefusal() error {
 	return nil
 }
 
-// imageProbe is the probe as the daemon asks for it: its contract, and the references of the role
-// prompts it hands every pod (prompts.RoleReferences). The probe command it sends, with
+// imageProbe is the probe as the daemon asks for it: its contract, the references of the role
+// prompts it hands every pod (prompts.RoleReferences), and the controller's reservation, the one
+// role that runs alone in its pod as the probe does (internal/daemon/kubernetes.go imageProbe), so
+// the probe pod is Guaranteed as every Legion pod is. The probe command it sends, with
 // --role-references and, the run having a provider key, --provider-env-dir, is noted.
 func (r *liveRig) imageProbe() ImageProbe {
 	p := ImageProbe{
 		Contract: api.DaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: prompts.RoleReferences(),
-		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
+		Retry:     bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
+		Resources: liveResources()[claim.RoleController],
 	}
 	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
 	note("runtime", "the probe command: %s", strings.Join(command, " "))

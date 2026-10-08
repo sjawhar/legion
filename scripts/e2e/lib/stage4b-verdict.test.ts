@@ -63,7 +63,9 @@ const limitMessage =
   'Failed to schedule pod, incompatible with nodepool "other"; all available instance types exceed limits for nodepool (NodePool=legion)';
 // limitEvent is Karpenter's verdict that every instance type exceeds the legion pool's limits.
 const limitEvent = podEvent("karpenter", "FailedScheduling", limitMessage);
-// affinityEvent is Karpenter's verdict for a genuine scheduling reason, the tree's affinity.
+// affinityEvent is Karpenter's verdict for a genuine scheduling reason other than the pool's
+// limits (a topology constraint; no Legion pod carries one, LEGION-632, so it stands for any such
+// reason).
 const affinityEvent = podEvent(
   "karpenter",
   "FailedScheduling",
@@ -325,7 +327,7 @@ describe("stage 4b's verdict line", () => {
   }
 });
 
-// The tree-separation checkpoint reads whether tree 2's planner held from on_tree's exit status
+// The issue-independence checkpoint reads whether tree 2's planner held from on_tree's exit status
 // (`if left=$(on_tree "$tree2" left_planning "$tree2")`), so the wrapper must give back the
 // command's status and not its own capacity_subject restore, which would report every tree as one
 // that left planning, with an empty reason.
