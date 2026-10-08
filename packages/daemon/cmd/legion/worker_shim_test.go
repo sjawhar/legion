@@ -68,6 +68,7 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 		{"no wrapped command", []string{"--connect", connect, "--boot-token-file", token, "--"}, 1, []string{"no wrapped command"}},
 		{"--agent-secrets-key-dir alone", append([]string{"--connect", connect, "--boot-token-file", token, "--agent-secrets-key-dir", dir}, omp...), 1, []string{"given together or not at all"}},
 		{"--warm-codegraph without LEGION_WORKSPACE", append([]string{"--connect", connect, "--boot-token-file", token, "--warm-codegraph"}, omp...), 1, []string{"--warm-codegraph", "LEGION_WORKSPACE"}},
+		{"a --stop-grace that is not positive", append([]string{"--connect", connect, "--boot-token-file", token, "--stop-grace", "0s"}, omp...), 1, []string{"--stop-grace 0s is not a positive duration"}},
 		{"--socket mode, which is not ported", append([]string{"--socket", socket}, omp...), 2, []string{"-socket"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

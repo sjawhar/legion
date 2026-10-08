@@ -622,24 +622,24 @@ func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
 	})
 }
 
-// The shim ends with its child, and the warm-up ends with the shim: once the child has exited the
-// warm-up's context is ended — the build it started stops on that — and Run returns the child's
-// status only once the warm-up has returned, so the lease the warm-up releases on its way out is
-// gone before the launcher reads the shim as exited. A role stopped mid-build (the launcher's one
-// SIGTERM to the whole group) otherwise left `.codegraph/legion-warm.lock` behind, and its relaunch
-// within the minute read a live build and skipped its own.
+// The shim ends with its child, and the warm-up ends with the shim: the moment the child is told
+// to stop the warm-up's context is ended — the build it started stops on that, not at the child's
+// exit, so an agent that spends its whole grace ignoring SIGTERM costs the stop nothing more — and
+// Run returns the child's status only once the warm-up has returned, so the lease the warm-up
+// releases on its way out is gone before the launcher reads the shim as exited. A role stopped
+// mid-build (the launcher's one SIGTERM to the whole group) otherwise left `.codegraph/legion-warm.lock`
+// behind, and its relaunch within the minute read a live build and skipped its own.
 func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
 	path := socketPath(t)
 	daemon := listen(t, path)
-	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7")
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7", "FAKE_OMP_IGNORE_SIGTERM=1")
 	var mu sync.Mutex
-	var ended, returned time.Time
+	var returned time.Time
+	ended := make(chan struct{})
 	cfg := config(t, path, child)
 	cfg.WarmCodegraph = func(ctx context.Context, _ string) {
 		<-ctx.Done()
-		mu.Lock()
-		ended = time.Now()
-		mu.Unlock()
+		close(ended)
 		// What a real warm-up does here: its codegraph child ends on the same context, it logs the
 		// end and releases the lease. That takes time the shim must wait out.
 		time.Sleep(300 * time.Millisecond)
@@ -653,18 +653,54 @@ func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
 	p.open(t)
 
 	p.send(t, shimwire.Shutdown{})
-	clock.next(t, grace)
-	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
-		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
+	p.expectRaw(t, "fake_sigterm")
+	expired := clock.next(t, grace)
+	// The child is ignoring its SIGTERM and still running; the warm-up has already been ended.
+	select {
+	case <-ended:
+	case <-time.After(waitLimit):
+		t.Fatalf("the warm-up's context did not end when the child was told to stop; log:\n%s", sh.log)
+	}
+	expired.elapse()
+	if code := sh.wait(t); code != 128+int(syscall.SIGKILL) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGKILL))
 	}
 	exited := time.Now()
 	mu.Lock()
 	defer mu.Unlock()
-	if ended.IsZero() {
-		t.Fatalf("the warm-up's context never ended; log:\n%s", sh.log)
-	}
 	if returned.IsZero() || returned.After(exited) {
 		t.Fatalf("Run returned at %s with the warm-up still running (it returned at %s); log:\n%s", exited.Format(time.StampMilli), returned.Format(time.StampMilli), sh.log)
+	}
+}
+
+// The wait for the warm-up is what the role's stop grace leaves once the child's own grace and the
+// stdout drain are spent (warmUpDrain, pinned in drain_test.go), so a warm-up that never returns
+// cannot hold the shim past the grace at which its launcher kills it (with the lease then left
+// behind, the failure the wait prevents): Run returns without it, saying so, and a runtime whose
+// stop grace leaves nothing gets no wait at all.
+func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7")
+	cfg := config(t, path, child)
+	// grace is the test's 3 s; a 3.5 s stop grace leaves half a second less the 1 s stdout drain:
+	// nothing, so Run returns at once without the warm-up, which never returns.
+	cfg.StopGrace = grace + 500*time.Millisecond
+	never := make(chan struct{})
+	cfg.WarmCodegraph = func(ctx context.Context, _ string) { <-never }
+	defer close(never)
+	clock := newClock()
+	sh := run(t, cfg, clock)
+	p := daemon.accept(t)
+	p.open(t)
+
+	p.send(t, shimwire.Shutdown{})
+	clock.next(t, grace)
+	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
+	}
+	if sh.log.count("the CodeGraph warm-up is still running") != 1 {
+		t.Fatalf("the shim left without saying the warm-up still ran; log:\n%s", sh.log)
 	}
 }
 

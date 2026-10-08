@@ -3,7 +3,6 @@ package workspace
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,10 +22,13 @@ import (
 // files) takes longer than Provision's own command budget. codegraphStopGrace is how long a
 // codegraph child whose context ended has to leave on its SIGTERM before it is killed and the
 // invocation returns: a shim's warm-up ends with the shim's Oh My Pi (WarmCodegraphIndex), and the
-// shim waits on it, so this grace bounds how long after its agent a shim exits.
+// shim waits on it inside the role's stop grace (internal/shim's Config.StopGrace, the pod's
+// terminationGracePeriodSeconds, `worker_stop_timeout_seconds`, 10 s by default), so this grace is
+// well inside what is left of that once the agent's own grace is spent; CodeGraph 1.5.0 leaves
+// within about two seconds of a SIGTERM, its SQLite closed.
 const (
 	codegraphTimeout   = 30 * time.Minute
-	codegraphStopGrace = 5 * time.Second
+	codegraphStopGrace = 2 * time.Second
 )
 
 // codegraphEmptyLockGrace is how long an empty `.codegraph/codegraph.lock` still counts as held,
@@ -60,7 +62,10 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // pod overlapping its replacement. flock would not do: under gVisor a pod's flock never reaches
 // another pod (initWaitSeconds, internal/runtime/sandbox/manifest.go), where a file's existence
 // and mtime on the shared volume do. So the lease is an exclusive create its holder keeps fresh,
-// and a stale one is taken over by a rename, the one step exactly one of two contenders wins.
+// and the only exclusive step on this filesystem is that create: a stale lease is removed under a
+// second exclusive create, the takeover marker (takeOverWarmLease), so two contenders that both
+// judged one lease stale cannot both remove it and both build — a rename would not do, since a
+// rename moves whatever is at the path, the winner's fresh lease included.
 const (
 	warmLeaseHeartbeat = 10 * time.Second
 	warmLeaseStale     = 60 * time.Second
@@ -210,12 +215,23 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 	}
 }
 
+// warmLeaseStep is a seam for the lease's own tests, nil otherwise: it is called with the name of
+// the step acquireWarmLease is about to take, so a test can run a second contender at exactly that
+// point and drive an interleaving the scheduler would rarely produce.
+var warmLeaseStep func(step string)
+
+func leaseStep(step string) {
+	if warmLeaseStep != nil {
+		warmLeaseStep(step)
+	}
+}
+
 // acquireWarmLease takes dir's warm-up lease, the file at path, or reports that another process
 // holds it. An exclusive create either wins the lease or finds a holder's file. One whose mtime is
 // within warmLeaseStale is a live warm-up elsewhere, and the caller leaves the build to it. An
-// older one is a dead holder's: it is taken over by renaming it aside — the one step two
-// contenders cannot both win, the loser's rename failing with ENOENT — and the create is tried
-// once more, an EEXIST then being a contender that got there first. A file gone between the
+// older one is a dead holder's, which takeOverWarmLease removes under its own exclusive marker, so
+// of two contenders that both judged one lease stale exactly one removes it; the create is then
+// tried once more, an EEXIST being a contender that got there first. A lease gone between the
 // failed create and its stat was just released, and gets the same one retry.
 func acquireWarmLease(dir, path string) (release func(), held bool) {
 	skipped := func(what string) (func(), bool) {
@@ -226,7 +242,8 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return nil, false
 	}
-	for attempt := 0; ; attempt++ {
+	for range 2 {
+		// Two tries: the create, and one more after a released or taken-over lease.
 		lease, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			created, err := lease.Stat()
@@ -240,9 +257,6 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 		if !errors.Is(err, os.ErrExist) {
 			return failed(err)
 		}
-		if attempt > 0 {
-			return skipped("holds")
-		}
 		info, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -253,15 +267,55 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 		if time.Since(info.ModTime()) < warmLeaseStale {
 			return skipped("holds")
 		}
-		stale := path + ".stale-" + rand.Text()
-		if err := os.Rename(path, stale); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return skipped("took over")
-			}
+		leaseStep("judged stale")
+		switch took, err := takeOverWarmLease(path, info); {
+		case err != nil:
 			return failed(err)
+		case !took:
+			return skipped("is taking over")
 		}
-		_ = os.Remove(stale)
 	}
+	return skipped("holds")
+}
+
+// takeOverWarmLease removes the lease at path a contender judged stale (its FileInfo) under the
+// takeover marker beside it, an exclusive create of its own: of two contenders that both judged
+// the same lease stale, exactly one creates the marker, and the other finds it and leaves the
+// takeover to the holder (false). Under the marker the lease is read again, since the first
+// contender may already have replaced it: one that is still the file judged stale (os.SameFile) is
+// removed; one that is not — a new holder's, fresh — is left for the caller's create to find; one
+// already gone was released. Either way the caller's create decides (true). A marker older than
+// warmLeaseStale is a contender's killed inside these few syscalls, removed before the one retry.
+func takeOverWarmLease(path string, stale os.FileInfo) (bool, error) {
+	marker := path + ".takeover"
+	for range 2 {
+		held, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_ = held.Close()
+			leaseStep("marker held")
+			current, err := os.Stat(path)
+			if err == nil && os.SameFile(stale, current) {
+				_ = os.Remove(path)
+			}
+			_ = os.Remove(marker)
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return false, err
+		}
+		info, err := os.Stat(marker)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if time.Since(info.ModTime()) < warmLeaseStale {
+			return false, nil
+		}
+		_ = os.Remove(marker)
+	}
+	return false, nil
 }
 
 // holdWarmLease keeps the lease at path fresh, its mtime set to now every warmLeaseHeartbeat so a

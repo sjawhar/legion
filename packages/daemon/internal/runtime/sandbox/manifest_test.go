@@ -962,6 +962,12 @@ func TestATreeRolesShimIsToldToWarmTheWorkspacesCodegraphIndex(t *testing.T) {
 	if envOf(worker)["LEGION_WORKSPACE"] == "" {
 		t.Fatalf("the shim is told --warm-codegraph with no LEGION_WORKSPACE to warm; env %v", worker.Env)
 	}
+	// The shim's wait for that warm-up on its way out is bounded by the stop grace its launcher
+	// kills it at, so the shim is told the same TerminationGrace the launcher runs with.
+	at := slices.Index(shim, "--stop-grace")
+	if at < 0 || at+1 >= len(shim) || shim[at+1] != r.terminationGrace.String() {
+		t.Fatalf("the shim runs as %v, want --stop-grace %s, the launcher's own", shim, r.terminationGrace)
+	}
 }
 
 // New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,

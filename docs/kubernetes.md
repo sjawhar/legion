@@ -853,13 +853,16 @@ background (`codegraph init`, or `codegraph index` to repair one an earlier buil
 `codegraph status --json` decides). Nothing waits on it: not the launch, not the role's registration,
 not a prompt. Six role shims share one workspace, and a draining pod can overlap its replacement, so
 the warm-up holds a lease at `.codegraph/legion-warm.lock` for its run — an exclusive create whose
-holder refreshes its mtime every 10 s, taken over once it is 60 s stale — and a shim that finds the
-lease held leaves the build to its holder (a pod's `flock` reaches no other pod under gVisor, so the
-lease is a file, not a lock). A stop mid-build — the launcher's one SIGTERM to the role's process
-group — ends Oh My Pi and the `codegraph` child together, and the shim exits only once the warm-up
-has released its lease, so the relaunch is never told a live build holds the workspace; it runs the
-warm-up again, and `status` on the volume's existing index answers complete, so nothing runs, or
-reports the index the stop left partial, which `codegraph index` repairs. The tester's `affected` and
+holder refreshes its mtime every 10 s, taken over once it is 60 s stale, the takeover itself under a
+second exclusive create beside it so two shims that both read one stale lease never both build — and a
+shim that finds the lease held leaves the build to its holder (a pod's `flock` reaches no other pod
+under gVisor, so the lease is a file, not a lock). A stop mid-build — the launcher's one SIGTERM to
+the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim exits only
+once the warm-up has released its lease, inside the pod's `terminationGracePeriodSeconds`
+(`worker_stop_timeout_seconds`, which the launcher passes the shim as `--stop-grace`), so the
+relaunch is never told a live build holds the workspace; it runs the warm-up again, and `status` on
+the volume's existing index answers complete, so nothing runs, or reports the index the stop left
+partial, which `codegraph index` repairs. The tester's `affected` and
 the reviewer's `impact`/`callers` queries answer once `codegraph status --json` reports
 `index.state: "complete"`; before that a role falls back to grep, as its prompt says. The init
 containers never call `codegraph`.

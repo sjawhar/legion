@@ -44,17 +44,29 @@ const (
 	// shim's default, half the daemon's default `worker_stop_timeout_seconds`
 	// (DEFAULT_TERMINATE_STDIN_GRACE_MS, worker-shim.ts).
 	DefaultGrace = 5 * time.Second
+	// DefaultStopGrace is the stop grace a shim assumes when its runtime names none
+	// (Config.StopGrace): the daemon's default `worker_stop_timeout_seconds`, which is also what a
+	// pod's launcher gets as its own stop grace (internal/runtime/sandbox's launcherCommand passes
+	// both the same value, the pod's terminationGracePeriodSeconds).
+	DefaultStopGrace = 10 * time.Second
 	// drainTimeout bounds reading OMP's stdout after OMP has exited. What OMP wrote is in the pipe
 	// by then; only a process it started and left holding the pipe keeps it open past this.
 	drainTimeout = time.Second
 	// adoptionWaitDelay bounds the wait for jj's stderr once jj has been killed at its budget.
 	adoptionWaitDelay = time.Second
-	// warmUpDrain bounds Run's wait for an in-flight CodeGraph warm-up once the shim's loop has
-	// ended: the warm-up ends its codegraph child on that same context within its own stop grace
-	// (workspace.runCodegraph), so this is only a backstop against a wait that would otherwise
-	// outlive the launcher's stop grace, under which the shim's exit still reaches the daemon.
-	warmUpDrain = 10 * time.Second
 )
+
+// warmUpDrain is how long Run waits for an in-flight CodeGraph warm-up once the shim's loop has
+// ended, before it returns without it: what is left of the role's stop grace once the agent's own
+// grace and the stdout drain are spent, so the whole stop — the agent SIGTERMed and, ignoring it,
+// killed at Grace; its stdout drained for drainTimeout; the warm-up's codegraph child SIGTERMed
+// and, ignoring it, killed at workspace's codegraphStopGrace; the lease released — fits inside the
+// grace after which the launcher SIGKILLs the shim (endGeneration, internal/launcher/process.go),
+// which would leave the lease behind. With the defaults, 10 s − 5 s − 1 s = 4 s, against a measured
+// 0.1–0.3 s and a codegraph kill at 2 s. A runtime whose stop grace leaves nothing waits not at all.
+func warmUpDrain(stopGrace, grace time.Duration) time.Duration {
+	return max(stopGrace-grace-drainTimeout, 0)
+}
 
 // Clock is the time the shim waits on: the backoff between dials and the grace before a kill.
 type Clock interface {
@@ -97,6 +109,11 @@ type Config struct {
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
 	Grace time.Duration
+	// StopGrace is how long the shim's runtime gives the whole shim to exit after its stop signal
+	// before it is killed — a pod's terminationGracePeriodSeconds, which the launcher passes as
+	// `--stop-grace`; zero is DefaultStopGrace. Run keeps its wait for the warm-up (warmUpDrain)
+	// inside it.
+	StopGrace time.Duration
 	// Clock is the time the shim waits on; nil is the real one.
 	Clock Clock
 }
@@ -107,12 +124,15 @@ type Config struct {
 // the shim exits 143 as that signal would have. The error is the shim's own failure to start
 // the child, never the child's.
 func Run(ctx context.Context, cfg Config) (int, error) {
-	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, childExited: make(chan struct{})}
+	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, stopGrace: cfg.StopGrace, childExited: make(chan struct{})}
 	if s.clock == nil {
 		s.clock = realClock{}
 	}
 	if s.grace == 0 {
 		s.grace = DefaultGrace
+	}
+	if s.stopGrace == 0 {
+		s.stopGrace = DefaultStopGrace
 	}
 	out := cfg.Log
 	if out == nil {
@@ -121,20 +141,24 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	s.log = log.New(out, "", 0)
 	s.out.log = s.log
 	s.loop, s.stop = context.WithCancel(context.Background())
+	s.warm, s.stopWarm = context.WithCancel(s.loop)
+	// Deferred in this order so that they run in reverse: the loop ends, the renewer with it, and
+	// the warm-up — ended with the loop — is waited for last, inside the stop grace.
+	defer s.drainWarmUp()
+	defer s.renewers.Wait()
 	defer s.stop()
-	defer s.renewers.Wait() // the renewer, if one was started, is a child of s.loop and ends with it
-	defer s.drainWarmUp()   // run returns only once s.loop has ended, which ends the warm-up's build
 	go s.watch(ctx)
 	return s.run()
 }
 
 type shim struct {
-	cfg    Config
-	clock  Clock
-	grace  time.Duration
-	log    *log.Logger
-	dedupe shimwire.Dedupe
-	out    outbox
+	cfg       Config
+	clock     Clock
+	grace     time.Duration
+	stopGrace time.Duration
+	log       *log.Logger
+	dedupe    shimwire.Dedupe
+	out       outbox
 
 	// order makes a dedupe decision and the daemon-bound frames it implies one step, as they are
 	// in the single-threaded shim this is ported from: a start replayed for a retried delivery
@@ -144,6 +168,12 @@ type shim struct {
 	// loop ends with the shim: every dial, connection, and backoff is bound to it.
 	loop context.Context
 	stop context.CancelFunc
+	// warm is the warm-up's context, a child of loop that also ends the moment the child is told
+	// to stop (terminate): the build has nothing to wait for once the agent is on its way out, and
+	// ending it then, not at the agent's exit, keeps the whole stop inside the stop grace even when
+	// the agent spends its own grace ignoring SIGTERM.
+	warm     context.Context
+	stopWarm context.CancelFunc
 
 	mu          sync.Mutex
 	child       *exec.Cmd
@@ -401,10 +431,10 @@ func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 }
 
 // warmCodegraph starts cfg.WarmCodegraph for the workspace LEGION_WORKSPACE names, once the
-// wrapped process has written its first line (pump), under s.loop: the warm-up's build ends when
-// the shim's loop does, and Run waits for its return (drainWarmUp). The command refuses
-// --warm-codegraph without the variable (cmd/legion/worker_shim.go), so an empty value here is a
-// Config built by hand.
+// wrapped process has written its first line (pump), under s.warm: the warm-up's build ends when
+// the child is told to stop or has exited, and Run waits for its return (drainWarmUp). The command
+// refuses --warm-codegraph without the variable (cmd/legion/worker_shim.go), so an empty value
+// here is a Config built by hand.
 func (s *shim) warmCodegraph() {
 	if s.cfg.WarmCodegraph == nil {
 		return
@@ -417,25 +447,26 @@ func (s *shim) warmCodegraph() {
 	s.warmUps.Add(1)
 	go func() {
 		defer s.warmUps.Done()
-		s.cfg.WarmCodegraph(s.loop, dir)
+		s.cfg.WarmCodegraph(s.warm, dir)
 	}()
 }
 
 // drainWarmUp waits for the warm-up warmCodegraph started, if any, to return — its codegraph
-// child ended by s.loop's end, its lease released — before Run returns the agent's exit status,
+// child ended by s.warm's end, its lease released — before Run returns the agent's exit status,
 // so a role stopped mid-build leaves no lease its relaunch would read as a live build. The wait is
-// bounded by warmUpDrain: a warm-up still running past it is logged and left, and the shim's exit
-// still reaches the daemon inside the launcher's stop grace.
+// bounded by warmUpDrain, what the role's stop grace leaves: a warm-up still running past it is
+// logged and left, so the shim's exit still reaches the daemon before the launcher's kill.
 func (s *shim) drainWarmUp() {
 	drained := make(chan struct{})
 	go func() {
 		s.warmUps.Wait()
 		close(drained)
 	}()
+	bound := warmUpDrain(s.stopGrace, s.grace)
 	select {
 	case <-drained:
-	case <-time.After(warmUpDrain):
-		s.log.Printf("[worker-shim] the CodeGraph warm-up is still running %v after the wrapped process exited; leaving it", warmUpDrain)
+	case <-time.After(bound):
+		s.log.Printf("[worker-shim] the CodeGraph warm-up is still running %v after the wrapped process exited; leaving it", bound)
 	}
 }
 
@@ -475,8 +506,11 @@ func (s *shim) watch(ctx context.Context) {
 }
 
 // terminate SIGTERMs the child and kills it if it is still running when the grace runs out. The
-// bridge keeps running meanwhile, so what OMP says on its way out still reaches the daemon. It
-// reports false, having done nothing but settle that no child will be spawned, when none was.
+// bridge keeps running meanwhile, so what OMP says on its way out still reaches the daemon. The
+// warm-up's context ends here too (s.warm): its build has nothing left to serve once the agent is
+// on its way out, and ending it now rather than at the agent's exit keeps the stop inside the stop
+// grace whatever the agent does with its own. It reports false, having done nothing but settle
+// that no child will be spawned, when none was.
 func (s *shim) terminate(reason string) bool {
 	s.mu.Lock()
 	child := s.child
@@ -493,6 +527,7 @@ func (s *shim) terminate(reason string) bool {
 	s.mu.Unlock()
 
 	s.log.Printf("[worker-shim] %s: sending SIGTERM to the wrapped process", reason)
+	s.stopWarm()
 	_ = child.Process.Signal(syscall.SIGTERM)
 	expired := s.clock.After(s.grace)
 	go func() {
