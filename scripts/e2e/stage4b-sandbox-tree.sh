@@ -3230,12 +3230,13 @@ until_true 300 "the controller's report message on $report" report_posted
 # literal is the command.
 # Only the assistant's own calls count, so a tool result that quotes the command (a skill file) or a
 # message on another issue is not the report's call.
-# report_after_tick succeeds when the report's call came on such a turn, and otherwise prints why.
+# report_after_tick succeeds at the first session whose report call came on such a turn, and
+# otherwise prints why.
 report_after_tick() {
-  local file verdicts=
+  local file verdict verdicts=
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    verdicts+=$(jq -R -s -r -L "$root/scripts/e2e/lib" --arg tick "summary: tick on $project" --arg report "$report" 'include "omp-tool-calls";
+    verdict=$(jq -R -s -r -L "$root/scripts/e2e/lib" --arg tick "summary: tick on $project" --arg report "$report" 'include "omp-tool-calls";
       def posts_report:
         any(.message.content[]? | select(runs_dispatch("message"));
           bash_command | test("--issue(=|\\s+)\\\\?[\u0027\"]?" + $report + "($|[^0-9])"));
@@ -3248,9 +3249,10 @@ report_after_tick() {
             | $before != null and $before.m.message.role == "assistant" and $before.m.message.stopReason == "stop"))
         then "tick" else "busy" end
     ' "$file")
+    [ "$verdict" = tick ] && return 0
+    verdicts+=$verdict
   done
   case $verdicts in
-  *tick*) return 0 ;;
   *busy*) echo "the controller's first report message was not posted on a turn a tick started while it was idle" ;;
   *) echo "no session of the controller holds a call running dispatch message --issue $report: the bash tool, a write to xd://bash, or eval code whose string literal runs it" ;;
   esac
