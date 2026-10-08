@@ -4,6 +4,9 @@
 
 ### Added
 
+- A delivered `ask.answered` that changes an earlier answer renders `previous_answer`, an issue
+  log names the answer it replaced, and `dispatch_read` of an ask lists its earlier answers
+  (LEGION-622).
 - Pictures in Dispatch (LEGION-541). `dispatch_message`, `dispatch_comment` and `dispatch_ask` take
   `images`, local paths of PNG, JPEG, GIF or WebP files (by their bytes) of at most 25 MiB: each is
   uploaded to the issue, the project document's project, or, for a reply to a direct message, the

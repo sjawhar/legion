@@ -339,7 +339,9 @@ when work is stopped on it; while it is open, keep working on everything that is
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
 answering a clarification, whose turn a reply gives), see
-[Asks after they open](skill://dispatch/references/asks.md).
+[Asks after they open](skill://dispatch/references/asks.md). A human can change an answer later;
+the change arrives as another `ask.answered` frame whose `previous_answer` names what it replaced,
+so act on the newest answer.
 
 ## Architecture components
 
