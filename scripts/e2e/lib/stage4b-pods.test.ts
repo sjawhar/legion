@@ -616,11 +616,13 @@ pod_shape_verdict "$work/pod-watch-wrong-shape.json" | sed 's/^/control /'`);
 });
 
 // The pod-watch-verdict checkpoint's matching (pod_watch_verdict, never_scheduled_deaths): the
-// daemon names a dead process by its incarnation, `<pod uid>/<generation>`, and the driver records an
-// action by the pod uid alone (driver_action). An action on a pod accounts for a death of any
-// generation of any role in that pod, and of no other pod, a pod whose uid it is a prefix of
-// included; a death whose pod the scheduler never placed is accounted for by that pod's own
-// conditions.
+// daemon names a dead process by its claim, whose last word is its role, and its incarnation,
+// `<pod uid>/<generation>`; the driver records an action by pod uid, with the role for a kill
+// (driver_action). A `kill-container` accounts for a death of the role it killed, any generation, in
+// its pod and no other role's; a `delete-pod` or `close` for a death of any role in its pod. Neither
+// accounts for another pod, a pod whose uid it is a prefix of included; a death whose pod the
+// scheduler never placed is accounted for by that pod's own conditions; and a record line in any
+// other form is named.
 describe("the pod-watch-verdict checkpoint's matching", () => {
   const scheduled = (uid: string) => ({
     kind: "Pod",
@@ -646,17 +648,20 @@ describe("the pod-watch-verdict checkpoint's matching", () => {
       containerStatuses: [{ state: { terminated: { reason: "OOMKilled", exitCode: 137 } } }],
     },
   };
-  const died = (incarnation: string) =>
+  // died is a death line of the ROLE claim at INCARNATION, as the daemon writes it.
+  const died = ([incarnation, role]: [string, string]) =>
     JSON.stringify({
       msg: "supervise: process died",
+      claim: `legion-acme-acme-1-${role}`,
       incarnation,
       observed: "gone",
       detail: "test",
     });
 
-  // verdict runs pod_watch_verdict on a watch of the pods, the daemon's death lines for DEATHS, and
-  // driver actions on ACTIONS (pod uids), and prints each incarnation it names, in order.
-  function verdict(deaths: string[], actions: string[]) {
+  // verdict runs pod_watch_verdict on a watch of the pods, the daemon's death lines for DEATHS
+  // ([incarnation, role]), and the driver record ACTIONS (its lines, without their time), and prints
+  // the incarnation of each death it names, then each other line it names, in order.
+  function verdict(deaths: [string, string][], actions: string[]) {
     const evidence = join(dir, `run-${++runs}`);
     mkdirSync(evidence);
     const pods = [scheduled("uid-a"), scheduled("uid-a2"), unscheduled("uid-u"), hog];
@@ -664,32 +669,106 @@ describe("the pod-watch-verdict checkpoint's matching", () => {
       join(evidence, "pod-watch.json"),
       pods.map((object) => `${JSON.stringify({ type: "ADDED", object })}\n`).join("")
     );
-    writeFileSync(join(evidence, "daemon.log"), deaths.map((i) => `${died(i)}\n`).join(""));
+    writeFileSync(join(evidence, "daemon.log"), deaths.map((d) => `${died(d)}\n`).join(""));
     writeFileSync(
       join(evidence, "driver-actions.txt"),
-      actions.map((uid) => `kill-container ${uid} 2026-10-08T14:00:00.000Z\n`).join("")
+      actions
+        .map((line) => {
+          const [kind, uid, ...role] = line.split(" ");
+          return `${[kind, uid, "2026-10-08T14:00:00.000Z", ...role].join(" ")}\n`;
+        })
+        .join("")
     );
     const out = runScript(`work=${JSON.stringify(evidence)}
 ${fn("never_scheduled_deaths")}
 ${fn("pod_watch_verdict")}
 pod_watch_verdict "$work/pod-watch.json" "$work/driver-actions.txt" "$work/daemon.log" >/dev/null || true
-sed -n 's/^incarnation \\(.*\\) died with no driver action.*/\\1/p' "$work/pod-watch-verdict.txt"`);
+sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^driver action /p' "$work/pod-watch-verdict.txt"`);
     if (out.exitCode !== 0) throw new Error(`the verdict's run exited ${out.exitCode}`);
     return out.out.split("\n").filter((line) => line !== "");
   }
 
-  test("an action on a pod accounts for every generation of every role in it, and no other pod", () => {
-    expect(verdict(["uid-a/1", "uid-a/3", "uid-a2/1", "uid-b/1"], ["uid-a"])).toEqual([
-      "uid-a2/1",
-      "uid-b/1",
-    ]);
+  test("a kill accounts for its own role, any generation, in its pod alone", () => {
+    expect(
+      verdict(
+        [
+          ["uid-a/1", "implementer"],
+          ["uid-a/3", "implementer"],
+          ["uid-a2/1", "implementer"],
+          ["uid-b/1", "implementer"],
+        ],
+        ["kill-container uid-a implementer"]
+      )
+    ).toEqual(["uid-a2/1", "uid-b/1"]);
+  });
+
+  test("a kill accounts for no other role in its pod", () => {
+    expect(
+      verdict(
+        [
+          ["uid-a/1", "implementer"],
+          ["uid-a/1", "tester"],
+        ],
+        ["kill-container uid-a implementer"]
+      )
+    ).toEqual(["uid-a/1"]);
+  });
+
+  test("a pod's deletion or close accounts for every role in it", () => {
+    const deaths: [string, string][] = [
+      ["uid-a/1", "implementer"],
+      ["uid-a/2", "tester"],
+    ];
+    expect(verdict(deaths, ["delete-pod uid-a"])).toEqual([]);
+    expect(verdict(deaths, ["close uid-a"])).toEqual([]);
   });
 
   test("with no action, every death of a scheduled pod is named", () => {
-    expect(verdict(["uid-a/1", "uid-a/3"], [])).toEqual(["uid-a/1", "uid-a/3"]);
+    expect(
+      verdict(
+        [
+          ["uid-a/1", "implementer"],
+          ["uid-a/3", "implementer"],
+        ],
+        []
+      )
+    ).toEqual(["uid-a/1", "uid-a/3"]);
   });
 
   test("a death whose pod was never scheduled is accounted for, whatever its generation", () => {
-    expect(verdict(["uid-u/2"], [])).toEqual([]);
+    expect(verdict([["uid-u/2", "planner"]], [])).toEqual([]);
+  });
+
+  test("a record line in another form is named, a kill without its role included", () => {
+    expect(verdict([], ["kill-container uid-a"])).toEqual([
+      "driver action kill-container uid-a 2026-10-08T14:00:00.000Z is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME",
+    ]);
+  });
+
+  // The checkpoint's live control (sibling_death_line): from the run's own record, a death of
+  // another role in the pod of the last kill no deletion or close also ended, which the verdict must
+  // name.
+  test("the sibling-death control is built on the last kill of a pod nothing else ended", () => {
+    const evidence = join(dir, `run-${++runs}`);
+    mkdirSync(evidence);
+    writeFileSync(
+      join(evidence, "driver-actions.txt"),
+      [
+        "kill-container uid-a 2026-10-08T14:00:00.000Z planner",
+        "kill-container uid-b 2026-10-08T14:01:00.000Z architect",
+        "kill-container uid-c 2026-10-08T14:02:00.000Z merger",
+        "delete-pod uid-c 2026-10-08T14:03:00.000Z",
+      ]
+        .map((line) => `${line}\n`)
+        .join("")
+    );
+    const out = runScript(`${fn("sibling_death_line")}
+sibling_death_line ${JSON.stringify(join(evidence, "driver-actions.txt"))}`);
+    expect(out.exitCode).toBe(0);
+    expect(JSON.parse(out.out)).toMatchObject({
+      msg: "supervise: process died",
+      claim: "legion-e2e-control-planner",
+      incarnation: "uid-b/1",
+    });
   });
 });
