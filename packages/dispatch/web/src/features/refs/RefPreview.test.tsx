@@ -556,6 +556,7 @@ test("an ask's card heads with its question formatted, not its source", async ()
       state: "open",
       urgency: "med",
     },
+    answers: [],
     edits: [],
     followers: [],
     replies: [],

@@ -45,6 +45,9 @@ dispatch_edit_ask({
 At least one field besides `ask` is required. Use this only while the same decision remains open: it keeps the prior text in the event
 log and invalidates any answer draft against the prior `edited_at` revision, so the human sees the new wording and explicitly reconfirms.
 An answered or resolved ask cannot be edited. If the decision is moot or superseded, retract the old ask and open a new one.
+A human can change an answer they gave. The change arrives as another `ask.answered` frame whose
+`previous_answer` names the answer it replaced, through the same route the first answer took, and
+`dispatch_read` of the ask lists every earlier answer. Act on the newest answer.
 
 An ask that lives as an `ask` block in a document keeps its question and options in the block, and `dispatch_edit_ask` writes the
 block along with the row, so the edit stands and the document reads the same. It changes only the fields you name: pass `urgency`

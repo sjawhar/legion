@@ -724,6 +724,14 @@ func NewAskEventPayload(ask Ask, changes ReferenceChanges) AskEventPayload {
 	}
 }
 
+// AskAnsweredEventPayload is an ask.answered payload. PreviousAnswer is set only when a human
+// replaces their earlier answer; the asker and every follower receive it through the same event
+// path as the first answer.
+type AskAnsweredEventPayload struct {
+	AskEventPayload
+	PreviousAnswer *AskAnswer `json:"previous_answer,omitempty"`
+}
+
 // IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
 // plus what the write moved in the reference graph. A new issue's spec text is indexed in the
 // creating transaction, so `issue.created` names the nodes that body cited.
@@ -800,6 +808,55 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// OpenAskOwner identifies the issue or standalone project document holding an ask.
+type OpenAskOwner struct {
+	Issue    *OpenAskIssue    `json:"issue,omitempty"`
+	Document *OpenAskDocument `json:"document,omitempty"`
+}
+
+// OpenAskIssue is the issue shape an ask-owned list row needs.
+type OpenAskIssue struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+}
+
+// OpenAskDocument is the project document shape an ask-owned list row needs.
+type OpenAskDocument struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+}
+
+// MyAnswerReply is the reply carried by a row in a person's answer history.
+type MyAnswerReply struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
+}
+
+// MyAnswerRow is one answer or reply written by the caller, newest first.
+type MyAnswerRow struct {
+	Kind     string         `json:"kind"`
+	At       time.Time      `json:"at"`
+	AskID    string         `json:"ask_id"`
+	Ref      string         `json:"ref"`
+	Question string         `json:"question"`
+	AskKind  string         `json:"ask_kind"`
+	AskState string         `json:"ask_state"`
+	EditedAt *string        `json:"edited_at"`
+	Owner    OpenAskOwner   `json:"owner"`
+	Answer   *AskAnswer     `json:"answer,omitempty"`
+	Current  bool           `json:"current"`
+	Reply    *MyAnswerReply `json:"reply,omitempty"`
+}
+
+// MyAnswersResponse is a page of the caller's answers and ask replies.
+type MyAnswersResponse struct {
+	Rows   []MyAnswerRow `json:"rows"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
 }
 
 // AskResolution records why a question no longer needs a human answer.

@@ -1441,8 +1441,10 @@ function eventHead(event: Event): string | undefined {
     case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
-    case "ask.answered":
-      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
+    case "ask.answered": {
+      const previousAnswer = event.payload.previous_answer;
+      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}${previousAnswer === undefined ? "" : ` (was: ${textHead(askAnswerText(previousAnswer))})`}`;
+    }
     case "comment.created":
     case "comment.answered":
     case "comment.anchor_refreshed":
@@ -1495,8 +1497,9 @@ function childrenSummary(issue: IssueDetails): string {
   ].join("\n");
 }
 
-function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string {
+function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]): string {
   const answer = ask.answer;
+  const earlierAnswers = answers.slice(0, -1);
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
@@ -1518,6 +1521,14 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
           `- By: ${answer.user}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
+        ]),
+    ...(earlierAnswers.length === 0
+      ? []
+      : [
+          "Earlier answers:",
+          ...earlierAnswers.map(
+            (earlier) => `- ${earlier.at} · ${earlier.user} · ${askAnswerText(earlier)}`
+          ),
         ]),
     ...(ask.resolution === undefined
       ? []

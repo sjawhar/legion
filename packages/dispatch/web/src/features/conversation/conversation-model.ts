@@ -275,7 +275,9 @@ export function activityDescription(
     case "ask.handed_back":
       return `handed “${event.payload.question}” back for approval`;
     case "ask.answered":
-      return `answered “${event.payload.question}”`;
+      return event.payload.previous_answer === undefined
+        ? `answered “${event.payload.question}”`
+        : `changed the answer to “${event.payload.question}”`;
     case "message.created":
       return "sent a message";
     case "message.delivery":
