@@ -82,13 +82,14 @@ if ! jq -e --arg bundle "dist/$entry.js" '.omp.extensions == [$bundle]' package.
   refuse "refusing to pack $name with omp.extensions=$(jq -c '.omp.extensions' package.json); rewrite it to $required first (the release, the worker image and the e2e pack step do, then restore the committed manifest)"
 fi
 
-# The Envoy plugin ships the Dispatch CLI as a second bundle. Its build uses a shell
-# chain, so a forwarded --metafile argument would describe only the last bundle.
+# The Envoy plugin ships the Dispatch CLI as a second bundle, built by envoy-client's
+# scripts/build-dispatch-cli.sh. Its manifest build chains the two, and a forwarded --metafile
+# argument would describe only the last bundle, so each gets its own here.
 metafiles=$(mktemp -d)
 trap 'rm -rf "$metafiles"' EXIT
 if [ "$name" = "@sjawhar/pi-envoy" ]; then
   bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils --metafile="$metafiles/envoy.json"
-  bun build ../envoy-client/bin/dispatch.ts --outfile dist/dispatch.js --target bun --format esm --metafile="$metafiles/dispatch.json"
+  "$root/packages/envoy-client/scripts/build-dispatch-cli.sh" dist "$metafiles/dispatch.json"
   bun "$root/scripts/third-party-notices.ts" "$metafiles/envoy.json" "$metafiles/dispatch.json" dist/THIRD_PARTY_NOTICES
 else
   bun run build --metafile="$metafiles/extension.json"

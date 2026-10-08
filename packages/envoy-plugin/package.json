@@ -27,7 +27,7 @@
     "bin"
   ],
   "scripts": {
-    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*' && bun build ../envoy-client/bin/dispatch.ts --outfile dist/dispatch.js --target bun --format esm",
+    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*' && ../envoy-client/scripts/build-dispatch-cli.sh dist",
     "prepack": "./scripts/prepack.sh",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",

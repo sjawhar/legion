@@ -55,34 +55,34 @@ describe("omp.skills / prepack manifest contract", () => {
 });
 
 describe("the dispatch CLI the package ships", () => {
-  test("package.json ships bin/ and builds dist/dispatch.js from the envoy-client entry", async () => {
+  test("package.json ships bin/ and builds dist/dispatch.js with envoy-client's one builder", async () => {
     const manifest: {
       readonly files?: readonly string[];
       readonly scripts?: Record<string, string>;
     } = JSON.parse(await readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
 
     expect(manifest.files).toContain("bin");
-    expect(manifest.scripts?.build).toContain(
-      "bun build ../envoy-client/bin/dispatch.ts --outfile dist/dispatch.js"
-    );
+    expect(manifest.scripts?.build).toContain("../envoy-client/scripts/build-dispatch-cli.sh dist");
+    expect(manifest.scripts?.build).not.toContain("bin/dispatch.ts");
   });
 
-  test("prepack.sh gives every bun build its own metafile and reads all of them for the notices", async () => {
+  test("the prepack gives each bundle its own metafile and reads both for the notices", async () => {
     // A chained `bun run build --metafile=…` hands the flag to its last command only, so the
-    // extensions' packages would be missing from THIRD_PARTY_NOTICES.
-    const lines = (
-      await readFile(path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh"), "utf8")
-    ).split("\n");
-    const builds = lines
-      .map((line) => line.trimStart())
-      .filter((line) => line.startsWith("bun build "));
-    expect(builds.map((line) => line.split(" ")[2])).toEqual([
-      "extensions/envoy.ts",
-      "../envoy-client/bin/dispatch.ts",
-    ]);
-    const metafiles = builds.map((line) => /--metafile="([^"]+)"/.exec(line)?.[1]);
+    // extension's packages would be missing from THIRD_PARTY_NOTICES.
+    const lines = (await readFile(path.join(REPO_ROOT, "scripts/pi-plugin-prepack.sh"), "utf8"))
+      .split("\n")
+      .map((line) => line.trimStart());
+    const envoy = lines.find((line) => line.startsWith("bun build extensions/envoy.ts "));
+    const dispatch = lines.find(
+      (line) => !line.startsWith("#") && line.includes("build-dispatch-cli.sh")
+    );
+    expect(lines.some((line) => line.includes("bin/dispatch.ts"))).toBe(false);
+    // `--metafile="$metafiles/…"` for bun build, `"$metafiles/…"` as the builder's argument.
+    const metafiles = [envoy, dispatch].map(
+      (line) => /"(\$metafiles\/[^"]+)"/.exec(line ?? "")?.[1]
+    );
     expect(metafiles.every((metafile) => metafile !== undefined)).toBe(true);
-    expect(new Set(metafiles).size).toBe(builds.length);
+    expect(new Set(metafiles).size).toBe(2);
     const notices = lines.find((line) => line.includes("third-party-notices.ts"));
     for (const metafile of metafiles) expect(notices).toContain(`"${metafile}"`);
   });

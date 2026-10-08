@@ -20,7 +20,7 @@
     "bin"
   ],
   "scripts": {
-    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils && bun build ../envoy-client/bin/dispatch.ts --outfile dist/dispatch.js --target bun --format esm",
+    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils && ../envoy-client/scripts/build-dispatch-cli.sh dist",
     "prepack": "../../scripts/pi-plugin-prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
