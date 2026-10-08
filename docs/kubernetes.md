@@ -40,18 +40,38 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
 - a generic toolchain for the repositories the workers work, specific to none of them: `uv` and `uvx`;
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
-  to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); and the AWS CLI
+  to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
+  at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
+  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); and the AWS CLI
   v2's `aws` — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned
   release whose linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the
   `ARG`s at the top of `worker.Dockerfile`). A corepack shim runs the version a project's
   `packageManager` names, or else the default that corepack ships (the image sets
   `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
-  corepack cache.
-  The image bakes no Python: `uv` installs each project's own, from its `.python-version` or
-  `requires-python`, the first time the project runs (`uv sync`, `uv run`). In a Sandbox pod that is on
-  the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
-  `~/.local/share/uv/python`. Node and the AWS CLI keep their trees at `/opt/node` and `/opt/aws-cli`,
-  outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it.
+  corepack cache. Node, Go and the AWS CLI keep their trees at `/opt/node`, `/opt/go` and
+  `/opt/aws-cli`, outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it;
+- what the capability check (`packages/daemon/internal/capabilities`, which `legion probe-image` runs —
+  [the probe subsection](#the-image-is-probed-before-it-publishes)) requires of the image, each outside
+  `HOME` for the same reason: the language servers Oh My Pi's LSP tools start when a working directory
+  carries their root markers — `gopls` (built static in the Dockerfile's `go` stage, at
+  `/usr/local/bin/gopls`), `typescript-language-server` and `pyright-langserver`, the latter two npm
+  global packages under `/opt/node/lib/node_modules` with their launchers (and TypeScript's `tsc` and
+  `tsserver`, and the `pyright` CLI) linked at `/usr/local/bin`. TypeScript is pinned to the version
+  this repository's lockfile holds, since `typescript-language-server` runs `tsserver`, which TypeScript
+  7 no longer ships; the server resolves the TypeScript installed beside it unless the repository's own
+  `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
+  (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
+  on it), `curl`, `wget`, and `chromium` for the browser tools, installed without its Recommends (no
+  setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). The image sets
+  `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`, which Oh My Pi reads first when it picks a browser —
+  without it, it takes the first Chrome or Chromium it finds on `PATH`, and with none downloads Chrome
+  for Testing into its cache on a worker's first browser call — so the browser a worker gets is the one
+  the probe ran, and nothing is downloaded. An operator's pod env can still override the variable; the
+  probe then checks what the pod would run. `uv` still installs each project's own Python, from its
+  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
+  Sandbox pod that is on the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
+  elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
+  own eval, not a project's interpreter.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -59,8 +79,26 @@ alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, lo
 itself: everything the image-time probe proved lives under `HOME` — the two plugin links and their lock at
 `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
-the OMP fork release has no linux/arm64 build. One commit ⇒ one image: nothing in it is pinned to an npm
-version.
+the OMP fork release has no linux/arm64 build. One commit ⇒ one image: Legion's own plugins come from
+the commit, never from an npm release; what the image does take from npm (the CodeGraph plugin and
+CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
+`worker.Dockerfile`.
+
+### Image size and pull time
+
+A node that has never run the image pulls it whole before the pod's init containers start, so the
+image's compressed size is a cold launch's first cost. Before the capability tools above,
+`ghcr.io/sjawhar/legion-worker:1.18.1` was 12 layers and 369 MiB compressed (386,510,448 bytes). With
+them — the Go toolchain, Chromium with its library closure, Python, the language servers — it is
+larger (the pull request's run records the figure; see the PR body). The bound that pull must fit,
+with the init containers' clone and Oh My Pi's boot after it, is the registration deadline:
+`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`
+(`packages/daemon/internal/config/config.go`; 120 s × 3 = 360 s by default), which the Sandbox
+runtime widens by its provisioning bound while the claim is still launching (`armRegistration`,
+`packages/daemon/internal/supervise/machine.go`); a pod that has not registered by then is retired and
+a launch failure counted. The stage 4a harness's `image-probe` and `root-ready` checks
+(`scripts/e2e/README.md`) are where a launch of the published image on the production cluster is
+measured. This change moves no deadline.
 
 ### The image is probed before it publishes
 
@@ -78,8 +116,15 @@ planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's r
 `ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
 `dispatch`, `dispatch-first`, `dispatch-brainstorming` and `envoy` skills in its), so a build whose OMP or plugins are
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
-leaves those agents' models unresolved (`--skip-agent-models`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The daemon's Agent Sandbox runtime runs the same command in a probe
+leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
+the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
+would find each — `omp setup python --check`, the Chromium `PUPPETEER_EXECUTABLE_PATH` names run with
+`--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun` and `uv` on `PATH` with `go version`
+running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
+row, before the OK line:
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=off daemon-api-version=<N>`.
+A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
 tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). To run it yourself:
@@ -87,11 +132,14 @@ tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`)
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
-the image `PATH`, the corepack shims fetching their shipped default pnpm and yarn into a scratch
-directory the step removes. It reruns only when the toolchain or an earlier layer changes, so a commit
-that only rebuilds `legion` needs no package registry.
-To check a published image's toolchain end to end, Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
+`tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
+version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, and trixie's `python3`, `curl`, `wget`
+and `chromium --version` included — the corepack shims fetching their shipped default pnpm and yarn
+into a scratch directory the step removes. It reruns only when the toolchain or an earlier layer
+changes, so a commit that only rebuilds `legion` needs no package registry.
+To check a published image's toolchain end to end, a project Python install included:
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && go version && gopls version && python3 --version && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -201,9 +249,9 @@ set to public — a package-settings action on GitHub with no API.
 ### Per-deployment toolchains layer on top
 
 The base image carries Legion's own tools and the generic toolchain listed above, and nothing in it is
-specific to one repository, so a Python or Node repository runs on the published image as it is. A
+specific to one repository, so a Go, Python or Node repository runs on the published image as it is. A
 deployment whose repositories need more than that (a system library, another language, a different Node
-line) builds its own image in **its** repo:
+or Go line) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
