@@ -335,7 +335,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		if state == "changes_requested" {
 			selected = approvalOptionRequestChanges
 		}
-		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, nil, nil))
+		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

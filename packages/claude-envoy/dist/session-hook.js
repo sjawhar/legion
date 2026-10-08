@@ -13777,6 +13777,12 @@ var askEventPayloadFields = {
   question: exports_external.string().optional(),
   options: exports_external.array(exports_external.object({ label: exports_external.string().optional() })).optional(),
   answer: exports_external.object({ selected: exports_external.array(exports_external.string()).nullish(), text: exports_external.string().nullish() }).nullish(),
+  previous_answer: exports_external.object({
+    user: exports_external.string().optional(),
+    selected: exports_external.array(exports_external.string()).nullish(),
+    text: exports_external.string().nullish(),
+    at: exports_external.string().optional()
+  }).nullish(),
   anchor: exports_external.object({
     quote: exports_external.string().optional(),
     mark_id: exports_external.string().optional(),
@@ -16628,8 +16634,10 @@ function eventHead(event) {
     case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
-    case "ask.answered":
-      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
+    case "ask.answered": {
+      const previousAnswer = event.payload.previous_answer;
+      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}${previousAnswer === undefined ? "" : ` (was: ${textHead(askAnswerText(previousAnswer))})`}`;
+    }
     case "comment.created":
     case "comment.answered":
     case "comment.anchor_refreshed":
@@ -16670,8 +16678,9 @@ function childrenSummary(issue2) {
   ].join(`
 `);
 }
-function askSummary({ ask, replies }, graph) {
+function askSummary({ ask, replies, answers }, graph) {
   const answer = ask.answer;
+  const earlierAnswers = answers.slice(0, -1);
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     `Body: ${reply.body}`
@@ -16687,6 +16696,10 @@ function askSummary({ ask, replies }, graph) {
       `- By: ${answer.user}`,
       `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
       ...answer.text === null ? [] : [`- Text: ${answer.text}`]
+    ],
+    ...earlierAnswers.length === 0 ? [] : [
+      "Earlier answers:",
+      ...earlierAnswers.map((earlier) => `- ${earlier.at} \xB7 ${earlier.user} \xB7 ${askAnswerText(earlier)}`)
     ],
     ...ask.resolution === undefined ? [] : [
       "Resolution:",
