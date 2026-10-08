@@ -59,6 +59,7 @@ function askRead(question: string): AskRead {
       created_at: "2026-09-09T00:00:00Z",
       edited_at: null,
     },
+    answers: [],
     edits: [],
     followers: [],
     replies: [],

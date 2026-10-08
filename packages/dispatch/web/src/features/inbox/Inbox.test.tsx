@@ -30,7 +30,7 @@ function artifactAsk(): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
-    thread: { edits: [], followers: [], replies: [] },
+    thread: { answers: [], edits: [], followers: [], replies: [] },
     question: "Does this design need review?",
     priority: null,
     snoozed_until: null,
@@ -90,6 +90,7 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
     return {
       ...row,
       thread: {
+        answers: [],
         edits: [],
         followers: [],
         replies: [
@@ -143,6 +144,7 @@ test("an unchanged old Inbox cache does not refetch every thread on remount", as
   const row = issueAsk({
     id: "ask-old",
     thread: {
+      answers: [],
       edits: [],
       followers: [],
       replies: [
@@ -197,6 +199,7 @@ test("Inbox labels an artifact-owned ask with its project and document page link
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([ask]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -233,6 +236,7 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -272,6 +276,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -319,6 +324,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -355,6 +361,7 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([noted]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: noted,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -406,6 +413,7 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([p0, agentWaits, p2]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: [p0, p2, agentWaits].find((ask) => ask.id === id) ?? p0,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -769,6 +777,7 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -828,6 +837,7 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -864,6 +874,7 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: issueAsk(),
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -911,6 +922,7 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -996,6 +1008,7 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => inboxRows);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
+    answers: [],
     edits: [],
     followers: [],
     replies: id === askB.id ? repliesB : [],
@@ -1103,6 +1116,7 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : threadB,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -1165,6 +1179,7 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => inboxRows);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -1222,6 +1237,7 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : threadB,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],

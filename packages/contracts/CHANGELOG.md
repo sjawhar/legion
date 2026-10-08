@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
+  `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
+  `previous_answer` names the answer a human changed (LEGION-622).
 - `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
   `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for
   an upload an agent's conversation owns; `dispatch_doc_read` and `dispatch_read` describe the

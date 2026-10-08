@@ -16,8 +16,10 @@ import (
 )
 
 type askTransition struct {
-	EventType string
-	Apply     func(context.Context, pgx.Tx, model.Ask) (model.Ask, error)
+	EventType      string
+	ReplacesAnswer *time.Time
+	Apply          func(context.Context, pgx.Tx, model.Ask) (model.Ask, error)
+	Payload        func(model.Ask) any
 	// After runs once the transition's own event is appended, still inside the
 	// transaction; the events it returns are published with it.
 	After func(context.Context, pgx.Tx, model.Ask) ([]model.Event, error)
@@ -39,6 +41,7 @@ func answerTransition(
 	selected []string,
 	text *string,
 	revision *answerRevision,
+	replacesAnswer *time.Time,
 	writeBlock func(context.Context, pgx.Tx, model.Ask, model.AskAnswer) error,
 ) askTransition {
 	// A block ask's answer is written into its document, where text reaches the parser with line
@@ -48,8 +51,10 @@ func answerTransition(
 		lined := pmdoc.LineFeeds(*text)
 		text = &lined
 	}
+	var previousAnswer *model.AskAnswer
 	return askTransition{
-		EventType: "ask.answered",
+		EventType:      "ask.answered",
+		ReplacesAnswer: replacesAnswer,
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
 			if revision != nil && !stringPointersEqual(revision.EditedAt, ask.EditedAt) {
 				return model.Ask{}, errorf(
@@ -57,6 +62,17 @@ func answerTransition(
 					"ASK_EDITED",
 					"the question changed after you reviewed it; review the latest version and confirm your answer",
 				)
+			}
+			if ask.State == "answered" {
+				switch {
+				case ask.Kind == "approval":
+					return model.Ask{}, errorf(http.StatusConflict, "ASK_APPROVAL_REVIEW", "an approval is a review of a document version; record a new review on the document instead")
+				case !ask.Answer.At.Equal(*replacesAnswer):
+					return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWER_CHANGED", "the answer changed after you reviewed it; review the current answer and confirm your change")
+				case canonicalLogin(ask.Answer.User) != canonicalLogin(actor.ID):
+					return model.Ask{}, errorf(http.StatusForbidden, "NOT_ANSWERER", "only the person who gave the current answer may change it")
+				}
+				previousAnswer = ask.Answer
 			}
 			hasText := text != nil && strings.TrimSpace(*text) != ""
 			switch ask.Kind {
@@ -92,6 +108,12 @@ func answerTransition(
 			ask.Answer = &answer
 			return ask, nil
 		},
+		Payload: func(ask model.Ask) any {
+			return model.AskAnsweredEventPayload{
+				AskEventPayload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+				PreviousAnswer:  previousAnswer,
+			}
+		},
 	}
 }
 
@@ -107,6 +129,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		Selected         []string        `json:"selected"`
 		Text             *string         `json:"text"`
 		ExpectedEditedAt json.RawMessage `json:"expected_edited_at"`
+		ExpectedAnswerAt json.RawMessage `json:"expected_answer_at"`
 		Actor            *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -122,11 +145,28 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_edited_at must be an RFC3339 timestamp or null")
 		return
 	}
+	var replacesAnswer *time.Time
+	if input.ExpectedAnswerAt != nil {
+		var expectedAnswerAt *string
+		if err := json.Unmarshal(input.ExpectedAnswerAt, &expectedAnswerAt); err != nil {
+			writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_answer_at must be an RFC3339 timestamp or null")
+			return
+		}
+		if expectedAnswerAt != nil {
+			value, err := time.Parse(time.RFC3339Nano, *expectedAnswerAt)
+			if err != nil {
+				writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_answer_at must be an RFC3339 timestamp or null")
+				return
+			}
+			replacesAnswer = &value
+		}
+	}
 	transition := answerTransition(
 		actor,
 		input.Selected,
 		input.Text,
 		&answerRevision{EditedAt: expectedEditedAt},
+		replacesAnswer,
 		func(ctx context.Context, tx pgx.Tx, ask model.Ask, answer model.AskAnswer) error {
 			if ask.BlockID == nil {
 				return nil
@@ -135,14 +175,16 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
+			var answerText any
+			if answer.Text != nil {
+				answerText = *answer.Text
+			}
 			attributes := map[string]any{
 				"state":       "answered",
 				"answered_by": answer.User,
 				"answered_at": timestampValue(answer.At),
 				"selected":    answer.Selected,
-			}
-			if answer.Text != nil {
-				attributes["answer"] = *answer.Text
+				"answer":      answerText,
 			}
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
@@ -264,8 +306,12 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor mod
 		return model.Ask{}, nil, err
 	}
 	// A transition writes no question text, so it moves no references and says so.
+	payload := any(model.NewAskEventPayload(ask, model.ReferenceChanges{}))
+	if transition.Payload != nil {
+		payload = transition.Payload(ask)
+	}
 	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
-		transition.EventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+		transition.EventType, actor, payload,
 	))
 	if err != nil {
 		return model.Ask{}, nil, err
@@ -297,7 +343,13 @@ func (s *server) transitionAskTx(ctx context.Context, tx pgx.Tx, id string, tran
 	}
 	switch ask.State {
 	case "open":
+		if transition.ReplacesAnswer != nil {
+			return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWER_CHANGED", "the answer changed after you reviewed it; review the current answer and confirm your change")
+		}
 	case "answered":
+		if transition.EventType == "ask.answered" && transition.ReplacesAnswer != nil {
+			break
+		}
 		if transition.EventType == "ask.answered" {
 			return model.Ask{}, errorf(http.StatusConflict, "ASK_CLOSED", "ask is already answered")
 		}
