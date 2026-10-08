@@ -59,6 +59,18 @@ legion start --config legion.yaml --check-config
   A model key that fails at boot refuses the boot even when the cause is a passing network blip,
   since the probe cannot tell the two apart. Start the daemon again once the cause is gone.
 
+## The daemon stops
+
+On SIGTERM (`legion stop`, a rollout, a node drain) the daemon logs `legion daemon stopping`, cuts
+short every relaunch and suspension it has in flight, and logs `legion daemon stopped` once it has
+recorded the boot's end. It waits at most 10 seconds for its own work before it records that, so it
+stops well inside a pod's termination grace. It ends no agent: the next boot re-adopts every pod or
+pane still running and relaunches each launch the stop cut short.
+
+- **`legion daemon stopped waiting for its work`.** Some of the daemon's work had not ended after 10
+  seconds; `deciding` names each claim whose decision was still running, with its event. The daemon
+  stopped anyway, and the next boot takes those claims up.
+
 ## The controller
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running

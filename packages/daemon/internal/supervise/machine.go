@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -321,6 +322,10 @@ type Machine struct {
 	// goroutines counts sends whose outcome has not been handled yet; idle wakes Wait.
 	goroutines int
 	idle       *sync.Cond
+	// view is the claim View reports: published under mu as each locked section ends and at every
+	// write of the claim (persist), and read without mu, so a reader never waits on a decision in
+	// flight.
+	view atomic.Pointer[Claim]
 }
 
 type sending struct {
@@ -364,6 +369,7 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	case StateWorking:
 		m.askFirst = true
 	}
+	m.publish()
 	return m, nil
 }
 
@@ -379,7 +385,7 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // not hold another's hello.
 func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
@@ -426,7 +432,7 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // old-pane hellos move the state first, so the caller does not open a second pane.
 func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if m.claim.State != StateLaunchUncertain || m.claim.Locator != nil {
 		return false, nil
 	}
@@ -443,7 +449,7 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 // includes a held suspension (holdSuspension), which the start drops.
 func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if row <= m.claim.LastStartRow {
 		return nil
 	}
@@ -488,13 +494,36 @@ func (c Claim) ServingRun() uint64 {
 	return c.ServingGeneration
 }
 
-// Claim is a copy of the claim as the machine holds it now.
+// Claim is a copy of the claim as the machine holds it now. It waits for the decision in flight,
+// so what it reports is what that decision left: a check a decision must not race reads it here.
 func (m *Machine) Claim() Claim {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := copyClaim(m.claim)
 	c.SuspensionHeld = m.held != nil
 	return c
+}
+
+// View is a copy of the claim as the machine last published it: as its latest decision left it, or
+// as the decision in flight last wrote it to the store. It never waits, where Claim waits out a
+// decision that holds the machine through its runtime call — a Sandbox relaunch waits minutes for
+// its pods — so a reader of every claim, like the operator's listing, reads View.
+func (m *Machine) View() Claim {
+	return copyClaim(*m.view.Load())
+}
+
+// publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
+func (m *Machine) publish() {
+	c := copyClaim(m.claim)
+	c.SuspensionHeld = m.held != nil
+	m.view.Store(&c)
+}
+
+// unlock ends a locked section that may have changed the claim: it publishes the claim, then
+// releases mu.
+func (m *Machine) unlock() {
+	m.publish()
+	m.mu.Unlock()
 }
 
 // OnTerminal installs the daemon callback for durable ready and failed transitions.
@@ -896,6 +925,9 @@ func (m *Machine) persist(ctx context.Context) error {
 	if !holdsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
+	// Published here as well as when the decision ends: a launch writes the claim before it waits
+	// in the runtime, and View then shows the launch rather than what it replaced.
+	m.publish()
 	return m.deps.Store.PutClaim(ctx, m.stored())
 }
 

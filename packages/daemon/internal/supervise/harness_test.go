@@ -619,6 +619,20 @@ func (g *gatedRuntime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	return g.Runtime.Suspend(ctx, loc)
 }
 
+// gatedResume holds Resume until the test lets it through, as a Sandbox relaunch waits on the
+// cluster for its pods.
+type gatedResume struct {
+	*fake.Runtime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedResume) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	g.entered <- struct{}{}
+	<-g.release
+	return g.Runtime.Resume(ctx, prev, spec)
+}
+
 func waitFor(t *testing.T, what string, ch <-chan string) string {
 	t.Helper()
 	select {

@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -40,6 +42,12 @@ type supervisor struct {
 	machines map[claim.Token]*member
 	stopped  bool
 	feeding  sync.WaitGroup
+	// supervised counts the machines, which are never removed, and deciding is each claim whose
+	// machine is handling an event from its inbox now, with the event's type. Both are read without
+	// mu, which Create holds through a store write, so the stop's log lines never wait on Postgres.
+	supervised atomic.Int64
+	decidingMu sync.Mutex
+	deciding   map[claim.Token]string
 }
 
 // member is one claim's machine, the queue its events wait in, and the tree the claim is of.
@@ -53,7 +61,7 @@ func newSupervisor(ctx context.Context, st *store.Store, project, stateDir strin
 	return &supervisor{
 		ctx: ctx, store: st, project: project, stateDir: stateDir, log: log,
 		restored: make(chan struct{}),
-		machines: map[claim.Token]*member{},
+		machines: map[claim.Token]*member{}, deciding: map[claim.Token]string{},
 	}
 }
 
@@ -152,6 +160,7 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 	m.OnTerminal(s.terminal)
 	queue := newInbox()
 	s.machines[token] = &member{machine: m, inbox: queue, tree: m.Claim().Tree}
+	s.supervised.Add(1)
 	s.feeding.Add(1)
 	go func() {
 		defer s.feeding.Done()
@@ -160,11 +169,45 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 			if !ok {
 				return
 			}
-			if err := m.Handle(s.ctx, ev); err != nil {
+			s.decide(token, ev)
+			err := m.Handle(s.ctx, ev)
+			s.decided(token)
+			switch {
+			case err == nil:
+			case s.ctx.Err() != nil:
+				s.log.Info("supervise: the daemon's stop ended a decision; the next boot takes the claim up",
+					"claim", token, "event", fmt.Sprintf("%T", ev), "error", err)
+			default:
 				s.log.Error("supervise: an event failed", "claim", token, "event", fmt.Sprintf("%T", ev), "error", err)
 			}
 		}
 	}()
+}
+
+// decide and decided bracket a machine's handling of one of its inbox's events.
+func (s *supervisor) decide(token claim.Token, ev supervise.Event) {
+	s.decidingMu.Lock()
+	defer s.decidingMu.Unlock()
+	s.deciding[token] = fmt.Sprintf("%T", ev)
+}
+
+func (s *supervisor) decided(token claim.Token) {
+	s.decidingMu.Lock()
+	defer s.decidingMu.Unlock()
+	delete(s.deciding, token)
+}
+
+// inDecision is every claim whose machine is handling an event from its inbox now, as
+// "<claim> (<event type>)", in claim order.
+func (s *supervisor) inDecision() []string {
+	s.decidingMu.Lock()
+	defer s.decidingMu.Unlock()
+	busy := make([]string, 0, len(s.deciding))
+	for token, ev := range s.deciding {
+		busy = append(busy, fmt.Sprintf("%s (%s)", token, ev))
+	}
+	slices.Sort(busy)
+	return busy
 }
 
 // post queues ev for the claim's machine. An event for a claim the daemon does not supervise, or
@@ -202,19 +245,22 @@ func (s *supervisor) volumeLost(c supervise.Claim) {
 
 // count is how many claims the daemon supervises.
 func (s *supervisor) count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.machines)
+	return int(s.supervised.Load())
 }
 
-// stop feeds no machine another event and waits for every event being handled to finish.
-func (s *supervisor) stop() {
+// halt feeds no machine another event, and waits for nothing.
+func (s *supervisor) halt() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stopped = true
 	for _, m := range s.machines {
 		m.inbox.close()
 	}
-	s.mu.Unlock()
+}
+
+// stop feeds no machine another event and waits for every event being handled to finish.
+func (s *supervisor) stop() {
+	s.halt()
 	s.feeding.Wait()
 }
 

@@ -315,9 +315,11 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, operatorView(root.Claim()))
 }
 
-// list answers every claim the daemon supervises, in token order: as its machine holds it now, or,
-// for a claim no machine supervises, as the store holds it. The machine's is what knows whether a
-// suspension is held.
+// list answers every claim the daemon supervises, in token order: as its machine last published it
+// (supervise.Machine.View), or, for a claim no machine supervises, as the store holds it. The
+// machine's is what knows whether a suspension is held. It never waits on a decision in flight: a
+// relaunch holds its machine for as long as the runtime waits out its pods, and with many claims
+// one is nearly always relaunching.
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
@@ -329,7 +331,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	views := make([]OperatorClaim, len(claims))
 	for i, c := range claims {
 		if m, ok := s.supervisor.Machine(c.Token); ok {
-			c = m.Claim()
+			c = m.View()
 		}
 		views[i] = operatorView(c)
 	}

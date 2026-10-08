@@ -220,13 +220,15 @@ func claimTookRole(state supervise.ClaimState) bool {
 }
 
 // supervisedClaim is token's claim as this daemon supervises it, or the zero Claim, whose state is
-// "", when it does not supervise it.
+// "", when it does not supervise it. It is the machine's View, which never waits on a decision in
+// flight: the outbox runs one row at a time, and an architect's relaunch can hold its machine for
+// minutes while the runtime waits out its pods.
 func (r *outbox) supervisedClaim(token claim.Token) supervise.Claim {
 	machine, ok := r.supervisor.Machine(token)
 	if !ok {
 		return supervise.Claim{}
 	}
-	return machine.Claim()
+	return machine.View()
 }
 
 // claimState is the state of token's claim, or "" when this daemon does not supervise it.

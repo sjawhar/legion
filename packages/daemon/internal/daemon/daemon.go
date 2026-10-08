@@ -53,8 +53,19 @@ const (
 	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
 	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
-	// shutdownTimeout bounds each half of the exit — draining the API, then stamping the boot.
-	shutdownTimeout = 10 * time.Second
+	// stopBudget bounds the daemon's stop from the moment it begins (supervision.halt) until it
+	// stamps its boot: the API's drain, the workflow's end, and the end of every claim's decision in
+	// flight, whose runtime calls the stop cancels. Work still running then — a call into a process
+	// that does not answer — is not waited on: the process exits once the boot is stamped, and the
+	// next boot re-adopts each process a claim records and relaunches each launch left unrecorded.
+	// drainTimeout bounds the API's drain, which starts with the stop and ends inside its budget, so
+	// a drain that runs out is reported as its own error. stampTimeout bounds the stamp, and
+	// storeCloseTimeout the store's close after it. The budget, the stamp and the close together
+	// stay well inside the 30 seconds a pod is given between SIGTERM and SIGKILL.
+	stopBudget        = 10 * time.Second
+	drainTimeout      = 8 * time.Second
+	stampTimeout      = 5 * time.Second
+	storeCloseTimeout = 2 * time.Second
 	// streamSocket is the worker stream's unix socket under the state directory: the one address
 	// every pane's shim dials under tmux (decision 2 — no configuration key).
 	streamSocket = "worker-stream.sock"
@@ -86,6 +97,9 @@ type overrides struct {
 	// controllerRetry is the first wait before a failed daemon-launched controller is retried; zero
 	// is controllerRetryFirst.
 	controllerRetry time.Duration
+	// stopBudget is how long the daemon's stop waits for its own work once it begins; zero is
+	// stopBudget.
+	stopBudget time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -109,8 +123,10 @@ type overrides struct {
 // not reach), migrates, takes its API listener and its worker stream, builds the runtime (under
 // kubernetes, once Agent Sandbox's install check passes), proves the worker image under
 // kubernetes, records the boot, supervises every claim the store holds, serves the API, and blocks
-// until ctx is done — then stops supervising, closes the API, stamps the boot's end, and closes
-// the pool, in that order, because the stamp needs the pool.
+// until ctx is done. Then it stops: it says so, cancels every claim's decision in flight, drains the
+// API, ends the workflow and supervision, stamps the boot's end and closes the pool, in that order,
+// because the stamp needs the pool. The waits before the stamp share one budget (stopBudget), so a
+// process that does not answer costs the stop that budget and never the stamp.
 //
 // Everything that can refuse comes before the boot record: a recorded boot is a boot that
 // served, and a daemon whose port, socket, tmux, cluster, or image refused it never ran.
@@ -309,25 +325,67 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		"boot", bootID,
 	)
 
-	var serveErr error
-	if superviseErr == nil {
-		if workflow != nil {
-			log.Info("legion workflow boot stage", "stage", "api")
+	// The stop begins where serve's context ends, which halts supervision, or here at once when
+	// supervision did not start. From then the daemon waits for its own work only until the halt's
+	// deadline, and stamps its boot whatever is still running.
+	served := make(chan error, 1)
+	go func() {
+		var serveErr error
+		if superviseErr == nil {
+			if workflow != nil {
+				log.Info("legion workflow boot stage", "stage", "api")
+			}
+			serveErr = serve(ctx, cfg, st, startedAt, listener, s, plan, workflow)
+		} else {
+			log.Info("legion daemon stopping", "project", cfg.Project, "claims", s.supervisor.count(), "cause", superviseErr.Error())
+			listener.Close()
 		}
-		serveErr = serve(ctx, cfg, st, startedAt, listener, s, plan, workflow)
-	} else {
-		listener.Close()
+		s.stop()
+		workflow.stop()
+		served <- serveErr
+	}()
+	var serveErr error
+	select {
+	case serveErr = <-served:
+	case <-s.halted:
+		deadline := time.NewTimer(time.Until(s.stopBy))
+		select {
+		case serveErr = <-served:
+		case <-deadline.C:
+			log.Warn("legion daemon stopped waiting for its work", "project", cfg.Project, "boot", bootID,
+				"after", plan.stopBudget.String(), "deciding", s.supervisor.inDecision())
+		}
+		deadline.Stop()
 	}
-	s.stop()
-	workflow.stop()
 
-	stop, cancelStop := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancelStop()
-	stopErr := st.StopBoot(stop, bootID, time.Now().UTC())
-	st.Close()
+	// The stop cancelled the store queries in flight, and a connection one of them ran on can go
+	// back to the pool unusable; the stamp runs on a connection opened after them.
+	st.Pool().Reset()
+	stamp, cancelStamp := context.WithTimeout(context.WithoutCancel(ctx), stampTimeout)
+	defer cancelStamp()
+	stopErr := st.StopBoot(stamp, bootID, time.Now().UTC())
+	closeStore(st, log)
 	log.Info("legion daemon stopped", "project", cfg.Project, "boot", bootID)
 
 	return errors.Join(superviseErr, serveErr, stopErr)
+}
+
+// closeStore closes the store, waiting for it up to storeCloseTimeout: the pool's close waits for
+// every connection a query holds, and a query the stop stopped waiting for may be waiting on
+// Postgres.
+func closeStore(st *store.Store, log *slog.Logger) {
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		st.Close()
+	}()
+	timer := time.NewTimer(storeCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-closed:
+	case <-timer.C:
+		log.Warn("legion daemon stopped waiting for its store to close", "after", storeCloseTimeout.String())
+	}
 }
 
 // plan is what the daemon resolved from its configuration before touching anything.
@@ -368,6 +426,8 @@ type plan struct {
 	orphanSweep time.Duration
 	// controllerRetry is the controller keeper's first wait before it retries a failed controller.
 	controllerRetry time.Duration
+	// stopBudget is how long the stop waits for the daemon's own work once it begins (stopBudget).
+	stopBudget time.Duration
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
@@ -426,11 +486,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if controllerRetry == 0 {
 		controllerRetry = controllerRetryFirst
 	}
+	stop := o.stopBudget
+	if stop == 0 {
+		stop = stopBudget
+	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
-		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
@@ -549,6 +613,11 @@ type supervision struct {
 	cancelStream context.CancelFunc
 	wg           sync.WaitGroup
 	stopOnce     sync.Once
+
+	// halted closes when the stop begins (halt), and stopBy is when it must end by, set before.
+	halted   chan struct{}
+	stopBy   time.Time
+	haltOnce sync.Once
 }
 
 // shimAddress is the address every agent's shim dials: the listener's bound address, or, when
@@ -636,7 +705,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
-		cancel: cancel, cancelStream: cancelStream,
+		cancel: cancel, cancelStream: cancelStream, halted: make(chan struct{}),
 	}, nil
 }
 
@@ -812,15 +881,32 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 	}
 }
 
-// stop ends supervision without ending a single agent: no machine is fed another event, the
-// machines' own work is cancelled, the worker stream closes every connection — each shim
-// reconnects to the next daemon on its own — and every send already out has its outcome handled
-// before the store it writes to closes. The panes keep running; the next boot re-adopts them.
-func (s *supervision) stop() {
-	s.stopOnce.Do(func() {
-		s.supervisor.stop()
+// halt begins the stop, once, and sets when it must end by (stopBy) before it closes halted: no
+// machine is fed another event, and the machines' own work and the worker stream are cancelled, so
+// a decision in flight ends now rather than when its runtime call's own wait runs out — a Sandbox
+// relaunch waits minutes for the previous pod to go, the tree's other pods to finish workspace-init
+// and the new pod to appear. A launch the cancellation cuts short leaves its claim launching with
+// no process recorded, which the next boot relaunches once its orphan reconciliation has run; every
+// shim the stream drops redials the next daemon, which re-adopts its process. The cancellation
+// comes before anything that can wait, so the stop's budget runs from the moment it begins.
+func (s *supervision) halt() {
+	s.haltOnce.Do(func() {
+		s.stopBy = time.Now().Add(s.plan.stopBudget)
+		close(s.halted)
 		s.cancel()
 		s.cancelStream()
+		s.supervisor.halt()
+	})
+}
+
+// stop ends supervision without ending a single agent: it halts it, then waits until every
+// decision in flight has returned and every send already out has its outcome handled, so nothing
+// writes to the store once it closes. The panes and pods keep running; the next boot re-adopts
+// them. The wait is unbounded here and bounded by run, which stops waiting at the halt's deadline.
+func (s *supervision) stop() {
+	s.stopOnce.Do(func() {
+		s.halt()
+		s.supervisor.stop()
 		s.supervisor.wait()
 		s.wg.Wait()
 	})
@@ -829,6 +915,9 @@ func (s *supervision) stop() {
 // serve runs the API on the listener the daemon already took until ctx is done or the server
 // fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
 // shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
+// The moment serving ends is the moment the daemon's stop begins: it says so, and halts
+// supervision before anything waits — the workflow's outbox and the controller keeper would
+// otherwise wait on a machine whose relaunch holds it, and the stop on them.
 func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
 	records := record.Store(record.NewStore())
 	var handlers []intake.Handler
@@ -886,7 +975,10 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 	group.Go(func() error {
 		<-serving.Done()
-		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		s.log.Info("legion daemon stopping", "project", cfg.Project, "claims", s.supervisor.count(),
+			"deciding", len(s.supervisor.inDecision()), "cause", context.Cause(serving).Error())
+		s.halt()
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
 		defer cancel()
 		return server.Shutdown(shutdown)
 	})

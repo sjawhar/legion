@@ -226,6 +226,47 @@ func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
 	}
 }
 
+// The outbox routes a notice without waiting on its architect's launch: the runner executes one
+// row at a time, and a machine holds its lock through the runtime call its decision makes, so a
+// read of the architect's claim that waited would hold every row behind it for as long as a
+// Sandbox relaunch waits on the cluster (LEGION-650). The architect is launching, so the notice
+// goes to its role topic, as it would once the launch returned.
+func TestANoticeIsRoutedWhileItsArchitectLaunches(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, fakeRuntime := newOutboxSupervisor(t, "legion", t.TempDir())
+	rt := newStallingRuntime(t, false)
+	rt.Runtime = fakeRuntime
+	sup.deps.Runtime = rt
+	architect := architectClaim(t, sup, "LEGION-1", supervise.StateQueued)
+	machine, _ := sup.Machine(architect)
+	rt.stalling.Store(true)
+	go func() { _ = machine.Handle(context.Background(), supervise.RequestSpawn{Claim: architect}) }()
+	select {
+	case <-rt.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the architect's launch never reached the runtime")
+	}
+	publisher := &holderPublisher{}
+	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.Implementing}, time.Now()))
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion"}
+
+	executed := make(chan error, 1)
+	go func() { executed <- runner.execute(context.Background(), row) }()
+	select {
+	case err := <-executed:
+		if err != nil {
+			t.Fatalf("execute the notice: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notice waited on its architect's launch in the runtime")
+	}
+	if _, delivered := publisher.snapshot(); len(delivered) != 1 || delivered[0].topic != architectTopic(t, "LEGION-1") {
+		t.Fatalf("notice publishes = %+v, want one to the launching architect's role topic", delivered)
+	}
+}
+
 // A role publish with no live holder is the ordinary state while the owning architect relaunches:
 // its claim has not ended, so the notice is held and retried on the outbox's backoff, logged once
 // for the row rather than on every attempt. The notices behind it for the same tree wait too, so

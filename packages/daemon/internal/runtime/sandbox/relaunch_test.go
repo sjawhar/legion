@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +257,37 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
+// A relaunch waiting out its tree's other pods ends with its context, at once, and sets nothing
+// Running: the wait is bounded by minutes (treeWaitBound), and the daemon's stop cancels the
+// launches in flight rather than wait them out (LEGION-650).
+func TestARelaunchWaitingOnItsTreeEndsWithItsContext(t *testing.T) {
+	g := newRig(t, nil)
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	launching, cancel := context.WithCancel(g.ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(launching, workerSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(workerToken)
+	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+	time.Sleep(200 * time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the cancelled relaunch returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the relaunch went on waiting for the root's workspace-init after its context ended")
+	}
+	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
+		t.Fatalf("the cancelled relaunch set the worker Running: %v", got)
 	}
 }
 

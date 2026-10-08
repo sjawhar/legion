@@ -739,6 +739,52 @@ func TestAstraSuspensionNotYetComplete(t *testing.T) {
 	h.wantState(StateLaunching)
 }
 
+// View never waits on a decision in flight, where Claim does: while a relaunch waits in the
+// runtime it reports the claim as the relaunch last wrote it — launching at the next generation,
+// with no process yet — and once the decision ends, as the decision left it. A reader of every
+// claim reads it, so one claim's relaunch never holds the others' answer (LEGION-650).
+func TestViewAnswersWhileARelaunchWaitsInTheRuntime(t *testing.T) {
+	h := newBareHarness(t)
+	gated := &gatedResume{Runtime: h.rt, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h.deps.Runtime = gated
+	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+		t.Fatal(err)
+	}
+	h.start(queuedClaim())
+	h.reach(StateIdle)
+	dead := h.locator()
+
+	died := make(chan error, 1)
+	go func() {
+		died <- h.m.Handle(h.ctx, RuntimeObservation{Observation: runtime.Observation{Locator: dead, Kind: runtime.Gone, At: h.clock.Now()}})
+	}()
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the relaunch never reached the runtime")
+	}
+	viewed := make(chan Claim, 1)
+	go func() { viewed <- h.m.View() }()
+	select {
+	case c := <-viewed:
+		if c.State != StateLaunching || c.Generation != 2 || c.Locator != nil {
+			t.Errorf("while the relaunch waits View reports %s at generation %d with locator %+v, want launching at 2 with none",
+				c.State, c.Generation, c.Locator)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("View waited on the relaunch in the runtime")
+	}
+
+	close(gated.release)
+	if err := <-died; err != nil {
+		t.Fatalf("handle the death: %v", err)
+	}
+	if c := h.m.View(); c.State != StateLaunching || c.Generation != 2 || c.Locator == nil || *c.Locator == dead {
+		t.Errorf("once the relaunch returns View reports %s at generation %d with locator %+v, want launching at 2 with the new process",
+			c.State, c.Generation, c.Locator)
+	}
+}
+
 func TestAstraDuplicateObservations(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
