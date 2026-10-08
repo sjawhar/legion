@@ -171,7 +171,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			objects:       withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error"))),
 			want:          runtime.Gone,
 			workspaceLost: true,
-			detail:        []string{"the tree volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
+			detail:        []string{"the issue's volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
 		},
 		{
 			row:     "5 the agent exited cleanly",

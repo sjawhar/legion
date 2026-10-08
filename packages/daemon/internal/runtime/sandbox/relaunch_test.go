@@ -179,11 +179,13 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	})
 }
 
-// A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name:
-// the Sandbox its old tree suspended mounts the old root's volume and has none of its own. The
-// orphan root's launch replaces that Sandbox with one of its own tree, carrying the tree volume.
-// One still running roles of the old tree is refused and left as it is.
-func TestAnOrphanRootReplacesTheSandboxItsOldTreeLeft(t *testing.T) {
+// A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name,
+// and finds the Sandbox its old tree suspended, still labelled with that tree. The Sandbox owns the
+// issue's volume, which holds its clone, workspace and its roles' sessions, so the orphan root's
+// launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One still running
+// roles of the old tree is refused and left as it is, and one owning no volume, the tree-volume
+// layout that mounted its old root's, is replaced by one of its own tree that owns one.
+func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
 	oldTree := map[string]string{labelProject: testProject, labelTree: labelValue(testTree), labelIssue: labelValue("LEGION-209")}
@@ -192,12 +194,32 @@ func TestAnOrphanRootReplacesTheSandboxItsOldTreeLeft(t *testing.T) {
 		spec.Tree = "LEGION-209"
 		return spec
 	}
-	t.Run("suspended by its old tree", func(t *testing.T) {
+	t.Run("suspended by its old tree, owning its volume", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)})
-		g.spawn(orphanSpec(t))
+		loc := g.spawn(orphanSpec(t))
+		if deleted := slices.ContainsFunc(g.writes(), func(a action) bool { return a.resource == "sandboxes" && a.verb == "delete" }); deleted {
+			t.Fatalf("the orphan root's launch deleted a Sandbox: %v", g.writes())
+		}
 		s := g.sandbox(name)
-		if s == nil || s.UID == "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || len(s.Spec.VolumeClaimTemplates) == 0 {
-			t.Fatalf("orphan root's Sandbox = %+v, want a new one of tree LEGION-209 with the tree volume", s)
+		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.Labels[labelIssue] != labelValue("LEGION-209") {
+			t.Fatalf("orphan root's Sandbox = %+v, want the old tree's Sandbox kept and relabelled for tree LEGION-209", s)
+		}
+		if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
+			t.Fatalf("orphan root's Sandbox claims %+v, want the issue volume it owned kept", s.Spec.VolumeClaimTemplates)
+		}
+		if got := s.Spec.PodTemplate.Metadata.Labels[labelTree]; got != labelValue("LEGION-209") {
+			t.Fatalf("the relabelled Sandbox's pod template carries tree %q, want LEGION-209", got)
+		}
+		pod := g.pod(name)
+		if pod == nil || string(pod.UID) != loc.Sandbox.PodUID {
+			t.Fatalf("pod %+v, locator %+v; want the launch's pod", pod, loc)
+		}
+		if pod.Labels[labelTree] != labelValue("LEGION-209") {
+			t.Fatalf("the new pod carries tree %q, want LEGION-209", pod.Labels[labelTree])
+		}
+		mounted := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
+		if mounted < 0 || pod.Spec.Volumes[mounted].PersistentVolumeClaim == nil || pod.Spec.Volumes[mounted].PersistentVolumeClaim.ClaimName != IssueClaimName(orphan) {
+			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
 		}
 	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
@@ -206,22 +228,16 @@ func TestAnOrphanRootReplacesTheSandboxItsOldTreeLeft(t *testing.T) {
 		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles") {
 			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal", err)
 		}
-		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" {
+		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue(testTree) {
 			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
 		}
 	})
-	t.Run("owning its old tree's volume", func(t *testing.T) {
-		owner := sandboxObject(t, name, "uid-sandbox-old-root", modeSuspended, oldTree)
-		if err := unstructured.SetNestedSlice(owner.Object, []any{map[string]any{"metadata": map[string]any{"name": treeVolume}}}, "spec", "volumeClaimTemplates"); err != nil {
-			t.Fatal(err)
-		}
-		g := newRig(t, []k8sruntime.Object{owner})
-		g.launcher(orphan)
-		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "only that tree's cleanup deletes it") {
-			t.Fatalf("a launch over a Sandbox owning another tree's volume = %v, want the refusal", err)
-		}
-		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-root" {
-			t.Fatalf("the Sandbox owning the old tree's volume = %+v, want it left as it was", s)
+	t.Run("suspended by its old tree, owning no volume", func(t *testing.T) {
+		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree))})
+		g.spawn(orphanSpec(t))
+		s := g.sandbox(name)
+		if s == nil || s.UID == "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || len(s.Spec.VolumeClaimTemplates) == 0 {
+			t.Fatalf("orphan root's Sandbox = %+v, want a new one of tree LEGION-209 owning its volume", s)
 		}
 	})
 }
@@ -229,7 +245,7 @@ func TestAnOrphanRootReplacesTheSandboxItsOldTreeLeft(t *testing.T) {
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:
 // suspend, wait the pod out, rewrite the Secrets, run (B1). The role's launcher in the new pod is
 // told the new generation's boot token and resumes the recorded session, and the init container is
-// told where that session is on the tree volume.
+// told where that session is on the issue's volume.
 func TestResumeAfterAFailedPod(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
@@ -851,10 +867,10 @@ func TestAFailedStepOfAnIssuePodsPreparationReleasesTheTreesTurn(t *testing.T) {
 		},
 		"the retained-sessions read": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				store := &sessionsFailingStore{treeStore: newTreeStore(), failed: failed, err: failure}
+				store := &sessionsFailingStore{fakeStore: newFakeStore(), failed: failed, err: failure}
 				return withOptions(func(o *Options) { o.Store = store }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
 			},
-			want: "read its tree's retained sessions",
+			want: "read its issue's retained sessions",
 		},
 		"the removable-workspaces read": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
@@ -931,18 +947,18 @@ func failedLaunch(t *testing.T, g *rig, spec runtime.SpawnSpec) error {
 	return err
 }
 
-// sessionsFailingStore is a treeStore whose next retained-sessions read fails, once.
+// sessionsFailingStore is a fakeStore whose next retained-sessions read fails, once.
 type sessionsFailingStore struct {
-	*treeStore
+	*fakeStore
 	failed *atomic.Bool
 	err    error
 }
 
-func (s *sessionsFailingStore) TreeHasSessions(ctx context.Context, project, tree string) (bool, error) {
+func (s *sessionsFailingStore) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
 	if s.failed.CompareAndSwap(false, true) {
 		return false, s.err
 	}
-	return s.treeStore.TreeHasSessions(ctx, project, tree)
+	return s.fakeStore.IssueHasSessions(ctx, project, issue)
 }
 
 // outageTokens refuses its next installation token, once, as a GitHub outage would.

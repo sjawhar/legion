@@ -218,13 +218,13 @@ func (r *liveRig) checkSuspend() error {
 		return fmt.Errorf("the root process after Suspend(%s) is %s: %v", worker.token, rootObs.Kind, err)
 	}
 	worker.loc, worker.state = nil, stateSuspended
-	pvc := TreeClaimName(root.token)
+	pvc := IssueClaimName(root.token)
 	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
 	if err != nil {
 		return err
 	}
 	if phase != "Bound" {
-		return fmt.Errorf("the tree PVC %s is %q", pvc, phase)
+		return fmt.Errorf("the issue PVC %s is %q", pvc, phase)
 	}
 	note("runtime", "Suspend(%s) stopped only its role process; issue Sandbox %s and root process stayed running in pod uid %s", worker.token, name, pod.UID)
 	note("operator", "PVC %s: Bound; Probe(stopped %s): Gone", pvc, short(loc.Incarnation))
@@ -846,10 +846,10 @@ func (r *liveRig) checkReleasePreservesIssue() error {
 	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
 		return fmt.Errorf("root after Release(%s) is %s: %v", worker.name, rootObs.Kind, err)
 	}
-	pvc := TreeClaimName(root.token)
+	pvc := IssueClaimName(root.token)
 	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
 	if err != nil || phase != "Bound" {
-		return fmt.Errorf("tree PVC %s after Release(%s) is %q: %v", pvc, worker.name, phase, err)
+		return fmt.Errorf("issue PVC %s after Release(%s) is %q: %v", pvc, worker.name, phase, err)
 	}
 	note("runtime", "Release(%s) ended only that role; issue Sandbox %s and root %s stayed Alive", worker.name, name, root.token)
 	note("operator", "PVC %s: Bound", pvc)

@@ -15,20 +15,21 @@ import (
 )
 
 // podKind is which of the runtime's two pods a Sandbox runs: an issue pod (issuePod), which runs
-// every workflow role of one issue on its tree's volume and provisions the issue's workspace, or the
-// project controller's pod (controllerPod, `controller: daemon`), which runs the controller alone on
-// a volume of its own and provisions nothing. prepare decides a launch's kind once, from its claim,
-// and a stored Sandbox's kind is the one its labels name (podKindOf). Building a pod asks the
-// launch's kind for every facet the two build differently; supervision — relaunch's check of the
-// running pod, the launchers, Probe, Suspend and the address records — asks a kind only its roles.
+// every workflow role of one issue on the issue's own volume and provisions the issue's workspace,
+// or the project controller's pod (controllerPod, `controller: daemon`), which runs the controller
+// alone on a volume of its own and provisions nothing. prepare decides a launch's kind once, from
+// its claim, and a stored Sandbox's kind is the one its labels name (podKindOf). Building a pod
+// asks the launch's kind for every facet the two build differently; supervision — relaunch's check
+// of the running pod, the launchers, Probe, Suspend and the address records — asks a kind only its
+// roles.
 type podKind interface {
 	// roles are the pod's launcher roles, one container each.
 	roles() []claim.Role
 	// claimToken is the claim of a launcher of role, one of roles, on a pod of this kind of project,
 	// issue being the issue key its Secrets carry (secretAnnotations).
 	claimToken(project, issue string, role claim.Role) (claim.Token, error)
-	// prepare resolves what the kind decides of a launch, its workspace and the volume its pod
-	// mounts, refusing a spec it cannot honour.
+	// prepare resolves what the kind decides of a launch, its workspace and whether its volume
+	// must already hold what it left, refusing a spec it cannot honour.
 	prepare(l *launch) error
 	// labels are the pod's resource labels, on its Sandbox, pod template, volume claim template and
 	// Secrets, which name its kind (podKindOf).
@@ -67,7 +68,7 @@ func podKindOf(labels map[string]string) (podKind, error) {
 }
 
 // issuePod is an issue's pod: every workflow role of the issue, one launcher each, working in the
-// issue's workspace on its tree's volume, which the tree's root Sandbox owns. Two init containers
+// issue's workspace on the issue's own volume, which its Sandbox owns. Two init containers
 // provision that workspace from the issue's repository, and the pod is placed beside its tree's
 // other pods and off every other tree's node.
 type issuePod struct{}
@@ -79,8 +80,7 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
-// the workspace's place on the tree volume and the tree's root claim, whose Sandbox owns that
-// volume; the root's own launch owns it. A resume expects the tree volume to hold what it left.
+// the workspace's place on the issue's volume. A resume expects the volume to hold what it left.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {
@@ -90,12 +90,8 @@ func (issuePod) prepare(l *launch) error {
 	if err != nil {
 		return err
 	}
-	root, err := claim.NewToken(spec.Project, spec.Tree, claim.RoleArchitect)
-	if err != nil {
-		return fmt.Errorf("the tree's root claim: %w", err)
-	}
-	l.workspace, l.volume, l.ownsVolume = working.Dir, root, claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree)
-	l.expectTreeVolume = l.resumeFile != ""
+	l.workspace = working.Dir
+	l.expectVolume = l.resumeFile != ""
 	return nil
 }
 
@@ -117,11 +113,11 @@ func (issuePod) secretAnnotations(l launch) map[string]string {
 }
 
 // initContainers are workspace-fetch and workspace-init, so the provisioning token never shares a
-// process with anything a tree agent can write (Stage 4b Task 4b.6b): workspace-fetch mounts the
-// provisioning Secret, its own TMPDIR, and the feed, and clones the repository from GitHub into the
-// feed; workspace-init mounts the tree volume, the feed read-only, and the config home, and does all
-// the tree volume's work from the feed, with no credential. Each takes the resources of the role
-// whose launch creates the pod.
+// process with anything an agent of the issue can write (Stage 4b Task 4b.6b): workspace-fetch
+// mounts the provisioning Secret, its own TMPDIR, and the feed, and clones the repository from
+// GitHub into the feed; workspace-init mounts the issue's volume, the feed read-only, and the
+// config home, and does all the volume's work from the feed, with no credential. Each takes the
+// resources of the role whose launch creates the pod.
 func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 	legion, resources := r.tools.Legion, r.resources[l.spec.Role]
 	return []corev1.Container{{
@@ -147,7 +143,7 @@ func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 		Env:        r.initEnvironment(l),
 		WorkingDir: TreeRoot,
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: treeVolume, MountPath: TreeRoot},
+			{Name: issueVolume, MountPath: TreeRoot},
 			{Name: feedVolume, MountPath: FeedDir, ReadOnly: true},
 			{Name: configVolume, MountPath: xdgConfigHome},
 		},
@@ -170,7 +166,7 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 }
 
 // agentEnv tells each agent its tree, issue and workspace, the tool paths and credential helper of
-// its checkout, and uv's directories on the tree volume.
+// its checkout, and uv's directories on the issue's volume.
 func (issuePod) agentEnv(r *Runtime, l launch, credentialHelper string) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "LEGION_TREE", Value: l.spec.Tree},
@@ -236,19 +232,19 @@ func (pod issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *s
 
 // provision is what a new issue pod needs before it starts, run under the tree's launch turn: it
 // waits until no other pod of the tree is initializing (awaitTreeInitialized), reads whether
-// workspace-init must find the tree volume holding retained sessions, lists the tree's removable
+// workspace-init must find the issue's volume holding retained sessions, lists the tree's removable
 // workspaces, mints the provisioning token for the repository's owner, and writes it to the pod's
 // init-only provisioning Secret.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	if err := r.awaitTreeInitialized(ctx, *l); err != nil {
 		return fmt.Errorf("wait for its tree's other pods to finish initializing: %w", err)
 	}
-	if !l.expectTreeVolume && l.spec.WorkspaceRecoveredFrom == "" {
-		sessions, err := r.store.TreeHasSessions(ctx, r.project, l.spec.Tree)
+	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" {
+		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
 		if err != nil {
-			return fmt.Errorf("read its tree's retained sessions: %w", err)
+			return fmt.Errorf("read its issue's retained sessions: %w", err)
 		}
-		l.expectTreeVolume = sessions
+		l.expectVolume = sessions
 	}
 	if r.removable != nil {
 		// Computed now, under the tree's launch turn, after every other pod of the tree has finished
@@ -311,7 +307,7 @@ func (controllerPod) claimToken(project, _ string, _ claim.Role) (claim.Token, e
 
 // prepare works in the root of the controller's own volume.
 func (controllerPod) prepare(l *launch) error {
-	l.workspace, l.volume, l.ownsVolume = TreeRoot, l.spec.Claim, true
+	l.workspace = TreeRoot
 	return nil
 }
 
@@ -341,7 +337,7 @@ func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
 		Command:         []string{r.tools.Legion, "workspace-init", "controller", "--root", TreeRoot},
 		Env:             env,
 		WorkingDir:      TreeRoot,
-		VolumeMounts:    []corev1.VolumeMount{{Name: treeVolume, MountPath: TreeRoot}},
+		VolumeMounts:    []corev1.VolumeMount{{Name: issueVolume, MountPath: TreeRoot}},
 		Resources:       r.resources[l.spec.Role],
 		SecurityContext: restrictedContainer(),
 	}}
@@ -352,7 +348,7 @@ func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 
 // agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, and nothing a tree agent alone
 // needs: no tree, issue or workspace, no tool paths or credential helper of a checkout, and none of
-// uv's directories on a tree volume.
+// uv's directories on an issue's volume.
 func (controllerPod) agentEnv(*Runtime, launch, string) []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
 }

@@ -68,11 +68,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -133,7 +133,7 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               }
             ],
             "workingDir": "/legion"
@@ -162,9 +162,9 @@
         ],
         "volumes": [
           {
-            "name": "tree",
+            "name": "issue",
             "persistentVolumeClaim": {
-              "claimName": "tree-legion-legion-controller"
+              "claimName": "issue-legion-legion-controller"
             }
           },
           {
@@ -208,7 +208,7 @@
             "legion.dev/project": "legion",
             "legion.dev/role": "controller"
           },
-          "name": "tree"
+          "name": "issue"
         },
         "spec": {
           "accessModes": [

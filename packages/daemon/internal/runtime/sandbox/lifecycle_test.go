@@ -283,10 +283,10 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 
 // The sweep deletes the project's Sandboxes of a tree whose cleanup confirmed (or that has no
 // lifecycle), only past the grace. A Sandbox of a live tree survives whatever claims are known,
-// with or without a locator: a suspended role holds its session there, a root the tree volume (N3),
-// and a claim launched after the daemon read its claims is missing from known. The image probe's
-// Sandbox is no claim's and is the probe's own to delete (#1266), and one whose labels name no
-// issue and tree is kept and reported: what cannot be told apart from a live tree's is never
+// with or without a locator: a suspended role holds its session on the issue's volume the Sandbox
+// owns (N3), and a claim launched after the daemon read its claims is missing from known. The image
+// probe's Sandbox is no claim's and is the probe's own to delete (#1266), and one whose labels name
+// no issue and tree is kept and reported: what cannot be told apart from a live tree's is never
 // deleted.
 func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-9-planner")
@@ -316,7 +316,7 @@ func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.
 		t.Fatal("an orphan of a closed tree past the grace survived")
 	}
 	if g.sandbox(SandboxName(rootToken)) == nil {
-		t.Fatal("the live tree's root Sandbox, and with it the tree volume, was deleted though no claim of it was known")
+		t.Fatal("the live tree's root Sandbox, and with it the issue's volume, was deleted though no claim of it was known")
 	}
 	for _, kept := range []string{probe, unlabelled} {
 		if g.sandbox(kept) == nil {

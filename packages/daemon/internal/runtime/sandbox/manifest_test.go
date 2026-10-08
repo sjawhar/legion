@@ -45,11 +45,11 @@ func goldenOptions() Options {
 // resumeSession is a session file Oh My Pi recorded in a pod.
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
-// manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
-// placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
-// whose workspace is recovered after its volume was lost; the root enrolled with the secrets
-// broker; and the project controller's pod, launched fresh and resuming. colocate is
-// whether another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
+// manifestCases are the Sandboxes the goldens pin: the root; a worker placed beside a scheduled
+// pod of its tree, and one placed with none; a resume; a relaunch whose workspace is recovered
+// after its volume was lost; the root enrolled with the secrets broker; and the project
+// controller's pod, launched fresh and resuming. Every one owns its volume. colocate is whether
+// another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
 // root-enrolled alone, is the runtime's enrollment for that one case (TestManifestGoldens,
 // TestManifestMatchesTheSandboxCRD apply it to the shared runtime before building that case's
 // manifest, and restore nil after — every other case runs unenrolled).
@@ -358,14 +358,13 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	}
 }
 
-// uv links a project's .venv, in an issue's workspace on the tree volume, to an interpreter under
-// UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the tree volume's own
+// uv links a project's .venv, in an issue's workspace on the issue's volume, to an interpreter
+// under UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the volume's own
 // mount (no other mount covering them) and outside the workspace, whose tree is the project's, so a
-// later pod runs the .venv as it is and reuses what an earlier pod downloaded. The cache is the
-// tree's, the same in every pod of it. The interpreter directory is the issue's: the same for two
-// pods of one issue, and another for a second issue of the tree, whose pods may install at the same
-// moment and share no lock with the first issue's across pods.
-func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
+// later pod runs the .venv as it is and reuses what an earlier pod downloaded. The cache is at the
+// same path in every pod. The interpreter directory is the issue's: the same for two pods of one
+// issue, and another for a second issue of the tree.
+func TestUvKeepsItsPythonsAndCacheOnTheIssueVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -380,8 +379,8 @@ func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
 		env := envOf(main)
 		for _, name := range []string{"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
 			dir := env[name]
-			if mount := mountHolding(main, dir); mount == nil || mount.Name != treeVolume || mount.SubPath != "" {
-				t.Errorf("%s %s: %s %q is on mount %+v, want the tree volume's own mount at %s", spec.Issue, spec.Role, name, dir, mount, TreeRoot)
+			if mount := mountHolding(main, dir); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
+				t.Errorf("%s %s: %s %q is on mount %+v, want the issue volume's own mount at %s", spec.Issue, spec.Role, name, dir, mount, TreeRoot)
 			}
 			if overlaps(dir, env["LEGION_WORKSPACE"]) {
 				t.Errorf("%s %s: %s %q overlaps the workspace %s", spec.Issue, spec.Role, name, dir, env["LEGION_WORKSPACE"])
@@ -599,7 +598,7 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 	}
 }
 
-// New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
+// New refuses options no cluster could run: an image not pinned by digest, an issue volume with no
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
 // does not choose.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
@@ -609,7 +608,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}{
 		"tag image":         {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
 		"no class":          {func(o *Options) { o.StorageClass = "" }, "no storage class"},
-		"no tree volume":    {func(o *Options) { o.TreeVolume = resource.Quantity{} }, "no tree volume size"},
+		"no volume size":    {func(o *Options) { o.TreeVolume = resource.Quantity{} }, "no issue volume size"},
 		"unix stream":       {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
 		"relative tool":     {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
 		"bad project":       {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},

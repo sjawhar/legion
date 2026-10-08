@@ -79,7 +79,7 @@ type Claim struct {
 	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
-	// WorkspaceLost is a claim whose session was lost with the tree volume it lived on — the one
+	// WorkspaceLost is a claim whose session was lost with the issue's volume it lived on — the one
 	// exception to resuming the agent a claim recorded. It records no session, and every launch
 	// recreates its workspace, fresh, until a new agent registers.
 	WorkspaceLost bool
@@ -121,7 +121,7 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, TreeVolumeLost, and the nine requests. The transition table has a row or a
+// PromptRefused, Timer, IssueVolumeLost, and the nine requests. The transition table has a row or a
 // named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
@@ -203,9 +203,9 @@ type Deps struct {
 	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
 	// nothing.
 	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
-	// VolumeLost is told of a claim whose tree volume was found lost as it relaunches that claim
-	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
-	// the same volume. nil tells no one.
+	// VolumeLost is told of a claim whose issue's volume was found lost as it relaunches that claim
+	// fresh, so the daemon can tell the issue's other claims (IssueVolumeLost): their sessions were
+	// on the same volume. nil tells no one.
 	VolumeLost func(c Claim)
 	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
 	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
@@ -699,7 +699,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent. A resume that found the tree volume lost is the exception (relaunchFresh). A task whose
+// is spent. A resume that found the issue's volume lost is the exception (relaunchFresh). A task whose
 // turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
 // and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
 // A process that dies while a suspension is held leaves the claim suspended instead (endHeld).
@@ -721,15 +721,16 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	return m.relaunchAfterFailure(ctx)
 }
 
-// relaunchFresh is a resume whose workspace-init found the tree volume lost, the session file with
-// it: resuming again would fail the same way on every attempt until the budget ran out. It is the
-// one exception to the same-agent rule. The claim drops the session it recorded and relaunches as a
-// fresh session that recreates its workspace from the issue's branch, and the agent that registers
-// next is the session it resumes from then on. The volume ended the process, not the launch, so no
-// launch failure is charged; the fresh launch has no session to find missing, so it cannot end this
-// way again. The daemon is told first: the tree's other claims kept their sessions on that volume.
+// relaunchFresh is a resume whose workspace-init found the issue's volume lost, the session file
+// with it: resuming again would fail the same way on every attempt until the budget ran out. It is
+// the one exception to the same-agent rule. The claim drops the session it recorded and relaunches
+// as a fresh session that recreates its workspace from the issue's branch, and the agent that
+// registers next is the session it resumes from then on. The volume ended the process, not the
+// launch, so no launch failure is charged; the fresh launch has no session to find missing, so it
+// cannot end this way again. The daemon is told first: the issue's other claims kept their sessions
+// on that volume.
 func (m *Machine) relaunchFresh(ctx context.Context) error {
-	m.log.Warn("supervise: the tree volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
+	m.log.Warn("supervise: the issue's volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
 	m.loseSession()
 	if m.deps.VolumeLost != nil {
 		m.deps.VolumeLost(copyClaim(m.claim))
@@ -737,8 +738,8 @@ func (m *Machine) relaunchFresh(ctx context.Context) error {
 	return m.launch(ctx)
 }
 
-// loseSession drops the session the claim recorded, which lived on a tree volume since lost: the
-// claim expects no session until a new agent registers, and its launches recreate the workspace.
+// loseSession drops the session the claim recorded, which lived on an issue's volume since lost:
+// the claim expects no session until a new agent registers, and its launches recreate the workspace.
 func (m *Machine) loseSession() {
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
 }
@@ -962,7 +963,7 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case Timer:
 		return ev.Claim
-	case TreeVolumeLost:
+	case IssueVolumeLost:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

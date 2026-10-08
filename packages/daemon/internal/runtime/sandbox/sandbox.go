@@ -62,7 +62,7 @@ const recheckInterval = 500 * time.Millisecond
 // Runtime is the Agent Sandbox runtime. Build one with New.
 type Runtime struct {
 	namespace, project, image, storageClass string
-	treeVolume                              resource.Quantity
+	volumeSize                              resource.Quantity
 	scheduling                              Scheduling
 	resources                               map[claim.Role]corev1.ResourceRequirements
 	streamURL, daemonURL, envoyURL          string
@@ -226,9 +226,9 @@ func configure(opts Options) (*Runtime, error) {
 	case !strings.Contains(opts.Image, "@sha256:"):
 		return refuse("image %q is not pinned by digest (…@sha256:…)", opts.Image)
 	case opts.StorageClass == "":
-		return refuse("no storage class for the tree volume (the cluster has no default class to fall back on)")
+		return refuse("no storage class for the issue volume (the cluster has no default class to fall back on)")
 	case opts.TreeVolume.Sign() <= 0:
-		return refuse("no tree volume size: %s is not a positive quantity", opts.TreeVolume.String())
+		return refuse("no issue volume size: %s is not a positive quantity", opts.TreeVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
 	case opts.BootIntervals <= 0:
@@ -281,7 +281,7 @@ func configure(opts Options) (*Runtime, error) {
 	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
-		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
+		volumeSize: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
@@ -562,7 +562,7 @@ func (r *Runtime) checkLocator(loc runtime.Locator) error {
 }
 
 // ProvisionsWorkspaces is true: every pod's init containers provision its claim's workspace on the
-// tree volume, and the tree volume goes with the tree's root claim.
+// issue's own volume, which goes with the issue's Sandbox.
 func (r *Runtime) ProvisionsWorkspaces() bool { return true }
 
 // Suspend ends only the recorded role process. It never changes the issue Sandbox operating mode:
@@ -618,10 +618,10 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 
 // Release is a claim-scoped operation: it ends at most the recorded role process and forgets the
 // claim from this runtime. It never suspends or deletes an issue Sandbox, even when this runtime
-// sees no sibling role: the issue's Sandbox, its Secrets and, for a root, the tree volume are the
-// tree cleanup's alone (CleanupTree), which runs once every stored claim of the tree has retired.
-// The project controller's Sandbox belongs to the controller's claim and nothing else, so releasing
-// that claim deletes it (releaseControllerSandbox).
+// sees no sibling role: the issue's Sandbox, its Secrets and its volume are the tree cleanup's
+// alone (CleanupTree), which runs once every stored claim of the tree has retired. The project
+// controller's Sandbox belongs to the controller's claim and nothing else, so releasing that claim
+// deletes it (releaseControllerSandbox).
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
@@ -670,7 +670,7 @@ func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Toke
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
-// --update-author`, run in the pod's own workspace on the tree volume) over the claim's
+// --update-author`, run in the pod's own workspace on the issue's volume) over the claim's
 // connection. The recorded process must still be the claim's running pod: the connection is its.
 func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id runtime.GitIdentity) error {
 	if err := r.checkLocator(loc); err != nil {

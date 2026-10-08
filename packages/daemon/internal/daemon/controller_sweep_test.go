@@ -23,8 +23,8 @@ import (
 // it, is deleted on its claim's account alone, never for want of a live tree.
 type liveTrees struct{}
 
-func (liveTrees) TreeHasSessions(context.Context, string, string) (bool, error) { return false, nil }
-func (liveTrees) TreeLive(context.Context, string, string) (bool, error)        { return true, nil }
+func (liveTrees) IssueHasSessions(context.Context, string, string) (bool, error) { return false, nil }
+func (liveTrees) TreeLive(context.Context, string, string) (bool, error)         { return true, nil }
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime
 // keeps the controller's Sandbox exactly while a known claim is the controller's. So the

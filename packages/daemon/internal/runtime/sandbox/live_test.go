@@ -511,7 +511,7 @@ type liveRig struct {
 	log  *slog.Logger
 	// trees is the durable state every runtime of the run reads (Options.Store): every tree live
 	// until a check records its cleanup confirmed.
-	trees *treeStore
+	trees *fakeStore
 
 	// The current runtime instance and its listener; stop ends both.
 	rt      *Runtime
@@ -588,7 +588,7 @@ func note(who, format string, args ...any) {
 func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &liveRig{
-		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newTreeStore(),
+		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newFakeStore(),
 		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
 	}
 	fail := func(format string, args ...any) {

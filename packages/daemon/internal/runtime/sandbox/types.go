@@ -54,9 +54,9 @@ type ProvisionTokens interface {
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
 // fake.
 type Store interface {
-	// TreeHasSessions is whether any stored claim of tree, retired ones included, recorded a
-	// session: the tree volume must then already hold the tree's clone.
-	TreeHasSessions(ctx context.Context, project, tree string) (bool, error)
+	// IssueHasSessions is whether any stored claim of issue, retired ones included, recorded a
+	// session: the issue's volume must then already hold the issue's clone and that session.
+	IssueHasSessions(ctx context.Context, project, issue string) (bool, error)
 	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
 	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
 	TreeLive(ctx context.Context, project, tree string) (bool, error)
@@ -71,9 +71,9 @@ type Options struct {
 	Store Store
 	// Image is the worker image, pinned by digest: New refuses one without "@sha256:".
 	Image string
-	// StorageClass is the tree volume's class. Required: production has no default class.
+	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
-	// TreeVolume is the tree volume's size, positive; the daemon's configuration supplies its
+	// TreeVolume is each issue volume's size, positive; the daemon's configuration supplies its
 	// default (runtime.kubernetes.tree_volume, 20Gi).
 	TreeVolume resource.Quantity
 	Scheduling Scheduling

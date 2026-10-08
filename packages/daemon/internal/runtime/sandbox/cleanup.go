@@ -10,33 +10,29 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// CleanupTree deletes every issue Sandbox of tree, and with them their role Secrets and, with the
-// root, the tree volume. The tree's cleanup reservation calls it (store.CleanupReservedTree) once
-// every stored claim of the tree has retired, so no launch creates a Sandbox of the tree
-// meanwhile. The API's own listing by the tree's label is the census: child issues' Sandboxes go
-// first, each awaited until the API no longer has it, and the listing is read again until none is
-// left; only then the root's, with foreground propagation, since the root Sandbox owns the tree PVC
-// every child pod mounts and garbage collection deletes the volume with it. The restricted daemon
-// identity has no PVC verb, so the root Sandbox's absence after a foreground delete is the API's
-// confirmation that the volume is gone. Each delete is fenced to the listed object's UID and
-// resourceVersion, and one the object changed since (a status write) lists again after a recheck
-// interval, so a controller writing status through a foreground delete does not spin the census; a
-// Sandbox already gone is gone, so a retry after a failure finishes the rest.
+// CleanupTree deletes every issue Sandbox of tree, and with each its role Secrets and the issue's
+// volume: the Sandbox owns its PVC by owner reference, and a foreground delete has garbage
+// collection remove the PVC before the Sandbox is gone. The tree's cleanup reservation calls it
+// (store.CleanupReservedTree) once every stored claim of the tree has retired, so no launch creates a
+// Sandbox of the tree meanwhile. The API's own listing by the tree's label is the census: each
+// Sandbox it names is deleted with foreground propagation, in any order, and awaited until the API
+// no longer has it, and the listing is read again until none is left. The restricted daemon identity
+// has no PVC verb, so a Sandbox's absence after its foreground delete is the API's confirmation
+// that its volume is gone. Each delete is fenced to the listed object's UID and resourceVersion, and
+// one the object changed since (a status write) lists again after a recheck interval, so a
+// controller writing status through a foreground delete does not spin the census; a Sandbox already
+// gone is gone, so a retry after a failure finishes the rest.
 func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 	for {
-		root, children, err := r.treeSandboxes(ctx, tree)
+		sandboxes, err := r.treeSandboxes(ctx, tree)
 		if err != nil {
 			return err
 		}
-		next := children
-		if len(children) == 0 {
-			if root == nil {
-				return nil
-			}
-			next = []*unstructured.Unstructured{root}
+		if len(sandboxes) == 0 {
+			return nil
 		}
-		for _, object := range next {
-			err := r.deleteSandbox(ctx, object, object == root)
+		for _, object := range sandboxes {
+			err := r.deleteSandbox(ctx, object, true)
 			if apierrors.IsConflict(err) {
 				select {
 				case <-ctx.Done():
@@ -52,31 +48,23 @@ func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 	}
 }
 
-// treeSandboxes lists tree's issue Sandboxes from the API, apart into its root issue's and its
-// child issues'.
-func (r *Runtime) treeSandboxes(ctx context.Context, tree string) (*unstructured.Unstructured, []*unstructured.Unstructured, error) {
+// treeSandboxes lists tree's issue Sandboxes from the API, the image probe's left out.
+func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructured.Unstructured, error) {
 	reading, cancel := call(ctx)
 	defer cancel()
 	list, err := r.sandboxClient().List(reading, metav1.ListOptions{
 		LabelSelector: labelProject + "=" + r.project + "," + labelTree + "=" + labelValue(tree),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("cleanup tree %s: list its Sandboxes: %w", tree, err)
+		return nil, fmt.Errorf("cleanup tree %s: list its Sandboxes: %w", tree, err)
 	}
-	var root *unstructured.Unstructured
-	var children []*unstructured.Unstructured
+	var sandboxes []*unstructured.Unstructured
 	for i := range list.Items {
-		object := &list.Items[i]
-		if object.GetLabels()[labelProbe] != "" {
-			continue
-		}
-		if object.GetLabels()[labelIssue] == labelValue(tree) {
-			root = object
-		} else {
-			children = append(children, object)
+		if object := &list.Items[i]; object.GetLabels()[labelProbe] == "" {
+			sandboxes = append(sandboxes, object)
 		}
 	}
-	return root, children, nil
+	return sandboxes, nil
 }
 
 // deleteSandbox deletes object, fenced to its UID and resourceVersion, waits until the API no

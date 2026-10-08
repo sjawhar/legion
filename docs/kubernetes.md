@@ -1532,7 +1532,7 @@ stamps every claim of the tree that already existed `workspaceLost`; each one's 
 fresh from the committed issue bookmark until its own fresh session registers, even after the new
 pod rebuilt the shared clone; a role first created later uses the ordinary fresh-worker path.
 A pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt begins: `Your workspace was recreated from
-`legion/<KEY>` because the tree's volume was lost. Anything you had not committed and pushed is
+`legion/<KEY>` because the issue's volume was lost. Anything you had not committed and pushed is
 gone. Re-read .legion and your last handoff, and reconcile before continuing.`
 
 One PVC per tree, `legion-<tree-slug>` (`ReadWriteOnce`, `tree_volume`, `storage_class`), created by the

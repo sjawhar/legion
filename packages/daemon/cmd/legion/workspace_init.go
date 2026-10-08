@@ -242,7 +242,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 					return err
 				}
 				if !sessions {
-					return volumeLostError(fmt.Sprintf("Tree volume for %s holds neither the clone (%s) nor retained sessions: the volume was lost", issue, cloneDir))
+					return volumeLostError(fmt.Sprintf("The volume of %s holds neither the clone (%s) nor retained sessions: the issue's volume was lost", issue, cloneDir))
 				}
 			}
 		}

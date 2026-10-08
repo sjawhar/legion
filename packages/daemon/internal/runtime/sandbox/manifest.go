@@ -23,8 +23,8 @@ import (
 )
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
-// mounts nothing a tree agent can write; and workspace-init, which works on the tree volume
-// without it. Each of the six role containers is named for its role.
+// mounts nothing an agent of the issue can write; and workspace-init, which works on the issue's
+// volume without it. Each of the six role containers is named for its role.
 const (
 	fetchContainer = "workspace-fetch"
 	initContainer  = "workspace-init"
@@ -89,7 +89,7 @@ var runtimeOwned = map[string]bool{
 // controller never enrolls (enrolledWith), so no pod carries one of its.
 func legionVolumeNames() []string {
 	names := []string{
-		treeVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+		issueVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role))
@@ -125,35 +125,29 @@ type launch struct {
 	// (podKindOf).
 	roles []claim.Role
 	// workspace is the launchers' working directory (podKind.prepare): an issue pod's workspace,
-	// which workspace-init provisions on the tree volume (workspace.Location under TreeRoot), or the
-	// root of the controller's own volume, TreeRoot.
+	// which workspace-init provisions on the issue's volume (workspace.Location under TreeRoot), or
+	// the root of the controller's own volume, TreeRoot.
 	workspace string
 	// secrets are the claim's launch credentials, each reaching the agent as a `<NAME>_FILE`
 	// pointer into its generation's private directory: the boot token, the spec's but the providers
 	// Secret's own (Options.ProvidersSecrets, which the runtime points at the providers mount
 	// whatever the spec carries), and the Dispatch bearer when Dispatch is configured.
 	secrets map[string]string
-	// volume is the claim whose Sandbox owns the volume the pod mounts (TreeClaimName), and
-	// ownsVolume whether that Sandbox is this launch's own, which then carries the volume's claim
-	// template (podKind.prepare): an issue pod mounts its tree root's, which the root's own launch
-	// owns, and the controller's pod its own.
-	volume     claim.Token
-	ownsVolume bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is checked by the role launcher before it starts the child; an issue pod's shared
-	// init checks tree storage, not a triggering role's transcript, and other stored sessions can
-	// also require an existing tree.
+	// resumeFile is checked by the role launcher before it starts the child; an issue pod's init
+	// checks the issue's volume, not a triggering role's transcript, and another role's stored
+	// session can also require the volume to hold what it left.
 	resumeFile string
-	// expectTreeVolume and removableWorkspacesJSON are an issue pod's workspace-init inputs
+	// expectVolume and removableWorkspacesJSON are an issue pod's workspace-init inputs
 	// (initEnvironment), which the issue pod sets itself (issuePod.prepare, issuePod.readyNewPod).
-	// expectTreeVolume is whether the tree volume must already hold the shared clone or a retained
+	// expectVolume is whether the issue's volume must already hold the clone or a retained
 	// session. removableWorkspacesJSON is the tree's removable-workspace candidates
 	// (Options.Removable), JSON-encoded together with their expiry, one object; "" when there are
 	// none. It is set last, under the tree's launch turn (setRemovable): prepare runs long before
 	// that turn is even requested, so a list this early could already be stale by the time a pod's
 	// manifest is actually written.
-	expectTreeVolume        bool
+	expectVolume            bool
 	removableWorkspacesJSON string
 }
 
@@ -298,40 +292,39 @@ func (l launch) agentArgv(agent []string) []string {
 func (r *Runtime) labels(l launch) map[string]string { return l.kind.labels(r.project, l) }
 
 // sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
-// before the claim's Secret is written, with the volume's claim template when the launch owns the
-// volume its pod mounts (launch.ownsVolume). Its pod template never runs: the relaunch's Running
-// patch replaces it with the template the launch computes, affinity and all, before the controller
-// creates a pod.
+// before the claim's Secret is written, with the claim template of the volume its pod mounts, the
+// Sandbox's own: an issue's Sandbox owns the issue's volume, the controller's its own. Its pod
+// template never runs: the relaunch's Running patch replaces it with the template the launch
+// computes, affinity and all, before the controller creates a pod.
 func (r *Runtime) sandboxManifest(l launch) sandbox {
-	s := sandbox{
+	storageClass := r.storageClass
+	return sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l)},
-		Spec:       sandboxSpec{PodTemplate: r.podTemplate(l, false), OperatingMode: modeSuspended},
-	}
-	if l.ownsVolume {
-		storageClass := r.storageClass
-		s.Spec.VolumeClaimTemplates = []volumeClaimTemplate{{
-			Metadata: volumeClaimMetadata{Name: treeVolume, Labels: r.labels(l)},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				StorageClassName: &storageClass,
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceStorage: r.treeVolume},
+		Spec: sandboxSpec{
+			PodTemplate: r.podTemplate(l, false), OperatingMode: modeSuspended,
+			VolumeClaimTemplates: []volumeClaimTemplate{{
+				Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.labels(l)},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					StorageClassName: &storageClass,
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: r.volumeSize},
+					},
 				},
-			},
-		}}
+			}},
+		},
 	}
-	return s
 }
 
-// podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts its volume by its
-// claim's name, the Sandbox owning it included: the controller replaces the owner's `tree` volume
-// with the same claim from its template, so owner and workers read alike. The pod runs as the
-// operator's ServiceAccount (the namespace's default when the operator names none), and its
-// launcher containers mount the providers Secret's configured keys and the operator's mounts, are
-// told the operator's variables, and start Oh My Pi on the pod's baseline (`--pod-safety`,
-// internal/podsafety). Its init containers, the volumes only they mount, and its placement are its
-// kind's (podKind).
+// podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts its own Sandbox's
+// volume by its claim's name (IssueClaimName), the name the controller gives the claim it makes
+// from the Sandbox's template, so the pod reads what the template provisioned whether or not the
+// controller rewrites the volume itself. The pod runs as the operator's ServiceAccount (the
+// namespace's default when the operator names none), and its launcher containers mount the
+// providers Secret's configured keys and the operator's mounts, are told the operator's variables,
+// and start Oh My Pi on the pod's baseline (`--pod-safety`, internal/podsafety). Its init
+// containers, the volumes only they mount, and its placement are its kind's (podKind).
 //
 // colocate is whether the pod must share a node with another pod scheduled right now
 // (podKind.colocate), which decides its affinity. The controller applies a template only to the
@@ -390,8 +383,8 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			Env:        slices.Clone(resolved),
 			WorkingDir: l.workspace,
 			VolumeMounts: slices.Concat([]corev1.VolumeMount{
-				{Name: treeVolume, MountPath: TreeRoot},
-				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
+				{Name: issueVolume, MountPath: TreeRoot},
+				{Name: issueVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
 				{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
 				{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
 				{Name: roleVolume(stateVolume, role), MountPath: StateDir},
@@ -439,11 +432,11 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
 		)
 	}
-	tree := corev1.Volume{Name: treeVolume, VolumeSource: corev1.VolumeSource{
-		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.volume)},
+	volume := corev1.Volume{Name: issueVolume, VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: IssueClaimName(l.spec.Claim)},
 	}}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
-	return slices.Concat([]corev1.Volume{tree}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
+	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
 		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
@@ -578,10 +571,10 @@ func xdgEnvironment() []corev1.EnvVar {
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
 const (
 	// uvPythonRoot holds the Pythons uv installs, one directory per issue (uvPythonDir), and
-	// uvCacheDir its cache, both on the tree volume beside the workspaces. A project's .venv, in an
-	// issue's workspace on that volume, links to an interpreter in that issue's directory, so every
-	// later pod of the issue finds the interpreter and the environment works there as it is; the
-	// cache lets every pod of the tree reuse what an earlier one downloaded.
+	// uvCacheDir its cache, both on the issue's volume beside the workspaces. A project's .venv, in
+	// an issue's workspace on that volume, links to an interpreter in that issue's directory, so
+	// every later pod of the issue finds the interpreter and the environment works there as it is;
+	// the cache lets every later pod of the issue reuse what an earlier one downloaded.
 	uvPythonRoot = TreeRoot + "/uv/python"
 	uvCacheDir   = TreeRoot + "/uv/cache"
 	// uvLinkMode is how uv puts a package from uvCacheDir into a .venv: a copy. With the cache and
@@ -613,9 +606,9 @@ func fetchEnvironment() []corev1.EnvVar {
 
 // initEnvironment is `workspace-init provision`'s contract (research runtime §2.3), the one
 // provisioning every role of the issue pod shares. Its PATH is the image's alone, naming no
-// directory on the tree volume, so the git and jj it resolves from PATH are never ones an agent put
-// there; it carries no tool-path variables, and it is never pointed at the provisioning token. It
-// gives shared provisioning its tree-wide storage expectation and never carries one role's session
+// directory on the issue's volume, so the git and jj it resolves from PATH are never ones an agent
+// put there; it carries no tool-path variables, and it is never pointed at the provisioning token.
+// It gives shared provisioning the issue's storage expectation and never carries one role's session
 // path: a missing transcript must not prevent sibling launchers from starting. A relaunch after the
 // volume was lost names the ref the recreated workspace is recovered from; both are
 // workspace-init's alone, never the agent's. LEGION_ROLE and LEGION_GENERATION are l.spec.Role and
@@ -638,7 +631,7 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 		{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
 		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
 	}
-	if l.expectTreeVolume {
+	if l.expectVolume {
 		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_TREE_VOLUME", Value: "true"})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {

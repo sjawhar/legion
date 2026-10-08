@@ -64,8 +64,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if s.Name != "legion-legion-controller" {
 		t.Errorf("the controller's Sandbox is %s, want legion-legion-controller", s.Name)
 	}
-	if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != treeVolume {
-		t.Fatalf("the controller's Sandbox claims %+v, want its own %s volume", s.Spec.VolumeClaimTemplates, treeVolume)
+	if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
+		t.Fatalf("the controller's Sandbox claims %+v, want its own %s volume", s.Spec.VolumeClaimTemplates, issueVolume)
 	}
 	for _, labels := range []map[string]string{s.Labels, r.podTemplate(l, false).Metadata.Labels} {
 		if labels[labelProject] != testProject || labels[labelRole] != string(claim.RoleController) {
@@ -95,7 +95,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if got := envOf(init)["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/"+SessionsSubPath+"/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl" {
 		t.Errorf("init LEGION_RESUME_SESSION_FILE = %q, want the session on the controller's volume", got)
 	}
-	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != treeVolume || mounts[0].MountPath != TreeRoot {
+	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != issueVolume || mounts[0].MountPath != TreeRoot {
 		t.Errorf("init mounts %+v, want the controller's volume at %s alone", mounts, TreeRoot)
 	}
 
@@ -139,8 +139,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 			t.Errorf("the controller's pod lacks its launcher's %s volume", prefix)
 		}
 	}
-	if v := volumes[treeVolume]; v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != TreeClaimName(controllerToken) {
-		t.Errorf("its volume %+v, want the claim of its own Sandbox, %s", v.VolumeSource, TreeClaimName(controllerToken))
+	if v := volumes[issueVolume]; v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != IssueClaimName(controllerToken) {
+		t.Errorf("its volume %+v, want the claim of its own Sandbox, %s", v.VolumeSource, IssueClaimName(controllerToken))
 	}
 	if secret := volumes[roleVolume("launcher", claim.RoleController)].Secret; secret == nil || secret.SecretName != roleSecretName(s.Name, claim.RoleController) {
 		t.Errorf("its launcher's token volume %+v, want the role Secret %s", secret, roleSecretName(s.Name, claim.RoleController))

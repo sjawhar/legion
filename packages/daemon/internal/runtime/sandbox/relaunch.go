@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -246,14 +247,16 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // first, bounded by the boot timeout; one by the claim's name that is not this project's is a
 // refusal.
 //
-// A Sandbox fits a launch when it carries the tree label the launch's pod carries, none for the
-// controller's pod, and owns its volume's claim template when the launch owns the volume
-// (launch.ownsVolume). It is made for its issue's tree (its tree label, and the tree volume template
-// a root's carries), and an issue's key, so its Sandbox's name, outlives a move to another tree: a
-// child of a closed tree re-admitted as a root of its own finds the Sandbox its old tree suspended,
-// which mounts the old root's volume and carries no volume of its own. Such a Sandbox, once
-// Suspended, is deleted and made again for this launch's tree; one that still runs roles of the old
-// tree is a refusal, since replacing it would end them.
+// A Sandbox fits a launch when it owns its volume (the claim template every Sandbox made now
+// carries) and carries the tree label the launch's pod carries, none for the controller's pod. It is
+// made for an issue, whose key, so its Sandbox's name, outlives a move to another tree: a child of a
+// closed tree re-admitted as a root of its own finds the Sandbox its old tree suspended, labelled
+// with that tree and owning the volume that holds the issue's clone, workspace and its roles'
+// sessions. Such a Sandbox, once Suspended, is relabelled for this launch's tree and kept, volume
+// and sessions with it; the Running patch rewrites its pod template, labels included, before any
+// pod runs. One that still runs roles of the old tree is a refusal, since replacing it would end
+// them. A Suspended Sandbox that owns no volume — the tree-volume layout, which mounted its tree
+// root's — fits no launch and is deleted and made again.
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
@@ -288,20 +291,28 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			return nil, fmt.Errorf("sandbox %s exists but is not project %s's (%s=%q)", l.name, r.project, labelProject, s.Labels[labelProject])
 		}
 		if s.DeletionTimestamp == nil {
-			if s.Labels[labelTree] == tree && (!l.ownsVolume || len(s.Spec.VolumeClaimTemplates) > 0) {
+			ownsVolume := len(s.Spec.VolumeClaimTemplates) > 0
+			if ownsVolume && s.Labels[labelTree] == tree {
 				return s, nil
 			}
 			if s.mode() != modeSuspended {
-				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is replaced once they stop",
-					l.name, s.Labels[labelTree], tree)
+				volume := ""
+				if !ownsVolume {
+					volume = " with no volume of its own"
+				}
+				return nil, fmt.Errorf("sandbox %s, made for tree %s%s, does not fit this launch of tree %s and still runs roles; it is replaced once they stop",
+					l.name, s.Labels[labelTree], volume, tree)
 			}
-			// A Sandbox with a volume template owns a tree's volume, which only that tree's cleanup
-			// (CleanupTree) deletes, after every claim of the tree retired.
-			if len(s.Spec.VolumeClaimTemplates) > 0 {
-				return nil, fmt.Errorf("sandbox %s owns tree %s's volume and does not fit this launch of tree %s; only that tree's cleanup deletes it",
-					l.name, s.Labels[labelTree], tree)
+			if ownsVolume {
+				r.log.Info("sandbox runtime: relabelling a suspended sandbox for its issue's new tree, keeping its volume",
+					"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree)
+				relabelled, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: tree})
+				if err != nil {
+					return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
+				}
+				return relabelled, nil
 			}
-			r.log.Info("sandbox runtime: replacing a sandbox made for another tree or without its tree volume", "sandbox", l.name, "uid", s.UID,
+			r.log.Info("sandbox runtime: replacing a sandbox that owns no volume", "sandbox", l.name, "uid", s.UID,
 				"tree", s.Labels[labelTree], "for", tree)
 			if err := r.deleteSandbox(ctx, u, false); err != nil && !apierrors.IsConflict(err) {
 				return nil, err
@@ -615,6 +626,12 @@ type jsonPatchOp struct {
 	Op    string `json:"op"`
 	Path  string `json:"path"`
 	Value any    `json:"value"`
+}
+
+// labelPatchPath is the JSON pointer of one of a Sandbox's labels, its key escaped as RFC 6901
+// requires (`~` as `~0`, then `/` as `~1`): an `add` there sets the label, replacing its value.
+func labelPatchPath(key string) string {
+	return "/metadata/labels/" + strings.NewReplacer("~", "~0", "/", "~1").Replace(key)
 }
 
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's
