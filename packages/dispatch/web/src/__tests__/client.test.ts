@@ -5,6 +5,7 @@ import {
   createApiClient,
   type FetchImplementation,
   isCredentialFeatureOff,
+  isDeliveryNotConfigured,
   isRetryableQueryError,
   isUnauthorized,
 } from "../api/client";
@@ -324,8 +325,8 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
 });
 
 test(
-  "isRetryableQueryError exempts an auth outcome (401), a credential-feature-off 404 and a " +
-    "document outside the schema, but retries a transient 5xx",
+  "isRetryableQueryError exempts an auth outcome (401), a credential-feature-off 404, an " +
+    "unconfigured delivery timeline and a document outside the schema, but retries a transient 5xx",
   async () => {
     const unauthorized = createApiClient(
       stubFetch(() => new Response(null, { status: 401 })).fetch
@@ -348,20 +349,38 @@ test(
       ).fetch
     );
     const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
+    const deliveryUnset = createApiClient(
+      stubFetch(() =>
+        Response.json(
+          { error: "delivery is not configured", code: "DELIVERY_NOT_CONFIGURED" },
+          { status: 404 }
+        )
+      ).fetch
+    );
 
-    const [unauthorizedError, featureOffError, documentSchemaError, serverErrorResult] =
-      await Promise.all([
-        unauthorized.whoAmI().catch((error: unknown) => error),
-        featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
-        documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
-        serverError.whoAmI().catch((error: unknown) => error),
-      ]);
+    const [
+      unauthorizedError,
+      featureOffError,
+      documentSchemaError,
+      serverErrorResult,
+      deliveryUnsetError,
+    ] = await Promise.all([
+      unauthorized.whoAmI().catch((error: unknown) => error),
+      featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
+      documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
+      serverError.whoAmI().catch((error: unknown) => error),
+      deliveryUnset
+        .getDeliveryTimeline({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
+        .catch((error: unknown) => error),
+    ]);
 
     expect(isRetryableQueryError(unauthorizedError)).toBe(false);
     expect(isCredentialFeatureOff(featureOffError)).toBe(true);
     expect(isRetryableQueryError(featureOffError)).toBe(false);
     expect(isRetryableQueryError(documentSchemaError)).toBe(false);
     expect(isRetryableQueryError(serverErrorResult)).toBe(true);
+    expect(isDeliveryNotConfigured(deliveryUnsetError)).toBe(true);
+    expect(isRetryableQueryError(deliveryUnsetError)).toBe(false);
   }
 );
 
@@ -473,6 +492,15 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.whoAmI();
   await api.logout();
   await api.githubRest("repos/acme/dispatch");
+  await api.getDeliverySettings();
+  await api.putDeliverySettings({
+    deploy_repo: "acme/widgets",
+    deploy_workflow_path: ".github/workflows/deploy.yml",
+    excluded_repos: [],
+    population_authors: ["octocat"],
+    pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
+    production_job_name: "widgets-release",
+  });
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/projects"],
@@ -508,6 +536,8 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/auth/whoami"],
     ["POST", "/auth/logout"],
     ["GET", "/api/github/rest/repos/acme/dispatch"],
+    ["GET", "/api/v1/settings/delivery"],
+    ["PUT", "/api/v1/settings/delivery"],
   ]);
 });
 

@@ -76,8 +76,9 @@ and the checks that branch requires (its rulesets and its branch protection), th
 
 ## The worker image
 
-Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's plugin, the
-`legion` CLI and a general toolchain (git, jj, gh, Node, uv, the AWS CLI).
+Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
+(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
+Node, uv, the AWS CLI).
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
@@ -218,21 +219,23 @@ legion start --config legion.yaml
 
 The daemon runs in the foreground and logs JSON lines to standard error. At every boot it checks
 that Agent Sandbox is installed and runs the worker image's launch probes in a probe Sandbox
-(`legion-probe-<project>-<digest prefix>`): the image's plugin must speak this daemon's contract,
+(`legion-probe-<project>-<digest prefix>`): the image's Legion plugin must speak this daemon's contract
+and load with its Envoy plugin,
 every agent's model must resolve, and every model key must work. Nothing restarts the daemon on its
 own, so run it under a process supervisor you trust. `legion stop --config legion.yaml` stops it,
 and `legion legions` lists the daemons registered on the machine.
 
 The `legion` binary the daemon runs and the worker image must come from the same commit. The
 image carries that binary, which embeds Legion's role prompts, at `/opt/legion/bin/legion` and
-Legion's Oh My Pi plugin at `/opt/legion/pi-legion-envoy`, so you can take both from the image
-you pinned:
+Legion's two Oh My Pi plugins at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, so you can
+take all three from the image you pinned:
 
 ```sh
 image=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 id=$(docker create --platform linux/amd64 "$image")
 docker cp "$id:/opt/legion/bin/legion" ./legion
-docker cp "$id:/opt/legion/pi-legion-envoy" ./pi-legion-envoy
+docker cp "$id:/opt/legion/pi-envoy" ./pi-envoy
+docker cp "$id:/opt/legion/pi-legion" ./pi-legion
 docker rm "$id"
 ```
 
@@ -292,9 +295,9 @@ The controller runs in your terminal as an interactive Oh My Pi session. It read
 its own, never `legion.yaml`; the repository's `deploy/kubernetes/daemon/controller.yaml.example` is
 the complete shape (rendered in the [configuration reference](/legion/legion/reference/config/)):
 
-1. Install Oh My Pi, then Legion's plugin from the same image as the daemon
-   (`omp plugin install ./pi-legion-envoy`, copied out as above). Set `omp_invocation`, or
-   `LEGION_OMP_PATH` to the absolute path of `omp`.
+1. Install Oh My Pi, then Legion's two plugins from the same image as the daemon
+   (`omp plugin install ./pi-envoy && omp plugin install ./pi-legion`, copied out as above). Set
+   `omp_invocation`, or `LEGION_OMP_PATH` to the absolute path of `omp`.
 2. Copy the example, set `project` to the daemon's project and `daemon_url` to the daemon's API as
    your machine reaches it (through a port-forward or a tunnel if need be), and put the operator
    token, the Envoy token, the agents' NATS seed (optional) and a Dispatch token for the controller
@@ -307,7 +310,7 @@ the complete shape (rendered in the [configuration reference](/legion/legion/ref
    legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
    ```
 
-The command checks the file and the plugin, fetches a fresh controller credential from the daemon
+The command checks the file and the plugins, fetches a fresh controller credential from the daemon
 with your operator token, and starts Oh My Pi in the foreground; its first turn runs the
 controller's start procedure with nothing typed. Running it again replaces the previous controller.
 Closing the terminal leaves the project without one, and the daemon logs
@@ -316,7 +319,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 ## Upgrade
 
 1. **Pick the new image** and note its digest ([The worker image](#the-worker-image)), and take the
-   `legion` binary and plugin from it.
+   `legion` binary and both plugins from it.
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
@@ -336,7 +339,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 
    A suspension waits for the agent's current turn to land; the resumed agent continues the same
    conversation in a new pod.
-5. **Restart the controller** with the new binary and plugin.
+5. **Restart the controller** with the new binary and plugins.
 
 ## Observe
 

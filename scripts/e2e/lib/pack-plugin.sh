@@ -1,40 +1,49 @@
 #!/usr/bin/env bash
-# Packs this checkout's @sjawhar/pi-legion-envoy exactly as the release packs it, into a tarball
-# holding what `npm pack` ships (package.json `files`: dist/ with the bundles and prepack.sh's
-# dist/skills, agents/, the packed manifest). Every script that installs a branch-built plugin packs
-# through here (lib/install-plugin-profile.sh and the grant rig's branch mode), so the plugin they run
-# is the one the release publishes. The worker image packs on its own, as release.yaml does, with the
-# same jq rewrite and `bun pm pack`; prepack.sh refuses any other omp.extensions.
+# Packs one of this checkout's two Oh My Pi plugins, @sjawhar/pi-envoy (packages/pi-envoy) or
+# @sjawhar/pi-legion (packages/pi-legion), exactly as the release packs it, into a tarball holding
+# what `npm pack` ships (package.json `files`: dist/ with the one bundle and the prepack's
+# dist/skills, the Legion plugin's agents/, the packed manifest). Every script that installs a
+# branch-built plugin packs through here (lib/install-plugin-profile.sh and the grant rig's branch
+# mode), so the plugins they run are the ones the release publishes. The worker image packs on its
+# own, as release.yaml does, with the same jq rewrite and `bun pm pack`; the prepack
+# (scripts/pi-plugin-prepack.sh) refuses any other omp.extensions.
 #
-#   scripts/e2e/lib/pack-plugin.sh <out dir>
+#   scripts/e2e/lib/pack-plugin.sh <pi-envoy|pi-legion> <out dir>
 #
-# Stdout is one line, the tarball's path; every step's own output goes to stderr. <out dir> is
-# created if missing and must hold no tarball already.
+# The first argument is the package's directory under packages/, and nothing else is taken: the
+# other workspace packages are not plugins. Stdout is one line, the tarball's path; every step's own
+# output goes to stderr. <out dir> is created if missing and must hold no tarball already.
 #
-# The sequence runs in the checkout this script lives in, because a copy of packages/pi-envoy cannot
-# build: prepack.sh copies ../../skills, and the bundle resolves @legion/* through the workspace
-# root's node_modules (`bun install --frozen-lockfile` at the root first).
-#   1. save package.json, arm the EXIT trap    release.yaml pi_envoy "Point extensions at the packed bundles"
-#   2. omp.extensions -> the packed bundles    that step's jq; worker.Dockerfile's `jq '.omp.extensions = …'`
-#   3. bun pm pack; its prepack builds dist/   release.yaml "Pack extension"; prepack.sh's `bun build`
+# The sequence runs in the checkout this script lives in, because a copy of the package cannot
+# build: the prepack copies the repository's skills/, and the bundle resolves @legion/* through the
+# workspace root's node_modules (`bun install --frozen-lockfile` at the root first).
+#   1. save package.json, arm the EXIT trap    release.yaml pi_envoy/pi_legion "Point extensions at the packed bundle"
+#   2. omp.extensions -> the packed bundle     that step's jq; worker.Dockerfile's `jq '.omp.extensions = …'`
+#   3. bun pm pack; its prepack builds dist/   release.yaml "Pack extension"; the prepack's `bun build`
 #   4. put package.json back                   release.yaml "Restore committed manifest"
 # Each source is cited by what it runs, never by line number: the lines move with every edit
 # above them. release.yaml's "Set release version" is not a step here: the tarball carries the
-# checkout's own version. The bundles inline package.json, so they are built while it names the
-# packed bundles, as the release builds them. The saved manifest is written under this run's temp
-# directory rather than beside package.json, so an interrupted run strands no tmp.json in the
-# checkout.
+# checkout's own version. The bundle is the committed manifest's one extension entry,
+# extensions/<entry>.ts, as dist/<entry>.js: the list the prepack requires. The bundle inlines
+# package.json, so it is built while the manifest names the packed bundle, as the release builds it.
+# The saved manifest is written under this run's temp directory rather than beside package.json, so
+# an interrupted run strands no tmp.json in the checkout.
 set -euo pipefail
 
 me=pack-plugin
 refuse() {
   echo "$me: $*" >&2
-  echo "usage: $0 <out dir>" >&2
+  echo "usage: $0 <pi-envoy|pi-legion> <out dir>" >&2
   exit 2
 }
 
-[ $# -eq 1 ] || refuse "expected one argument, the directory the tarball is written to"
-out=$(realpath -m -- "$1")
+[ $# -eq 2 ] || refuse "expected two arguments, the package to pack (pi-envoy or pi-legion) and the directory the tarball is written to"
+package=$1
+case "$package" in
+pi-envoy | pi-legion) ;;
+*) refuse "'$package' is not a plugin this checkout packs; the first argument is pi-envoy or pi-legion" ;;
+esac
+out=$(realpath -m -- "$2")
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 case "$out/" in
 "$root"/*) refuse "<out dir> $out is inside the checkout $root, where jj would snapshot the tarball" ;;
@@ -44,7 +53,7 @@ if compgen -G "$out/*.tgz" >/dev/null; then
   refuse "<out dir> $out already holds a tarball, so the one this run packs could not be told apart"
 fi
 
-manifest=$root/packages/pi-envoy/package.json
+manifest=$root/packages/$package/package.json
 work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXXXX")
 saved=$work/package.json
 restore=
@@ -84,11 +93,18 @@ if ! flock -n 9; then
   flock 9
 fi
 cp -p "$manifest" "$saved"
+# The committed manifest names one source entry, extensions/<entry>.ts; the packed one names that
+# entry's bundle alone, ["dist/<entry>.js"], the only list the prepack packs.
+entry=$(jq -r 'if (.omp.extensions | length) == 1 then .omp.extensions[0] else empty end' "$saved")
+case "$entry" in
+extensions/*.ts) entry=${entry#extensions/} && entry=${entry%.ts} ;;
+*) refuse "$manifest names omp.extensions $(jq -c '.omp.extensions' "$saved"); the committed list is one source entry, extensions/<entry>.ts" ;;
+esac
 restore=1
-jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' "$saved" >"$work/packed.json"
+jq --arg bundle "dist/$entry.js" '.omp.extensions = [$bundle]' "$saved" >"$work/packed.json"
 cp "$work/packed.json" "$manifest"
 
-(cd "$root/packages/pi-envoy" && bun pm pack --destination "$out") >&2
+(cd "$root/packages/$package" && bun pm pack --destination "$out") >&2
 put_back
 exec 9<&-
 tarballs=("$out"/*.tgz)

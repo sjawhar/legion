@@ -11,7 +11,7 @@ import (
 )
 
 // pushRig is a pane workspace for LEGION-7 with a bare GitHub stand-in as origin, main pushed there.
-// Its jj runs under the pane's own overlay (packages/pi-envoy/src/legion/jj-attribution.ts), which
+// Its jj runs under the pane's own overlay (packages/pi-legion/src/jj-attribution.ts), which
 // appends an Omp-Session trailer to every message jj describes, as a pane's jj does: a rig without
 // it proves the push only from a shell.
 type pushRig struct {

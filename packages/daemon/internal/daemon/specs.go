@@ -146,7 +146,7 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 // the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
 // daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
 // (workflow.Engine.ready, prompts/go/merger.md). It is exported for the rigs under
-// packages/pi-envoy/scripts, which tell a worker what a pane is told.
+// packages/pi-legion/scripts, which tell a worker what a pane is told.
 func AddressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {

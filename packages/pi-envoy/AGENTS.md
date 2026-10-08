@@ -1,6 +1,12 @@
 # Pi Envoy Extension
 
-Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
+Tracked Oh My Pi extension package `@sjawhar/pi-envoy`: the Envoy messaging and Dispatch tools
+every session loads, in one entry, `extensions/envoy.ts`, with the four skills every session with
+Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) staged into
+`dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. The Legion entry, its
+modules, agents and skills are `@sjawhar/pi-legion` (`packages/pi-legion`, its `AGENTS.md`), which a
+Legion pane loads beside this plugin and which reaches it through the interface in
+`@legion/pi-shared` (`packages/pi-shared/AGENTS.md`); this package never imports that one.
 
 ## Overview
 
@@ -47,8 +53,8 @@ the injected user message with the message id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
 first user message with the sent text, remembered under its host timestamp, forgotten at the run's
-`agent_end`; a turn the record misses shows twice, and the phase-worker section below says which
-turns those are and what a miss costs a phase worker).
+`agent_end`; a turn the record misses shows twice, and the phase-stall section of
+`packages/pi-legion/AGENTS.md` says which turns those are and what a miss costs a phase worker).
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own
@@ -74,225 +80,18 @@ whose inbox belongs to the server's PubAck; an empty receipt there fails the pub
 `nats: invalid jetstream publish response`. A frame that cannot be decoded is still never
 acknowledged, and a receipt that fails to publish is logged while delivery continues.
 
-## Daemon contract
+## Legion
 
-The plugin speaks to the Legion daemon (`packages/daemon`) through
-`src/legion/daemon-client.ts`, which reads every response through the strict schemas of
-`@legion/contracts/legion-api`, and boots every Legion session through the claim session
-(`src/legion/claim-session.ts`) or, for the controller, the controller session
-(`src/legion/controller-session.ts`). `package.json` declares the contract it was built against as
-`legion.daemonApiVersion`: the claim, credential, workflow, controller, and state
-shapes that client parses, and the pane's environment — the identity variables
-`LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
-`src/legion/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
-(where the claim session writes its jj attribution overlay), `LEGION_WORKSPACE` (where the handoff
-actions run, `src/legion/handoff-actions.ts`), `LEGION_GENERATION` (set by the daemon, read by
-nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, the Envoy
-variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
-`NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
-when the daemon has `dispatch_url` configured — and, beside the pane, `LEGION_REMOVABLE_WORKSPACES`
-on a pod's `workspace-init provision` container, which the image's own `legion`, built from the same
-commit as this plugin, decodes strictly. A change to any of these surfaces bumps the field and the
-daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
-history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
-daemon's golden test, is what `src/legion/daemon-api-version.test.ts` pins the field to, so neither
-side bumps alone, and the number is re-read against `main` at every rebase. Contract 12 renamed the
-field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-daemon client
-(LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
-refused naming that number.
-
-The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
-manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
-under the environment a pane will get, and the plugin a pane's Oh My Pi actually loads, which must
-be that same package — and `legion probe-image` holds a worker image's plugin to it the same way.
-Notes on earlier contracts that still describe behaviour:
-Contract 4 adds the operator-launched controller: `POST /legion/v1/controller/secret` (the CLI's
-call, never this extension's), a controller registration on `claims/register` answered with the
-role `controller` and no tree or issue, the `/grants` controller-session form
-(`{sessionId, secret}`), and `controllerLocator` (`{runtime, external: true, sessionId,
-registeredAt}`) on `/legion/v1/state`.
-Contract 5 adds `LEGION_GRANT_FILE` to the pane's environment, tmux pane and Sandbox pod alike
-(LEGION-262): Oh My Pi copies its environment once for every `gh` it runs to serve a `pr://` or
-`issue://` read or its `github` tool, so the pointer has to be there from its start, and this
-extension does not set it after the claim registers. On a pane launched without it, the plugin
-refuses every bash command and every call Oh My Pi serves with `gh`, answering
-`LEGION_GRANT_FILE is not set on this pane: …`. Restarting the daemon does not clear it, since
-a restarted daemon re-adopts a live pane without relaunching it; relaunching the pane does
-(`legion claims suspend` and then `legion claims resume` on its claim).
-Contract 6 adds `phase` to a claim's pending delivery on `/legion/v1/state` — the issue phase the
-task was queued for, absent for a task of no phase — and `unrecorded` as the `phase` and `status`
-the state route reads for an issue the workflow does not record, where an operator's claim exists
-and an issue does not (#1345). No request names `unrecorded`: the phase-backward request takes the
-workflow's phases alone. The handoff completion request is unchanged: a completion names no run,
-and the daemon attributes it to the run of the task the worker took, reading the claim in three
-steps — the task whose turn is running; or, once that turn ends and retires it, the run the claim
-is left serving, which is what answers for a worker woken by a notice; or, for a claim that has
-served no run at all, a task it holds that the agent may have read. A task the agent refused is
-not one it read, so it answers for none of them. `POST /legion/v1/handoff/complete` answers 409
-`HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
-`HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
-claim's launch counter and says nothing about the run; nothing reads it for this.
-Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
-architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
-closed shows none until it is re-admitted). The controller skill reads it at every start,
-since the escalation's wake reaches only a controller running when it is published (#1420).
-Contract 8 adds `NATS_NKEY_SEED_FILE` to the pane's environment (LEGION-279): when the daemon
-has the `legion-pane` NATS nkey seed (`nats_nkey_seed_file`, else `NATS_NKEY_SEED_FILE`, else
-`NATS_NKEY_SEED` in its own environment), every root and worker pane's pointer names a 0600
-`<role token>-nats_nkey_seed` file under the daemon's `<state_dir>/secrets`, pruned with the pane's
-other secret files, and every Sandbox pod's names the providers Secret's own `NATS_NKEY_SEED` file;
-`legion controller start` sets it to the operator file's `nats_nkey_seed_file`. The
-extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
-they authenticate as that nkey user once production NATS stops admitting credential-less clients.
-With no seed there is no pointer, and the connections carry no credential.
-Contract 10 adds `POST /legion/v1/roots/close` (`LegionRootCloseRequest`: `grantId`, `issue`,
-`reason`), the `legion` tool's `close_root`: a root architect ends its tree while the root is
-admitted and no phase has started, and the daemon posts the reason on the issue before it writes
-`done`.
-
-The claim session's boot (`createClaimSession`) is the same for a root architect and a phase
-worker — the daemon registers both on one route, a root being the claim whose issue is its tree:
-the persisted transcript; `claims/register` with the pane's boot token and this build's
-`daemonApiVersion` (`pluginContract`), where any 4xx exits the process with one log line naming
-the route, status, and daemon sentence (`exitOnRegistrationRefusal`) and a 5xx or transport
-failure propagates without exiting; jj session attribution; the Envoy role, which is the claim
-token and the topic the daemon sends an architect every notice on (no claim subscribes to an
-issue's notice topic, so no phase worker is woken by an architect's notice); and `claims/ready`,
-retried three times a second apart on a 5xx or transport failure only, and run again whenever the
-Envoy heartbeat regains the role. A session with no Legion environment boots nothing and gets no
-tool. The tool-call hook mints a fresh grant into the pane's `LEGION_GRANT_FILE` before every call
-that redeems one (see the grant file row below). It also registers the `legion` tool: architects
-register gates, release children, request a backward move, choose retry or escalation, sign off,
-close an admitted root tree (a root architect only), and read records; phase workers request a
-backward move and read records. No `claims/exit` report runs at shutdown, because a
-daemon-requested suspend ends the session but keeps its claim for resumption.
-
-A daemon that sets `controller: daemon` launches the controller itself, as a pod with
-`LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE` (`controllerSession` in
-`src/legion/controller-session.ts`): the session registers on `claims/register` with that boot
-token in place of a capability, is answered with the same controller registration, claims the role,
-subscribes to the controller topic, and then calls `claims/ready`, which is when the daemon sends
-its start message. Any step of that claim that fails exits Oh My Pi, so the daemon relaunches it;
-the operator's controller logs and stays up instead. Only a session classified as the controller
-(`LEGION_CONTROLLER=1`) registers its boot token that way: `/legion-claim-controller` in a root
-architect's or phase worker's pane, whose boot token is its own claim's, is a takeover by hand that
-needs the capability and stops before any daemon call without it, never re-registering the
-worker's claim or exiting it. Every other daemon launches no controller: the
-operator starts one with `legion controller start`, which drops an inherited boot token,
-fetches the controller capability with the operator's bearer and runs Oh My Pi with
-`LEGION_CONTROLLER=1` and `LEGION_CONTROLLER_SECRET_FILE`. No boot gate checks the operator's
-machine, so the plugin's contract is held there three times. Before its one daemon call,
-`legion controller start` launches Oh My Pi as the controller will run — its launch prefix and
-invocation, the controller's environment, in `<state_dir>/controller` — with the boot gate's load
-probe, and refuses when that Oh My Pi loads no pi-legion-envoy, or loads one whose
-`daemonApiVersion` is not its own. The manifest it reads is the one Oh My Pi reports loading, so
-whatever moves the plugin root (a dotenv file, the launch prefix, a project plugin root, a
-symlinked state directory) moves the check with it. That call, `POST /legion/v1/controller/secret`,
-names the contract the CLI held the plugin to (`pluginContract`), and the daemon refuses one that
-is not its `DaemonAPIVersion` with 409, naming both, before it mints anything. The mint revokes the
-incumbent controller, so neither a plugin that would refuse the new session nor a CLI built for
-another daemon (a binary replaced before its daemon restarted) cuts the running controller off.
-And the daemon refuses a controller registration whose `pluginContract` is not its
-`DaemonAPIVersion` with 409, naming both. That session goes through the controller session
-(`src/legion/controller-session.ts`), not the claim session, and gets no `legion` tool:
-`GET /legion/v1/state` first, since a registration replaces the running controller: an unset
-`LEGION_PROJECT`, or one whose controller role is not that of the project the state names
-(`legionProjectToken` in `@legion/contracts`, the daemon's own rule), stops the claim there; then
-`claims/register` with the capability in place of a boot token, answered with
-`api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
-`legion-<project>-controller`, then a subscription to the project's controller topic
-`notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
-`LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
-controller-session form with the secret the registration was issued. What the daemon publishes
-on that topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
-subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
-`whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
-it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
-retries, each compared with the role's state when the connection dropped, do not reopen it once
-the role has ended. A `/new` or `/resume` keeps it open whichever extension handles the switch
-first: Oh My Pi runs the manifest's order but moves on from a handler that outlasts its 30-second
-budget, and the switch's drop of the outgoing role (`endOutgoingRole`) leaves a role already
-claimed under the new session id alone. It is never registered with
-the listener, so a replaced controller resumed later gets it back only by claiming the role, which
-the daemon refuses its replaced capability. It is a live wake that changes no
-request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
-controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
-subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
-contract, and the daemon refuses its registration with 409. A later
-`legion controller start` mints a new capability, so the earlier session's grants stop working.
-`legion status <issue> <status>` in that session reads the grant file; from an operator shell it
-takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like
-`legion claims`, is refused when its group or others can read it.
-
-## Session titles
-
-Every Legion session names itself as soon as it starts, in a tmux pane or a
-pod: `Legion <role> · <ISSUE>` for a root architect or a phase worker (a sub-architect included),
-from `LEGION_ROLE` and `LEGION_ISSUE`, and `Legion controller · <PROJECT>` for a controller, from
-`LEGION_PROJECT` displayed in uppercase (the daemon carries that token in lowercase for subjects
-and paths; without it the title is `Legion controller`, so no daemon contract number moves for it).
-`session_start` in `extensions/legion.ts` calls `pi.setSessionName`
-(`src/legion/session-title.ts`) after the subagent check and before any daemon
-call or Envoy role claim, so the claim's registration already carries the title the Envoy listener
-lists, and every Dispatch write stamps it as `origin.session_title` (`getSessionName`, read at
-call time). Oh My Pi titles a session itself from the first message typed at its terminal or given
-on its command line, so a headless `omp --mode rpc` session the daemon prompts otherwise has none.
-The controller also titles the session a `/new`, `/resume`, `/fork`, branch or tree navigation
-leaves it on, before it re-claims.
-
-Oh My Pi persists the title in the transcript with its source, and a pane relaunched with
-`--resume` keeps it. A session already carrying the Legion title is left as it is; a title Oh My Pi
-generated (`titleSource: "auto"`) is replaced; any other title is a person's (a `/rename`, the RPC
-`set_session_name`) and is kept. Oh My Pi records an extension's `setSessionName` as `user` too, so
-its own title model never replaces the Legion title. A `task` subagent and a session with no Legion
-environment get no title from this extension.
-
-## Phase workers' handoff actions and the phase-stall follow-up
-
-A worker's handoff operations are actions of the `legion` tool, never shell text:
-`handoff_write`, `handoff_read`, and `handoff_complete` (`src/legion/handoff-actions.ts`), which
-`src/legion/tools.ts` carries for every session but the root architect. Each action runs the
-daemon's own `legion handoff ...` command, `legion` found on the pane's PATH (the tmux
-`<state_dir>/bin/legion` launcher, or the image's binary in a pod), in `LEGION_WORKSPACE`;
-`handoff_complete` first mints a grant into `LEGION_GRANT_FILE`, as the tool-call hook does before a
-shell command. `legion gh` and `legion credential` stay shell commands: git and gh call them. What a
-later phase needs goes in the handoff; a question for another live role goes to its role topic with
-`envoy_publish`.
-
-`handoff_write` sends its payload on the command's stdin, which both CLIs read when `--data` is
-omitted: one argv string is capped at 128 KiB (Linux's `MAX_ARG_STRLEN`), and a tester's handoff that
-accumulates review rounds outgrows it.
-
-The shell's completion is closed: the tool_call hook refuses `legion handoff complete` (by name or by
-a path ending `/legion`) in a phase-worker pane, a sub-architect's included, and a root architect's,
-ahead of every role gate so that it binds a `task` subagent too — a `bash` command in any position of
-a chain (a supervised service's start included), and `eval` code or stdin written to a supervised
-service (a `write` to `proc://<id>`, the path in a pasted `read` header, `[proc://<id>#XXXX]`,
-included, since Oh My Pi's `write` strips that before it routes) by a plain-text rule, exactly as
-it refuses the jj operation-log rewrites (`PANE_RULES` in `extensions/legion.ts`). A completion run
-from the shell would never reach the phase stall below. `legion handoff write` and `read` stay open
-to the shell: they leave no phase open, a root architect reads committed handoffs with
-`legion handoff read`, and a worker can pipe a handoff built from the one on disk to
-`legion handoff write` on stdin (`skills/legion-worker/SKILL.md`, the handoff write section).
-
-In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
-controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`
-tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
-`handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
-own turn is a user message too, and counts as an Envoy delivery rather than an assignment: the
-Envoy extension records each body it sends in, process-wide, and legion.ts asks that record at
-`message_start` (`matchInjectedUserTurn`). The record is forgotten at the run's `agent_end`, so a
-Send or an Aside sent in after the run's last queue or aside poll and before that `agent_end`,
-which the host then runs as a turn of its own, matches nothing: it counts as an assignment, which
-opens even a closed phase, and the dashboard shows it twice. One sent in after that `agent_end`
-starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
-open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
-as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
-message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
-sent follow-up stays quiet until the next Envoy delivery or assignment. The state is appended to the
-transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
-`--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
-(`LEGION_TEST_OMP`).
+The Legion lifecycle is not this package's. The daemon contract (`legion.daemonApiVersion`, the
+claim and controller sessions, the pane's environment) is described under "Daemon contract" in
+`packages/pi-legion/AGENTS.md`. The session titles a Legion session gives itself are described
+under "Session titles" there. A phase worker's handoff actions and the phase-stall follow-up are
+described under "Phase workers' handoff actions and the phase-stall follow-up" there. What this
+plugin gives the Legion entry is the interface it publishes at factory time
+(`publishEnvoyPluginInterface(import.meta.url)`, `@legion/pi-shared/interface`): the role-claim
+bridge the Legion entry claims through, the record of the user turns this plugin sends in, and the
+slot for the bootstrapped session's transcript; what the Legion entry does with it, and how it
+refuses to run without it, is "What this plugin needs from pi-envoy" there.
 
 ## Native Dispatch tools
 
@@ -467,23 +266,26 @@ state never nudges.
 
 | Task | Location | Notes |
 | --- | --- | --- |
-| OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
-| Legion lifecycle modules | `src/legion/` | Classification, the daemon client (`daemon-client.ts`) and the claim session (`claim-session.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — every `bash` command, the `github` tool, and any tool whose `path`/`paths` names a `pr://` or `issue://` URL, which Oh My Pi serves by running `gh` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the static gh environment and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`, `handoff-actions.ts`) |
-| Controller session | `src/legion/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
-| Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
+| OMP extension entry | `extensions/envoy.ts` | The one entry; ships as `dist/envoy.js` in `@sjawhar/pi-envoy` and loads in every installed OMP session. The Legion entry is `../pi-legion/extensions/legion.ts` (`packages/pi-legion/AGENTS.md`) |
+| Legion lifecycle | `../pi-legion/` | The daemon client, the claim and controller sessions, the grant file, the `legion` tool and the phase stall are `@sjawhar/pi-legion`'s: see `packages/pi-legion/AGENTS.md` |
+| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types and `toolSuccess`/`toolFailure`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
+| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, and resets the process-wide interface so no Legion suite's record reaches it |
+| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The four skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
+| No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the twenty-one native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))` — deliberately NOT strict: on installed OMP hosts a strict host schema makes the coercion pass delete an unknown key beside valid required fields and hand the executor silently narrowed args, while non-strict preserves unknown root fields so `executeDispatchTool`'s own always-strict parse names the invented field (the xd:// half is can1357/oh-my-pi#12871) — register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
-| Real end-to-end delivery smoke | `smoke-delivery.sh`, `smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
+| Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 
 ## Critical conventions
 
 - Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). The shared Dispatch contract exposes field shapes and cross-field validation through `dispatchToolSchema`; pass it `zodSchemaApi(pi.zod)`. `envoy.test.ts` proves every registered field came from the injected instance. |
 - Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
-- The registration heartbeat (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 120 s) re-asserts the session's held role after every successful re-registration: it reads `GET /v1/roles/<role>` and issues a soft `POST /v1/roles/set` only when the listener does not name this session as the live holder — a healthy tick writes nothing and appends no `envoy-role-claim` transcript entry. A 409 (a different live holder) drops the local claim, warns once, and ends re-assertion for that role; the newer holder is correct. A regain — or the first healthy tick after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; the controller re-runs nothing, since the daemon holds nothing for it. `claim-session.ts` registers that listener on the `LEGION_ROLE_CLAIM_BRIDGE` slot only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
-- A `task` subagent's session shares its parent's identity in both extensions (`subagentSessionCheck` in `src/subagent-session.ts`): in a Legion process it claims no role, calls no daemon route, installs no tool gate, and never exits (`extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. Both extensions ask the host's own roster first (`registeredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and no write, so it also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The roster's answer outranks the transcript layout. Only where the roster gives no opinion (a host build without the export, or a session the global roster does not list) does the transcript decide, once `ensureOnDisk` has published it; that publish stays, since the transcript is then the only signal and has to be on disk to read as top-level. It fails while another writer holds the transcript's publish lock (Oh My Pi's `SessionLockError`); the check then answers that one call from the transcript as it is on disk, logs a warning, and asks again at the next call, so a lost race never fails a hook or the tool call it gates. Each hook calls the check once and passes the answer on, and each extension instance keeps only a settled answer, for its life. The transcript check is recognised by either of two signals: the process-local one — the claim session's boot and a launched controller's claim (`claim-session.ts`, `controller-session.ts`) record the bootstrapped session's transcript path on `globalThis` under `Symbol.for("legion.pi-envoy.bootstrapped-session")`, and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is a `write` to the parent's `agent://` address. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.
-- A daemon refusal of the boot registration itself — `/legion/v1/claims/register` — ends the process (`exitOnRegistrationRefusal` in `src/legion/claim-session.ts`: one log line naming the route, the status, and the daemon's sentence, then `exitProcess(1)`) for every 4xx: a 400 or 404 (a request or a route the daemon does not have), a 403 (the boot token is stale, consumed, or unknown), and a 409 (the same-agent rule, `Worker respawn must resume the same agent session`: this session is not the one the resumed claim recorded; under a database session store that is Oh My Pi having started a fresh session at a path whose row is gone). None changes on retry, and a process that stayed up unregistered would sit alive under the daemon's registration deadline with nothing ever retiring it; exiting hands the outcome to the daemon, which counts the launch failure. Every other error there — a 5xx, a transport failure — propagates out of `session_start` without exiting (LEGION-81; `extensions/legion.test.ts` pins 400, 403, 404 and 409, and 500/503 as the negative control).
+- The registration heartbeat (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 120 s) re-asserts the session's held role after every successful re-registration: it reads `GET /v1/roles/<role>` and issues a soft `POST /v1/roles/set` only when the listener does not name this session as the live holder — a healthy tick writes nothing and appends no `envoy-role-claim` transcript entry. A 409 (a different live holder) drops the local claim, warns once, and ends re-assertion for that role; the newer holder is correct. A regain — or the first healthy tick after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; the controller re-runs nothing, since the daemon holds nothing for it. `packages/pi-legion/src/claim-session.ts` registers that listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`, `packages/pi-shared/AGENTS.md`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
+- A `task` subagent's session shares its parent's identity in both plugins (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, installs no tool gate, and never exits (`packages/pi-legion/extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. Both entries ask the host's own roster first (`registeredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and no write, so it also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The roster's answer outranks the transcript layout. Only where the roster gives no opinion (a host build without the export, or a session the global roster does not list) does the transcript decide, once `ensureOnDisk` has published it; that publish stays, since the transcript is then the only signal and has to be on disk to read as top-level. It fails while another writer holds the transcript's publish lock (Oh My Pi's `SessionLockError`); the check then answers that one call from the transcript as it is on disk, logs a warning, and asks again at the next call, so a lost race never fails a hook or the tool call it gates. Each hook calls the check once and passes the answer on, and each extension instance keeps only a settled answer, for its life. The transcript check is recognised by either of two signals: the process-local one — the claim session's boot and a launched controller's claim (`packages/pi-legion/src/claim-session.ts`, `packages/pi-legion/src/controller-session.ts`) record the bootstrapped session's transcript path on the shared interface (`bootstrappedSession` in `@legion/pi-shared/interface`), and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is a `write` to the parent's `agent://` address. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.
+- What a daemon refusal of the boot registration does to a Legion process (`exitOnRegistrationRefusal`) is the Legion entry's rule: see the critical conventions of `packages/pi-legion/AGENTS.md`.
+- Nothing under `extensions/` or `src/` imports `packages/pi-legion`: what both plugins need lives in `@legion/pi-shared`, which each bundles (`src/no-cross-import.test.ts`).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. Each runs its session on its own tmux server, on a socket in its temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and prints the `tmux -S <socket> attach -t <session>` line that watches it, so its cleanup's `tmux kill-session` can end only the session it started: on the shared default server that kill could end anyone's session. Keep new tmux calls on that wrapper rather than the default server.
+- `scripts/smoke-delivery.sh` and `scripts/smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. Each runs its session on its own tmux server, on a socket in its temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and prints the `tmux -S <socket> attach -t <session>` line that watches it, so its cleanup's `tmux kill-session` can end only the session it started: on the shared default server that kill could end anyone's session. Keep new tmux calls on that wrapper rather than the default server.

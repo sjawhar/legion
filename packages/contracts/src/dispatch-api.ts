@@ -2481,3 +2481,36 @@ export interface DeliveryTimelineResponse {
     readonly unfetchable_count: number;
   };
 }
+
+/**
+ * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
+ * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
+ * Which repository deploys, its deploy and PR-checks workflow paths, the deploy workflow's job
+ * whose success is a production deploy, and whose merged pull requests count. The last three
+ * timestamps and the error are the reconcile's own, cleared by every write.
+ */
+export interface DeliverySettings {
+  /** `owner/repo`, lowercased as the server stores it. */
+  readonly deploy_repo: string;
+  readonly deploy_workflow_path: string;
+  readonly production_job_name: string;
+  readonly pr_checks_workflow_path: string;
+  /** GitHub logins as GitHub's REST API spells them, compared exactly: an App's ends in `[bot]`. */
+  readonly population_authors: readonly string[];
+  readonly excluded_repos: readonly string[];
+  readonly last_event_at: string | null;
+  readonly last_reconcile_at: string | null;
+  readonly last_error: string | null;
+  readonly updated_by: Actor;
+  readonly updated_at: string;
+}
+
+/** `PUT /api/v1/settings/delivery`'s body, which replaces the whole record (human callers only). */
+export interface DeliverySettingsInput {
+  readonly deploy_repo: string;
+  readonly deploy_workflow_path: string;
+  readonly production_job_name: string;
+  readonly pr_checks_workflow_path: string;
+  readonly population_authors: readonly string[];
+  readonly excluded_repos: readonly string[];
+}

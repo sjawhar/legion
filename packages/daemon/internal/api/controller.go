@@ -87,7 +87,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 			"pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
 		named := "names no daemon API contract"
 		if req.PluginContract != 0 {
-			named = fmt.Sprintf("holds the controller's pi-legion-envoy to daemon API contract %d", req.PluginContract)
+			named = fmt.Sprintf("holds the controller's pi-legion to daemon API contract %d", req.PluginContract)
 		}
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
 			"legion controller start %s; this daemon requires %d: run the legion built with this daemon",
@@ -134,7 +134,7 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		s.log.Warn("api: refused a controller registration: its plugin speaks another daemon API contract",
 			"session", req.SessionID, "pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
-			"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", req.PluginContract, DaemonAPIVersion)))
+			"pi-legion speaks daemon API contract %d; this daemon requires %d", req.PluginContract, DaemonAPIVersion)))
 		return
 	}
 	secret := rand.Text()

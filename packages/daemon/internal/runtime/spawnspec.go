@@ -34,7 +34,7 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 // under tmux beside the claim's other secret files, which the daemon prunes it with. Every
 // runtime names it in the agent's environment from the process's start, because Oh My Pi copies
 // that environment once for every `gh` it runs to serve a pr:// or issue:// read, and none writes
-// it: the pi-envoy extension writes a fresh grant there before each tool call that redeems one, and
+// it: the pi-legion extension writes a fresh grant there before each tool call that redeems one, and
 // `legion credential`, `legion gh` and `legion handoff complete` read it.
 func GrantFile(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-grant")
