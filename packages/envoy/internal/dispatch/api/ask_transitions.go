@@ -31,19 +31,22 @@ type answerRevision struct {
 	EditedAt *string
 }
 
+// answerOptions are what an answer write carries beyond its selection and text, each optional:
+// Revision is the question revision the human reviewed (the answer route always sends one),
+// ReplacesAnswer the `at` of the current answer a change replaces, and WriteBlock writes a block
+// ask's answer into its document.
+type answerOptions struct {
+	Revision       *answerRevision
+	ReplacesAnswer *time.Time
+	WriteBlock     func(context.Context, pgx.Tx, model.Ask, model.AskAnswer) error
+}
+
 // answerTransition records a human answer. Approval asks have their review options and always name
 // the document's latest settled version, since every version write moves the open request to it
-// (docs.MoveApprovalAsk) and stamps edited_at, so revision, which the answer route requires, refuses
-// an answer to a version the human was not shown (ASK_EDITED). Questions accept their configured
-// options.
-func answerTransition(
-	actor model.Actor,
-	selected []string,
-	text *string,
-	revision *answerRevision,
-	replacesAnswer *time.Time,
-	writeBlock func(context.Context, pgx.Tx, model.Ask, model.AskAnswer) error,
-) askTransition {
+// (docs.MoveApprovalAsk) and stamps edited_at, so the revision, which the answer route requires,
+// refuses an answer to a version the human was not shown (ASK_EDITED). Questions accept their
+// configured options.
+func answerTransition(actor model.Actor, selected []string, text *string, options answerOptions) askTransition {
 	// A block ask's answer is written into its document, where text reaches the parser with line
 	// feeds alone (pmdoc.LineFeeds); the ask's row takes the same text, so settlement, which writes
 	// the row's answer onto the block, agrees with it.
@@ -54,9 +57,9 @@ func answerTransition(
 	var previousAnswer *model.AskAnswer
 	return askTransition{
 		EventType:      "ask.answered",
-		ReplacesAnswer: replacesAnswer,
+		ReplacesAnswer: options.ReplacesAnswer,
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
-			if revision != nil && !stringPointersEqual(revision.EditedAt, ask.EditedAt) {
+			if options.Revision != nil && !stringPointersEqual(options.Revision.EditedAt, ask.EditedAt) {
 				return model.Ask{}, errorf(
 					http.StatusConflict,
 					"ASK_EDITED",
@@ -67,7 +70,7 @@ func answerTransition(
 				switch {
 				case ask.Kind == "approval":
 					return model.Ask{}, errorf(http.StatusConflict, "ASK_APPROVAL_REVIEW", "an approval is a review of a document version; record a new review on the document instead")
-				case !ask.Answer.At.Equal(*replacesAnswer):
+				case !ask.Answer.At.Equal(*options.ReplacesAnswer):
 					return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWER_CHANGED", "the answer changed after you reviewed it; review the current answer and confirm your change")
 				case canonicalLogin(ask.Answer.User) != canonicalLogin(actor.ID):
 					return model.Ask{}, errorf(http.StatusForbidden, "NOT_ANSWERER", "only the person who gave the current answer may change it")
@@ -92,8 +95,8 @@ func answerTransition(
 				}
 			}
 			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
-			if writeBlock != nil {
-				if err := writeBlock(ctx, tx, ask, answer); err != nil {
+			if options.WriteBlock != nil {
+				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {
 					return model.Ask{}, err
 				}
 			}
@@ -117,6 +120,33 @@ func answerTransition(
 	}
 }
 
+// parseAnswerPrecondition decodes one of an answer's tri-state precondition fields, named field.
+// Absent → (nil, false): no precondition. JSON null → (nil, true): the precondition is that the
+// value is unset. A string → it. Anything else → 400 INVALID_ANSWER.
+func parseAnswerPrecondition(field string, raw json.RawMessage) (value *string, provided bool, err error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, true, errorf(http.StatusBadRequest, "INVALID_ANSWER", "%s must be an RFC3339 timestamp or null", field)
+	}
+	return value, true, nil
+}
+
+// parseReplacesAnswer reads expected_answer_at, the `at` of the current answer a change replaces:
+// nil when absent or null (a first answer), else an RFC 3339 timestamp.
+func parseReplacesAnswer(raw json.RawMessage) (*time.Time, error) {
+	text, _, err := parseAnswerPrecondition("expected_answer_at", raw)
+	if err != nil || text == nil {
+		return nil, err
+	}
+	value, err := time.Parse(time.RFC3339Nano, *text)
+	if err != nil {
+		return nil, errorf(http.StatusBadRequest, "INVALID_ANSWER", "expected_answer_at must be an RFC3339 timestamp or null")
+	}
+	return &value, nil
+}
+
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -136,38 +166,24 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.ExpectedEditedAt == nil {
+	expectedEditedAt, provided, err := parseAnswerPrecondition("expected_edited_at", input.ExpectedEditedAt)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if !provided {
 		writeError(w, "ASK_REVISION_REQUIRED", http.StatusBadRequest, "expected_edited_at is required")
 		return
 	}
-	var expectedEditedAt *string
-	if err := json.Unmarshal(input.ExpectedEditedAt, &expectedEditedAt); err != nil {
-		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_edited_at must be an RFC3339 timestamp or null")
+	replacesAnswer, err := parseReplacesAnswer(input.ExpectedAnswerAt)
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
-	var replacesAnswer *time.Time
-	if input.ExpectedAnswerAt != nil {
-		var expectedAnswerAt *string
-		if err := json.Unmarshal(input.ExpectedAnswerAt, &expectedAnswerAt); err != nil {
-			writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_answer_at must be an RFC3339 timestamp or null")
-			return
-		}
-		if expectedAnswerAt != nil {
-			value, err := time.Parse(time.RFC3339Nano, *expectedAnswerAt)
-			if err != nil {
-				writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_answer_at must be an RFC3339 timestamp or null")
-				return
-			}
-			replacesAnswer = &value
-		}
-	}
-	transition := answerTransition(
-		actor,
-		input.Selected,
-		input.Text,
-		&answerRevision{EditedAt: expectedEditedAt},
-		replacesAnswer,
-		func(ctx context.Context, tx pgx.Tx, ask model.Ask, answer model.AskAnswer) error {
+	transition := answerTransition(actor, input.Selected, input.Text, answerOptions{
+		Revision:       &answerRevision{EditedAt: expectedEditedAt},
+		ReplacesAnswer: replacesAnswer,
+		WriteBlock: func(ctx context.Context, tx pgx.Tx, ask model.Ask, answer model.AskAnswer) error {
 			if ask.BlockID == nil {
 				return nil
 			}
@@ -188,7 +204,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			}
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
-	)
+	})
 	// An approval ask's answer is a review of the document it names, pinned to the version its
 	// question named: the latest settled one, which every version write moves the request to, and
 	// the one the human reviewed (revision).
@@ -347,13 +363,14 @@ func (s *server) transitionAskTx(ctx context.Context, tx pgx.Tx, id string, tran
 			return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWER_CHANGED", "the answer changed after you reviewed it; review the current answer and confirm your change")
 		}
 	case "answered":
-		if transition.EventType == "ask.answered" && transition.ReplacesAnswer != nil {
-			break
-		}
-		if transition.EventType == "ask.answered" {
+		switch {
+		case transition.EventType != "ask.answered":
+			return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWERED", "ask is already answered")
+		case transition.ReplacesAnswer == nil:
+			// A first answer to an ask someone answered first.
 			return model.Ask{}, errorf(http.StatusConflict, "ASK_CLOSED", "ask is already answered")
 		}
-		return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWERED", "ask is already answered")
+		// A change to the current answer, which Apply checks is the answer the human reviewed.
 	case "resolved":
 		return model.Ask{}, errorf(http.StatusConflict, "ASK_RESOLVED", "ask is already resolved")
 	default:

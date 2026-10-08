@@ -592,11 +592,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 		), active as (
 			select
 				a.id::text,
-				-- An issue ask's ref is the SPA's item route; the bare issue page reads no ?ask=.
-				case
-					when i.key is not null then '/issues/' || i.key || '/asks/' || a.id::text
-					else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?ask=' || a.id::text
-				end as ref,
+				`+askItemRefExpression+` as ref,
 				a.question,
 				a.kind,
 				a.urgency,
@@ -773,18 +769,23 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 	return edits, nil
 }
 
-// loadAskAnswers reads every real answer back from ask.answered events, oldest first. A document
-// settlement can restore an answered block and write the same answer event under its editor, so
-// only user-authored events whose actor matches answer.user count, with the earliest event for an
-// answer timestamp retained.
+// answerEventsQuery selects the ask.answered events (aliased e) that record a person's own answer,
+// one row per answer. A document settlement can restore an answered block and write the same
+// answer event under its editor, so only an event whose actor is the user the answer names counts,
+// and the repeats of one answer (its ask and its `at`) collapse to the earliest event. columns is
+// the select list; filter narrows the events further. loadAskAnswers and listMyAnswers share it.
+func answerEventsQuery(columns, filter string) string {
+	return `select distinct on (e.payload->>'id', e.payload->'answer'->>'at') ` + columns + `
+		from events e
+		where e.type = 'ask.answered' and e.actor->>'kind' = 'user'
+		  and e.actor->>'id' = e.payload->'answer'->>'user' and ` + filter + `
+		order by e.payload->>'id', e.payload->'answer'->>'at', e.id asc`
+}
+
+// loadAskAnswers reads every real answer to one ask back from its ask.answered events
+// (answerEventsQuery), oldest first.
 func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([]model.AskAnswer, error) {
-	rows, err := q.Query(ctx, `
-		select distinct on (payload->'answer'->>'at') payload->'answer', id
-		from events
-		where type = 'ask.answered' and payload->>'id' = $1
-		  and actor->>'kind' = 'user' and actor->>'id' = payload->'answer'->>'user'
-		order by payload->'answer'->>'at', id asc
-	`, askID)
+	rows, err := q.Query(ctx, answerEventsQuery(`e.payload->'answer', e.id`, `e.payload->>'id' = $1`), askID)
 	if err != nil {
 		return nil, fmt.Errorf("load ask answers: %w", err)
 	}

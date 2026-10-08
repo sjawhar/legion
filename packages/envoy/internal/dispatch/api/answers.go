@@ -34,9 +34,8 @@ func parseMyAnswersPage(r *http.Request) (limit, offset int, err error) {
 	return limit, offset, nil
 }
 
-// listMyAnswers returns the caller's real answer transitions and their replies on asks. A document
-// settlement may re-emit a restored answer under its editor, so the event actor must be the answer's
-// human user and duplicate answer timestamps collapse to their first event.
+// listMyAnswers returns the caller's real answer transitions (answerEventsQuery) and their replies
+// on asks, newest first.
 func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.requireHuman(w, r)
 	if !ok {
@@ -50,13 +49,9 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		with answered as (
-			select distinct on (e.payload->>'id', e.payload->'answer'->>'at')
-			       e.created_at as at, 'answer' as kind, e.payload->>'id' as ask_id,
-			       e.payload->'answer' as answer, null::uuid as reply_id, null::text as body, e.id as event_id
-			from events e
-			where e.type = 'ask.answered' and e.actor->>'kind' = 'user'
-			  and e.actor->>'id' = e.payload->'answer'->>'user' and e.actor->>'id' = $1
-			order by e.payload->>'id', e.payload->'answer'->>'at', e.id asc
+			`+answerEventsQuery(`e.created_at as at, 'answer' as kind, e.payload->>'id' as ask_id,
+			       e.payload->'answer' as answer, null::uuid as reply_id, null::text as body, e.id as event_id`,
+		`e.actor->>'id' = $1`)+`
 		), mine as (
 			select * from answered
 			union all
@@ -64,7 +59,7 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 			from comments c
 			where c.ask_id is not null and c.author->>'kind' = 'user' and c.author->>'id' = $1
 		)
-		select m.at, m.kind, m.ask_id, m.answer, m.reply_id, m.body, m.event_id,
+		select m.at, m.kind, m.ask_id, m.answer, m.reply_id, m.body, m.event_id, `+askItemRefExpression+` as ref,
 		       a.question, a.kind, a.state, a.edited_at,
 		       coalesce(a.state = 'answered' and m.kind = 'answer' and a.answer->>'at' = m.answer->>'at', false) as current,
 		       i.key, i.title, ar.project_key, ar.slug, ar.name, count(*) over () as total
@@ -99,6 +94,7 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 			&replyID,
 			&body,
 			&eventID,
+			&row.Ref,
 			&row.Question,
 			&row.AskKind,
 			&row.AskState,
@@ -115,15 +111,10 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.EditedAt = timestampPtr(editedAt)
-		// An issue ask's ref is the SPA's item route, which lands an anchored ask on its document
-		// and an unanchored one on its Conversation turn; the bare issue page reads no `?ask=`. A
-		// document ask's `?ask=` is its own item route.
 		if issueKey != nil {
 			row.Owner.Issue = &model.OpenAskIssue{Key: *issueKey, Title: *issueTitle}
-			row.Ref = "/issues/" + *issueKey + "/asks/" + row.AskID
 		} else {
 			row.Owner.Document = &model.OpenAskDocument{Project: *project, Slug: *slug, Name: *name}
-			row.Ref = "/projects/" + *project + "/documents/" + *slug + "?ask=" + row.AskID
 		}
 		if row.Kind == "answer" {
 			if err := json.Unmarshal(answer, &row.Answer); err != nil {
