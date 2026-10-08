@@ -127,7 +127,8 @@ would find each — `omp setup python --check`, the `chromium` on `PATH` (or the
 profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun` and `uv` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=off daemon-api-version=<N>`.
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
+(`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
@@ -710,8 +711,9 @@ A deployment row is `present` when the deployment satisfies it, `decided` when `
 the gap's place; a decision on a satisfied row is moot and the row reads present), and `open`
 otherwise, carrying the line that records one. A name that is not one of the three is refused at
 load naming them; a blank reason too. The report appears in four places: the daemon's log, one
-warning per open row at boot and again whenever the set of open rows changes (the broker login
-reaching `issued` is the one change a running daemon sees), as `capability <name> is open: <detail>;
+warning per open row at boot and again at the first controller tick after the set of open rows
+changed (the tick asks only when it wakes the controller — one registered, no tick pending — and the
+broker login reaching `issued` is the one change a running daemon sees), as `capability <name> is open: <detail>;
 to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
 --json` under `capabilities` (daemon API contract 15: every row as `{name, status, detail,
 decision?, configLine?}`, `status` one of `present`, `unchecked`, `live`, `withheld`, `decided` or

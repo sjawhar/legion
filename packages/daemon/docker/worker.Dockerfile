@@ -563,7 +563,9 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # node, bun and uv on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked
-# model-fallback=off daemon-api-version=<N>`; a build whose image lacks a capability fails here, the
+# model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
+# since the build runs under no operator overlay; a probe pod reads the operator's value — and a build
+# whose image lacks a capability fails here, the
 # probe naming every missing one. The daemon's probe Sandbox runs it again with its own contract, on
 # the pod baseline and under the operator's pod, resolving every agent's model, and refuses a skipped
 # result, before any claim runs on the image (packages/daemon/internal/runtime/sandbox/probe.go).

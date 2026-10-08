@@ -626,9 +626,10 @@ func (s *supervision) deployment() capabilities.Deployment {
 
 // reportCapabilities names the deployment capabilities with no decision, in the table's order, and
 // logs the report whenever that set differs from the one last logged: once at boot, and again from
-// the tick that finds it changed (admit.Admission.ReportCapabilities) — the broker's login reaching
-// issued is the one change a running daemon sees — so a gap is logged at boot and on change, never
-// on every tick.
+// a controller tick that finds it changed (admit.Admission.ReportCapabilities asks only when the
+// tick queues a wake: a controller is registered and no tick notice is pending) — the broker's
+// login reaching issued is the one change a running daemon sees — so a gap is logged at boot and
+// at the first tick after a change, never on every tick, and never between ticks.
 func (s *supervision) reportCapabilities() []string {
 	d := s.deployment()
 	open := d.Open()

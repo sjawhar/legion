@@ -49,7 +49,9 @@ const GIT_TOKEN = "rig-token";
 
 const startedAt = new Date().toISOString();
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
- * (`workflow.RoleFor`, through daemon-pane.go). */
+ * (`workflow.RoleFor`, through daemon-pane.go). `capabilities` is the deployment's capability
+ * report (contract 15), which the strict reader requires; the rig has no deployment to report on,
+ * so it is the empty list the daemon's MarshalJSON emits for an empty report. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
@@ -63,6 +65,7 @@ const STATE = LegionStateResponse.parse({
     },
   },
   pendingStatusWrites: [],
+  capabilities: [],
 });
 
 interface LogLine {
