@@ -18,12 +18,13 @@ import (
 
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
 // pi.agents is there, the Envoy and Legion plugins handed to it as its two explicit extensions
-// load from those roots, pi-envoy publishing the interface pi-legion speaks, and Oh My Pi finds
-// every task agent and skill Legion's prompts name; and the session-storage setting refuses a
-// value it does not know, naming the variable. Asked for task agents, it resolves their models
-// too, unless told to skip them. With $LEGION_TEST_SEEN set, each run appends the environment it
-// saw there: PI_CONFIG_FILES, whether the first overlay it names exists, and OTEL_SDK_DISABLED;
-// with $LEGION_TEST_KEY_SEEN, the provider key TEST_PROVIDER_KEY.
+// beside its discovery load from those roots, pi-envoy publishing the interface pi-legion speaks
+// from the one module instance, and Oh My Pi finds every task agent and skill Legion's prompts
+// name; and the session-storage setting refuses a value it does not know, naming the variable.
+// Asked for task agents, it resolves their models too, unless told to skip them. With
+// $LEGION_TEST_SEEN set, each run appends the environment it saw there: PI_CONFIG_FILES, whether
+// the first overlay it names exists, and OTEL_SDK_DISABLED; with $LEGION_TEST_KEY_SEEN, the
+// provider key TEST_PROVIDER_KEY.
 func imageOmp(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "omp")
@@ -35,11 +36,11 @@ if [ -n "${LEGION_TEST_SEEN:-}" ]; then
 fi
 [ -z "${LEGION_TEST_KEY_SEEN:-}" ] || printf '%s\n' "${TEST_PROVIDER_KEY:-unset}" >>"$LEGION_TEST_KEY_SEEN"
 case "$*" in
-"models --no-extensions --extension "*" --extension "*" --extension "*" --json")
-  envoy=$(cd "$4" && pwd -P)
-  root=$(cd "$6" && pwd -P)
+"models --extension "*" --extension "*" --extension "*" --json")
+  envoy=$(cd "$3" && pwd -P)
+  root=$(cd "$5" && pwd -P)
   printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n' "$root" >&2
-  printf 'LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://%s/dist/envoy.js\n' "$envoy" >&2
+  printf 'LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://%s/dist/envoy.js\nLEGION_ENVOY_PUBLISHERS=1\nLEGION_ENVOY_PUBLISHER=file://%s/dist/envoy.js\n' "$envoy" "$envoy" >&2
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ]; then echo LEGION_PROMPT_AGENTS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ] && [ -z "${LEGION_SKIP_AGENT_MODELS:-}" ]; then echo LEGION_AGENT_MODELS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_SKILLS:-}" ]; then echo LEGION_PROMPT_SKILLS=resolved >&2; fi ;;
@@ -65,15 +66,16 @@ func (i image) flags(extra ...string) []string {
 }
 
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
-// links both plugins, the Legion manifest declaring contract, and LEGION_OMP_PATH set to omp. It
-// answers the plugin roots a pod loads.
+// links neither plugin (a pod names both as explicit extensions, and a linked one would load
+// twice), the Legion manifest declaring contract, and LEGION_OMP_PATH set to omp. It answers the
+// plugin roots a pod loads.
 func inImage(t *testing.T, contract, omp string) image {
 	t.Helper()
 	home := t.TempDir()
 	roots := image{legion: filepath.Join(home, "pi-legion"), envoy: filepath.Join(home, "pi-envoy")}
-	for _, plugin := range []struct{ name, root, manifest string }{
-		{"pi-legion", roots.legion, `{"name":"@sjawhar/pi-legion","version":"1.57.0","legion":{"daemonApiVersion":` + contract + `}}`},
-		{"pi-envoy", roots.envoy, `{"name":"@sjawhar/pi-envoy","version":"1.57.0"}`},
+	for _, plugin := range []struct{ root, manifest string }{
+		{roots.legion, `{"name":"@sjawhar/pi-legion","version":"1.57.0","legion":{"daemonApiVersion":` + contract + `}}`},
+		{roots.envoy, `{"name":"@sjawhar/pi-envoy","version":"1.57.0"}`},
 	} {
 		if err := os.MkdirAll(plugin.root, 0o755); err != nil {
 			t.Fatal(err)
@@ -81,13 +83,9 @@ func inImage(t *testing.T, contract, omp string) image {
 		if err := os.WriteFile(filepath.Join(plugin.root, "package.json"), []byte(plugin.manifest), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		installed := filepath.Join(home, ".omp", "profiles", "legion", "plugins", "node_modules", "@sjawhar", plugin.name)
-		if err := os.MkdirAll(filepath.Dir(installed), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(plugin.root, installed); err != nil {
-			t.Fatal(err)
-		}
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".omp", "profiles", "legion", "plugins", "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_PROFILE", "legion")
@@ -114,7 +112,7 @@ func TestProbeImagePrintsTheOKLineWithThisBinarysContract(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("probe-image exited %d: %s", code, stderr)
 	}
-	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
+	if want := "probe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
@@ -141,7 +139,7 @@ func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 
 	code, stdout, stderr := probeImage(img.flags("--omp", omp)...)
 
-	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed agent-models=resolved daemon-api-version="+thisBinarysContract+"\n" {
+	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed extensions=discovered agent-models=resolved daemon-api-version="+thisBinarysContract+"\n" {
 		t.Fatalf("probe-image --omp = %d %q %q, want the OK line naming %s", code, stdout, stderr, omp)
 	}
 }
@@ -154,7 +152,7 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 
 	code, stdout, stderr := probeImage(img.flags("--skip-agent-models")...)
 
-	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=skipped daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
+	if want := "probe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=skipped daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
 		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want %q", code, stdout, stderr, want)
 	}
 }
@@ -170,7 +168,7 @@ func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
 
 	code, stdout, stderr := probeImage(img.flags()...)
 
-	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"
+	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"
 	if code != 0 || stdout != want || strings.Contains(stdout+stderr, seed) {
 		t.Fatalf("probe-image with a user seed = %d %q %q, want %q and no seed", code, stdout, stderr, want)
 	}

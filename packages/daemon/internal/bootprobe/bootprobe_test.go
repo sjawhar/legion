@@ -139,10 +139,35 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 }
 
 // The OK line is the wire between the image's `legion probe-image` and the daemon's probe
-// Sandbox: the session-storage mark, the agent-models mark, then the contract last.
+// Sandbox: the session-storage mark, the extensions mark, the agent-models mark, then the contract
+// last.
 func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
-	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=3"; got != want {
+	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved daemon-api-version=3"; got != want {
 		t.Errorf("OKLine = %q, want %q", got, want)
+	}
+}
+
+// The daemon reads whether the image's probe ran the discovery-on pod lane from its OK line; a CLI
+// that predates that lane prints no mark, and certified an image whose profile links the plugins a
+// pod names explicitly.
+func TestExtensionsDiscoveredReadsTheMarkOnAnOKLine(t *testing.T) {
+	for _, testCase := range []struct {
+		name, output string
+		want         bool
+	}{
+		{"the mark, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved) + "\n", true},
+		{"the mark on a build-time probe's line", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped), true},
+		{"a CLI that predates the discovery-on pod lane", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=5", false},
+		{"a CLI that predates the agent-model check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5", false},
+		{"the mark on a line that is not the OK line", "[legion] extensions=discovered agent-models=resolved daemon-api-version=5", false},
+		{"a token the mark merely begins", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered-not agent-models=resolved daemon-api-version=5", false},
+		{"nothing", "", false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := ExtensionsDiscovered(testCase.output); got != testCase.want {
+				t.Fatalf("ExtensionsDiscovered = %t, want %t", got, testCase.want)
+			}
+		})
 	}
 }
 

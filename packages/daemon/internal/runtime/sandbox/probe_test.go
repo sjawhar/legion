@@ -293,6 +293,9 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes: build the image from this daemon's commit"}},
 		{"a build-time probe's result", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped)) },
 			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
+		{"a CLI that predates the discovery-on pod lane", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=3")
+		}, []string{"Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit"}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
@@ -566,7 +569,7 @@ func TestEveryBootProbesTheImage(t *testing.T) {
 		t.Fatalf("the first boot's probe = %v, want a pass", err)
 	}
 	g.eventually("the first probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
-	g.fails("legion probe-image: Oh My Pi, loading the plugins from /opt/legion/pi-envoy and /opt/legion/pi-legion with discovery off, as a pod does, " +
+	g.fails("legion probe-image: Oh My Pi, loading the plugins from /opt/legion/pi-envoy and /opt/legion/pi-legion with discovery on, as a pod does, " +
 		"cannot run task agent oracle (dispatched by roles/core/planner.md) on its model @oracle: role oracle is not configured.")
 
 	err := g.probe(probeOptions(t))

@@ -31,8 +31,9 @@ func newImageOmp(t *testing.T, agents, load, session []string) imageOmp {
 	}
 	script := `#!/bin/sh
 dir=` + dir + `
+# The pod's load arm, three extensions, comes before the pane's, one, whose glob would swallow it.
 case "$*" in
-"models --no-extensions --extension "*" --extension "*" --extension "*" --json") kind=load ;;
+"models --extension "*" --extension "*" --extension "*" --json") kind=load ;;
 "models --no-extensions --extension "*" --json") kind=agents ;;
 "models --extension "*" --json") kind=load ;;
 "--mode rpc --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools") kind=session ;;
@@ -50,10 +51,11 @@ root="$HOME/.omp"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion" 2>/dev/null && pwd -P)
 envoy=$(cd "$root/plugins/node_modules/@sjawhar/pi-envoy" 2>/dev/null && pwd -P)
 # A pod's lane hands Oh My Pi the Envoy plugin root, then the Legion plugin root, as its explicit
-# extensions: each loads from its root.
-if [ "$kind:$2" = "load:--no-extensions" ]; then envoy=$(cd "$4" && pwd -P); installed=$(cd "$6" && pwd -P); fi
+# extensions beside its discovery (eight words to a pane's four): each loads from its root.
+if [ "$kind" = load ] && [ "$#" -eq 8 ]; then envoy=$(cd "$3" && pwd -P); installed=$(cd "$5" && pwd -P); fi
 legion="LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$installed/dist/legion.js?mtime=1\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n"
-with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n"
+# As the real probe answers: the first publisher, then how many published and each one's URL.
+with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHERS=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=1\n"
 case "$kind:$step" in
 agents:available) echo LEGION_OMP_AGENTS=available >&2; exit 0 ;;
 agents:missing) echo LEGION_OMP_AGENTS=missing >&2; exit 0 ;;
@@ -67,6 +69,9 @@ load:no-envoy) printf "${legion}LEGION_ENVOY_INTERFACE=none\n" >&2; exit 0 ;;
 load:envoy-mismatch) printf "${legion}LEGION_ENVOY_INTERFACE=2\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n" >&2; exit 0 ;;
 load:legacy) printf "$legion${with_envoy}LEGION_LEGACY_PLUGIN_LOADED_FROM=file://$dir/legacy/dist/legion.js\n" >&2; exit 0 ;;
 load:envoy-elsewhere) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$dir/elsewhere/pi-envoy/dist/envoy.js\n" >&2; exit 0 ;;
+# The profile links the Envoy plugin beside the explicit root: Oh My Pi imports the one file twice,
+# by two paths, and the Envoy entry publishes from each module instance.
+load:twice) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHERS=2\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=1\nLEGION_ENVOY_PUBLISHER=file://$envoy/dist/envoy.js?mtime=2\n" >&2; exit 0 ;;
 session:refuses) echo "Invalid OMP_SESSION_STORAGE: legion-launch-probe (expected file or sql)" >&2; exit 1 ;;
 session:accepts) exit 0 ;;
 session:dies) echo "database is locked" >&2; exit 1 ;;
@@ -117,15 +122,14 @@ func (f imageOmp) read(t *testing.T, name string) string {
 
 // imageHome is a HOME laid out as the worker image lays it out: the Legion plugin's manifest
 // declaring legion (raw JSON) under opt-legion/pi-legion and the Envoy plugin's under
-// opt-legion/pi-envoy, each linked into the `legion` profile as `omp plugin install` links it.
+// opt-legion/pi-envoy, the two roots a pod names as its explicit extensions, and a `legion` profile
+// that links neither — with discovery on, a plugin both linked and explicit would load twice.
 func imageHome(t *testing.T, legion string) string {
 	t.Helper()
 	home := t.TempDir()
-	profile := filepath.Join(home, ".omp", "profiles", "legion")
+	mkdir(t, filepath.Join(home, ".omp", "profiles", "legion"))
 	writeManifest(t, filepath.Join(legionRootOf(home), "package.json"), legion)
-	link(t, legionRootOf(home), filepath.Dir(manifestAt(profile)))
 	writeEnvoyManifest(t, filepath.Join(envoyRootOf(home), "package.json"))
-	link(t, envoyRootOf(home), filepath.Dir(envoyManifestAt(profile)))
 	return home
 }
 
@@ -159,7 +163,7 @@ func imageGateUnder(t *testing.T, f imageOmp, legion string, attempts int) (plug
 }
 
 // A pod loads the Envoy and Legion plugins as its two explicit extension roots, in that order,
-// with discovery off, so the probe that certifies the image loads them the same way: a packaging
+// with discovery on, so the probe that certifies the image loads them the same way: a packaging
 // or pin change that broke only that lane would otherwise pass the probe whose job is to refuse
 // such an image, and every pod would start without the Legion tool.
 func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
@@ -176,8 +180,8 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 		t.Fatalf("ProbeImage = %v, want every probe to pass", err)
 	}
 	argv := f.read(t, "load.argv.1")
-	if !strings.Contains(argv, "--no-extensions --extension "+envoyRoot+" --extension "+root+" --extension ") {
-		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: --no-extensions with %s then %s as the explicit extensions", strings.TrimSpace(argv), envoyRoot, root)
+	if !strings.HasPrefix(argv, "models --extension "+envoyRoot+" --extension "+root+" --extension ") {
+		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: `models --extension %s --extension %s …`, the two roots first and discovery on", strings.TrimSpace(argv), envoyRoot, root)
 	}
 	// The two plugin roots are also the extension roots the probe's own discovery of task agents
 	// and skills reads: exported as the roots, never as the probe's own path.
@@ -248,9 +252,11 @@ func TestTheImageProbeResolvesARelativePluginRoot(t *testing.T) {
 	}
 }
 
-// In a pod's lane the plugins come from the image's plugin roots, and discovery is off, so no
-// refusal there sends the operator to the profile's plugin install: each names the roots a pod
-// loads, and sends the operator to rebuild the worker image.
+// In a pod's lane the plugins come from the image's plugin roots, which its profile must not also
+// link, so no refusal there sends the operator to the profile's plugin install: each names the
+// roots a pod loads, and sends the operator to rebuild the worker image. An Envoy plugin that
+// published twice — the profile linking it beside the explicit root, which a pod with discovery on
+// loads once by each path — is refused naming every copy and the root.
 func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 	for _, testCase := range []struct {
 		name, legion string
@@ -261,7 +267,7 @@ func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 		{"another contract", contractPrevious, []string{"yes"},
 			[]string{"speaks daemon API contract 2; this daemon requires 3", "into the plugin root @ROOT, which a pod loads as an explicit extension beside the Envoy plugin root @ENVOY"}, "OMP profile"},
 		{"not loaded", contractCurrent, []string{"no"},
-			[]string{"pi-legion 1.57.0 at @ROOT did not load with discovery off and @ROOT as one of Oh My Pi's two explicit extensions, as a pod loads it"}, "omp plugin list"},
+			[]string{"pi-legion 1.57.0 at @ROOT did not load with @ROOT as one of Oh My Pi's two explicit extensions, discovery on, as a pod loads it"}, "omp plugin list"},
 		{"loaded from another copy", contractCurrent, []string{"elsewhere"},
 			[]string{"pi-legion loads from @DIR/elsewhere/pi-legion/package.json, but the probe passed @ROOT as one of Oh My Pi's two explicit extensions"}, "dotenv"},
 		{"no Envoy plugin", contractCurrent, []string{"no-envoy"},
@@ -272,6 +278,8 @@ func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 			[]string{"the worker image loads @sjawhar/pi-legion-envoy from file://@RAWDIR/legacy/dist/legion.js beside pi-legion: build the worker image from this daemon's commit"}, "plugin uninstall"},
 		{"an Envoy plugin from another copy", contractCurrent, []string{"envoy-elsewhere"},
 			[]string{"pi-envoy loads from @DIR/elsewhere/pi-envoy/package.json, but the probe passed @ENVOY as one of Oh My Pi's two explicit extensions"}, "dotenv"},
+		{"an Envoy plugin loaded twice", contractCurrent, []string{"twice"},
+			[]string{"pi-envoy loaded 2 times (file://@REALENVOY/dist/envoy.js?mtime=1, file://@REALENVOY/dist/envoy.js?mtime=2): the worker image's profile links it beside the explicit root @ENVOY, so a pod would load it twice — build the worker image from this daemon's commit"}, "plugin uninstall"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			f := newImageOmp(t, []string{"available"}, testCase.load, []string{"refuses"})

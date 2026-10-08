@@ -439,13 +439,17 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // image whose CLI predates the contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
-// workers run their agents on their models. When the daemon has a pane NATS nkey seed (Options.NATSUser),
-// the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
-// refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
-// invalid seed exits 1 (natsauth.Seed), and a key the kubelet cannot mount never starts the
-// container, so only a CLI that predates the user line succeeds without one. Naming another is the
-// providers Secret holding another seed. An image whose CLI predates a flag the probe command
-// passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks.
+// workers run their agents on their models. And it must carry the extensions mark
+// (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
+// roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
+// into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
+// twice. When the daemon has a pane NATS nkey seed (Options.NATSUser), the probe must also name the
+// same user as the seed its pointer read (bootprobe.NATSUser), a refusal otherwise. Naming none is
+// the image's: a current CLI whose pointer holds a blank or invalid seed exits 1 (natsauth.Seed),
+// and a key the kubelet cannot mount never starts the container, so only a CLI that predates the
+// user line succeeds without one. Naming another is the providers Secret holding another seed. An
+// image whose CLI predates a flag the probe command passes stops at the flags, and its Failed pod
+// is refused naming the flag its CLI lacks.
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
 	if why := kubeletFailure(pod); why != "" {
 		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
@@ -483,6 +487,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		}
 		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models (its OK line's agent-models mark: %s, where the daemon's probe requires %s) — log tail: %s",
 			name, mark, bootprobe.AgentModelsResolved, logTail)
+	}
+	if !bootprobe.ExtensionsDiscovered(logTail) {
+		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
+			name, logTail)
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {

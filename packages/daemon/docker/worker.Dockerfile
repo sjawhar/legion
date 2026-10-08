@@ -355,8 +355,9 @@ COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
-# OMP_PROFILE=legion: the isolated profile the plugins are linked into (plugins resolve to
-# /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
+# OMP_PROFILE=legion: the isolated profile the CodeGraph plugin is linked into (plugins resolve to
+# /home/legion/.omp/profiles/legion/plugins/node_modules); the Envoy and Legion plugins stay unlinked,
+# named by path (step 3 below). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
 # because OMP's DirResolver derives the profile root from it. DO_NOT_TRACK=1: CodeGraph's telemetry
 # and update-check opt-out (ranked above CODEGRAPH_TELEMETRY, above stored config, above
@@ -378,11 +379,21 @@ WORKDIR /home/legion
 #    container, with no network. A git older than 2.42 fails it (`Git does not recognize required
 #    option: porcelain`), which is how bookworm's 2.39.5 shipped in an image that passed every probe:
 #    `legion probe-image` never runs jj, and the daemon host's own git is newer.
-# 3. Link the two packed plugins, and the CodeGraph plugin from npm, into the legion profile
-#    (omp-plugins.lock.json records all three enabled). This is OMP's first run in the image, so it
-#    also downloads OMP's native modules (~345 MB) into /home/legion/.omp/natives/<version>/;
-#    this layer ships them, a pod never fetches them, and the probes in the final step never wait on
-#    the download.
+# 3. Link the CodeGraph plugin from npm into the legion profile (omp-plugins.lock.json records it
+#    enabled), and nothing else: /opt/legion/pi-envoy and /opt/legion/pi-legion are the two roots a
+#    pod names as Oh My Pi's explicit extensions (--extension, discovery on;
+#    packages/daemon/internal/runtime/sandbox/manifest.go agentArgv), and must never be linked into
+#    the profile too. Oh My Pi loads an installed plugin and an explicit one by their own paths, so a
+#    plugin that is both loads twice — its factory runs twice in every role. The pod lane's probe in
+#    the final step refuses an image whose pi-envoy loads twice (the Envoy interface counts its
+#    publishers); a re-linked pi-legion alone it cannot see, since that plugin's load marker is one
+#    object the second load overwrites — so the two links come and go together, here. The
+#    alternative, dropping the explicit flags and loading both from the profile as a pane does, was
+#    refused: the image probe would stop certifying the two roots by path, and the spec names the
+#    explicit flags; explicit roots and an unlinked profile are one decision. This is OMP's first
+#    run in the image, so the CodeGraph install also downloads OMP's native modules (~345 MB) into
+#    /home/legion/.omp/natives/<version>/ — the build's success is the check; this layer ships them,
+#    a pod never fetches them, and the probes in the final step never wait on the download.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -390,8 +401,6 @@ RUN set -eu; \
     git init --quiet --bare "$scratch/origin.git"; \
     jj git clone "$scratch/origin.git" "$scratch/clone"; \
     rm -rf "$scratch"; \
-    omp plugin install /opt/legion/pi-envoy; \
-    omp plugin install /opt/legion/pi-legion; \
     omp plugin install "@bopstack/pi-codegraph@${PI_CODEGRAPH_VERSION}"; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its

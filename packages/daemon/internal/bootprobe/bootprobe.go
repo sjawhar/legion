@@ -98,6 +98,12 @@ func abandoned(name string, err error) error {
 // such token, having checked nothing about the setting.
 const sessionStorageMark = "session-storage=probed"
 
+// extensionsMark is on the OK line once the load probe has run the pod's lane with extension
+// discovery on, the two plugin roots explicit beside it: a CLI that predates that lane probed the
+// roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
+// into its profile, which a pod of this daemon would load twice.
+const extensionsMark = "extensions=discovered"
+
 // OKPrefix begins the line `legion probe-image` prints when every probe passed.
 const OKPrefix = "probe-image: OK"
 
@@ -111,13 +117,21 @@ const (
 // agentModelsMark carries one of those states on the OK line.
 const agentModelsMark = "agent-models="
 
-// OKLine is that line: the OMP invocation probed, the session-storage mark, the agent-models mark
-// (AgentModelsResolved or AgentModelsSkipped), and the daemon API contract the image's plugin
-// declared. The daemon's probe Sandbox passes the image only on a line that confirms the daemon's
-// own contract (ConfirmedContract) with the agents' models resolved (AgentModels).
+// OKLine is that line: the OMP invocation probed, the session-storage mark, the extensions mark,
+// the agent-models mark (AgentModelsResolved or AgentModelsSkipped), and the daemon API contract
+// the image's plugin declared. The daemon's probe Sandbox passes the image only on a line that
+// confirms the daemon's own contract (ConfirmedContract), carries the extensions mark
+// (ExtensionsDiscovered), and has the agents' models resolved (AgentModels).
 func OKLine(omp string, contract int, agentModels string) string {
-	return fmt.Sprintf("%s (%s) %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels, contract)
+	return fmt.Sprintf("%s (%s) %s %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels, contract)
 }
+
+// extensionsDiscovered is the extensions mark, a whole token, on an OK line.
+var extensionsDiscovered = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + regexp.QuoteMeta(extensionsMark) + `(?: |$)`)
+
+// ExtensionsDiscovered is whether an OK line in output carries the extensions mark; false for no OK
+// line, or one from a CLI that predates the discovery-on pod lane.
+func ExtensionsDiscovered(output string) bool { return extensionsDiscovered.MatchString(output) }
 
 // agentModelsState is the agent-models mark on an OK line.
 var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+) daemon-api-version=[0-9]+$`)

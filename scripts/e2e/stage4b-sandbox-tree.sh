@@ -2234,7 +2234,13 @@ markers=$(fixture_markers "$pod" planner) || fail "the fixture markers could not
 printf '%s\n' "$markers" >"$evidence/fixture-markers.txt"
 argv=$(pod_commands "$pod" planner)
 note "tree 2 planner container $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
-if grep -q -- '--no-extensions' <<<"$argv"; then note "the planner runs with --no-extensions"; else note "the planner runs without --no-extensions"; fi
+# The agent's lane: discovery on, the image's two plugin roots as the explicit extensions, the Envoy
+# plugin first (packages/daemon/internal/runtime/sandbox/manifest.go agentArgv). $argv is one line
+# per process, its words space-separated, so the two flags are one run of text on the agent's line.
+if grep -q -- '--no-extensions' <<<"$argv"; then fail "the planner runs with --no-extensions, which fences the repository's extensions off: $(tr '\n' ';' <<<"$argv")"; fi
+grep -qF -- '--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion' <<<"$argv" ||
+  fail "the planner's argv names no '--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion', the two explicit plugin roots: $(tr '\n' ';' <<<"$argv")"
+note "the planner runs with discovery on and the two explicit roots, /opt/legion/pi-envoy then /opt/legion/pi-legion"
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
 on_tree "$tree2" wait_for_phase "$tree2" implementing "$plan_seconds"
 pass

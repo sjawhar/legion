@@ -25,13 +25,17 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   (`packages/daemon/cmd/legion/probe_image.go`);
 - `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
   `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
-  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion` and each linked into the
-  isolated OMP profile `legion` (`OMP_PROFILE=legion`; plugins resolve to
-  `/home/legion/.omp/profiles/legion/plugins/node_modules`). A pod loads the two as Oh My Pi's
-  explicit extensions, the Envoy plugin first, with discovery off;
-- `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
-  CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
-  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`);
+  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two roots a pod names as Oh
+  My Pi's explicit extensions, the Envoy plugin first, with extension discovery on. Neither is linked
+  into the OMP profile: a plugin both installed and named by `--extension` loads twice, and the image
+  probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
+  the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
+  `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
+- `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
+  (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
+  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
+  `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
+  radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`);
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -56,8 +60,8 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
 `~/.omp/profiles/legion`). Mount writable volumes below the profile directory, never at `/home/legion`
-itself: everything the image-time probe proved lives under `HOME` — the two plugin links and their lock at
-`~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
+itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
+lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image: nothing in it is pinned to an npm
 version.
