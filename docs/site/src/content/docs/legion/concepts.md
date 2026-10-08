@@ -182,9 +182,9 @@ Legion uses GitHub's own review mechanisms rather than labels:
   opened, Legion's reviewer) accepts the reply.
 - Two limits stop a loop: after `review_round_cap` rounds (three by default), or once
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
-  the issue and hands the decision to the architect. Every return to implementing counts a round:
-  a tester's fail, a review's request for changes, a worker's own move back, and the daemon's own
-  when CI turns red or the head starts conflicting with its base.
+  the issue and hands the decision to the architect. Every return to implementing counts a round (a
+  tester's fail, a review's request for changes, and the daemon's own move when CI turns red or the
+  head starts conflicting with its base), and so does a worker's move back to any earlier phase.
 
 ## READY and the human merge
 
