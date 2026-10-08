@@ -583,6 +583,13 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	return err
 }
 
+// GitHubCredentialHelper is the `credential.helper` every shared clone gets: `gh auth
+// git-credential`, the helper `gh auth setup-git` itself writes, which answers git from the
+// hosts.yml under the process's GH_CONFIG_DIR (ghconfig.HostsFile). The `gh` in it is resolved on
+// PATH when git runs it, so the one it reaches is the process's own, and the value names no path
+// of this machine's that the clone would carry to another.
+const GitHubCredentialHelper = "!gh auth git-credential"
+
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
 // one-shot clone/fetch environment has been removed. This ports the helper writes in workspace.ts's
 // provisionIssueWorkspace.

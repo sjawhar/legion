@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
 // envName is a name a shell accepts as a variable, which is also a valid Kubernetes Secret key.
@@ -38,6 +40,21 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 // `legion credential`, `legion gh` and `legion handoff complete` read it.
 func GrantFile(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-grant")
+}
+
+// GitHubCredential is the daemon's one function a runtime calls for a tree role's GitHub
+// credential files: the gh `hosts.yml` and `config.yml` rendered from the role's App token
+// (ghconfig.Render), which the runtime puts under the agent's GH_CONFIG_DIR and rewrites from the
+// same function as the lease nears its expiry. Never for the controller: it works Dispatch, never
+// GitHub, and appauth.AppRoleFor has no App for it.
+type GitHubCredential func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error)
+
+// GHConfigDir is the tmux pane's GH_CONFIG_DIR: `<state_dir>/secrets/<claim>-gh`, the directory
+// holding the claim's gh files (ghconfig.HostsFile and ghconfig.ConfigFile), named for its claim
+// token as GrantFile is so the daemon prunes it with the claim's other secret files. A pod has no
+// use for it: there the files are a Secret volume the manifest mounts.
+func GHConfigDir(stateDir string, token claim.Token) string {
+	return SecretFilePath(stateDir, string(token)+"-gh")
 }
 
 // ValidateSpawnSpec is the refusal every runtime makes before anything touches its disk, its

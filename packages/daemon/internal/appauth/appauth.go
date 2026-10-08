@@ -18,7 +18,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-const refreshWindow = 5 * time.Minute
+// refreshWindow is how long before a lease's expiry Token stops serving it from the cache and
+// mints a fresh one. The daemon rewrites each role's gh token file from the cached lease, so a
+// container sees a new token only after that rewrite reaches it, and a Kubernetes Secret volume
+// reaches a running pod within about the kubelet's one-minute sync period. Twenty minutes leaves
+// a container the new token at least some fifteen minutes before the old one expires, while GitHub
+// keeps the old token valid until its own expiry, so a `gh` or `git` that started on the old one
+// finishes on it.
+const refreshWindow = 20 * time.Minute
 
 // AppRole names the GitHub App a Legion role acts as.
 type AppRole string
@@ -150,8 +157,9 @@ func New(apps config.GitHubApps, options Options) *Manager {
 	}
 }
 
-// Token returns a cached lease until fewer than five minutes remain, otherwise minting a fresh
-// installation token. Concurrent requests for the same App and owner share that one exchange.
+// Token returns a cached lease until fewer than twenty minutes remain (refreshWindow), otherwise
+// minting a fresh installation token. Concurrent requests for the same App and owner share that
+// one exchange.
 func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
