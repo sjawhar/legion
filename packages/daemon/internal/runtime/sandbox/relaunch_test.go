@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -950,6 +951,97 @@ func (o *outageTokens) Token(ctx context.Context, owner string) (string, error) 
 		return "", errors.New("no installation token: GitHub is down")
 	}
 	return staticTokens{}.Token(ctx, owner)
+}
+
+// A role starting into a running issue pod reads every launcher Secret of the pod to check the pod
+// is bound to it. A Secret that is gone, is not the Sandbox's, or binds another pod proves the pod
+// is not one this runtime bound, and the pod is replaced. A read that fails, such as a server error,
+// a throttled request or a timeout, proves nothing: that start fails with the error, and the pod
+// and the sibling already running in it are left as they are, so one API-server error during a
+// handoff never ends the roles already in the pod. The role's next start goes into the same pod.
+func TestOnlyAPodsUnboundLaunchersReplaceItNotAFailedRead(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// unbind is what happens to the reviewer's launcher Secret before the reviewer starts, with
+		// fail armed to fail the next read of it.
+		unbind   func(g *rig, secret string, fail *atomic.Bool)
+		replaced bool
+	}{
+		"a read that fails with a server error": {
+			unbind:   func(_ *rig, _ string, fail *atomic.Bool) { fail.Store(true) },
+			replaced: false,
+		},
+		"a Secret that is gone": {
+			unbind: func(g *rig, secret string, _ *atomic.Bool) {
+				if err := g.kube.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("secrets"), testNamespace, secret); err != nil {
+					g.t.Fatal(err)
+				}
+			},
+			replaced: true,
+		},
+		"a Secret that is not the Sandbox's": {
+			unbind: func(g *rig, secret string, _ *atomic.Bool) {
+				editSecret(g, secret, func(s *corev1.Secret) { s.OwnerReferences = nil })
+			},
+			replaced: true,
+		},
+		"a Secret that binds another pod": {
+			unbind: func(g *rig, secret string, _ *atomic.Bool) {
+				editSecret(g, secret, func(s *corev1.Secret) { s.Annotations[launcherPodUIDAnnotation] = "uid-another-pod" })
+			},
+			replaced: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil)
+			testerLoc := g.spawn(workerSpec(t))
+			sandboxName := testerLoc.Sandbox.Name
+			reviewerSecret := roleSecretName(sandboxName, claim.RoleReviewer)
+			var fail atomic.Bool
+			g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+				if a.(k8stesting.GetAction).GetName() == reviewerSecret && fail.CompareAndSwap(true, false) {
+					return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+				}
+				return false, nil, nil
+			})
+			tc.unbind(g, reviewerSecret, &fail)
+
+			reviewer := testSpec(t, otherToken, claim.RoleReviewer, testTree)
+			if !tc.replaced {
+				g.launcher(reviewer.Claim)
+				err := failedLaunch(t, g, reviewer)
+				if err == nil || !strings.Contains(err.Error(), "read its pod's launcher bindings") || !strings.Contains(err.Error(), "etcdserver: request timed out") {
+					t.Fatalf("Spawn = %v, want the failed read of %s", err, reviewerSecret)
+				}
+				if pod := g.pod(sandboxName); pod == nil || string(pod.UID) != testerLoc.Sandbox.PodUID {
+					t.Fatalf("a failed read replaced the pod the tester runs in (%s), want it kept", testerLoc.Sandbox.PodUID)
+				}
+				if mode := g.sandbox(sandboxName).mode(); mode != modeRunning {
+					t.Fatalf("a failed read left the Sandbox %s, want it running", mode)
+				}
+				if obs, err := g.r.Probe(g.ctx, testerLoc); err != nil || obs.Kind != runtime.Alive {
+					t.Fatalf("the tester after its sibling's failed start: %s (%v), want alive", obs.Kind, err)
+				}
+			}
+			reviewerLoc := g.spawn(reviewer)
+			if replaced := reviewerLoc.Sandbox.PodUID != testerLoc.Sandbox.PodUID; replaced != tc.replaced {
+				t.Fatalf("the reviewer's start replaced the pod: %t, want %t", replaced, tc.replaced)
+			}
+		})
+	}
+}
+
+// editSecret rewrites the Secret named name in the tracker.
+func editSecret(g *rig, name string, edit func(*corev1.Secret)) {
+	g.t.Helper()
+	secret := g.secret(name)
+	if secret == nil {
+		g.t.Fatalf("no Secret %s", name)
+	}
+	next := secret.DeepCopy()
+	edit(next)
+	if err := g.kube.Tracker().Update(corev1.SchemeGroupVersion.WithResource("secrets"), next, testNamespace); err != nil {
+		g.t.Fatal(err)
+	}
 }
 
 // A Running patch the server applied but whose answer never arrived (a client timeout) is as

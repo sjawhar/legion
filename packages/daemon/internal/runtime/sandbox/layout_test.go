@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -69,6 +70,50 @@ func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T)
 				t.Fatalf("census = %v, want a refusal naming %s: %q", err, tc.name, tc.want)
 			}
 		})
+	}
+}
+
+// A namespace of a deployment before issue pods holds a per-claim Sandbox for every running role.
+// The census's one refusal names every Sandbox it refuses, each with its reason, and how many, and
+// none of the pods this runtime builds, so the operator clears them all before the next boot.
+func TestTheBootCensusNamesEveryRefusedSandboxAndHowMany(t *testing.T) {
+	g := newRig(t, nil)
+	g.spawn(rootSpec(t))
+	built := SandboxName(rootToken)
+	legacy := map[string]string{
+		"legion-legion-legion-208-tester":   "not exactly the launchers its labels name",
+		"legion-legion-legion-208-reviewer": "not exactly the launchers its labels name",
+		"legion-legion-controller":          "not exactly the launchers its labels name",
+		"legion-legion-other":               "name neither an issue nor the project controller",
+	}
+	for name, labels := range map[string]map[string]string{
+		"legion-legion-legion-208-tester":   claimLabels(claim.RoleTester),
+		"legion-legion-legion-208-reviewer": claimLabels(claim.RoleReviewer),
+		"legion-legion-controller":          {labelProject: testProject, labelRole: string(claim.RoleController)},
+		"legion-legion-other":               {labelProject: testProject},
+	} {
+		if err := g.dyn.Tracker().Create(sandboxGVR, sandboxRunning(t, name, labels, "worker"), testNamespace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject)
+	if err == nil {
+		t.Fatal("census = nil, want a refusal naming every legacy Sandbox")
+	}
+	if want := fmt.Sprintf("%d of project %s's Sandboxes are not pods this runtime builds", len(legacy), testProject); !strings.Contains(err.Error(), want) {
+		t.Errorf("census = %q, want it to say %q", err, want)
+	}
+	for name, reason := range legacy {
+		if !strings.Contains(err.Error(), "legacy issue Sandbox "+name) {
+			t.Errorf("census = %q, want it to name %s", err, name)
+		}
+		_, after, _ := strings.Cut(err.Error(), "legacy issue Sandbox "+name)
+		if next, _, _ := strings.Cut(after, "; legacy issue Sandbox "); !strings.Contains(next, reason) {
+			t.Errorf("census names %s with %q, want %q", name, next, reason)
+		}
+	}
+	if strings.Contains(err.Error(), "legacy issue Sandbox "+built+" ") || strings.Contains(err.Error(), "legacy issue Sandbox "+built+":") {
+		t.Errorf("census = %q, which names the issue pod this runtime built, %s", err, built)
 	}
 }
 

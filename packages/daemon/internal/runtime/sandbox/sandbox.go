@@ -148,13 +148,14 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 	return rejectLegacyIssueSandboxes(ctx, dyn.Resource(sandboxGVR).Namespace(namespace), project)
 }
 
-// rejectLegacyIssueSandboxes refuses the project's first Sandbox whose pod is not one this runtime
+// rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
 // builds: its containers must be exactly the launcher roles of the kind its labels name
 // (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
 // controller's. So a per-claim Sandbox of the layout before issue pods (one worker container), the
 // controller Sandbox a daemon before issue pods made (role=controller, one worker container), a pod
 // missing a launcher, one with a container more, and a Sandbox whose labels name no kind are each
-// refused, and an operator removes it before enabling issue pods.
+// refused. The refusal names every one of them, each with its reason, and how many there are, so
+// an operator removes them all before the next boot rather than one per refused boot.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -162,40 +163,53 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 	if err != nil {
 		return fmt.Errorf("sandbox runtime: census existing issue Sandboxes before layout migration: %w", err)
 	}
+	var refused []string
 	for _, object := range list.Items {
 		if object.GetLabels()[labelProbe] != "" {
 			continue
 		}
-		kind, err := podKindOf(object.GetLabels())
-		if err != nil {
-			return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s: %v; migrate or remove it before enabling issue pods", object.GetName(), err)
-		}
-		roles := kind.roles()
-		containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
-		if err != nil || !found {
-			return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s has no issue-pod container shape; migrate or remove it before enabling issue pods", object.GetName())
-		}
-		var names []string
-		for _, raw := range containers {
-			container, ok := raw.(map[string]any)
-			if !ok {
-				return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s has an unreadable container shape; migrate or remove it before enabling issue pods", object.GetName())
-			}
-			name, _ := container["name"].(string)
-			names = append(names, name)
-		}
-		want := make([]string, 0, len(roles))
-		for _, role := range roles {
-			want = append(want, string(role))
-		}
-		slices.Sort(names)
-		slices.Sort(want)
-		if !slices.Equal(names, want) {
-			return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s runs containers %v, not exactly the launchers its labels name %v; migrate or remove it before enabling issue pods",
-				object.GetName(), names, want)
+		if reason := legacyIssueSandbox(object); reason != "" {
+			refused = append(refused, "legacy issue Sandbox "+object.GetName()+reason)
 		}
 	}
-	return nil
+	if len(refused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("sandbox runtime: %d of project %s's Sandboxes are not pods this runtime builds; migrate or remove each before enabling issue pods: %s",
+		len(refused), project, strings.Join(refused, "; "))
+}
+
+// legacyIssueSandbox is why object is not a pod this runtime builds, following its name in the
+// census's refusal, or "" when it is one.
+func legacyIssueSandbox(object unstructured.Unstructured) string {
+	kind, err := podKindOf(object.GetLabels())
+	if err != nil {
+		return ": " + err.Error()
+	}
+	containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
+	if err != nil || !found {
+		return " has no issue-pod container shape"
+	}
+	var names []string
+	for _, raw := range containers {
+		container, ok := raw.(map[string]any)
+		if !ok {
+			return " has an unreadable container shape"
+		}
+		name, _ := container["name"].(string)
+		names = append(names, name)
+	}
+	roles := kind.roles()
+	want := make([]string, 0, len(roles))
+	for _, role := range roles {
+		want = append(want, string(role))
+	}
+	slices.Sort(names)
+	slices.Sort(want)
+	if !slices.Equal(names, want) {
+		return fmt.Sprintf(" runs containers %v, not exactly the launchers its labels name %v", names, want)
+	}
+	return ""
 }
 
 // configure checks opts and fills their defaults, touching no cluster.

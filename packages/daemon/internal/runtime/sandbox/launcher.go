@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -311,19 +312,27 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 }
 
 // launcherBound reports whether pod is one whose launchers this runtime bound: the Secret of every
-// role of roles, the pod's launcher roles, binds it by uid. A running pod an older runtime made
-// (one worker container, no launchers) or one whose binding never landed is replaced rather than
-// trusted.
-func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) bool {
+// role of roles, the pod's launcher roles, exists, is the Sandbox's, and binds pod by uid. A running
+// pod an older runtime made (one worker container, no launchers) or one whose binding never landed
+// is replaced rather than trusted. Any other failure to read a Secret, such as a timeout, a
+// throttled request or a server error, proves nothing about the pod: it is returned, so only the
+// launch that read it fails, and the pod and every role running in it are left as they are.
+func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
 	for _, role := range roles {
+		name := roleSecretName(s.Name, role)
 		reading, cancel := call(ctx)
-		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(reading, roleSecretName(s.Name, role), metav1.GetOptions{})
+		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(reading, name, metav1.GetOptions{})
 		cancel()
-		if err != nil || !ownedBySandbox(secret.OwnerReferences, s.UID) || secret.Annotations[launcherPodUIDAnnotation] != string(pod.UID) {
-			return false
+		switch {
+		case apierrors.IsNotFound(err):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("read launcher secret %s: %w", name, err)
+		case !ownedBySandbox(secret.OwnerReferences, s.UID) || secret.Annotations[launcherPodUIDAnnotation] != string(pod.UID):
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {

@@ -468,20 +468,109 @@ Before the daemon opens its store, so before any schema write, image probe or re
 that Agent Sandbox is installed and refuses a namespace that holds a Sandbox of its project whose pod
 is not exactly the launchers its labels name — six for an issue's (`legion.dev/issue`), the
 controller's alone for the project controller's (`legion.dev/role=controller` with no tree) — naming
-it. That catches a per-claim Sandbox of the layout before issue pods and the controller Sandbox a
+every such Sandbox, each with its reason, and how many there are. That catches every per-claim
+Sandbox of the layout before issue pods, running or suspended, and the controller Sandbox a
 `controller: daemon` daemon made before the controller ran in a launcher pod (`role=controller`, one
-`worker` container): remove either before enabling issue pods. Once the store opens and before it
-migrates, it refuses a claim that still records a Sandbox locator of the layout before issue pods
-(no pod uid, container or generation), that earlier controller's claim included. Clear that claim
-with the release that made it, before upgrading: set `controller: operator` and boot that release
-once. It stops the controller its earlier boot launched, logging `controller: stopping the
-controller an earlier boot under controller: daemon launched; this daemon leaves the controller to
-its operator`: the stop deletes the claim's Sandbox and retires the claim, which then records no
-locator, so `legion claims list` shows `legion-<project>-controller` `retired`. Then start this
-release, with `controller: daemon` again if the daemon is to launch the controller. The daemon runs
-on a host its pods can reach and serves the worker stream they dial. The controller is `legion
-controller start` on the operator's machine, or, under `controller: daemon`, a pod of its own with
-one launcher that the daemon launches ([The controller](#the-controller)).
+`worker` container). Once the store opens and before it migrates, it refuses a claim that still
+records a Sandbox locator of the layout before issue pods (no pod uid, container or generation),
+that earlier controller's claim included. A deployment of the earlier release clears both before it
+upgrades ([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees)).
+The daemon runs on a host its pods can reach and serves the worker stream they dial. The controller
+is `legion controller start` on the operator's machine, or, under `controller: daemon`, a pod of its
+own with one launcher that the daemon launches ([The controller](#the-controller)).
+
+### Upgrading a deployment with running trees
+
+This section is for a deployment that runs the release before issue pods (`legion-v10.0.0`), whose
+every role runs in a Sandbox of its own. A daemon at this release refuses to boot while that
+deployment's work is still in place:
+
+- **A per-claim Sandbox** in its namespace, running or suspended, is refused by the census before
+  the store opens (`rejectLegacyIssueSandboxes` in `internal/runtime/sandbox/sandbox.go`, run by
+  `run` in `internal/daemon/daemon.go` before `store.Open`).
+- **A per-claim locator** on any claim is refused once the store has connected and before it
+  migrates (`HasLegacySandboxClaims` in `internal/store/claims.go`).
+
+Nothing is written before either refusal: `store.Open` only connects and pings, and the first
+write is `Migrate`, after both checks. So a refused boot leaves the database as the earlier release
+left it, and re-pinning the earlier release's image recovers. In the cluster a refused boot is a
+crash-looping Deployment: the earlier release's pods keep running, but nothing supervises them.
+
+No migration turns a per-claim Sandbox or locator into an issue pod's, and nothing on a tree volume
+carries over (below), so the upgrade drains the deployment while it still runs the earlier release:
+
+1. **Drain every tree.** Move each tree's root issue out of the workflow on Dispatch (`done`,
+   `backlog`, `icebox` or `triage`) and let its linger expire, which closes the tree. A tree no
+   workflow issue backs, one an operator spawned, is closed with `legion claims close` on its root
+   claim; the earlier release refuses that for a workflow issue's tree, which the workflow closes.
+   Each claim of a closed tree is released and retires, and a retired claim records no locator.
+2. **Let the cleanup finish.** On the earlier release, releasing a claim deletes its Sandbox by
+   name, and the root's Sandbox takes the tree volume with it (`Release` in
+   `internal/runtime/sandbox/sandbox.go` at `legion-v10.0.0`). Wait until every Sandbox is gone, or
+   delete one left behind once no claim of it runs.
+3. **Clear the controller's claim, if `controller: daemon` ran.** Set `controller: operator` and
+   boot the earlier release once. It stops the controller its earlier boot launched, logging
+   `controller: stopping the controller an earlier boot under controller: daemon launched; this
+   daemon leaves the controller to its operator`: the stop deletes the claim's Sandbox and retires
+   the claim, so `legion claims list` shows `legion-<project>-controller` `retired`. In the cluster
+   each of these boots is a configuration change of its own through the deploy path.
+4. **Check that nothing is left.** `<project>` below is `legion.yaml`'s `project` lowercased with
+   every non-alphanumeric removed (`claim.ProjectToken`), the value of every Sandbox's
+   `legion.dev/project` label and of the `claims.project` column. Both of these must come back
+   empty:
+
+   ```sh
+   kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,!legion.dev/probe'
+   ```
+
+   ```sql
+   -- connected as the daemon is, with its postgres_dsn
+   select token, state from claims where project = '<project>' and locator->>'runtime' = 'sandbox';
+   ```
+
+   The query lists every claim that records a Sandbox locator at all, which is stricter than the
+   boot check: on the earlier release every such locator is a per-claim one.
+5. **Dump the database** (`pg_dump` with the daemon's `postgres_dsn`). It is the only way back
+   ([Rolling back](#rolling-back-the-upgrade)).
+6. **Roll this release out in one step:**
+   - the daemon at this release;
+   - `runtime.kubernetes.image` pinned to a worker image built from it, since the image probe
+     refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
+     `internal/runtime/sandbox/probe.go`); and
+   - for an operator-launched controller, every operator's `legion` and `pi-legion` at contract 15.
+     `legion controller start` refuses a `pi-legion` speaking another contract (`probeAndMint` in
+     `cmd/legion/controller.go`), and the daemon refuses a `legion` or `pi-legion` of another
+     contract with 409 (`internal/api/controller.go`). That `pi-legion` release must be published
+     before the rollout.
+
+**Why deleting a live tree's Sandboxes loses its work.** On the earlier release the tree volume is
+the root Sandbox's `volumeClaimTemplates` entry, so Agent Sandbox creates the volume's claim with
+that Sandbox as its owner, and deleting the root Sandbox deletes the volume (`sandboxManifest` in
+`internal/runtime/sandbox/manifest.go` and `Release` in `sandbox.go`, both at `legion-v10.0.0`).
+That loses every session recorded on the volume and every change in its working copies that was
+not pushed. A volume kept anyway is never mounted again: the earlier release names a tree's claim
+`tree-legion-<project>-<root issue>-architect`, from the root architect's own Sandbox
+(`SandboxName` and `TreeClaimName` in `names.go` at `legion-v10.0.0`), and this release
+`tree-legion-<project>-<root issue>`, from the root issue's Sandbox (`SandboxName` and
+`TreeClaimName` in `internal/runtime/sandbox/names.go`). Suspending the tree's claims on the earlier
+release instead (`legion claims suspend`) keeps their Sandboxes, `Suspended`, and the census refuses
+a suspended per-claim Sandbox all the same.
+
+#### Rolling back the upgrade
+
+Restore the dump from step 5 and re-pin the earlier release; work done under this release since the
+upgrade is not in the dump. Re-pinning without the restore does not work. Once this release has
+booted it has applied migrations 0033 to 0035 (`internal/store/migrations`), and the earlier
+release cannot read what they and this release write:
+
+- it refuses an `issue_suspend` outbox row as an unknown kind (`decodeOutboxJSON` in
+  `internal/record/outbox.go` at `legion-v10.0.0`);
+- it refuses an issue pod's locator, whose Sandbox name carries no role (`checkLocator` in
+  `internal/runtime/sandbox/sandbox.go` at `legion-v10.0.0`);
+- nothing stops it booting on the newer schema: `Migrate` applies the migrations it has not
+  recorded and compares nothing against the version the database is at
+  (`internal/store/store.go`, the same at `legion-v10.0.0`), so it would boot and then fail row by
+  row.
 
 ### Configuration
 
@@ -879,7 +968,7 @@ The shell runs as the tree's agents do, user 1000 under gVisor, with nothing the
 
 **No pod of the tree is running**, as when the only pod is the one whose `workspace-init`
 refuses: mount the tree's claim in a pod of your own, `tree-<root Sandbox>`, e.g.
-`tree-legion-<project>-<root issue>-architect`
+`tree-legion-<project>-<root issue>`
 (`kubectl -n legion get pvc -l legion.dev/tree=<KEY>`). The claim is `ReadWriteOnce`, so the pod
 must land on the node where the tree's pods hold it; the preferred affinity below puts it there.
 Delete it before the tree's next pod starts elsewhere, because that pod cannot attach the volume
@@ -913,7 +1002,7 @@ spec:
       command: [sleep, "3600"]
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
       volumeMounts: [{ name: tree, mountPath: /legion }]
-  volumes: [{ name: tree, persistentVolumeClaim: { claimName: tree-legion-<project>-<root issue>-architect } }]
+  volumes: [{ name: tree, persistentVolumeClaim: { claimName: tree-legion-<project>-<root issue> } }]
 ```
 
 ```sh
