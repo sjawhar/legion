@@ -69,7 +69,12 @@ func IsCommitID(s string) bool { return commitID.MatchString(s) }
 //   - No row at all is an issue whose branch GitHub does not have, such as a merged branch GitHub
 //     deleted. The workspace starts at main, resolved to one commit first (mainCommit), with the
 //     bookmark created on it.
-func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log func(string)) error {
+//
+// With exclude set, the workspace is added with nothing checked out and then given sparse patterns
+// holding everything at its starting commit but those paths (sparseInclude, applySparse), so the
+// left-out files are never written to the volume; the patterns are computed before anything is
+// added, so a commit whose tree cannot be read creates nothing.
+func createWorkspace(ctx context.Context, run Runner, workspace Workspace, exclude []string, log func(string)) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
 	remote := workspace.Bookmark + "@origin"
@@ -134,6 +139,12 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 				workspace.Bookmark, listed(setAside), workspace.Dir, cloneDir))
 		}
 	}
+	var include []string
+	if len(exclude) > 0 {
+		if include, err = sparseInclude(ctx, run, cloneDir, revision, exclude); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
 		return fmt.Errorf("create workspace parent: %w", err)
 	}
@@ -155,6 +166,9 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
 	}
+	if len(exclude) > 0 {
+		add = append(add, "--sparse-patterns", "empty")
+	}
 	result, err := runCommand(ctx, run, add, nil, "")
 	if err != nil {
 		return fmt.Errorf("run %s: %w", strings.Join(add, " "), err)
@@ -169,6 +183,11 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			return err
 		}
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
+			return err
+		}
+	}
+	if len(exclude) > 0 {
+		if err := applySparse(ctx, run, workspace, include); err != nil {
 			return err
 		}
 	}

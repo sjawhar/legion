@@ -72,10 +72,12 @@ type outbox struct {
 	dispatchProject string
 	stateDir        string
 	repo            ghrepo.Repository
-	log             *slog.Logger
-	now             func() time.Time
-	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
-	remove          func(context.Context, workspace.Workspace) error
+	// exclude is the project's workspace_exclude, which a workspace the outbox provisions leaves out.
+	exclude   []string
+	log       *slog.Logger
+	now       func() time.Time
+	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
+	remove    func(context.Context, workspace.Workspace) error
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
@@ -97,7 +99,8 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
-		log: log, now: time.Now,
+		exclude: configured.WorkspaceExclude,
+		log:     log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -730,8 +733,9 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	}
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
-		Source: workspace.FromGitHub(lease.Token, r.stateDir),
-		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
+		Source:  workspace.FromGitHub(lease.Token, r.stateDir),
+		Log:     func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
+		Exclude: r.exclude,
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}

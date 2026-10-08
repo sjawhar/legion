@@ -26,7 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
+const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir> [--exclude <path>]..."
 
 const (
 	// workspaceLostExitCode reports an expected tree volume with neither its shared clone nor
@@ -111,10 +111,23 @@ func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io
 	root := flags.String("root", "/legion", "tree volume root directory")
 	credentialHelper := flags.String("credential-helper", "", "git credential helper written into the shared clone's config (required)")
 	feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
+	var exclude excludeFlag
+	flags.Var(&exclude, "exclude", "a path a new issue workspace leaves out of its checkout; once per path")
 	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
 		return code
 	}
-	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout), stderr)
+	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, exclude, stdout), stderr)
+}
+
+// excludeFlag is workspace-init provision's --exclude, given once per path the project's
+// `workspace_exclude` names.
+type excludeFlag []string
+
+func (f *excludeFlag) String() string { return strings.Join(*f, " ") }
+
+func (f *excludeFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }
 
 const workspaceControllerUsage = "legion workspace-init controller [--root /legion]"
@@ -191,8 +204,8 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 // run where the provisioning token is pointed at: this is the process that runs git and jj against what every
 // agent of the tree can write. Then it installs the gh shim, creates the directories the main
 // container mounts, holds a resume to the same agent, and provisions from the feed under the
-// repository lock, which it holds until it returns.
-func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
+// repository lock, which it holds until it returns. A workspace it creates leaves exclude out.
+func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, exclude []string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
 		return err
@@ -208,6 +221,9 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	if !filepath.IsAbs(feed) {
 		return fmt.Errorf("--feed must be an absolute path (got %q)", feed)
+	}
+	if exclude, err = workspace.CleanExclude(exclude); err != nil {
+		return fmt.Errorf("--exclude %w", err)
 	}
 	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
 		return errors.New(provisionTokenFileEnv + " is set: provisioning runs without the provisioning token, which `workspace-init fetch` alone holds")
@@ -264,7 +280,8 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
-		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
+		Log:     func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
+		Exclude: exclude,
 	})
 	if err != nil {
 		return err

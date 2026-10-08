@@ -182,9 +182,10 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 	}
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, TreeVolume: treeVolume,
-		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
-		Resources:  resources,
-		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
+		WorkspaceExclude: cfg.Projects[cfg.Project].WorkspaceExclude,
+		Scheduling:       sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
+		Resources:        resources,
+		DaemonURL:        cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
 		NATSURLs:         cfg.NatsURLs,
 		Tools:            workerImageTools,
 		Pod:              sandbox.Pod(k.Pod),

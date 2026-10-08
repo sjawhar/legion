@@ -15,6 +15,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // DesignGate is the human design-review policy the workflow applies to root issues.
@@ -37,7 +38,8 @@ type Gates struct {
 }
 
 // Project maps a Dispatch project prefix to its repository, parsed at load, its optional
-// merge-queue role, and the required workflows it declares as review workflows.
+// merge-queue role, the required workflows it declares as review workflows, and the paths its
+// issue workspaces leave out.
 type Project struct {
 	Repo           ghrepo.Repository
 	MergeQueueRole string
@@ -46,6 +48,10 @@ type Project struct {
 	// reviewer's round decides rather than the implementer (workflow.Config.ReviewWorkflows). Empty,
 	// every red required workflow sends the work back as a red required check does.
 	ReviewWorkflows []string
+	// WorkspaceExclude is `workspace_exclude`: paths in the repository a new issue workspace leaves
+	// out of its checkout (workspace.Request.Exclude), in workspace.CleanExclude's form. Empty, a
+	// workspace checks out everything.
+	WorkspaceExclude []string
 }
 
 // GitHubApp is one App's configuration. Load resolves the configured private-key source into
@@ -106,7 +112,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping with repo", key)
 	}
-	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole", "review_workflows")
+	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole", "review_workflows", "workspace_exclude")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		// The shipped loader's own words (validateProjectEntry, config.ts).
@@ -139,6 +145,15 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if workflows := fields["review_workflows"]; workflows != nil {
 		if project.ReviewWorkflows, err = readReviewWorkflows(workflows, key+".review_workflows"); err != nil {
 			return Project{}, err
+		}
+	}
+	if exclude := fields["workspace_exclude"]; exclude != nil {
+		paths, err := readStrings(exclude, key+".workspace_exclude")
+		if err != nil {
+			return Project{}, err
+		}
+		if project.WorkspaceExclude, err = workspace.CleanExclude(paths); err != nil {
+			return Project{}, fmt.Errorf("%s.workspace_exclude %w", key, err)
 		}
 	}
 	return project, nil

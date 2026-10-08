@@ -77,6 +77,11 @@ type Request struct {
 	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
 	// issue's workspace at main (createWorkspace).
 	Log func(line string)
+	// Exclude is the paths a workspace this provisioning creates leaves out of its checkout
+	// (CleanExclude's form; the project's `workspace_exclude`). A workspace that already exists
+	// keeps the patterns it has, its agent's own `jj sparse set` among them. Empty, it checks out
+	// everything.
+	Exclude []string
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape

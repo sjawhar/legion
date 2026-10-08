@@ -37,7 +37,7 @@ func TestCreateWorkspaceRefusesARowItCannotRead(t *testing.T) {
 	}
 
 	before := len(run.Calls())
-	err = createWorkspace(context.Background(), run, first, req.Log)
+	err = createWorkspace(context.Background(), run, first, nil, req.Log)
 	if err == nil || !strings.Contains(err.Error(), "Bookmark legion/WIDGETS-42's row \"local|1|0|0|<Error:") || !strings.Contains(err.Error(), "is not the shape") {
 		t.Fatalf("createWorkspace on an unreadable bookmark: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestCreateWorkspaceRefusesAnOriginRowConcurrentFetchesConflicted(t *testing
 	fromOrigin(t, run, clone, "jj", "--at-op", operation, "git", "fetch", "-R", clone)
 
 	before := len(run.Calls())
-	err = createWorkspace(context.Background(), run, workspace, req.Log)
+	err = createWorkspace(context.Background(), run, workspace, nil, req.Log)
 	want := "Remote bookmark legion/WIDGETS-42@origin is conflicted (adds " + moved + "; removes " + listed + "), one side a deletion, which concurrent fetches leave"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("createWorkspace on a conflicted origin row: %v\nwant it to contain %q", err, want)
@@ -118,7 +118,7 @@ func TestCreateWorkspaceRefusesAMainAtOriginConcurrentFetchesConflicted(t *testi
 		t.Fatal(err)
 	}
 	before := len(run.Calls())
-	err = createWorkspace(context.Background(), run, workspace, req.Log)
+	err = createWorkspace(context.Background(), run, workspace, nil, req.Log)
 	var refusals []string
 	for _, adds := range [][]string{{moved, elsewhere}, {elsewhere, moved}} {
 		refusals = append(refusals, "Remote bookmark main@origin is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"), which concurrent fetches leave, and main is not in the shared clone "+clone+"; workspace "+workspace.Dir+" was not created. Provision again: the next provisioning's fetch sets the row to origin's main as it is then")

@@ -117,6 +117,18 @@ What each part is for:
   review bot's. A red only they make, in testing or review, goes to the reviewer, who adjudicates
   their findings and re-runs them, rather than back to the implementer; any other red required
   workflow sends the work back, as a red required check does. None is declared unless you list it.
+  It may also list `workspace_exclude`, paths in its repository (`tasks/`, `assets/large`) that
+  every new issue workspace leaves out of its checkout, under either runtime, so a large tree of
+  files no issue changes is not written once per workspace on the tree volume. A new workspace is
+  created with nothing checked out and then given jj sparse patterns that name every other entry
+  at its starting commit. A workspace that already exists keeps its patterns. A worker that needs a
+  left-out path runs `jj sparse set --add <path>` in its own workspace. jj does not record a file
+  written outside the patterns, so the role prompt tells each worker to add a path before writing
+  under it. git lists every left-out file as deleted (jj rewrites the colocated worktree's index on
+  each commit operation, so git's own sparse checkout would not hold), so a worker never runs
+  `git add -A` or `git commit` in its workspace and records changes with jj. A path that a later
+  commit adds beside a left-out one is not checked out until a worker adds it. `.legion`, where
+  handoffs are written, cannot be left out.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes

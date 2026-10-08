@@ -51,10 +51,11 @@ type recordingRunner struct {
 	timeout time.Duration
 	runner  Runner
 
-	mu           sync.Mutex
-	commands     []Command
-	killClone    bool
-	failReadTree bool
+	mu            sync.Mutex
+	commands      []Command
+	killClone     bool
+	failReadTree  bool
+	failSparseSet bool
 }
 
 func (r *recordingRunner) Timeout() time.Duration { return r.timeout }
@@ -78,6 +79,9 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	}
 	if r.failReadTree && command.Argv[0] == "git" && slices.Contains(command.Argv, "read-tree") {
 		return Result{ExitCode: 1, Stderr: "forced read-tree failure for test"}, nil
+	}
+	if r.failSparseSet && commandWith(command.Argv, "jj", "sparse", "set") {
+		return Result{ExitCode: 1, Stderr: "forced sparse set failure for test"}, nil
 	}
 
 	actual := command

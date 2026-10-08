@@ -63,6 +63,7 @@ const recheckInterval = 500 * time.Millisecond
 type Runtime struct {
 	namespace, project, image, storageClass string
 	treeVolume                              resource.Quantity
+	workspaceExclude                        []string
 	scheduling                              Scheduling
 	resources                               map[claim.Role]corev1.ResourceRequirements
 	streamURL, daemonURL, envoyURL          string
@@ -281,7 +282,7 @@ func configure(opts Options) (*Runtime, error) {
 	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
-		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
+		treeVolume: opts.TreeVolume, workspaceExclude: slices.Clone(opts.WorkspaceExclude), scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,

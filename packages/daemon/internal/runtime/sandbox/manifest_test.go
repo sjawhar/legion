@@ -291,6 +291,28 @@ func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 	}
 }
 
+// The project's workspace_exclude reaches the issue pod's workspace-init as one --exclude per path,
+// after every other flag; with none configured, the command names no --exclude.
+func TestWorkspaceInitIsToldTheProjectsWorkspaceExclusions(t *testing.T) {
+	plain, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command := containerNamed(t, podOf(t, plain, workerSpec(t), false), initContainer).Command; slices.Contains(command, "--exclude") {
+		t.Fatalf("workspace-init with no exclusions runs %q, want no --exclude", command)
+	}
+	opts := goldenOptions()
+	opts.WorkspaceExclude = []string{"tasks", "src/gen"}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := containerNamed(t, podOf(t, r, workerSpec(t), false), initContainer).Command
+	if want := []string{"--feed", FeedDir, "--exclude", "tasks", "--exclude", "src/gen"}; len(command) < len(want) || !slices.Equal(command[len(command)-len(want):], want) {
+		t.Fatalf("workspace-init runs %q, want it to end %q", command, want)
+	}
+}
+
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and

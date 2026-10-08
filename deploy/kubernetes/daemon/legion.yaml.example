@@ -42,6 +42,9 @@ projects:
     # review_workflows:                # opt-in: required workflows that review the code and fail on
     #   - .github/workflows/review.yml #   their own findings; in testing and review a red only they
     #                                  #   make goes to the reviewer, not back to the implementer
+    # workspace_exclude:               # opt-in: paths a new issue workspace leaves out of its
+    #   - tasks/                       #   checkout (jj sparse); a worker adds one back with
+    #                                  #   `jj sparse set --add <path>`
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:

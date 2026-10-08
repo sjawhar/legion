@@ -76,7 +76,11 @@ type Options struct {
 	// TreeVolume is the tree volume's size, positive; the daemon's configuration supplies its
 	// default (runtime.kubernetes.tree_volume, 20Gi).
 	TreeVolume resource.Quantity
-	Scheduling Scheduling
+	// WorkspaceExclude is the paths each issue workspace an issue pod's workspace-init creates leaves
+	// out of its checkout (the project's workspace_exclude), passed as one --exclude each. Empty,
+	// a workspace checks out everything.
+	WorkspaceExclude []string
+	Scheduling       Scheduling
 	// Resources are each role's container requests and limits; a role absent here gets none.
 	Resources map[claim.Role]corev1.ResourceRequirements
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.

@@ -487,6 +487,22 @@ func TestTheOperatorsPodReachesTheSandboxRuntime(t *testing.T) {
 	}
 }
 
+// The daemon's project's workspace_exclude reaches the runtime's Options, which hands it to each
+// issue pod's workspace-init.
+func TestTheProjectsWorkspaceExclusionsReachTheSandboxRuntime(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	project := cfg.Projects[cfg.Project]
+	project.WorkspaceExclude = []string{"tasks", "src/gen"}
+	cfg.Projects = map[string]config.Project{cfg.Project: project}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if want := []string{"tasks", "src/gen"}; !reflect.DeepEqual(opts.WorkspaceExclude, want) {
+		t.Errorf("the runtime's WorkspaceExclude is %q, want %q", opts.WorkspaceExclude, want)
+	}
+}
+
 // The NATS nkey seed reaches every pod from the providers Secret, never from a copy in a claim's
 // Secret: whenever the daemon has one — from nats_nkey_seed_file, NATS_NKEY_SEED_FILE, or
 // NATS_NKEY_SEED — it is a launch secret the runtime reads from the providers mount, and with none

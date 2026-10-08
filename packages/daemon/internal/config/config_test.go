@@ -233,8 +233,8 @@ func TestLoadReadsEveryStage3Key(t *testing.T) {
 dispatch_token_file: tokens/DISPATCH_TOKEN
 projects:
   DEMO: { repo: acme/widgets }
-  OTHER: { repo: acme/other, merge_queue_role: merge-queue, review_workflows: [.github/workflows/review.yml, .github/workflows/bot.yaml] }
-  EMPTY: { repo: acme/empty, review_workflows: [] }
+  OTHER: { repo: acme/other, merge_queue_role: merge-queue, review_workflows: [.github/workflows/review.yml, .github/workflows/bot.yaml], workspace_exclude: [tasks/, src/gen] }
+  EMPTY: { repo: acme/empty, review_workflows: [], workspace_exclude: [] }
 gates:
   design: off
 github_apps:
@@ -263,7 +263,7 @@ max_fix_attempts: 4
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
 		"DEMO": {Repo: ghrepo.MustParse("acme/widgets")},
 		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue",
-			ReviewWorkflows: []string{".github/workflows/review.yml", ".github/workflows/bot.yaml"}},
+			ReviewWorkflows: []string{".github/workflows/review.yml", ".github/workflows/bot.yaml"}, WorkspaceExclude: []string{"tasks", "src/gen"}},
 		"EMPTY": {Repo: ghrepo.MustParse("acme/empty")},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
@@ -421,6 +421,26 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			name: "a review workflow named twice",
 			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/review.yml, .github/workflows/review.yml] }", 1),
 			want: `projects.DEMO.review_workflows names ".github/workflows/review.yml" twice`,
+		},
+		{
+			name: "workspace_exclude is not a list",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, workspace_exclude: tasks }", 1),
+			want: "projects.DEMO.workspace_exclude must be an array of non-empty strings",
+		},
+		{
+			name: "a workspace exclusion outside the repository",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, workspace_exclude: [../tasks] }", 1),
+			want: `projects.DEMO.workspace_exclude entry "../tasks" must be a path inside the repository: not its root, no leading /, and no empty, . or .. segment`,
+		},
+		{
+			name: "a workspace exclusion of the handoff directory",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, workspace_exclude: [.legion] }", 1),
+			want: `projects.DEMO.workspace_exclude entry ".legion" names .legion, where every role writes its handoffs; a workspace always checks it out`,
+		},
+		{
+			name: "a workspace exclusion inside another",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, workspace_exclude: [tasks, tasks/t1] }", 1),
+			want: `projects.DEMO.workspace_exclude entry "tasks/t1" is inside "tasks", which the list already leaves out`,
 		},
 		{
 			name: "gates is not a mapping",

@@ -120,10 +120,18 @@ func (issuePod) secretAnnotations(l launch) map[string]string {
 // process with anything a tree agent can write (Stage 4b Task 4b.6b): workspace-fetch mounts the
 // provisioning Secret, its own TMPDIR, and the feed, and clones the repository from GitHub into the
 // feed; workspace-init mounts the tree volume, the feed read-only, and the config home, and does all
-// the tree volume's work from the feed, with no credential. Each takes the resources of the role
-// whose launch creates the pod.
+// the tree volume's work from the feed, with no credential, leaving each path of the project's
+// workspace_exclude out of a workspace it creates (one --exclude each). Each takes the resources of
+// the role whose launch creates the pod.
 func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 	legion, resources := r.tools.Legion, r.resources[l.spec.Role]
+	provision := []string{
+		legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
+		"--credential-helper", "!" + legion + " credential", "--feed", FeedDir,
+	}
+	for _, path := range r.workspaceExclude {
+		provision = append(provision, "--exclude", path)
+	}
 	return []corev1.Container{{
 		Name:       fetchContainer,
 		Image:      r.image,
@@ -138,12 +146,9 @@ func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),
 	}, {
-		Name:  initContainer,
-		Image: r.image,
-		Command: []string{
-			legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
-			"--credential-helper", "!" + legion + " credential", "--feed", FeedDir,
-		},
+		Name:       initContainer,
+		Image:      r.image,
+		Command:    provision,
 		Env:        r.initEnvironment(l),
 		WorkingDir: TreeRoot,
 		VolumeMounts: []corev1.VolumeMount{

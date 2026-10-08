@@ -37,6 +37,10 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := request.Source.check(request.Repo); err != nil {
 		return Workspace{}, err
 	}
+	exclude, err := CleanExclude(request.Exclude)
+	if err != nil {
+		return Workspace{}, fmt.Errorf("workspace exclusions: %w", err)
+	}
 
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
@@ -68,7 +72,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		if err := restoreGitWorktree(ctx, run, workspace, request.Log); err != nil {
 			return Workspace{}, err
 		}
-	} else if err := createWorkspace(ctx, run, workspace, request.Log); err != nil {
+	} else if err := createWorkspace(ctx, run, workspace, exclude, request.Log); err != nil {
 		return Workspace{}, err
 	}
 	// Every workspace provisioning touches has its git worktree entry locked, one added before

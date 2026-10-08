@@ -363,6 +363,16 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 			says: func(*treeVolume) string { return `--feed must be an absolute path (got "")` },
 		},
 		{
+			name: "an --exclude outside the repository",
+			args: func(v *treeVolume) []string {
+				return append(v.args("LEGION-42"), "--exclude", "tasks", "--exclude", "../escape")
+			},
+			code: 1,
+			says: func(*treeVolume) string {
+				return `--exclude entry "../escape" must be a path inside the repository`
+			},
+		},
+		{
 			name: "pointed at the provisioning token",
 			env:  func(t *testing.T, v *treeVolume) { t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token) },
 			code: 1,
@@ -506,6 +516,56 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 		t.Fatalf("workspace-init called codegraph %q, want it to build no index on the pod's registration path", calls)
 	}
 	holdsNoToken(t, v.root, "after provisioning")
+}
+
+// The pod's provisioning leaves each --exclude path out of the issue workspace it creates: the
+// workspace has every other file of the remote's main, no file under an excluded path, and a jj
+// status with no change.
+func TestWorkspaceInitLeavesTheExcludedPathsOutOfTheWorkspace(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	work := filepath.Join(t.TempDir(), "work")
+	identity := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid",
+		"GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid")
+	gitIn := func(dir string, args ...string) {
+		t.Helper()
+		command := exec.Command(v.env["WINIT_REAL_GIT"], args...)
+		command.Dir, command.Env = dir, identity
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
+	}
+	gitIn(filepath.Dir(work), "clone", "--quiet", v.env["WINIT_REMOTE"], work)
+	for path, contents := range map[string]string{"README.md": "widgets\n", "tasks/t1/basic_info.json": "{}\n", "tasks/t2/data.txt": "data\n"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(work, path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, path), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(work, "add", "--all")
+	gitIn(work, "commit", "--quiet", "-m", "tree")
+	gitIn(work, "push", "--quiet", "origin", "HEAD:main")
+	v.fetch(t)
+
+	code, _, stderr := runWorkspaceInitHere(append(v.args("LEGION-42"), "--exclude", "tasks/"))
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	workspace := v.workspace("LEGION-42")
+	if _, err := os.Stat(filepath.Join(workspace, "README.md")); err != nil {
+		t.Fatalf("README.md in the workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "tasks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tasks in the workspace: %v, want it left out", err)
+	}
+	if patterns := v.jj(t, "sparse", "list", "-R", workspace); patterns != "README.md" {
+		t.Fatalf("jj sparse list = %q, want README.md alone", patterns)
+	}
+	if status := v.jj(t, "status", "-R", workspace); !strings.Contains(status, "The working copy has no changes") {
+		t.Fatalf("jj status = %q, want no change", status)
+	}
 }
 
 // Shared init distinguishes loss of the tree's storage from one role's missing transcript.

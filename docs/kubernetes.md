@@ -839,6 +839,14 @@ packages on the tree volume, beside the cache, and a deployment sizes `tree_volu
 workspace of a tree. `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
 stops at the pod, so neither may run while another pod of the tree is using uv.
 
+Each issue's workspace holds a full checkout of the repository unless the project lists paths in
+`projects.<KEY>.workspace_exclude`. A workspace `workspace-init` creates then leaves those paths out:
+it is added with nothing checked out, and then given jj sparse patterns that name every other entry
+at its starting commit (the init container's `--exclude`, one per path). For a repository whose large
+fixture tree no issue edits, that is the difference between one copy of the tree per workspace and
+none. A workspace keeps the patterns it was created with. A worker that needs a left-out path runs
+`jj sparse set --add <path>` in its own workspace, and the next pod of the issue keeps that path.
+
 Every pod runs:
 - with `runtimeClassName: gvisor`;
 - with `serviceAccountName` set to the operator's `pod.service_account` (the namespace's default
