@@ -2465,8 +2465,10 @@ pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
 plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph -T 'commit_id ++ "\n"' | head -1)
 [ -n "$plan_head" ] || fail "no 'plan: record handoff' commit on tree 1's workspace"
 push_actors() {
-  gh api "repos/$repo/events" --paginate --jq --arg ref "refs/heads/legion/$tree1" \
-    '.[] | select(.type == "PushEvent" and .payload.ref == $ref) | "\(.payload.head) \(.actor.login)"' >"$evidence/github-credential-pushes.txt" 2>/dev/null
+  # gh's --jq takes no --arg, so the ref is piped to jq proper; the events feed lags a push by a
+  # few minutes and holds the repository's newest 300 events.
+  gh api "repos/$repo/events" --paginate 2>/dev/null |
+    jq -r --arg ref "refs/heads/legion/$tree1" '.[] | select(.type == "PushEvent" and .payload.ref == $ref) | "\(.payload.head) \(.actor.login)"' >"$evidence/github-credential-pushes.txt" || true
   grep -q "^$pr_head legion-implementer\[bot\]$" "$evidence/github-credential-pushes.txt" &&
     grep -q "^$plan_head legion-reviewer\[bot\]$" "$evidence/github-credential-pushes.txt"
 }
