@@ -75,12 +75,15 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		addressing += " " + ReviewWorkflowsFragment(s.reviewWorkflows)
 	}
 	env := map[string]string{}
+	if value := slackReportingChannelsEnvValue(s.slack); value != "" {
+		env[slackReportingChannelsEnv] = value
+	}
 	if s.identity != nil {
 		id, err := s.identity(ctx, c.Role)
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}
-		env = id.Env()
+		maps.Copy(env, id.Env())
 	}
 	spec := runtime.SpawnSpec{
 		Env:     env,
@@ -111,8 +114,12 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
+	env := map[string]string{}
+	if value := slackReportingChannelsEnvValue(s.slack); value != "" {
+		env[slackReportingChannelsEnv] = value
+	}
 	return runtime.SpawnSpec{
-		Env:     map[string]string{},
+		Env:     env,
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,
@@ -185,6 +192,27 @@ func SlackFragment(slack config.Slack) string {
 		channels = append(channels, fmt.Sprintf("`notifications.slack.%s.%s.mention` (files in %s)", slack.Team, c.Channel, c.Project))
 	}
 	return fmt.Sprintf("Slack reporting channels: team `%s`; %s.", slack.Team, strings.Join(channels, ", "))
+}
+
+// slackReportingChannelsEnv is LEGION_SLACK_REPORTING_CHANNELS (the literal is duplicated in
+// packages/daemon/cmd/legion/slack.go, which reads it; the two must agree): the comma-separated
+// channel IDs legion slack post and reply may address, carried to every launch this deployment
+// configures Slack reporting channels for. A report thread's text reaches a session as untrusted
+// data; keeping this allowlist in the launch's Env, rather than only in the controller's free-text
+// addressing, lets `legion slack` enforce it in code instead of trusting a prompt.
+const slackReportingChannelsEnv = "LEGION_SLACK_REPORTING_CHANNELS"
+
+// slackReportingChannelsEnvValue is slackReportingChannelsEnv's value for slack: "" when slack is
+// nil or names no channels, so SpawnSpec and controllerSpawnSpec set no Env entry for it then.
+func slackReportingChannelsEnvValue(slack *config.Slack) string {
+	if slack == nil {
+		return ""
+	}
+	channels := make([]string, len(slack.ReportingChannels))
+	for i, c := range slack.ReportingChannels {
+		channels[i] = c.Channel
+	}
+	return strings.Join(channels, ",")
 }
 
 // ReviewWorkflowsFragment is the sentence a reviewer is told after its addressing: the required

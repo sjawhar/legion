@@ -176,3 +176,33 @@ func TestControllerAddressingIncludesSlackReportingChannels(t *testing.T) {
 		t.Errorf("ControllerAddressing without Slack = %q, want its gate policy only", got)
 	}
 }
+
+// The daemon-launched controller's SpawnSpec (not SlackFragment or ControllerAddressing in
+// isolation) carries the deployment's Slack reporting channels through two surfaces: the launch
+// addressing, so the controller's prompt names the topics, and LEGION_SLACK_REPORTING_CHANNELS in
+// its Env, so `legion slack post`/`reply` can enforce the allowlist in code. Either surface
+// dropping the channels would leave the controller unable to subscribe, or unable to reply.
+func TestTheControllersLaunchCarriesSlackReportingChannelsOnBothAddressingAndEnv(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	slack := &config.Slack{Team: "T0WORKSPACE", ReportingChannels: []config.ReportingChannel{
+		{Channel: "C0REPORTS", Project: "ACME"},
+		{Channel: "G0PRIVATE", Project: "OTHER"},
+	}}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer,
+		designGate: config.DesignGateRootIssues, slack: slack,
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if wantSuffix := " " + SlackFragment(*slack); !strings.HasSuffix(spec.Prompt.Addressing, wantSuffix) {
+		t.Errorf("addressing = %q, want it to end with %q", spec.Prompt.Addressing, wantSuffix)
+	}
+	if want := "C0REPORTS,G0PRIVATE"; spec.Env["LEGION_SLACK_REPORTING_CHANNELS"] != want {
+		t.Errorf("Env[LEGION_SLACK_REPORTING_CHANNELS] = %q, want %q", spec.Env["LEGION_SLACK_REPORTING_CHANNELS"], want)
+	}
+}

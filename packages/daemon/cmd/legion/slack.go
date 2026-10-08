@@ -18,6 +18,22 @@ import (
 const (
 	slackBotTokenName = "LEGION_SLACK_BOT_TOKEN"
 	defaultSlackAPI   = "https://slack.com/api"
+	// slackReportingChannelsEnv is LEGION_SLACK_REPORTING_CHANNELS, which specs.SpawnSpec sets
+	// (packages/daemon/internal/daemon/specs.go) from this deployment's configured
+	// `slack.reporting_channels`: the comma-separated channel IDs legion slack post and reply may
+	// address. A report thread's text reaches a session as untrusted data; enforcing the allowlist
+	// here, in code, means a hostile report cannot talk a session out of it the way it could a
+	// prompt rule.
+	slackReportingChannelsEnv = "LEGION_SLACK_REPORTING_CHANNELS"
+)
+
+// slackAPIBaseURL and slackHTTPClient are the only seams a test may redirect: unexported package
+// variables a test file sets directly, in-process. Neither is an environment variable or a flag —
+// in release code or otherwise — so an environment- or prompt-directed run can never retarget
+// where the brokered bot token is sent; production always pins requests to defaultSlackAPI.
+var (
+	slackAPIBaseURL = defaultSlackAPI
+	slackHTTPClient = http.DefaultClient
 )
 
 // slackCommands is `legion slack`'s public bot surface. It obtains the bot token only through
@@ -40,6 +56,10 @@ func runSlackPost(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if !validSlackMessageFlags(flags, *channel, *text) {
 		return 2
 	}
+	if !allowedSlackChannel(*channel) {
+		fmt.Fprintf(stderr, "legion slack post: %s is not a configured Slack reporting channel\n", *channel)
+		return 1
+	}
 	return runWithSlackToken(ctx, "post", args, "Post a message as the Legion Slack app", stdout, stderr, func(token string) error {
 		return postSlackMessage(ctx, token, *channel, *text, "", stdout)
 	})
@@ -56,6 +76,10 @@ func runSlackReply(ctx context.Context, args []string, stdout, stderr io.Writer)
 			fmt.Fprintln(stderr, "legion slack reply: --thread-ts is required")
 		}
 		return 2
+	}
+	if !allowedSlackChannel(*channel) {
+		fmt.Fprintf(stderr, "legion slack reply: %s is not a configured Slack reporting channel\n", *channel)
+		return 1
 	}
 	return runWithSlackToken(ctx, "reply", args, "Reply in a Legion Slack thread", stdout, stderr, func(token string) error {
 		return postSlackMessage(ctx, token, *channel, *text, *threadTS, stdout)
@@ -109,6 +133,20 @@ func validSlackMessageFlags(flags *flag.FlagSet, channel, text string) bool {
 	return true
 }
 
+// allowedSlackChannel reports whether channel is one of this deployment's configured Slack
+// reporting channels (LEGION_SLACK_REPORTING_CHANNELS, which specs.SpawnSpec sets). legion slack
+// post and reply are the only posters in this slice — the allowlist does not yet cover a deferred
+// worker round-trip — so this is their one enforcement point: a report thread's text can ask a
+// session to post wherever it likes, but the session cannot comply with anything this refuses.
+func allowedSlackChannel(channel string) bool {
+	for _, configured := range strings.Split(os.Getenv(slackReportingChannelsEnv), ",") {
+		if configured != "" && configured == channel {
+			return true
+		}
+	}
+	return false
+}
+
 // runWithSlackToken restarts this command beneath agent-secrets when it is not already the broker's
 // child. agent-secrets grants the token to that child process alone; this parent cannot inspect it.
 func runWithSlackToken(ctx context.Context, subcommand string, args []string, reason string, stdout, stderr io.Writer, operation func(string) error) int {
@@ -155,10 +193,24 @@ type slackPostResult struct {
 	TS      string `json:"ts"`
 }
 
+// slackRepliesPage is one page of conversations.replies: readSlackThread keeps paging while
+// HasMore is true, following ResponseMetadata.NextCursor, and returns every message across every
+// page so a long thread never loses context to the first page alone.
+type slackRepliesPage struct {
+	OK               bool              `json:"ok"`
+	Messages         []json.RawMessage `json:"messages"`
+	HasMore          bool              `json:"has_more,omitempty"`
+	ResponseMetadata struct {
+		NextCursor string `json:"next_cursor"`
+	} `json:"response_metadata,omitempty"`
+}
+
+// slackThreadResult is readSlackThread's complete answer: every message of the thread, gathered
+// across every page conversations.replies paginated. There is no has_more on the wire here —
+// pagination is already finished by the time this is printed.
 type slackThreadResult struct {
 	OK       bool              `json:"ok"`
 	Messages []json.RawMessage `json:"messages"`
-	HasMore  bool              `json:"has_more,omitempty"`
 }
 
 func postSlackMessage(ctx context.Context, token, channel, text, threadTS string, stdout io.Writer) error {
@@ -189,24 +241,37 @@ func postSlackMessage(ctx context.Context, token, channel, text, threadTS string
 }
 
 func readSlackThread(ctx context.Context, token, channel, threadTS string, stdout io.Writer) error {
-	response, err := slackRequest(ctx, token, "conversations.replies", http.MethodGet, nil, func(endpoint *url.URL) {
-		query := endpoint.Query()
-		query.Set("channel", channel)
-		query.Set("ts", threadTS)
-		endpoint.RawQuery = query.Encode()
-	})
-	if err != nil {
-		return err
+	var messages []json.RawMessage
+	cursor := ""
+	for {
+		response, err := slackRequest(ctx, token, "conversations.replies", http.MethodGet, nil, func(endpoint *url.URL) {
+			query := endpoint.Query()
+			query.Set("channel", channel)
+			query.Set("ts", threadTS)
+			if cursor != "" {
+				query.Set("cursor", cursor)
+			}
+			endpoint.RawQuery = query.Encode()
+		})
+		if err != nil {
+			return err
+		}
+		var page slackRepliesPage
+		decodeErr := json.NewDecoder(response.Body).Decode(&page)
+		response.Body.Close()
+		if decodeErr != nil {
+			return fmt.Errorf("decode conversations.replies response: %w", decodeErr)
+		}
+		if !page.OK {
+			return errors.New("Slack conversations.replies reported failure")
+		}
+		messages = append(messages, page.Messages...)
+		cursor = page.ResponseMetadata.NextCursor
+		if !page.HasMore || cursor == "" {
+			break
+		}
 	}
-	defer response.Body.Close()
-	var result slackThreadResult
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode conversations.replies response: %w", err)
-	}
-	if !result.OK {
-		return errors.New("Slack conversations.replies reported failure")
-	}
-	return json.NewEncoder(stdout).Encode(result)
+	return json.NewEncoder(stdout).Encode(slackThreadResult{OK: true, Messages: messages})
 }
 
 // slackRequest adds the token only to Slack's Authorization header. It never includes an API
@@ -227,7 +292,7 @@ func slackRequest(ctx context.Context, token, method, requestMethod string, body
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := slackHTTPClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("call Slack %s: %w", method, err)
 	}
@@ -239,16 +304,12 @@ func slackRequest(ctx context.Context, token, method, requestMethod string, body
 }
 
 func slackEndpoint(method string) (*url.URL, error) {
-	base := os.Getenv("LEGION_SLACK_API_URL")
-	if base == "" {
-		base = defaultSlackAPI
-	}
-	endpoint, err := url.Parse(base)
+	endpoint, err := url.Parse(slackAPIBaseURL)
 	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
-		return nil, fmt.Errorf("LEGION_SLACK_API_URL must be an absolute URL")
+		return nil, fmt.Errorf("slack API base URL %q is invalid", slackAPIBaseURL)
 	}
 	if endpoint.Scheme != "https" && endpoint.Scheme != "http" {
-		return nil, fmt.Errorf("LEGION_SLACK_API_URL must use http or https")
+		return nil, fmt.Errorf("slack API base URL %q must use http or https", slackAPIBaseURL)
 	}
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/" + method
 	endpoint.RawQuery = ""

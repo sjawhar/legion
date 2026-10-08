@@ -91,11 +91,9 @@ timestamp>" --text "<question>"`. The controller routes later mentions in that t
 current architect role; continue the same thread and do not open a Dispatch ask for the reporter.
 
 Write each answer into the root specification in the reporter's own words. A Legion post in the
-thread names the root issue so the controller recognizes later mentions as owned. Once the
-specification has every answer the reporter gave and any necessary Dispatch-only decision blocks
-are settled, use `dispatch_request_approval` for the human who approves work. The reporter does
-not approve the design gate through Slack. Follow the policy below: `gates.design: root-issues`
-needs that human approval; `gates.design: off` has no approval step.
+thread names the root issue so the controller recognizes later mentions as owned. The reporter
+never approves the design gate through Slack — the design gate procedure below runs exactly as it
+does for any root issue, against the human who approves work.
 
 The issue's primary document **is** the root specification. Extend it in place: a new version
 that adds only the evidence each decision needs and what the human decides, each as a
