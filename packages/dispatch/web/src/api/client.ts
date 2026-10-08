@@ -125,6 +125,12 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
+// A document that no longer exists cannot be restored, so its browser-held edits are discarded
+// when the admission read confirms this exact server response. Other 404s remain retryable.
+export function isArtifactNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "ARTIFACT_NOT_FOUND";
+}
+
 // A Dispatch with no secrets broker configured (no DISPATCH_AGENT_SECRETS_URL) answers every
 // credential route but the pending list with this 404 — the same class as the architecture-source
 // 404 above it: retrying changes nothing. The pending list, which every page reads, answers `null`
