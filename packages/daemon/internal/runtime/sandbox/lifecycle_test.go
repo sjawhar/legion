@@ -1,12 +1,18 @@
 package sandbox
 
 import (
+	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -323,6 +329,91 @@ func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.
 			t.Fatalf("Sandbox %s was swept as an orphan", kept)
 		}
 	}
+}
+
+// The sweep decides on a Sandbox as the informer held it, and takes the pod's launch turn only once
+// its tree looks closed. An issue of that closed tree can be re-admitted in between — a child
+// re-admitted as a root of its own, whose launch keeps the suspended Sandbox, relabelled for the
+// new tree with its UID unchanged (TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft), and
+// runs a pod in it before the sweep's turn comes. The delete is fenced to what the decision read,
+// as the controller branch's is (TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays): the
+// re-admitted issue keeps its running Sandbox, and with it the volume holding its clone, workspace
+// and sessions, on this sweep and on the next, which reads the Sandbox under its live tree.
+func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
+	orphan := claim.Token("legion-legion-legion-209-architect")
+	name := SandboxName(orphan)
+	oldTree := map[string]string{labelProject: testProject, labelTree: labelValue(testTree), labelIssue: labelValue("LEGION-209")}
+	spec := testSpec(t, orphan, claim.RoleArchitect, "LEGION-209")
+	spec.Tree = "LEGION-209"
+	var g *rig
+	var loc runtime.Locator
+	store := &readmittingStore{fakeStore: newFakeStore(), tree: testTree}
+	store.readmit = func() { loc = g.spawn(spec) }
+	g = newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)},
+		withOptions(func(o *Options) { o.Store = store }))
+	g.dyn.PrependReactor("patch", "sandboxes", k8stesting.ObjectReaction(&versionedTracker{ObjectTracker: generationTracker{g.dyn.Tracker()}}))
+	g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))
+	store.close(testTree)
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !store.readmitted.Load() {
+		t.Fatal("the sweep never read the old tree's lifecycle, so the re-admission never ran between its decision and its delete")
+	}
+	kept := func(when string) {
+		t.Helper()
+		s := g.sandbox(name)
+		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.mode() != modeRunning {
+			t.Fatalf("the re-admitted issue's Sandbox %s = %+v; want the relabelled Sandbox uid-sandbox-old-tree kept Running under tree LEGION-209, its volume and sessions with it", when, s)
+		}
+		if pod := g.pod(name); pod == nil || string(pod.UID) != loc.Sandbox.PodUID {
+			t.Fatalf("the re-admitted issue's pod %s = %+v; want the launch's pod %s still running", when, pod, loc.Sandbox.PodUID)
+		}
+	}
+	kept("after the sweep that decided on the old tree's Sandbox")
+	g.eventually("the runtime's store to hold the Sandbox relabelled", func() bool {
+		s, _ := g.r.storedSandbox(name)
+		return s != nil && s.Labels[labelTree] == labelValue("LEGION-209")
+	})
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	kept("after the next sweep")
+}
+
+// readmittingStore is the runtime's store whose first TreeLive read of tree runs readmit before it
+// answers: a re-admission of one of the tree's issues that lands between the sweep's decision and
+// the pod turn it takes to delete.
+type readmittingStore struct {
+	*fakeStore
+	tree       string
+	once       sync.Once
+	readmit    func()
+	readmitted atomic.Bool
+}
+
+func (s *readmittingStore) TreeLive(ctx context.Context, project, tree string) (bool, error) {
+	if tree == s.tree {
+		s.once.Do(func() {
+			s.readmit()
+			s.readmitted.Store(true)
+		})
+	}
+	return s.fakeStore.TreeLive(ctx, project, tree)
+}
+
+// versionedTracker stores a Sandbox patch under a new resourceVersion, as the API server does for
+// every write; the fake's tracker leaves the version alone.
+type versionedTracker struct {
+	k8stesting.ObjectTracker
+	writes atomic.Int64
+}
+
+func (t *versionedTracker) Patch(gvr schema.GroupVersionResource, obj k8sruntime.Object, ns string, opts ...metav1.PatchOptions) error {
+	if object, err := metaOf(obj); err == nil && gvr == sandboxGVR {
+		object.SetResourceVersion(fmt.Sprintf("rv-%d", t.writes.Add(1)))
+	}
+	return t.ObjectTracker.Patch(gvr, obj, ns, opts...)
 }
 
 // Adoption goes over the claim's connection, to the recorded process only.
