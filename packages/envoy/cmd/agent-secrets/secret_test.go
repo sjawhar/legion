@@ -28,6 +28,118 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
+func TestSecretInvalidUTF8WritesNothing(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+			t.Run(fmt.Sprintf("%s/terminal=%t", args[0], terminal), func(t *testing.T) {
+				local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+				broker := startSecretBroker(t, servedBy(local))
+				useAWS(t, local, testAccount, adaSignIn)
+				if terminal {
+					useTerminal(t, "private-\xff-value")
+				} else {
+					useStdin(t, "private-\xff-value\n")
+				}
+				out, errOut, code := runSecret(args...)
+				if code != exitUsageError || !strings.Contains(errOut, "UTF-8") {
+					t.Fatalf("exit=%d stderr=%q; want UTF-8 usage error", code, errOut)
+				}
+				if strings.Contains(out+errOut, "private-") {
+					t.Fatal("refusal printed the value")
+				}
+				if valueOf(t, local, "HELD_KEY") != "v1" {
+					t.Fatal("set changed the stored value")
+				}
+				if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+					t.Fatal("create wrote the invalid value")
+				}
+				if rereads, _ := broker.recorded(); len(rereads) != 0 {
+					t.Fatal("refused value reached the broker reread")
+				}
+			})
+		}
+	}
+}
+
+func TestSecretDerivedOwnerMustBeAnEmailBeforeWriting(t *testing.T) {
+	for _, session := range []string{"ada", "shared", "ada@example", "ada..name", "ada@example.com/extra"} {
+		for _, form := range []string{"create", "retag"} {
+			t.Run(form+"/"+session, func(t *testing.T) {
+				local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+				startSecretBroker(t, servedBy(local))
+				useAWS(t, local, testAccount, strings.TrimSuffix(adaSignIn, "ada@example.com")+session)
+				useStdin(t, "value")
+				args := []string{"retag", "HELD_KEY", "--owner", "me"}
+				if form == "create" {
+					args = []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}
+				}
+				_, errOut, code := runSecret(args...)
+				if code == 0 || !strings.Contains(errOut, "email") {
+					t.Fatalf("exit=%d stderr=%q; want invalid email refusal", code, errOut)
+				}
+				if tagMap(describe(t, local, "HELD_KEY").Tags)[policy.TagOwner] != "ada@example.com" {
+					t.Fatal("retag wrote a malformed owner")
+				}
+				if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+					t.Fatal("create wrote a malformed owner")
+				}
+			})
+		}
+	}
+}
+
+func TestSecretWriteSignInAcceptsAWSPartitions(t *testing.T) {
+	for _, partition := range []string{"aws", "aws-cn", "aws-us-gov", "aws-iso"} {
+		t.Run(partition, func(t *testing.T) {
+			local := secrets.NewLocal()
+			startSecretBroker(t, servedBy(local))
+			useAWS(t, local, testAccount, strings.Replace(adaSignIn, "arn:aws:", "arn:"+partition+":", 1))
+			useStdin(t, "value")
+			_, errOut, code := runSecret("create", "NEW_KEY", "--owner", "me", "--tier", "agent")
+			if code != 0 {
+				t.Fatalf("exit=%d stderr=%q", code, errOut)
+			}
+			if valueOf(t, local, "NEW_KEY") != "value" {
+				t.Fatal("partition sign-in did not create the value")
+			}
+		})
+	}
+}
+
+func TestSecretAStoppedPromptWritesNothingAndNamesTheRetry(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"},
+		{"set", "HELD_KEY", "--profile", "ada's work"},
+	} {
+		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		useTerminal(t)
+		readHidden = func(_ int, onStop func()) ([]byte, error) {
+			onStop()
+			return nil, errPromptStopped
+		}
+		out, errOut, code := runSecret(args...)
+		if code != exitUsageError || !strings.Contains(errOut, "Nothing was stored. Press Enter") ||
+			!strings.Contains(errOut, "again and type the whole value") {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, errOut)
+		}
+		retry := "agent-secrets secret create NEW_KEY --owner me --tier agent"
+		if args[0] == "set" {
+			retry = "agent-secrets secret set HELD_KEY --profile 'ada'\\''s work'"
+		}
+		if !strings.Contains(errOut, retry) {
+			t.Fatalf("retry command missing from %q", errOut)
+		}
+		if valueOf(t, local, "HELD_KEY") != "v1" {
+			t.Fatal("stopped set changed the value")
+		}
+		if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+			t.Fatal("stopped create wrote a value")
+		}
+	}
+}
+
 // testAccount is the account policytest.KeyARN, and so every test secret, is in.
 const testAccount = "111122223333"
 
@@ -449,7 +561,7 @@ func useTerminal(t *testing.T, typed ...string) *[]int {
 		return terminalFD, true
 	}
 	reads := &[]int{}
-	readHidden = func(fd int) ([]byte, error) {
+	readHidden = func(fd int, _ func()) ([]byte, error) {
 		*reads = append(*reads, fd)
 		if len(*reads) > len(typed) {
 			t.Fatalf("read %d values at the terminal, want %d", len(*reads), len(typed))
@@ -533,7 +645,7 @@ func TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int) ([]byte, error) { return nil, errMoreThanOneLine }
+		readHidden = func(int, func()) ([]byte, error) { return nil, errMoreThanOneLine }
 		_, stderr, code := runSecret(tc.args...)
 		want := "a value of more than one line must be piped in: " + tc.want
 		if code != exitUsageError || !strings.Contains(stderr, want) {
@@ -557,7 +669,7 @@ func TestSecretAPasteCutShortAtATerminalWritesNothing(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int) ([]byte, error) { return nil, errPasteCutShort }
+		readHidden = func(int, func()) ([]byte, error) { return nil, errPasteCutShort }
 		_, stderr, code := runSecret(args...)
 		if code != 1 || !strings.Contains(stderr, errPasteCutShort.Error()) {
 			t.Fatalf("%v: exit %d, stderr %q; want 1 naming %q", args, code, stderr, errPasteCutShort)
@@ -590,7 +702,7 @@ func TestSecretAControlByteAtATerminalIsAUsageError(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int) ([]byte, error) { return nil, testControlByteError(0x01) }
+		readHidden = func(int, func()) ([]byte, error) { return nil, testControlByteError(0x01) }
 		_, stderr, code := runSecret(args...)
 		want := "the control byte 0x01 cannot be typed at the prompt; pipe the value in"
 		if code != exitUsageError || !strings.Contains(stderr, want) {
@@ -613,7 +725,7 @@ func TestSecretAValueCutShortAtATerminalWritesNothing(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int) ([]byte, error) { return nil, errValueCutShort }
+		readHidden = func(int, func()) ([]byte, error) { return nil, errValueCutShort }
 		_, stderr, code := runSecret(args...)
 		if code != 1 || !strings.Contains(stderr, errValueCutShort.Error()) {
 			t.Fatalf("%v: exit %d, stderr %q; want 1 naming %q", args, code, stderr, errValueCutShort)

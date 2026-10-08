@@ -46,33 +46,33 @@ broker: serving DEMO_DEPLOY_TOKEN
 - **The name** is the one agents ask for, and the environment variable their command gets it in:
   uppercase letters, digits and single underscores, starting with a letter. In Secrets Manager it
   is `<namespace>demo-deploy-token`. Any other name is refused at once (exit 2).
-- **`--owner me`** writes your email: your sign-in's session name in lowercase, which for an IAM
-  Identity Center sign-in is your user name there. The broker matches an owner against the email
-  a person signs in to Dispatch with, so `me` names you where your Identity Center user name is
+- **`--owner me`** writes your sign-in's session name in lowercase. It must be an email the broker
+  accepts, or the command refuses before writing. The broker matches it against the email a
+  person signs in to Dispatch with, so `me` names you where your Identity Center user name is
   that email. **`--owner shared`** makes the secret everyone's.
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
-- **The value.** At a terminal the CLI prompts for it and reads one line with echo off, so the
-  value never shows on the screen; Enter or Ctrl-D ends it. Ctrl-W removes the previous word. Any
-  other control byte is refused and names the command to pipe the value in. Anywhere else the CLI
-  reads standard input to its end, less one trailing newline, so a pipe or a file works too. An
-  empty value (Enter or Ctrl-D alone at the prompt, or empty standard input) is refused (exit 2)
-  and writes nothing.
+- **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
+  Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
+  one inside a bracketed paste, refuses the value. The prompt keeps discarding through Enter or
+  Ctrl-D and the paste's end before reporting the error and naming the pipe command. Anywhere
+  else the CLI reads standard input to its end, less one trailing newline. Empty values and
+  invalid UTF-8 are refused (exit 2) and write nothing.
 
 The CLI checks your sign-in before it asks for the value, so a refused sign-in never has you type a
 secret for nothing. The secret is created on the broker's key with both tags, and the broker serves
 it from the next request. Secrets Manager refuses a name that is already taken, including one
 scheduled for deletion: [restore](#delete-and-restore) that one instead.
 
-The prompt takes one line. A value of more than one line pasted there, such as a key, is refused
-(exit 2): nothing is written, and the CLI discards the rest of the paste, so none of it reaches
-your shell. That holds whole on a terminal that marks pastes (bracketed paste, which most terminal
-emulators and tmux support): the CLI reads such a paste through its end however slowly it
-arrives. On a terminal without it, the CLI waits for 200 ms of quiet after the line, so a paste
-delivered slowly over a bad link can be split after a line ending: the CLI then stores the first
-line as the value with no refusal, and the later lines reach your shell. `secret set NAME < FILE`
-replaces that value; pipe a value of more than one line in rather than pasting it. The refusal
-names the command that pipes the value in; put the value in a file and run that:
+The prompt takes one line. A bracketed paste of more than one line, such as a key, is read through
+its closing mark and refused (exit 2), even when its writes arrive slowly. Most terminal emulators
+and tmux support bracketed paste.
+
+Without brackets the CLI drains input until 200 ms of quiet after the line, for at most
+10 seconds. **That is a bounded drain, not a guarantee about an entire paste:** bytes arriving
+later can reach your shell. If those bytes are a second line, the first line may already have been
+accepted as the value. Pipe multi-line values in rather than pasting them, and use
+`secret set NAME < FILE` to replace a value. The refusal names the command that pipes the value in:
 
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN
@@ -82,12 +82,18 @@ $ agent-secrets secret set DEMO_DEPLOY_TOKEN < key.pem
 set a new value of DEMO_DEPLOY_TOKEN
 broker: serving DEMO_DEPLOY_TOKEN
 ```
-Ctrl-C, Ctrl-\ or a termination signal (`SIGTERM`) at the prompt puts your terminal back as it
-was, echo on, and writes nothing. Ctrl-C ends the CLI by SIGINT, so a script or a `;` list running
-it stops there too; Ctrl-\ ends it by SIGQUIT (a shell reports 131) without writing a core file,
-which would hold what you had typed; a termination signal (SIGTERM) ends it by that signal, which a
-shell reports as 143. A job-control stop (Ctrl-Z) restores the shell terminal while the prompt is
-stopped; `fg` hides the value and turns bracketed paste back on before it resumes reading.
+Ctrl-C, Ctrl-\\, SIGTERM or SIGHUP at the prompt restores the foreground terminal and writes
+nothing, then ends the CLI by that signal. A shell reports 130, 131, 143 or 129 respectively.
+Ctrl-C also stops a shell's `;` list. Core dumps are disabled before the value is read and stay
+disabled for the rest of the process, so a later crash cannot put the value in a core file.
+
+**Ctrl-Z discards the entry.** The kernel flushes unread input on a terminal stop and reports no
+count of lost bytes, so a resumed value could be silently incomplete. The CLI refuses it rather
+than storing a partial secret. After `fg`, input stays hidden only while the remainder is
+discarded: press Enter, then run the command shown in the message and type the whole value again.
+The command exits 2 and stores nothing. The same refusal applies after Ctrl-Z, `bg`, then `fg`.
+A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry. The macOS
+stop/resume path has not been verified on a macOS machine.
 
 ## Which sign-in may do what
 

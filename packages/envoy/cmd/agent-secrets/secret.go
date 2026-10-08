@@ -21,6 +21,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -31,8 +32,50 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 )
 
-// secretForms are the secret forms, as cmdSecret dispatches them and its -h lists them.
-var secretForms = []string{"list", "show", "create", "set", "retag", "delete", "restore"}
+type secretForm struct {
+	help command
+	run  func([]string, io.Writer, io.Writer) int
+}
+
+// secretForms is the one table for dispatch, form names and help text.
+var secretForms []secretForm
+
+func init() {
+	// Register after variable initialization: the handlers use commands for help.
+	secretForms = []secretForm{
+		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
+			"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."}, cmdSecretList},
+		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
+			"Print the agent secret NAME's owner, tier, dates and versions, never its value."}, cmdSecretShow},
+		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",
+			"Create the agent secret NAME under your own AWS sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."}, cmdSecretCreate},
+		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
+			"Give the agent secret NAME a new value under your own AWS sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."}, cmdSecretSet},
+		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--profile P]",
+			"Change the agent secret NAME's owner, tier or both under your own AWS sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."}, cmdSecretRetag},
+		{command{"secret delete", "agent-secrets secret delete NAME [--profile P]",
+			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own AWS\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
+		{command{"secret restore", "agent-secrets secret restore NAME [--profile P]",
+			"Cancel the agent secret NAME's scheduled deletion under your own AWS sign-in, then ask\nthe broker to serve it again at once."}, cmdSecretRestore},
+	}
+	execForm := commands[len(commands)-1]
+	commands = commands[:len(commands)-1]
+	for _, form := range secretForms {
+		commands = append(commands, form.help)
+	}
+	commands = append(commands, execForm)
+}
+
+func secretFormNames() string {
+	var names strings.Builder
+	for i, form := range secretForms {
+		if i != 0 {
+			names.WriteString(", ")
+		}
+		names.WriteString(strings.TrimPrefix(form.help.name, "secret "))
+	}
+	return names.String()
+}
 
 // recoveryWindowDays is the recovery window delete schedules every deletion with, 30 days: the
 // longest Secrets Manager allows, during which restore brings the secret back.
@@ -46,7 +89,7 @@ const sharedRetagRefused = "a shared secret's owner and tier are an administrato
 // cmdSecret dispatches the secret forms.
 func cmdSecret(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintf(stderr, "agent-secrets secret: a form is required: %s\n", strings.Join(secretForms, ", "))
+		fmt.Fprintf(stderr, "agent-secrets secret: a form is required: %s\n", secretFormNames())
 		return exitUsageError
 	}
 	switch args[0] {
@@ -55,27 +98,17 @@ func cmdSecret(args []string, stdout, stderr io.Writer) int {
 			if i > 0 {
 				fmt.Fprintln(stderr)
 			}
-			writeCommandHelp(stderr, lookupCommand("secret "+form))
+			writeCommandHelp(stderr, form.help)
 		}
 		return 0
-	case "list":
-		return cmdSecretList(args[1:], stdout, stderr)
-	case "show":
-		return cmdSecretShow(args[1:], stdout, stderr)
-	case "create":
-		return cmdSecretCreate(args[1:], stdout, stderr)
-	case "set":
-		return cmdSecretSet(args[1:], stdout, stderr)
-	case "retag":
-		return cmdSecretRetag(args[1:], stdout, stderr)
-	case "delete":
-		return cmdSecretDelete(args[1:], stdout, stderr)
-	case "restore":
-		return cmdSecretRestore(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "agent-secrets secret: unknown form %q; the forms are %s\n", args[0], strings.Join(secretForms, ", "))
-		return exitUsageError
 	}
+	for _, form := range secretForms {
+		if form.help.name == "secret "+args[0] {
+			return form.run(args[1:], stdout, stderr)
+		}
+	}
+	fmt.Fprintf(stderr, "agent-secrets secret: unknown form %q; the forms are %s\n", args[0], secretFormNames())
+	return exitUsageError
 }
 
 // usageErr is a secret form's usage error, which exits 2.
@@ -131,11 +164,14 @@ func checkOwnerTier(owner, tier string) error {
 }
 
 // ownerTag is the owner tag --owner names: the signed-in person's email for me, shared for shared.
-func ownerTag(owner, email string) string {
+func ownerTag(owner, email string) (string, error) {
 	if owner == "me" {
-		return email
+		if !policy.ValidPersonOwner(email) {
+			return "", usageErr{fmt.Errorf("your AWS sign-in's session name %q is not an email the broker accepts as an owner", email)}
+		}
+		return email, nil
 	}
-	return owner
+	return owner, nil
 }
 
 // ownerTierTags is the owner and tier tags, which create and retag always send together
@@ -160,10 +196,9 @@ var stdinTerminal = func(r io.Reader) (fd int, ok bool) {
 	return int(f.Fd()), true
 }
 
-// readHidden reads one line typed at the terminal fd with echo off, less its line ending, so the
-// value never shows on the screen; tests replace it. readHiddenAtTerminal is the real one: Ctrl-D
-// ends the line too, a paste of more than one line is errMoreThanOneLine, and nothing typed at the
-// prompt is left for the shell, whether it returns or a signal ends the process.
+// readHidden reads one hidden line from terminal fd, less its line ending; tests
+// replace it. The reader drains bracketed pastes through their end, and input
+// following an unbracketed line through a bounded quiet window.
 var readHidden = readHiddenAtTerminal
 
 // errMoreThanOneLine is readHidden's answer when more input followed the first line at the prompt,
@@ -178,6 +213,10 @@ var errPasteCutShort = errors.New("the terminal hung up before the paste ended")
 // errValueCutShort is readHidden's answer when the terminal hung up outside a paste, before the
 // person ended the value: what was typed is not necessarily all they meant to enter.
 var errValueCutShort = errors.New("the terminal hung up before the value ended")
+
+// A tty stop flushes unread bytes without reporting how many. The entire entry
+// must be refused, even when the reader had already received a prefix.
+var errPromptStopped = errors.New("the terminal stopped while reading the value")
 
 // promptControlByteError is an unhandled control byte typed at the prompt. Its byte lets the form
 // turn the reader error into a usage error that names the invisible input.
@@ -221,13 +260,21 @@ func pipeCommand(profile string, words ...string) string {
 // less one trailing newline, so `echo` and a file ending in a newline give the value without one.
 // An empty value is a usage error either way.
 func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
+	if err := disableCoreDumps(); err != nil {
+		return "", err
+	}
 	if fd, ok := stdinTerminal(secretStdin); ok {
 		fmt.Fprintf(stderr, "Value for %s: ", name)
-		line, err := readHidden(fd)
+		line, err := readHidden(fd, func() {
+			fmt.Fprintf(stderr, "\nNothing was stored. Press Enter to finish discarding this entry, then run %s again and type the whole value.\n", pipeTo)
+		})
 		// Echo is off, so the line ending the person typed never reached the screen.
 		fmt.Fprintln(stderr)
 		if errors.Is(err, errMoreThanOneLine) {
 			return "", usageErr{fmt.Errorf("a value of more than one line must be piped in: %s < FILE", pipeTo)}
+		}
+		if errors.Is(err, errPromptStopped) {
+			return "", usageErr{fmt.Errorf("nothing was stored: %w; run %s again and type the whole value", err, pipeTo)}
 		}
 		var control interface{ ControlByte() byte }
 		if errors.As(err, &control) {
@@ -239,11 +286,17 @@ func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 		if len(line) == 0 {
 			return "", usageErr{errors.New("no value was entered at the prompt")}
 		}
+		if !utf8.Valid(line) {
+			return "", usageErr{errors.New("the value must be valid UTF-8")}
+		}
 		return string(line), nil
 	}
 	data, err := io.ReadAll(secretStdin)
 	if err != nil {
 		return "", fmt.Errorf("read the value from standard input: %w", err)
+	}
+	if !utf8.Valid(data) {
+		return "", usageErr{errors.New("the value must be valid UTF-8")}
 	}
 	value := strings.TrimSuffix(string(data), "\n")
 	if value == "" {
@@ -593,11 +646,14 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
+	ownerValue, err := ownerTag(*owner, email)
+	if err != nil {
+		return secretFail(stderr, form, err)
+	}
 	value, err := readSecretValue(name, pipeCommand(*profile, "secret", "create", name, "--owner", *owner, "--tier", *tier), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	ownerValue := ownerTag(*owner, email)
 	if _, err := s.sm.CreateSecret(s.ctx, &secretsmanager.CreateSecretInput{
 		Name:         aws.String(s.id(slug)),
 		KmsKeyId:     aws.String(s.settings.KMSKeyARN),
@@ -680,7 +736,10 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	tags := tagMap(held.Tags)
 	owner, tier := tags[policy.TagOwner], tags[policy.TagTier]
 	if *newOwner != "" {
-		owner = ownerTag(*newOwner, email)
+		owner, err = ownerTag(*newOwner, email)
+		if err != nil {
+			return secretFail(stderr, form, err)
+		}
 	}
 	if *newTier != "" {
 		tier = *newTier

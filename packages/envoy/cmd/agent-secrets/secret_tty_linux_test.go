@@ -83,7 +83,7 @@ func typeAtPromptInWrites(t *testing.T, gap time.Duration, writes ...string) (*o
 	controller, terminal := openPTY(t)
 	answer := make(chan promptRead, 1)
 	go func() {
-		line, err := readHidden(terminal)
+		line, err := readHidden(terminal, nil)
 		answer <- promptRead{line, err}
 	}()
 	awaitEchoOff(t, terminal)
@@ -282,18 +282,20 @@ func TestPromptRefusesAPasteCutShortByAHangUp(t *testing.T) {
 			consumed, hungUp := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			read := 0
-			readTerminal = func(fd int, buf []byte) (int, error) {
+			readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
+				n, err := real(fd, wake, buf, timeout)
+				if n > 0 {
+					read += n
+				}
 				if read >= len(tc.paste) {
 					once.Do(func() { close(consumed) })
 					<-hungUp
 				}
-				n, err := real(fd, buf)
-				read += n
 				return n, err
 			}
 			answer := make(chan promptRead, 1)
 			go func() {
-				line, err := readHidden(terminal)
+				line, err := readHidden(terminal, nil)
 				answer <- promptRead{line, err}
 			}()
 			awaitEchoOff(t, terminal)
@@ -327,7 +329,7 @@ func TestPromptSignalHelper(t *testing.T) {
 	if os.Getenv("AGENT_SECRETS_PROMPT_HELPER") == "" {
 		t.Skip("subprocess helper")
 	}
-	_, err := readHidden(0)
+	_, err := readHidden(0, nil)
 	fmt.Printf("RETURNED %v\n", err)
 }
 

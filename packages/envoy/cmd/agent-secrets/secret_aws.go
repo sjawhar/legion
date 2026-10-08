@@ -56,7 +56,7 @@ var awsClients = func(ctx context.Context, profile, region string) (secretsAPI, 
 // ssoRole matches a person's Identity Center sign-in and captures (account, session name). The
 // deployment repository's Identity Center permission sets map the session name to the person's
 // userName, which is their email.
-var ssoRole = regexp.MustCompile(`^arn:aws:sts::([0-9]{12}):assumed-role/AWSReservedSSO_[^/]+/(.+)$`)
+var ssoRole = regexp.MustCompile(`^arn:aws[a-z-]*:sts::([0-9]{12}):assumed-role/AWSReservedSSO_[^/]+/(.+)$`)
 
 // requireAccount refuses, before any read or write, a sign-in in an account other than the
 // broker's, naming both accounts: a read there would list another account's secrets as if they

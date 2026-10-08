@@ -79,6 +79,7 @@ const (
 	exitDenied      = 77  // the request was denied; nothing was run
 	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
 	exitNotFound    = 127 // the command `register --exec` was given was not found
+	exitHangup      = 129 // the value prompt received SIGHUP: the terminal is restored and the process ends by SIGHUP; nothing was written
 	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
 	exitQuit        = 131 // `secret create` or `secret set` quit (Ctrl-\) at the value prompt: the process ends by SIGQUIT, which a shell's $? reads as 131; nothing was written
 	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
@@ -125,20 +126,6 @@ var commands = []command{
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
-	{"secret list", "agent-secrets secret list [--json] [--profile P]",
-		"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."},
-	{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
-		"Print the agent secret NAME's owner, tier, dates and versions, never its value."},
-	{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",
-		"Create the agent secret NAME under your own AWS sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."},
-	{"secret set", "agent-secrets secret set NAME [--profile P]",
-		"Give the agent secret NAME a new value under your own AWS sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."},
-	{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--profile P]",
-		"Change the agent secret NAME's owner, tier or both under your own AWS sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."},
-	{"secret delete", "agent-secrets secret delete NAME [--profile P]",
-		"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own AWS\nsign-in, then ask the broker to stop serving it at once."},
-	{"secret restore", "agent-secrets secret restore NAME [--profile P]",
-		"Cancel the agent secret NAME's scheduled deletion under your own AWS sign-in, then ask\nthe broker to serve it again at once."},
 	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]",
 		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted."},
 }
@@ -166,8 +153,8 @@ environment:
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
-secret create and set end by the signal when interrupted (Ctrl-C), quit (Ctrl-\) or terminated at
-the value prompt, which a shell's $? reads as 130, 131 or 143
+secret create and set end by the signal on hang-up (SIGHUP), interrupt (Ctrl-C), quit (Ctrl-\)
+or termination (SIGTERM) at the value prompt: a shell reports 129, 130, 131 or 143
 `
 
 func main() {

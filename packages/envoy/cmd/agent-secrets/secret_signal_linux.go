@@ -1,10 +1,9 @@
-//go:build linux
+//go:build linux && (amd64 || arm64)
 
 package main
 
 import (
 	"fmt"
-	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
@@ -38,15 +37,32 @@ func sigaction(sig syscall.Signal, act, old *linuxSigaction) error {
 	return nil
 }
 
+// promptSignalIgnored reads the kernel disposition, including SIG_IGN inherited
+// for job-control signals that os/signal's runtime bookkeeping does not record.
+func promptSignalIgnored(sig syscall.Signal) (bool, error) {
+	var old linuxSigaction
+	if err := sigaction(sig, nil, &old); err != nil {
+		return false, fmt.Errorf("read the handler of %s: %w", sig, err)
+	}
+	return old.handler == 1, nil // SIG_IGN
+}
+
+func preventCoreDumps() error {
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("turn core dumps off: %w", err)
+	}
+	return nil
+}
+
 // stopBy stops the process by the job-control signal sig at its default action, and returns once
-// SIGCONT resumes it, with sig still delivered to signals. It sends sig to the calling thread
+// SIGCONT resumes it, with its handler restored. It sends sig to the calling thread
 // alone, so the stop takes effect as that thread returns from the call, before any more of the
 // prompt runs. Go's runtime leaves these signals at its own ignoring default even after
 // signal.Reset, so stopBy installs SIG_DFL itself, and puts back the handler it replaced
 // directly: making sig ignored on the way back, as signal.Ignore does, would discard a stop still
 // pending on another thread. In an orphaned process group the kernel discards the stop, and the
 // prompt goes on reading.
-func stopBy(sig syscall.Signal, _ chan<- os.Signal) error {
+func stopBy(sig syscall.Signal) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	var dfl, old linuxSigaction
@@ -63,14 +79,9 @@ func stopBy(sig syscall.Signal, _ chan<- os.Signal) error {
 	return nil
 }
 
-// quitWithoutCore makes the process one the kernel writes no core of, whatever its core limit or
-// core pattern says, and sets SIGQUIT to its default action, so a SIGQUIT sent next ends the
-// process by that signal rather than by Go's own SIGQUIT handler, which writes every goroutine's
-// stack and exits 2.
+// quitWithoutCore selects the kernel's SIGQUIT action instead of Go's stack dump.
+// Core dumps have already been disabled before reading the value.
 func quitWithoutCore() error {
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
-		return fmt.Errorf("turn core dumps off: %w", err)
-	}
 	var dfl linuxSigaction
 	if err := sigaction(syscall.SIGQUIT, &dfl, nil); err != nil {
 		return fmt.Errorf("set SIG_DFL for %s: %w", syscall.SIGQUIT, err)

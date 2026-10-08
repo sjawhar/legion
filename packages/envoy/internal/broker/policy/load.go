@@ -62,6 +62,11 @@ var slugPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
 // emailPattern is an owner tag naming a person: their lowercase email, as their sign-in names them.
 var emailPattern = regexp.MustCompile(`^[a-z0-9._%+'-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$`)
 
+// ValidPersonOwner reports whether an owner tag names a person by lowercase email.
+func ValidPersonOwner(owner string) bool {
+	return emailPattern.MatchString(owner)
+}
+
 // keyARNPattern is a KMS key's ARN, whose last segment is the key id.
 var keyARNPattern = regexp.MustCompile(`^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$`)
 
@@ -249,7 +254,7 @@ func (l Loader) secret(ctx context.Context, slug string, ls listing, keys *keyId
 	switch {
 	case s.Owner == OwnerShared:
 		s.kind = ownerShared
-	case emailPattern.MatchString(s.Owner):
+	case ValidPersonOwner(s.Owner):
 		s.kind = ownerPerson
 	case slices.Contains(l.Services, s.Owner):
 		s.kind = ownerService

@@ -9,4 +9,5 @@ const (
 	ioctlGetTermios      = unix.TCGETS  // read the terminal's settings
 	ioctlSetTermios      = unix.TCSETS  // set them, keeping its unread input
 	ioctlSetTermiosFlush = unix.TCSETSF // set them and discard its unread input
+	disabledControlByte  = 0            // Linux's _POSIX_VDISABLE
 )

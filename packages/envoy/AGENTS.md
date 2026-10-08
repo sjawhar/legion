@@ -1980,35 +1980,47 @@ in that account, not the broker, decides what the person may read or write; it n
 identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
 account than the key's, naming both (`requireAccount`, so a read never lists another account's
 secrets as if they were the agent secrets), and a write also refuses any ARN but
-`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN),
-so a machine's role writes nothing. `--owner me` is that session name lowercased, the person's
-Identity Center user name. `create` and `set` check the sign-in before they read the value: at a
-terminal they prompt on stderr and read one line with echo off (`readHidden`,
-`secret_prompt_unix.go`: byte by byte with canonical mode off, so no line limit cuts it; Enter or
-the terminal's end-of-file character ends it; VWERASE drops the preceding word, and every other
-control byte below 0x20 outside a paste is a usage error naming the byte and the pipe command; it
-turns bracketed paste on and reads a bracketed paste through its end however far apart its writes
-arrive, and on a terminal that does not bracket pastes takes input within 200 ms after the line as
-the paste's rest; any but line endings after the line is a paste of more than one line, refused
-with exit 2; a hang-up outside a paste returns `errValueCutShort`, and one inside a bracketed paste
-returns `errMoreThanOneLine`, else `errPasteCutShort`, never what was read; every return, and
-SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGTTIN or SIGTTOU unless inherited as ignored, turns bracketed
-paste off and puts the terminal back with the flushing set call, so nothing typed at the prompt
-reaches the shell. SIGINT/SIGQUIT/SIGTERM then re-raise themselves, so the process dies by the
-signal and a shell reads $? as 130, 131 or 143, an exit only if that fails; SIGQUIT is set to its
-default action first, since Go's own handler dumps every goroutine and exits 2, and the process is
-made one the kernel writes no core of, since a core would hold what was typed (`quitWithoutCore`:
-`PR_SET_DUMPABLE` 0 on Linux, a core limit of 0 on macOS). A job-control signal stops the process
-at its default action (`stopBy`), which Go's runtime otherwise leaves ignoring these signals; on
-Linux it is sent to the watcher's own thread with `tgkill` under `runtime.LockOSThread`, so the
-stop takes effect before any more of the prompt runs, and Go's handler is put back with the saved
-action, never through `signal.Ignore`, whose SIG_IGN discards a stop still pending. macOS sends it
-to the process and puts the handler back with `signal.Ignore` then `signal.Notify`, correct only
-if the stop takes effect before `kill` returns, which no Darwin run has shown. On SIGCONT the
-watcher rehides the terminal and turns bracketed paste back on. No test holds a stop at a real
-`bash -i`: a test's process group is orphaned, and the kernel discards its stop;
-`TestPromptQuitEndsTheProcessBySIGQUITWithNoCore` holds the quit), elsewhere all of stdin
-less one trailing newline, and an empty value is a usage error.
+`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
+in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
+before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
+`create` and `set` check the sign-in before they read the value: at a terminal they prompt on
+stderr and read one line with echo off (`readHidden`, `secret_prompt_unix.go`). Canonical mode is
+off, so no terminal line limit cuts the value. Enter or the terminal's end-of-file character ends
+it; erase, word erase and kill edit it. An unhandled control byte is refused, inside bracketed
+pastes too. The reader records the error, discards through the line ending (and through a
+bracketed paste's closing mark), then drains the post-line quiet window before returning it.
+The prompt enables bracketed paste and reads each such paste through its end, however far apart
+its writes arrive. Without brackets, it drains through 200 ms of quiet after the line, for at most
+10 seconds. Anything but line endings after the first line is refused with exit 2. Bytes arriving
+after that bounded drain can reach the shell; multi-line values should be piped, not pasted.
+A terminal hang-up before the line or paste ends returns an error, never a partial value.
+Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 values are usage errors
+on either path.
+
+The reader alone changes the terminal, including its final flushing restore and bracketed-paste
+disable. It joins the signal watcher before restoring, and does not restore a terminal another
+process group owns. The watcher handles SIGINT, SIGQUIT, SIGTERM, SIGHUP and SIGTSTP; signals whose
+kernel disposition is SIG_IGN remain ignored. Their tty control characters are disabled and
+consumed by the reader instead, since even an ignored tty signal would flush unread input.
+SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. On SIGTSTP,
+`stopBy` re-raises the stop and the watcher sends the reader a resume token without touching the
+terminal. The reader reapplies its current mode on resume or EINTR; one poll waits for input or a
+watcher event and also times the quiet window. Reads never block. NOFLSH is cleared: leaving
+unread secret bytes in the tty queue at a stop would let bash read them. The kernel reports no
+count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
+stays hidden only to discard the remaining line, then exits 2 and names the command to run again
+with the whole value. No partial value is returned or stored. An interactive shell restores its
+own terminal while the job is stopped. On Linux the stop is sent to the watcher's own thread with
+`tgkill` under `runtime.LockOSThread`, with SIG_DFL installed and the saved action restored.
+Darwin sends the stop to the process and reinstalls Go's handler through `signal.Ignore` and
+`signal.Notify`; its stop/resume behavior remains unverified on Darwin.
+After a terminating signal the reader restores, then re-raises it: SIGHUP, SIGINT, SIGQUIT and
+SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the kernel default, not Go's
+goroutine dump. Core dumps are disabled once, before the first value byte is read, for the rest
+of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
+`secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, ignored
+SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal restoration.
+
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a

@@ -4,7 +4,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"os/signal"
 	"syscall"
 	"unsafe"
@@ -22,6 +21,29 @@ type darwinSigaction struct {
 	flags   int32
 }
 
+// Darwin answers sigaction queries with struct sigaction, without the input
+// structure's trampoline field.
+type darwinOldSigaction struct {
+	handler uintptr
+	mask    uint32
+	flags   int32
+}
+
+func promptSignalIgnored(sig syscall.Signal) (bool, error) {
+	var old darwinOldSigaction
+	if _, _, errno := unix.Syscall(unix.SYS_SIGACTION, uintptr(sig), 0, uintptr(unsafe.Pointer(&old))); errno != 0 {
+		return false, fmt.Errorf("read the handler of %s: %w", sig, errno)
+	}
+	return old.handler == 1, nil // SIG_IGN
+}
+
+func preventCoreDumps() error {
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
+		return fmt.Errorf("turn core dumps off: %w", err)
+	}
+	return nil
+}
+
 // setDefaultAction sets sig to its default action.
 func setDefaultAction(sig syscall.Signal) error {
 	var dfl darwinSigaction // handler 0 is SIG_DFL.
@@ -32,32 +54,26 @@ func setDefaultAction(sig syscall.Signal) error {
 }
 
 // stopBy stops the process by the job-control signal sig at its default action, and returns once
-// SIGCONT resumes it, with sig delivered to signals again. Go's runtime leaves these signals at its
-// own ignoring default even after signal.Reset, so stopBy installs SIG_DFL itself. Darwin has no
-// call that sends a signal to one thread of a process here, so stopBy sends sig to the process,
-// then puts Go's handler back through os/signal: signal.Ignore clears the runtime's record that
-// its handler is installed, so the signal.Notify after it installs the handler again. That
-// signal.Ignore discards a stop still pending, so the order holds only if Darwin stops the
-// process before kill returns to its caller. Unverified: this has run on no Darwin machine.
-func stopBy(sig syscall.Signal, signals chan<- os.Signal) error {
+// SIGCONT resumes it. Go's runtime leaves this signal at its own ignoring default
+// even after signal.Reset, so stopBy installs SIG_DFL itself. Darwin sends the
+// signal to the process; signal.Ignore clears the runtime's handler bookkeeping
+// so the watcher's subsequent signal.Notify reinstalls Go's handler. That Ignore
+// discards a pending stop, so this relies on Darwin stopping before kill returns.
+// The Darwin stop/resume path has not been exercised on a Darwin machine.
+func stopBy(sig syscall.Signal) error {
 	if err := setDefaultAction(sig); err != nil {
 		return err
 	}
 	stopErr := unix.Kill(unix.Getpid(), sig)
 	signal.Ignore(sig)
-	signal.Notify(signals, sig)
 	if stopErr != nil {
 		return fmt.Errorf("stop by %s: %w", sig, stopErr)
 	}
 	return nil
 }
 
-// quitWithoutCore sets the process's core limit to 0, so the kernel writes no core of it, and sets
-// SIGQUIT to its default action, so a SIGQUIT sent next ends the process by that signal rather than
-// by Go's own SIGQUIT handler, which writes every goroutine's stack and exits 2.
+// quitWithoutCore selects the kernel's SIGQUIT action instead of Go's stack dump.
+// Core dumps have already been disabled before reading the value.
 func quitWithoutCore() error {
-	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
-		return fmt.Errorf("turn core dumps off: %w", err)
-	}
 	return setDefaultAction(syscall.SIGQUIT)
 }
