@@ -13,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -176,6 +178,22 @@ func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 	}
 }
 
+// checkDaemonModeLine fails the test unless line is the not-registered line of a daemon that launches
+// its own controller: the operator's text leading this mode's remedy, the mode, and the state of the
+// controller's claim as the store holds it, which is never a live controller's (empty before the
+// daemon has created the claim).
+func checkDaemonModeLine(t *testing.T, line map[string]any) {
+	t.Helper()
+	msg, _ := line["msg"].(string)
+	state, isString := line["claimState"].(string)
+	live := state == string(supervise.StateReady) || state == string(supervise.StateWorking) || state == string(supervise.StateIdle)
+	if !strings.HasPrefix(msg, notRegisteredLine) || !strings.Contains(msg, "controller: operator") ||
+		line["mode"] != string(config.ControllerLaunchDaemon) || !isString || live {
+		t.Errorf("the not-registered line = %v, want %q leading a remedy naming controller: operator, mode daemon, and the state of a claim that is not live",
+			line, notRegisteredLine)
+	}
+}
+
 // Under `controller: daemon` the daemon launches the controller itself, and the same sweep watches
 // it on the same cadence: while its launch has not registered, or the Envoy role registry says the
 // session it registered is gone (a launch that died, its claim relaunching or waiting out the
@@ -254,12 +272,7 @@ func TestTheDaemonSaysWhenItsOwnControllerIsNotRegistered(t *testing.T) {
 				t.Fatalf("%q was logged %d times over many sweeps, want %d\n%s", notRegisteredLine, len(warns), tc.wantWarn, logs.String())
 			}
 			for _, line := range warns {
-				msg, _ := line["msg"].(string)
-				if !strings.HasPrefix(msg, notRegisteredLine) || !strings.Contains(msg, "controller: operator") ||
-					line["mode"] != string(config.ControllerLaunchDaemon) || line["claimState"] != string(supervise.StateLaunching) {
-					t.Errorf("the not-registered line = %v, want %q leading a remedy naming controller: operator, mode daemon, and the claim launching",
-						line, notRegisteredLine)
-				}
+				checkDaemonModeLine(t, line)
 			}
 			noHolder := loggedLines(t, logs.String(), noHolderLine)
 			if tc.wantNoHolder != (len(noHolder) >= 3) || !tc.wantNoHolder && len(noHolder) > 0 {
@@ -271,5 +284,61 @@ func TestTheDaemonSaysWhenItsOwnControllerIsNotRegistered(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// stalledLaunches is a runtime whose launches of the controller do not return until release closes,
+// as a launch whose Sandbox never shows its pod waits out its bound, holding the controller's
+// machine all the while. started is set once such a launch has begun.
+type stalledLaunches struct {
+	*fake.Runtime
+	started *atomic.Bool
+	release chan struct{}
+}
+
+func (r stalledLaunches) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	if spec.Role == claim.RoleController {
+		r.started.Store(true)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return runtime.Locator{}, ctx.Err()
+		}
+	}
+	return r.Runtime.Spawn(ctx, spec)
+}
+
+// The sweep never waits on the controller's launch: while a launch of the daemon's own controller
+// hangs, holding its machine, the daemon still says on its cadence that no controller is registered.
+// The machines' timers never fire here (stillClock), so a short worker boot timeout spaces the line
+// a few sweeps apart and nothing else; one line after the launch began shows the sweep did not wait.
+func TestTheDaemonSaysItsControllerIsNotRegisteredWhileItsLaunchHangs(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	cfg.WorkerBootTimeout = 100 * time.Millisecond
+	envoy, _ := envoyRoleRegistry(t, "ses_controller", false)
+	cfg.EnvoyURL = envoy.URL
+	stalled := stalledLaunches{Runtime: fake.NewRuntime(), started: &atomic.Bool{}, release: make(chan struct{})}
+	o := fakeRuntime(stalled.Runtime, &built{})
+	build := o.runtime
+	o.runtime = func(ctx context.Context, conns runtime.Conns, address string, apps appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		if _, err := build(ctx, conns, address, apps, removable); err != nil {
+			return nil, err
+		}
+		return stalled, nil
+	}
+	o.orphanSweep = 20 * time.Millisecond
+	logs := &syncBuffer{}
+	startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
+	// Registered after the daemon's own cleanup, so it runs first and the launch returns before the
+	// daemon is stopped.
+	t.Cleanup(func() { close(stalled.release) })
+	testwait.Eventually(t, "the controller's launch to begin", stalled.started.Load)
+	mark := len(logs.String())
+	testwait.Eventually(t, "a not-registered line after the launch began", func() bool {
+		return strings.Contains(logs.String()[mark:], notRegisteredLine)
+	})
+	for _, line := range loggedLines(t, logs.String(), notRegisteredLine) {
+		checkDaemonModeLine(t, line)
 	}
 }
