@@ -15,7 +15,7 @@ import (
 )
 
 func (s *server) listArchitectureSources(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -80,17 +80,18 @@ func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
 	key := r.PathValue("key")
 	var input struct {
-		Repo   string `json:"repo"`
-		Branch string `json:"branch"`
+		Repo   string       `json:"repo"`
+		Branch string       `json:"branch"`
+		Actor  *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
 		return
 	}
 	owner, name, err := parseSourceRepo(input.Repo)
@@ -170,7 +171,16 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 // edges (graph_edges loses its component arms with them). Snapshots stay as
 // history.
 func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	var input struct {
+		Actor *model.Actor `json:"actor"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &input); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {
 		return
 	}
