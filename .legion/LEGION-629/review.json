@@ -1,0 +1,52 @@
+{
+  "codeHead": "e865b2c172791afc8bbac0cc1c5d558dc17316af",
+  "completed": "2026-10-08T10:51:19.82199994Z",
+  "critical": 0,
+  "escalatedToArchitect": [
+    "Spec-accepted but security-relevant: with the four pins gone, a repository .omp/config.yml setting compaction.remoteEndpoint (or memory.backend, images.urls.enabled) is honoured in a pod as acceptance 3 requires; measured on omp 18.6.0, compaction.methodOrder puts remote first and the remote call POSTs the conversation with the session model's apiKey as a bearer when the URL ends in /chat/completions. The only lever is the operator's overlay, and deploy/kubernetes/operator-route/overlay.yml pins none of the four.",
+    "dev.autoqa reads true on the pinned fork once PI_AUTO_QA=0 leaves the baseline (dev.autoqaConsent unset; default push endpoint a third party's), a Legion-wide default flip needing no repository file; the plan's §2 'default false' was measured with PI_AUTO_QA=0 still exported."
+  ],
+  "fastFollow": "docs/kubernetes.md:86 and worker.Dockerfile:23,450-451,456-457 still quote the pre-change lane and OK line (the Dockerfile lines deferred to the root PR per the architect); the image-guard section does not name the extensions=discovered refusal; WarmCodegraphIndex is an identity wrapper over warmCodegraphIndex with the doc split across both; Run's defer order relies on run() returning only after s.loop ended rather than declaring drainWarmUp before stop; runCodegraph signals the direct child, not its group.",
+  "forgeFacts": {
+    "ci": "Tests run 37757152711 (lint, typecheck, test) and PR Title 37757152603/37758033464/37763031865 all success at code head e865b2c1; Docs build success; the tester's handoff head 05c5498e carries skip-checks: true and the daemon reads checksVerdict green carried from the code head (read_record).",
+    "e2e": "E2E (implementer) and E2E (tester) lines both present in the PR body with surface, command, observation, head SHA and negative control; the tester's implementerProof.verdict is verified and its own proof array has 5 entries at e865b2c1.",
+    "threads": "0 review threads, 0 reviews on #1848 before this round (gh api graphql reviewThreads/reviews at 05c5498e)."
+  },
+  "important": 2,
+  "issue": "LEGION-629",
+  "keyFindings": [
+    {
+      "description": "The stale-lease takeover renames whatever is at the lease path. Two contenders that both judged the same stale lease (the design's own case: a SIGKILLed pod, six role containers relaunching together): A renames it aside and re-creates a fresh lease at attempt 1; B's rename then moves A's live lease aside (rename only fails ENOENT when the path is absent), B removes it and creates its own, and both run codegraph init/index on one workspace — the SQLite corruption lines 125-130 say this file exists to prevent. The comment at 216-217 ('the one step two contenders cannot both win') holds only while the path is empty between A's rename and A's create. Fix direction: verify the renamed-aside file is the one judged stale (os.SameFile against the stat at 246) and restore it otherwise, or serialize takeovers on a second O_EXCL marker (itself stale past warmLeaseStale), or renameat2 RENAME_EXCHANGE; whichever, a test that drives the interleaving deterministically.",
+      "file": "packages/daemon/internal/workspace/codegraph.go:253-263",
+      "severity": "important"
+    },
+    {
+      "description": "warmUpDrain (10 s) is reasoned against 'the launcher's 30 s stop grace', but a pod's launcher always runs with --stop-grace \u003cTerminationGrace\u003e = worker_stop_timeout_seconds, default 10 s (internal/runtime/sandbox/manifest.go:394, internal/config/config.go:179); the launcher's 30 s is only its unset fallback (internal/launcher/launcher.go:46-47). Worst case after the group SIGTERM: Grace 5 s + drainTimeout 1 s + warmUpDrain 10 s = 16 s \u003e 10 s, so the launcher SIGKILLs the shim with the lease still held — the failure the drain was added to prevent. The measured path is 0.12-0.30 s, so this is the bound and the comment, not an observed failure: bound the drain by the role's actual grace (Config carries Grace already) or set it under worker_stop_timeout - Grace - drainTimeout, and correct the comment.",
+      "file": "packages/daemon/internal/shim/shim.go:52-56,437",
+      "severity": "important"
+    },
+    {
+      "description": "A rename that fails ENOENT is read as 'another process took over' and the warm-up skips, but the holder releasing (os.Remove at 292) between the stat at 246 and the rename produces the same ENOENT with the lease free: one launch's warm-up is lost for nothing and the log line is false. Continue into the existing one retry instead, as the stat ENOENT branch at 247-248 does.",
+      "file": "packages/daemon/internal/workspace/codegraph.go:257-259",
+      "severity": "minor"
+    }
+  ],
+  "minor": 1,
+  "notProven": [
+    "Acceptance 2's daemon-launched figures (registration time, index time in a real issue pod) and acceptance 4's 'at the image build and from the daemon': in-pod proxies only; stage4a/stage4b on a devbox against an image built from this branch (plan §7); Worker Image runs only for PRs against main.",
+    "internal/runtime/sandbox/live_operator_test.go (e2e-tagged) and scripts/e2e/stage4b-sandbox-tree.sh edits ship blind (go vet -tags e2e only).",
+    "A build stopped ~5 s in can leave a database CodeGraph's next index wedges on (its watchdog at 60 s); the repair can take two launches (tester's observation).",
+    "Whether a repository's disabledExtensions can drop an explicit --extension root: the deep-review agent reports it cannot on the pinned binary (package-name and path forms), unverified by the reviewer."
+  ],
+  "phase": "review",
+  "planDepartures": "Departure 1 (fence test rewritten as TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands rather than deleted) reviewed against the plan's design, which the architect approved; departure 2 (profile unlinks pi-envoy/pi-legion) is the measured consequence of the spec's explicit roots and leaves acceptance unchanged.",
+  "reviewedHead": "05c5498e445301cdb70a9cc3126e9292a0967694",
+  "round": 1,
+  "schemaVersion": 1,
+  "thermonuclear": {
+    "codeQuality": "found the lease takeover race (verified by the reviewer at codegraph.go:253-263); the rest cleanup, batched into the Fast-follow line.",
+    "deepReview": "two spec-level security consequences (self-posting endpoints and dev.autoqa default) escalated to the architect, not findings against the diff; three Low items, one taken as a finding (the drain bound), one folded into the lease finding (rename ENOENT), one hardening (WaitGroup Add after Run returned, no panic since Wait on a zero counter returns at once); lease, shim lifecycle, publisher parsing, OK-line marks, --warm-codegraph wiring, Dockerfile unlinking and the jj-tracking hazard cleared.",
+    "head": "05c5498e445301cdb70a9cc3126e9292a0967694"
+  },
+  "verdict": "changes_requested"
+}
