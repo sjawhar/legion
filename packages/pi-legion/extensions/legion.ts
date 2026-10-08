@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { LegionRole } from "@legion/contracts";
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
@@ -88,34 +87,6 @@ async function persistedTranscript(
   const agentId = path.basename(sessionFile, ".jsonl");
   if (!agentId) throw new Error("Legion session transcript has no agent id");
   return { sessionFile, agentId };
-}
-
-// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; a
-// sub-architect completes its phase through the `legion` tool, never bash: `legion handoff
-// complete` is refused ahead of this gate by the pane rules (PANE_RULES), in a sub-architect's pane
-// and a root architect's alike.
-// Allow bash only for a single `legion ...` invocation: no chaining outside a
-// quoted argument. This is a conservative character scan, not a shell parser --
-// it rejects some legitimate quoting it can't reason about (nested quotes,
-// escapes) rather than risk letting a chained command through.
-function isSingleLegionCommand(command: unknown): boolean {
-  if (typeof command !== "string") return false;
-  const trimmed = command.trim();
-  if (trimmed.length === 0) return false;
-  let quote: '"' | "'" | undefined;
-  for (const char of trimmed) {
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === "\n" || char === ";" || char === "&" || char === "|") return false;
-  }
-  if (quote !== undefined) return false;
-  return trimmed.split(/\s+/, 1)[0] === "legion";
 }
 
 // Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
@@ -221,8 +192,7 @@ function splitShellCommands(command: string): string[][] | undefined {
  * `legion` is not followed by `push`, the second is), and neither looks only at words[0], so a
  * prefix before the command name (`time`, `timeout 600`, an env assignment such as `FOO=1`, a
  * leading `!` or `if`, which splitShellCommands's naive split leaves attached ahead of a `;`)
- * never hides it. Shared by jjLogRewriteInvocation, isPushInvocation, and the handoff-complete
- * rule's own invocation matcher. */
+ * never hides it. Shared by jjLogRewriteInvocation and isPushInvocation. */
 function commandMatch(words: readonly string[], name: string, sequence: readonly string[]): number {
   for (let index = 0; index < words.length; index += 1) {
     const word = words[index];
@@ -289,37 +259,11 @@ const JJ_LOG_REWRITE: PaneRule = {
     'architect the `jj -R "$LEGION_WORKSPACE" log` evidence.',
 };
 
-// A worker completes its phase with the `legion` tool's `handoff_complete`
-// (src/handoff-actions.ts), and the phase stall (src/phase-stall.ts) closes only on
-// that call: the same command run from the pane's shell would complete the phase where the stall
-// cannot see it and draw a follow-up asking the worker to complete again. Only `complete` is
-// refused: `legion handoff write` and `read` from the shell leave no phase open, and the shell can
-// pipe a handoff too large for one argv string to `legion handoff write` on stdin. `legion`,
-// `handoff` and `complete` separated only by whitespace, quotes, and argv-list punctuation, so
-// `["legion", "handoff", "complete"]` counts and a path through `legion/handoff` does not.
-const LEGION_HANDOFF_COMPLETE_MENTION = /\blegion[\s"'`,[\]]+handoff[\s"'`,[\]]+complete\b/;
-
-const LEGION_HANDOFF_COMPLETE: PaneRule = {
-  mention: (text) =>
-    LEGION_HANDOFF_COMPLETE_MENTION.test(text) ? "legion handoff complete" : undefined,
-  // Both CLIs take `handoff` straight after the program and `complete` straight after `handoff`.
-  invocation: (words) => {
-    const legion = commandMatch(words, "legion", ["handoff", "complete"]);
-    return legion === -1 ? undefined : words.slice(legion).join(" ");
-  },
-  refusal: (attempt) =>
-    `refused \`${attempt}\`: a phase is completed with the \`legion\` tool's ` +
-    "`handoff_complete`, never a shell command: the tool call is what records the phase " +
-    "complete. A root architect or a `task` subagent has no handoff actions: it leaves the " +
-    "completion to the worker. Text that only names the command (a commit message, a PR body) " +
-    "reads as the command: pass it in a file.",
-};
-
-/** The rules a pane in an issue workspace is held to, ahead of every role gate, so that they bind
- * a `task` subagent too: it runs in that pane, against that workspace. Every issue workspace is a
- * jj workspace of one clone, sharing its operation log, and every tree pane -- a phase worker's, a
- * sub-architect's, a root architect's -- has one. */
-const TREE_PANE_RULES: readonly PaneRule[] = [JJ_LOG_REWRITE, LEGION_HANDOFF_COMPLETE];
+/** The rules a pane in an issue workspace is held to, judged from the pane environment so that
+ * they bind a `task` subagent too: it runs in that pane, against that workspace. Every issue
+ * workspace is a jj workspace of one clone, sharing its operation log, and every tree pane -- a
+ * phase worker's, a sub-architect's, a root architect's -- has one. */
+const TREE_PANE_RULES: readonly PaneRule[] = [JJ_LOG_REWRITE];
 
 /** The rules each kind of Legion pane is held to. The controller has no issue workspace. */
 const PANE_RULES: Readonly<Partial<Record<LegionSessionKind["kind"], readonly PaneRule[]>>> = {
@@ -373,18 +317,15 @@ function unwrapReadHeader(path: string): string {
   return target;
 }
 
-/** The target a `write` path names, as Oh My Pi's `write` tool reads it before it routes: the
- * path inside a pasted `read` header, and then the `conflict://` URL alone when a prefix stands
- * before it (`recoverConflictUriPrefix`), which writes a workspace file whatever the prefix. */
-function writeTarget(path: string): string {
-  const unwrapped = unwrapReadHeader(path);
-  return PREFIXED_CONFLICT_URL.exec(unwrapped)?.[2] ?? unwrapped;
-}
-
-/** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. */
+/** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. The
+ * target is read as Oh My Pi's `write` routes it: the path inside a pasted `read` header, then
+ * the `conflict://` URL alone when a prefix stands before it (`recoverConflictUriPrefix`), which
+ * writes a workspace file whatever the prefix. */
 function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
   if (toolCall.toolName !== "write" || typeof toolCall.input.path !== "string") return undefined;
-  return NON_FILE_WRITE_URL.exec(writeTarget(toolCall.input.path))?.[1]?.toLowerCase();
+  const unwrapped = unwrapReadHeader(toolCall.input.path);
+  const target = PREFIXED_CONFLICT_URL.exec(unwrapped)?.[2] ?? unwrapped;
+  return NON_FILE_WRITE_URL.exec(target)?.[1]?.toLowerCase();
 }
 
 /** The refusal for the first of `rules` a tool call breaks, or undefined. commands is bash's own
@@ -445,21 +386,6 @@ function envoyPluginRefusal(): string | undefined {
       return `Legion plugin at ${import.meta.url} needs @sjawhar/pi-envoy at interface version ${reading.expected}, found version ${reading.found} from ${reading.from}; install the @sjawhar/pi-envoy released with this @sjawhar/pi-legion`;
   }
 }
-
-/** Code-mutation tools, blocked for each role `CODE_TOOL_REFUSAL` names. `write` here means a real
- * filesystem write: a `write` into Oh My Pi (`nonFileWriteScheme`) passes the gate for every role,
- * since a gated role messages and cancels the subagents it launches this way. `task` is
- * deliberately absent: every Legion role may launch `task` subagents. */
-const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
-
-/** Why each gated role is refused a code-mutation tool. A role absent here mutates code freely;
- * `architect` covers a root architect and a sub-architect alike, and is the one role whose `bash`
- * is held to the same refusal (every command but a single `legion` one). */
-export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = {
-  architect: "the architect delegates all code work to phase workers",
-  reviewer: "the reviewer edits no code; its only commits are its review handoffs, made via bash",
-  merger: "the merger only verifies and reports",
-};
 
 export default function legionExtension(pi: PiApi): void {
   // One instance per session (a `task` subagent gets its own). The id ties every hook log line
@@ -586,12 +512,10 @@ export default function legionExtension(pi: PiApi): void {
       toolName: toolCall.toolName,
     });
     // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of
-    // one clone), and a `task` subagent's bash runs in the same pane against it; a subagent has no
-    // `legion` tool, so a handoff from its bash is one the phase stall cannot see. The pane rules
-    // are therefore judged from the pane's environment ahead of the subagent exemption below --
-    // the one gate that reaches a subagent -- and before any grant is minted. Classified once per
-    // instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the handler,
-    // never at load.
+    // one clone), and a `task` subagent's bash runs in the same pane against it, so the pane rule
+    // is judged from the pane's environment ahead of the subagent exemption below and before any
+    // grant is minted. Classified once per instance, on the first call: a throw for a malformed
+    // LEGION_ROLE stays inside the handler, never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
     const commands =
       toolCall.toolName === "bash" && typeof toolCall.input.command === "string"
@@ -599,28 +523,12 @@ export default function legionExtension(pi: PiApi): void {
         : undefined;
     const refusal = paneRuleRefusal(toolCall, paneRules, commands);
     if (refusal !== undefined) return { block: true, reason: refusal };
-    // No other gate applies to a subagent's own tool calls: the role gates below bind the session
-    // that holds the claim, and a subagent shares its parent's identity and claims no role (see
+    // A subagent's own tool calls mint no grant: the grant minting below binds the session that
+    // holds the claim, and a subagent shares its parent's identity and claims no role (see
     // isSubagentSession). Every role may launch one with `task`.
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
-    const codeToolRefusal = active === undefined ? undefined : CODE_TOOL_REFUSAL[active.role];
-    const mutatesCode =
-      CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
-      (active?.role === "architect" &&
-        toolCall.toolName === "bash" &&
-        !isSingleLegionCommand(toolCall.input.command));
-    // A `write` into Oh My Pi (a tool device, an agent message, job control) is not a file
-    // mutation. Short-circuit it out of the mutation gate so the architect/reviewer/merger role
-    // checks apply only to real file writes.
-    if (
-      codeToolRefusal !== undefined &&
-      mutatesCode &&
-      nonFileWriteScheme(toolCall) === undefined
-    ) {
-      return { block: true, reason: codeToolRefusal };
-    }
     if (!needsGrant(toolCall)) return undefined;
     // The shared wrapper mints through the caller's client, then writes the grant to the pane's
     // `LEGION_GRANT_FILE`, which `legion` reads ahead of `LEGION_GRANT`. The host writes a hook's

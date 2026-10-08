@@ -56,7 +56,7 @@ export const HANDOFF_DESCRIPTION =
   "in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
 /** Why a root architect, which runs no phase, cannot call a handoff action, and the one route it
- * has: its bash admits a single `legion` command, so it reads handoffs with `legion handoff read`. */
+ * has: it reads committed handoffs with `legion handoff read` from bash. */
 export function rootArchitectHandoffRefusal(operation: string): string {
   return `${operation} is not available to a root architect session; a root architect reads handoffs with \`legion handoff read [--phase <phase>]\` from bash`;
 }

@@ -52,3 +52,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   a Legion skill into the `dispatch` skill are `skill://dispatch/...`, which resolve once both plugins
   are installed. Install both into the daemon's Oh My Pi profile:
   `omp plugin install @sjawhar/pi-envoy && omp plugin install @sjawhar/pi-legion`.
+
+### Removed
+
+- The extension's role gate — the architect's bash restriction to a single `legion` command, and
+  the architect's, reviewer's and merger's refusal of `edit`, `write` and `apply_patch` — and the
+  shell refusal of `legion handoff complete` are removed (LEGION-630). No role is refused a tool:
+  the role prompts alone say who edits what, and the operation-log rule (`jj undo`, `jj abandon`,
+  `jj op restore|revert|abandon|undo` refused in every tree pane and its `task` subagents) stays.
+  `legion.daemonApiVersion` is unchanged.
