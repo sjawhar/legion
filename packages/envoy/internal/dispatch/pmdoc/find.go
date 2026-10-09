@@ -866,6 +866,9 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 	if !markTypes[mark.Type] {
 		return fmt.Errorf("%w: mark %q", ErrSchema, mark.Type)
 	}
+	if err := attrNestingError("mark", mark.Type, mark.Attrs, maxMarkAttrNesting); err != nil {
+		return err
+	}
 
 	spans, err := yTextRanges(frag)
 	if err != nil {

@@ -727,7 +727,7 @@ describe("the pod-watch-verdict checkpoint's matching", () => {
         })
         .join("")
     );
-    const out = runScript(`work=${JSON.stringify(evidence)}
+    const out = runScript(`root=${JSON.stringify(root)} work=${JSON.stringify(evidence)}
 ${fn("never_scheduled_deaths")}
 ${fn("pod_watch_verdict")}
 pod_watch_verdict "$work/pod-watch.json" "$work/driver-actions.txt" "$work/daemon.log" >/dev/null || true

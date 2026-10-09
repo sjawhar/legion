@@ -72,6 +72,11 @@ legion start --config legion.yaml --check-config
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running
   the controller. Start it ([Start the controller](/legion/legion/running-legion/#start-the-controller)).
+- **The daemon logs `controller not registered; run legion controller start only under controller:
+  operator; this daemon launches its own controller and relaunches it`.** The controller the daemon
+  launches has not registered, or its session is gone. The line's `claimState` says where its claim
+  is: `launching` while a launch is in flight, `failed` or `retired` while the daemon waits to retry
+  it. For a launch that keeps failing, see "The daemon-launched controller keeps failing" below.
 - **`legion controller start` is refused: `this daemon launches the project's controller itself
   (controller: daemon), so legion controller start has none to start`.** The daemon runs its own
   controller as a pod; reach it through Dispatch instead.
