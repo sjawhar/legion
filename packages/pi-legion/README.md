@@ -17,8 +17,9 @@ pi-envoy").
 
 The Legion daemon's boot gate (`packages/daemon/internal/daemon/bootgate.go`) refuses to start
 unless the Oh My Pi a pane will run loads this plugin at the daemon's contract
-(`legion.daemonApiVersion` in `package.json`, currently 14) and loads `@sjawhar/pi-envoy` with it,
-so both go into the Oh My Pi profile the daemon's panes use:
+(`legion.daemonApiVersion` in this package's `package.json`, equal to `DaemonAPIVersion` in
+`packages/daemon/internal/api/version.go`) and loads `@sjawhar/pi-envoy` with it, so both go into
+the Oh My Pi profile the daemon's panes use:
 
 ```sh
 omp plugin install @sjawhar/pi-envoy && omp plugin install @sjawhar/pi-legion

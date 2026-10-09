@@ -1543,7 +1543,7 @@ fixture_markers() {
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
 # before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
-# (stage3-4b13b-acceptance.sh, pane-rule-phase-worker-and-stall) for a pod's session: a worker
+# (stage3-4b13b-acceptance.sh, phase-stall-follow-up) for a pod's session: a worker
 # stopped while its handoff_complete call runs leaves that call with no result and no `closed`
 # (LEGION-283), and a worker resumed from such a session may report the phase again.
 completion_verdict() {
@@ -3463,9 +3463,9 @@ until_true 300 "the controller's report message on $report" report_posted
 # last preceding message entry is an assistant message with stopReason `stop`, a turn that had
 # genuinely finished. A start turn that ends in an unretried error fails the check. The report's
 # call is the controller's first call that posts a dispatch_message on the report issue, by any of
-# the three ways Oh My Pi gives the model to call the tool (lib/omp-tool-calls.jq's calls): the
-# dispatch_message tool itself, a write to its xd://dispatch_message device, or eval code that calls
-# tool.dispatch_message(...).
+# the ways Oh My Pi gives the model to call the tool (lib/omp-tool-calls.jq's calls): the
+# dispatch_message tool itself, a write to its xd://dispatch_message device, eval code that calls
+# tool.dispatch_message(...), or eval code that calls the generic tool.write(...) naming that device.
 # Only the assistant's own calls count, so a tool result that quotes the tool's name (a skill
 # file) or a message on another issue is not the report's call.
 # report_after_tick succeeds when the report's call came on such a turn, and otherwise prints why.
@@ -3492,7 +3492,7 @@ report_after_tick() {
   case $verdicts in
   *tick*) return 0 ;;
   *busy*) echo "the controller's first report message was not posted on a turn a tick started while it was idle" ;;
-  *) echo "no session of the controller holds a call posting a dispatch_message on $report: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message" ;;
+  *) echo "no session of the controller holds a call posting a dispatch_message on $report: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write" ;;
   esac
   return 1
 }

@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -167,9 +168,9 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 	rt := fake.NewRuntime()
 	o := fakeRuntime(rt, &built{})
 	var probed runtime.Runtime
-	o.probe = func(_ context.Context, built runtime.Runtime) error {
+	o.probe = func(_ context.Context, built runtime.Runtime) (bootprobe.ImageReport, error) {
 		probed = built
-		return errors.New("worker image ghcr.io/sjawhar/legion-worker@sha256:aaaa refused: the plugin declares contract 3")
+		return bootprobe.ImageReport{}, errors.New("worker image ghcr.io/sjawhar/legion-worker@sha256:aaaa refused: the plugin declares contract 3")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

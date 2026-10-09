@@ -294,16 +294,16 @@ reviewer_commented() {
 # reviewer_completed ISSUE: the daemon recorded the reviewer's completion of the issue's open round.
 reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].workers.reviewer.handoffCommit // "") != ""' >/dev/null; }
 # approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
-# head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/, since
-# the Go daemon has no .legion/ deletion step before Stage 7. The merge then carries the run's
-# .legion/ handoffs and retro learnings onto the smoke main, and clean_smoke_main removes them.
+# head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/<issue>/,
+# which retro's last commit then removes. The merge carries the run's retro learnings onto the
+# smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
   local issue=$1
   send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo as your role says, taking the round's steps in the order it gives, and complete the reviewer handoff. This is the round's last review."
   until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
 }
-# The smoke repository's main is shared by every proof on this box, and a proof merge leaves its
-# .legion/ handoffs there until clean_smoke_main removes them. Another run's merge in that window
+# The smoke repository's main is shared by every proof on this box, and a proof merge leaves what it
+# carries there until clean_smoke_main removes it. Another run's merge in that window
 # adds the same paths with other content, and GitHub refuses it as a merge commit that cannot be
 # cleanly created, a failure that reads as a defect of whatever that run was proving.
 # hold_smoke_main takes an exclusive flock on one file per smoke repository, from the proof's
@@ -451,7 +451,7 @@ clean_smoke_main() {
     gh api -X DELETE "repos/$repo/contents/$path" -f message="proof fixture: remove $path" -f sha="$sha" -f branch="$branch" >/dev/null
   done <<<"$paths"
   url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
-    --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
+    --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: docs/solutions/ retro learnings, which each proof merge carries, and any .legion/ handoffs a merge from before retro removed them left. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
   smoke_cleanup_url=$url
   pr=${url##*/}
   timeout_hook=report_smoke_pr_merge_state

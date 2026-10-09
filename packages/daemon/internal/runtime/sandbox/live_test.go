@@ -72,6 +72,7 @@ var liveChecks = []liveCheck{
 	{"boot-refusal-negative", (*liveRig).checkBootRefusal, nil},
 	{"image-probe", (*liveRig).checkImageProbe, nil},
 	{"image-probe-negative", (*liveRig).checkImageProbeRefusal, nil},
+	{"image-probe-capability-negative", (*liveRig).checkImageProbeCapabilityRefusal, nil},
 	{"root-ready", (*liveRig).checkRootReady, nil},
 	{"gvisor", (*liveRig).checkGVisor, nil},
 	{"resources", (*liveRig).checkResources, nil},
@@ -750,23 +751,10 @@ func sameLocator(a, b runtime.Locator) bool {
 		(a.Sandbox == nil) == (b.Sandbox == nil) && (a.Sandbox == nil || *a.Sandbox == *b.Sandbox)
 }
 
-// startRuntime binds a fresh listener on the devbox's private address, builds a fresh runtime on
-// it and registers the runtime's launcher acceptor, as a daemon boot does (sandboxRuntime), with an
-// Observe feeding the run's observation record.
-func (r *liveRig) startRuntime() error {
-	if r.tokens.apps == nil {
-		if err := r.resolveApp(); err != nil {
-			return err
-		}
-	}
-	ctx, stop := context.WithCancel(r.ctx)
-	address := "tcp://" + r.env.streamHost + ":" + r.env.streamPort
-	ln, err := stream.Listen(ctx, address, r.reg.resolve, stream.Options{RPCTimeout: 30 * time.Second, Log: r.log})
-	if err != nil {
-		stop()
-		holder, _ := exec.Command("ss", "-Hltnp", "sport = :"+r.env.streamPort).CombinedOutput()
-		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
-	}
+// runtimeOptions are the Options every runtime of the run is built from, as a daemon boot builds
+// them: the operator's pod, the run's provider key, the stub agent, and the worker stream at
+// address, through ln.
+func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 	opts := Options{
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", IssueVolume: liveIssueVolume,
 		Resources: liveResources(),
@@ -786,6 +774,31 @@ func (r *liveRig) startRuntime() error {
 	if r.env.agentSecretsURL != "" {
 		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}
 	}
+	return opts
+}
+
+// streamAddress is the worker stream's address on the devbox's private address: every runtime of
+// the run is built on it, and every pod's shim dials it.
+func (r *liveRig) streamAddress() string { return "tcp://" + r.env.streamHost + ":" + r.env.streamPort }
+
+// startRuntime binds a fresh listener on the devbox's private address, builds a fresh runtime on
+// it and registers the runtime's launcher acceptor, as a daemon boot does (sandboxRuntime), with an
+// Observe feeding the run's observation record.
+func (r *liveRig) startRuntime() error {
+	if r.tokens.apps == nil {
+		if err := r.resolveApp(); err != nil {
+			return err
+		}
+	}
+	ctx, stop := context.WithCancel(r.ctx)
+	address := r.streamAddress()
+	ln, err := stream.Listen(ctx, address, r.reg.resolve, stream.Options{RPCTimeout: 30 * time.Second, Log: r.log})
+	if err != nil {
+		stop()
+		holder, _ := exec.Command("ss", "-Hltnp", "sport = :"+r.env.streamPort).CombinedOutput()
+		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
+	}
+	opts := r.runtimeOptions(address, ln)
 	rt, err := New(ctx, r.rc, opts)
 	if err != nil {
 		stop()

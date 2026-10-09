@@ -83,3 +83,15 @@ runtime:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
+
+# The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
+# capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets
+# broker (runtime.kubernetes.agent_secrets), model fallback (retry.modelFallback in the operator's
+# overlay, read by the image probe) and every role's reservation (resources above, which the
+# daemon's defaults fill for every role, so that row is present on every Kubernetes deployment). A
+# gap never stops the daemon; it is yours to close, or to decide here, by name and with the reason,
+# which the report then shows in the gap's place. This example configures no broker, so it decides
+# that one.
+capabilities:
+  decided:
+    secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"

@@ -39,12 +39,20 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		t.Cleanup(httpServer.Close)
 
 		peer := connectPeer(t, httpServer.URL, artifactID)
+		// The peer writes on the room's document, as a browser does once the room has sent it, so
+		// the chain's root always lands beside the seeded paragraph.
+		waitForPeerDocument(t, peer, "before\n")
 		fragment := peer.Doc.GetXmlFragment(fragmentName)
 		root := crdt.NewYXmlElement("blockquote")
-		opening, err := peer.Send(func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) })
-		if err != nil {
+		if _, err := peer.Send(func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) }); err != nil {
 			t.Fatalf("send the chain's root: %v", err)
 		}
+		// The delete is written on the peer's document as it stands here, holding the chain's root
+		// and the paragraph beside it but none of the chain, so the peer sends the same delete an
+		// ordinary client would and this test process does not walk the chain itself. The root's
+		// own update is not enough: it names the paragraph as the root's right origin, so a
+		// document holding that update alone parks the root and its delete deletes nothing.
+		opening := crdt.EncodeStateAsUpdateV1(peer.Doc, nil)
 		deepest := root
 		for grown := 1; grown < levels; {
 			batch := min(levelsPerUp, levels-grown)
@@ -59,24 +67,34 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 			}
 			grown += batch
 		}
+		// The room takes the peer's updates one at a time, in order, so it holds the whole chain
+		// once its clock for the peer's client reaches the peer's own. The delete's wait below
+		// then times the delete alone, not the batches still queued ahead of it.
+		client := peer.Doc.ClientID()
+		sent := peer.Doc.StateVector().Clock(client)
+		live := service.srv.GetDoc(artifactID)
 		waitFor(t, 30*time.Second, "the room to hold the nested chain", func() bool {
-			_, err := service.Text(context.Background(), artifactID)
-			return errors.Is(err, ErrDocSchema)
+			return live.StateVector().Clock(client) == sent
 		})
+		if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
+			t.Fatalf("the room holding the chain reads as %v, want %v", err, ErrDocSchema)
+		}
 
-		// The delete is written on a document holding the chain's root alone, so the peer sends
-		// the same delete an ordinary client would and this test process does not walk the chain
-		// itself.
 		deleter := crdt.New()
 		if err := crdt.ApplyUpdateV1(deleter, opening, nil); err != nil {
 			t.Fatalf("open the deleting document: %v", err)
 		}
 		deleterFragment := deleter.GetXmlFragment(fragmentName)
+		if held := deleterFragment.Len(); held != 2 {
+			t.Fatalf("the deleting document holds %d blocks, want the chain's root and the paragraph", held)
+		}
+		// ygo hands an observer an update for every transaction, one that changed nothing
+		// included, so the delete is checked by what it left.
 		deletion := docstest.Transact(deleter, func(txn *crdt.Transaction) {
 			deleterFragment.Delete(txn, 0, 1)
 		})
-		if deletion == nil {
-			t.Fatal("deleting the chain's root produced no update")
+		if held := deleterFragment.Len(); held != 1 {
+			t.Fatalf("deleting the chain's root left %d blocks, want the paragraph alone", held)
 		}
 		if err := peer.Write(ygsync.EncodeUpdate(deletion)); err != nil {
 			t.Fatalf("send the chain's delete: %v", err)

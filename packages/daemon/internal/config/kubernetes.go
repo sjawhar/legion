@@ -68,6 +68,15 @@ type Toleration struct{ Key, Operator, Value, Effect string }
 // the settled block holds every field (DefaultResources fills what the file leaves out).
 type RoleResources struct{ CPU, Memory string }
 
+// Reserved reports whether the role's pod reserves its CPU and memory and is bounded in both: CPU
+// and Memory each set, each the container's request and its limit. It is the resource-limits
+// capability's measure (capabilities.Deployment.RolesWithoutResources); a settled Kubernetes block
+// holds every role reserved, since DefaultResources fills what the file leaves out, and only a
+// Kubernetes value built without the loader (a test's) can report a role unreserved.
+func (r RoleResources) Reserved() bool {
+	return r.CPU != "" && r.Memory != ""
+}
+
 // defaultResources is each role's reservation when the file sets none: the roles that build and
 // test a change get the most, the roles that read and write get less, and the controller, which
 // runs alone in its pod, gets a pod of its own size. The image probe pod takes the controller's.

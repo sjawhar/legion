@@ -55,14 +55,26 @@ package api
 // issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
 // generation, with the incarnation `<pod uid>/<generation>`.
 //
-// 16: LEGION-632 -- each issue's pod is independent, on a volume of its own, so the pod's
+// 16: LEGION-578 -- api.State gains `capabilities`, the deployment's capability report
+// (capabilities.Deployment.Report): one row per capability of the table, each `present`,
+// `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`, an open row carrying the
+// legion.yaml line that records a decision. Never null, so a plugin built before it refuses the
+// state, and the bump is why the two never meet. (This branch first took 15; LEGION-462 landed at
+// 15 first, and pi-legion 8.3.0 declares it without `capabilities`, so a daemon at 15 would pass
+// the gate against a plugin whose strict reader refuses its state. Renumbered, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md says.)
+//
+// 17: LEGION-632 -- each issue's pod is independent, on a volume of its own, so the pod's
 // `workspace-init provision` container no longer carries `LEGION_REMOVABLE_WORKSPACES` (the
 // removable-workspaces pass is gone with the shared tree volume), nor
 // `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (no two provisions share a repository, so the flock
 // and its wait are gone), nor the `LEGION_ROLE` and `LEGION_GENERATION` that seeded that pass's
 // candidate rotation; and `LEGION_EXPECT_TREE_VOLUME` is now `LEGION_EXPECT_ISSUE_VOLUME`. An image
-// built before 16 acts on a contract this daemon no longer speaks: it looks for the old name and so
+// built before 17 acts on a contract this daemon no longer speaks: it looks for the old name and so
 // never learns the volume must already hold the clone, provisioning a lost volume afresh instead of
 // exiting 3, and runs a lock and a removal pass against variables nothing sets; the image probe
-// pairs the daemon with an image built from this contract instead.
-const DaemonAPIVersion = 16
+// pairs the daemon with an image built from this contract instead. (This branch first took 16;
+// LEGION-578 landed at 16 first, and pi-legion 8.4.1 declares it with `capabilities` but with the
+// init container's old environment, so a daemon at 16 would pass the gate against an image whose
+// `workspace-init` speaks the other contract. Renumbered, as the same learning says.)
+const DaemonAPIVersion = 17

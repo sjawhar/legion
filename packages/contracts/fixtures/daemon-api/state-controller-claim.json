@@ -48,5 +48,6 @@
     "external": true,
     "sessionId": "ses_controller",
     "registeredAt": "2026-10-06T18:01:41Z"
-  }
+  },
+  "capabilities": []
 }
