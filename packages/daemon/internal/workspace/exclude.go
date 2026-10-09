@@ -54,8 +54,12 @@ func CleanExclude(paths []string) ([]string, error) {
 // exclude names (CleanExclude's form): jj's patterns name only what a working copy includes, each
 // a path and everything below it, so a path is left out by naming every entry of each directory
 // above it but the one on its way down. The entries come from the commit's own tree in the shared
-// clone, so the list holds no path the revision lacks; a path the revision does not have leaves
-// nothing out. An excluded path below a file is no directory, and leaves that file in.
+// clone. The patterns always name the handoff directory, which an issue branch starts without
+// (ghbranch.Create cuts it from main with `.legion/` deleted): jj records no file outside them.
+//
+// It returns no patterns when no excluded path is in revision's tree (a path the revision lacks,
+// or one below a file), so the workspace checks out everything rather than going sparse for
+// nothing.
 //
 // The patterns are computed once, for the revision the workspace is created at: an entry a later
 // commit adds beside an excluded path is not checked out until the workspace's agent adds it
@@ -77,20 +81,28 @@ func sparseInclude(ctx context.Context, run Runner, cloneDir, revision string, e
 	}
 	slices.Sort(dirs)
 	var include []string
+	leftOut := false
 	for _, dir := range dirs {
 		entries, err := treeEntries(ctx, run, cloneDir, revision, dir)
 		if err != nil {
 			return nil, err
 		}
 		for _, entry := range entries {
-			if excluded[entry.path] || entry.tree && holding[entry.path] {
+			if excluded[entry.path] {
+				leftOut = true
+				continue
+			}
+			if entry.tree && holding[entry.path] {
 				continue
 			}
 			include = append(include, entry.path)
 		}
 	}
-	if len(include) == 0 {
-		return nil, fmt.Errorf("leaving out %s leaves nothing of commit %s in the workspace", strings.Join(exclude, ", "), revision)
+	if !leftOut {
+		return nil, nil
+	}
+	if !slices.Contains(include, handoffDir) {
+		include = append(include, handoffDir)
 	}
 	slices.Sort(include)
 	return include, nil

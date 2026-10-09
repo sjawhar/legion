@@ -145,6 +145,75 @@ func TestProvisionLeavesTheExcludedPathsOutOfANewWorkspace(t *testing.T) {
 	}
 }
 
+// pushIssueBranchWithoutHandoffs pushes legion/WIDGETS-42 to run's remote as main with its
+// `.legion/` deleted, the commit ghbranch.Create starts an issue branch on.
+func pushIssueBranchWithoutHandoffs(t *testing.T, run *recordingRunner) {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "work")
+	identity := []string{
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid",
+		"GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid",
+	}
+	runSetupWith(t, filepath.Dir(work), identity, "git", "clone", "--quiet", run.remote, work)
+	runSetupWith(t, work, identity, "git", "rm", "-r", "--quiet", handoffDir)
+	runSetupWith(t, work, identity, "git", "commit", "--quiet", "-m", "strip .legion")
+	runSetupWith(t, work, identity, "git", "push", "--quiet", "origin", "HEAD:refs/heads/legion/WIDGETS-42")
+}
+
+// An issue branch starts without `.legion/`, and the patterns still name it: a handoff written
+// there is part of the working copy's change, as on a workspace that checks out everything.
+func TestProvisionRecordsAHandoffOnAnIssueBranchWithoutHandoffs(t *testing.T) {
+	run := newLocalRunner(t)
+	pushTree(t, run, map[string]string{
+		"README.md":                 "widgets\n",
+		"tasks/t1/x.json":           "{}\n",
+		".legion/OTHER-1/plan.json": "{}\n",
+	})
+	pushIssueBranchWithoutHandoffs(t, run)
+	request := provisionRequest(t)
+	request.Exclude = []string{"tasks"}
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if parent := runSetup(t, workspace.Dir, "jj", "log", "-r", "@-", "--no-graph", "-T", "description.first_line()"); parent != "strip .legion" {
+		t.Fatalf("the workspace sits on %q, want the issue branch", parent)
+	}
+	if patterns := runSetup(t, workspace.Dir, "jj", "sparse", "list"); patterns != ".legion\nREADME.md\n" {
+		t.Fatalf("jj sparse list = %q, want .legion named though the branch lacks it", patterns)
+	}
+	handoff := filepath.Join(workspace.Dir, handoffDir, "WIDGETS-42", "plan.json")
+	if err := os.MkdirAll(filepath.Dir(handoff), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handoff, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := runSetup(t, workspace.Dir, "jj", "status"); !strings.Contains(status, "A .legion/WIDGETS-42/plan.json") {
+		t.Fatalf("jj status after writing a handoff = %q, want it added", status)
+	}
+}
+
+// An exclusion that names nothing in the starting commit leaves the workspace whole: it checks out
+// everything, `.`, rather than going sparse for nothing.
+func TestProvisionLeavesAWorkspaceWholeWhenNoExclusionMatches(t *testing.T) {
+	run := newLocalRunner(t)
+	pushTree(t, run, excludeFixture)
+	request := provisionRequest(t)
+	request.Exclude = []string{"fixtures", "README.md/inside-a-file"}
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if patterns := runSetup(t, workspace.Dir, "jj", "sparse", "list"); patterns != ".\n" {
+		t.Fatalf("jj sparse list = %q, want the whole repository", patterns)
+	}
+	if got := checkedOut(t, workspace.Dir); len(got) != len(excludeFixture) {
+		t.Fatalf("the workspace checks out %q, want every file", got)
+	}
+}
+
 // Exclusions shape only the workspace a provisioning creates: one that exists keeps its patterns,
 // so a path its agent added back stays checked out on every later provisioning.
 func TestProvisionKeepsAnExistingWorkspacesSparsePatterns(t *testing.T) {

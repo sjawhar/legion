@@ -70,10 +70,10 @@ func IsCommitID(s string) bool { return commitID.MatchString(s) }
 //     deleted. The workspace starts at main, resolved to one commit first (mainCommit), with the
 //     bookmark created on it.
 //
-// With exclude set, the workspace is added with nothing checked out and then given sparse patterns
-// holding everything at its starting commit but those paths (sparseInclude, applySparse), so the
-// left-out files are never written to the volume; the patterns are computed before anything is
-// added, so a commit whose tree cannot be read creates nothing.
+// With exclude set, the patterns are computed first (sparseInclude), so a commit whose tree cannot
+// be read creates nothing. When an excluded path is in the starting commit, the workspace is added
+// with nothing checked out and then given those patterns (applySparse), so the left-out files are
+// never written to the volume; when none is, it checks out everything.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace, exclude []string, log func(string)) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
@@ -166,7 +166,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, exclu
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
 	}
-	if len(exclude) > 0 {
+	if len(include) > 0 {
 		add = append(add, "--sparse-patterns", "empty")
 	}
 	result, err := runCommand(ctx, run, add, nil, "")
@@ -186,7 +186,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, exclu
 			return err
 		}
 	}
-	if len(exclude) > 0 {
+	if len(include) > 0 {
 		if err := applySparse(ctx, run, workspace, include); err != nil {
 			return err
 		}

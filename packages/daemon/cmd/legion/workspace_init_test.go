@@ -560,8 +560,8 @@ func TestWorkspaceInitLeavesTheExcludedPathsOutOfTheWorkspace(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "tasks")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tasks in the workspace: %v, want it left out", err)
 	}
-	if patterns := v.jj(t, "sparse", "list", "-R", workspace); patterns != "README.md" {
-		t.Fatalf("jj sparse list = %q, want README.md alone", patterns)
+	if patterns := v.jj(t, "sparse", "list", "-R", workspace); patterns != ".legion\nREADME.md" {
+		t.Fatalf("jj sparse list = %q, want .legion and README.md", patterns)
 	}
 	if status := v.jj(t, "status", "-R", workspace); !strings.Contains(status, "The working copy has no changes") {
 		t.Fatalf("jj status = %q, want no change", status)
