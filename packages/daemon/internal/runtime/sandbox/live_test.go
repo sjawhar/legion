@@ -99,6 +99,7 @@ var liveChecks = []liveCheck{
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
 	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
+	{"postgres-resume", (*liveRig).checkPostgresResume, nil},
 }
 
 // The runtime's settings for the run: the boot timeout covers a Karpenter node coming up and the
@@ -219,6 +220,10 @@ type liveEnv struct {
 	// field here is read with os.Getenv, unlike the rest of liveEnv: unset is a blocked run of the
 	// secrets-* checks, never a refusal to start (secretsBlocked).
 	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin string
+	// The scratch Postgres the script started for postgres-resume: the file holding its URL, which
+	// the script also wrote into the providers Secret under liveSessionsSecretKey, and the address it
+	// listens on, which every pod must reach as it reaches the worker stream.
+	sessionDSNFile, sessionDBAddress string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -251,6 +256,8 @@ func readLiveEnv(t *testing.T) liveEnv {
 		agentSecretsOperator: os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
 		agentSecretsAutoSHA:  os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
 		agentSecretsBin:      os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
+		sessionDSNFile:       get("LEGION_E2E_SESSION_DSN_FILE"),
+		sessionDBAddress:     get("LEGION_E2E_SESSION_DB_ADDRESS"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -601,6 +608,9 @@ type liveRig struct {
 	enrollments        map[claim.Token]liveEnrollment
 	grants             map[claim.Token]string
 	requests           map[claim.Token]string
+	// sessionStore is the providers Secret's key every runtime started from now on keeps sessions
+	// in (Options.SessionDSNKey, session_store postgres): set by postgres-resume, "" before it.
+	sessionStore string
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -729,6 +739,9 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// taking the root issue's resident roles with it. Its role is its own tree's architect, the
 		// claim a tree's first launch is in the daemon.
 		{"orphan", "S4A-4", "S4A-4", claim.RoleArchitect},
+		// sessions is postgres-resume's own tree, launched once the runtime keeps sessions in the
+		// scratch database: its pod is the only one created under session_store postgres.
+		{"sessions", "S4A-5", "S4A-5", claim.RoleArchitect},
 		// root2 and child2 are two issues of one tree, each in a Sandbox and on a volume of its own
 		// (independent-provision).
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
@@ -780,7 +793,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
 		Agent: stubAgent, BootTimeout: liveBootTimeout,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
-		Tokens: r.tokens, Conns: ln, Log: r.log,
+		Tokens: r.tokens, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
 	}
 	if r.env.agentSecretsURL != "" {
 		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}

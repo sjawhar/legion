@@ -26,7 +26,10 @@
 # LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, which the run
 # substitutes for the operator route's models.yml placeholder; LEGION_E2E_MODEL_GATEWAY_AUDIENCE
 # (required) the audience that gateway accepts on a worker's projected token, which the run
-# substitutes for the operator route's pod.yml placeholder;
+# substitutes for the operator route's pod.yml placeholder; LEGION_E2E_SESSION_DB_PORT (required) a
+# port on the devbox's private address that the devbox's security group admits from the Legion
+# nodes, as it admits the worker-stream port, where the run's scratch Postgres listens for
+# postgres-resume;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
 #
@@ -47,6 +50,9 @@ port=13373
 repo=sjawhar/legion-smoke
 app_id=3202636
 app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
+# The scratch session database's image: the pinned Postgres the repository's CI tests against.
+session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_db_port=${LEGION_E2E_SESSION_DB_PORT:-}
 operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
@@ -64,6 +70,8 @@ operator_route=$root/deploy/kubernetes/operator-route
 route_configmap=legion-operator-route-$project
 providers_secret=legion-$project-providers
 record=$work/sandboxes
+session_db=legion-e2e4a-db-$project
+session_db_started=
 check=setup
 torn_down=
 snapshotted=
@@ -98,6 +106,7 @@ cleanup() {
   exec >&7 2>&7
   set +e
   teardown
+  [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
@@ -110,7 +119,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl aws curl ss secrets diff docker; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
@@ -123,13 +132,21 @@ imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
   fail "instance metadata has no local-ipv4"
 unset imds
-if [ -n "$(ss -Hltn "sport = :$port")" ]; then
-  fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
-fi
+case "$session_db_port" in
+'') fail "LEGION_E2E_SESSION_DB_PORT is unset: postgres-resume's scratch Postgres listens on a port of the devbox's private address that the Legion nodes can reach" ;;
+*[!0-9]*) fail "LEGION_E2E_SESSION_DB_PORT must be a port number, not '$session_db_port'" ;;
+esac
+[ "$session_db_port" != "$port" ] || fail "LEGION_E2E_SESSION_DB_PORT is the worker stream's port $port"
+for taken in "$port" "$session_db_port"; do
+  if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
+    fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
+  fi
+done
 op get namespace "$namespace" -o name >/dev/null || fail "the operator context $operator cannot read namespace $namespace"
 note "run project $project (every object's legion.dev/project label)"
 note "image $image"
 note "worker stream tcp://$host:$port (the devbox's private address)"
+note "scratch session database $host:$session_db_port ($session_db_image)"
 note "runtime identity: context $runtime_context in $runtime_kubeconfig; operator: context $operator"
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
 while IFS= read -r line; do note "$line"; done <<<"$built"
@@ -144,6 +161,33 @@ begin snapshot
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
 snapshotted=1
 note "[operator] $(wc -l <"$evidence/namespace-before.txt") objects in $namespace carry no project label or project $project"
+
+begin session-db
+# postgres-resume's session database: a throwaway Postgres on the devbox's private address, which
+# pods reach as they reach the worker stream. Its password is the run's own and reaches docker
+# through an owner-only env file, never an argument; the URL is written only to an owner-only file,
+# which the harness and the providers Secret read, and is never printed.
+session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+(
+  umask 077
+  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
+  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$session_db_port" >"$work/session-dsn"
+)
+unset session_db_password
+session_db_started=1
+docker run -d --name "$session_db" --cpus 1 --env-file "$work/session-db.env" -p "$host:$session_db_port:5432" "$session_db_image" >/dev/null ||
+  fail "docker could not start the scratch session database $session_db on $host:$session_db_port"
+ready=
+for _ in $(seq 60); do
+  if docker exec "$session_db" pg_isready -q -h 127.0.0.1 -U legion -d sessions; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+[ -n "$ready" ] || fail "the scratch session database $session_db did not accept connections within 60s: $(docker logs --tail 20 "$session_db" 2>&1)"
+note "container $session_db: database sessions on $host:$session_db_port, accepting connections (the URL is in an owner-only file, not printed)"
+pass
 
 begin operator-route
 # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
@@ -161,13 +205,15 @@ op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml"
   fail "the operator could not create ConfigMap $route_configmap"
 note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
 note "operator pod: $work/pod.yml, the operator route's with its token audience from LEGION_E2E_MODEL_GATEWAY_AUDIENCE"
-# The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
-# model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
-# it arrives.
+# The run's providers Secret, named as the runtime names it (ProvidersSecretName): one key no model
+# route reads, which provider_keys hands to every agent's Oh My Pi and provider-key checks where it
+# arrives, and the scratch session database's URL, which postgres-resume's runtime keeps sessions
+# in (session_dsn_secret stage4a_sessions).
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
+  --from-file=stage4a_sessions="$work/session-dsn" \
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create Secret $providers_secret"
-note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$run_label"
+note "[operator] Secret $providers_secret: stage4a (a random value no route reads) and stage4a_sessions (the scratch session database's URL, not printed), label legion.dev/project=$run_label"
 pass
 
 begin build
@@ -197,6 +243,8 @@ if env \
   LEGION_E2E_AGENT_SECRETS_OPERATOR="$agent_secrets_operator" \
   LEGION_E2E_AGENT_SECRETS_AUTO_SHA256="$agent_secrets_auto_sha" \
   LEGION_E2E_AGENT_SECRETS_BIN="$work/agent-secrets" \
+  LEGION_E2E_SESSION_DSN_FILE="$work/session-dsn" \
+  LEGION_E2E_SESSION_DB_ADDRESS="$host:$session_db_port" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
   harness_ok=1
 fi

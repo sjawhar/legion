@@ -59,6 +59,10 @@ type Kubernetes struct {
 	// AgentSecrets is the secrets broker every pod is enrolled with (runtime.kubernetes.agent_secrets);
 	// nil when the deployment enrolls none, in which case pods carry no token for it.
 	AgentSecrets *AgentSecretsConfig
+	// SessionDSNSecret is the providers Secret's key that holds the postgres:// URL of the database
+	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`);
+	// "" under `session_store: pvc`, the default, where each session is a file on the tree volume.
+	SessionDSNSecret string
 }
 
 // Scheduling is where the pods may run beyond the Legion pool, which the runtime selects itself.
@@ -293,7 +297,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Context != "" && block.Kubeconfig == "" {
 		return nil, errors.New("runtime.kubernetes.context names a kubeconfig context, so it requires runtime.kubernetes.kubeconfig")
 	}
-	if err := checkSessionStore(fields["session_store"], fields["session_dsn_secret"]); err != nil {
+	if block.SessionDSNSecret, err = readSessionStore(fields["session_store"], fields["session_dsn_secret"]); err != nil {
 		return nil, err
 	}
 	if block.Scheduling, err = readScheduling(fields["scheduling"]); err != nil {
@@ -690,24 +694,37 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	return nil
 }
 
-// checkSessionStore reads `session_store` and `session_dsn_secret` only to refuse what the Go
-// runtime does not do: a pod's session lives on its issue's volume until Stage 6 adds the database.
-func checkSessionStore(store, dsnSecret *yaml.Node) error {
+// secretDataKey is what Kubernetes accepts as a Secret's data key.
+var secretDataKey = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+// readSessionStore reads `session_store` and `session_dsn_secret`: the providers Secret's key that
+// holds the session database's URL under `postgres`, "" under `pvc`, the default, where each
+// session is a file on the issue's volume. postgres names its key, and pvc names none: an inert key
+// is refused, never ignored.
+func readSessionStore(store, dsnSecret *yaml.Node) (string, error) {
 	name, err := readString(store, kubernetesKey+".session_store")
 	if err != nil {
-		return err
+		return "", err
 	}
 	switch {
 	case name == nil || *name == "pvc":
+		if dsnSecret != nil {
+			return "", errors.New("runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it")
+		}
+		return "", nil
 	case *name == "postgres":
-		return errors.New("runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session lives on its issue's volume (pvc)")
 	default:
-		return errors.New("runtime.kubernetes.session_store must be 'pvc' or 'postgres'")
+		return "", errors.New("runtime.kubernetes.session_store must be 'pvc' or 'postgres'")
 	}
-	if dsnSecret != nil {
-		return errors.New("runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it")
+	key, err := requiredString(dsnSecret, kubernetesKey+".session_dsn_secret",
+		" with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL")
+	if err != nil {
+		return "", err
 	}
-	return nil
+	if !secretDataKey.MatchString(key) {
+		return "", fmt.Errorf("runtime.kubernetes.session_dsn_secret %q is not a Secret data key ([-._a-zA-Z0-9]+)", key)
+	}
+	return key, nil
 }
 
 // readQuantity reads a positive Kubernetes quantity as the file wrote it, "" when unset. A bare

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -363,10 +362,8 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	if failure == "" {
 		return nil
 	}
-	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
-	slices.Sort(keys)
 	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
-		name, ProvidersSecretName(r.project), strings.Join(keys, ", "), failure)}
+		name, ProvidersSecretName(r.project), strings.Join(r.providersKeys(), ", "), failure)}
 	return &refused
 }
 
@@ -578,7 +575,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
-		Env:             slices.Concat(r.operatorEnv(), r.providersPointers()),
+		Env:             slices.Concat(r.operatorEnv(), r.providersPointers(), r.sessionDSNPointer()),
 		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),

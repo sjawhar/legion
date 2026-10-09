@@ -154,9 +154,10 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 // tree's cleanup does not wait on those claims, which run nothing and are no longer its, and the
 // orphan's start re-points its claim to the orphan's own tree before it starts it, so the claim
 // binds the new tree's lifecycle rather than the old tree's confirmed one. The claim keeps its
-// session and resumes it under either runtime: under tmux it is on the host, and under a runtime
-// that provisions each issue's workspace in a pod it is on the issue's own volume, which the
-// issue's Sandbox keeps across the move.
+// session and resumes it under every runtime: under tmux it is on the host; under a runtime that
+// provisions each issue's workspace in a pod it is on the issue's own volume, which the issue's
+// Sandbox keeps across the move, or in the Sandbox runtime's session database (session_store
+// postgres), which every tree's pods read.
 func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

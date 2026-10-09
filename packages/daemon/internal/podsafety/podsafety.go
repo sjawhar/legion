@@ -7,17 +7,20 @@
 // repository's settings reach a pod's agent as they reach any agent session, under the operator's.
 // The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions
 // (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would otherwise fill
-// them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them
-// in the operator's pod, since a pod keeps its sessions as files on the issue's volume, where a
-// resume reads them (sandbox.CheckPod). And the state-home directory: the one Oh My Pi's state
-// root resolves to under the role's XDG_STATE_HOME (EnsureStateHome), made before Oh My Pi starts,
-// since Oh My Pi reads the variable only where that directory exists. Apply, the overlay and the
-// baseline together, runs only in a pod, for a worker's shim (`legion worker-shim --pod-safety`)
-// and for the image probe (`legion probe-image --pod-safety`), which certifies the baseline a
-// worker's Oh My Pi starts on. The state home is the shim's alone: every role the shim starts is
-// told one of its own (sandbox.roleStateHome), which in an issue pod keeps a role's browser broker
-// lock apart from its siblings', and the probe pod runs one container and is told none. A pane gets
-// the overlay alone, which runtime/tmux writes and names itself (writeTurnScopeOverlay, panePairs).
+// them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them,
+// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod): a pod keeps its sessions
+// as files on the issue's volume, where a resume reads them, unless the runtime keeps them in a
+// database (runtime.kubernetes.session_store postgres), where it starts every generation with
+// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. And the
+// state-home directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
+// (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where that
+// directory exists. Apply, the overlay and the baseline together, runs only in a pod, for a
+// worker's shim (`legion worker-shim --pod-safety`) and for the image probe (`legion probe-image
+// --pod-safety`), which certifies the baseline a worker's Oh My Pi starts on. The state home is the
+// shim's alone: every role the shim starts is told one of its own (sandbox.roleStateHome), which in
+// an issue pod keeps a role's browser broker lock apart from its siblings', and the probe pod runs
+// one container and is told none. A pane gets the overlay alone, which runtime/tmux writes and
+// names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -48,7 +51,8 @@ const TurnScopeFile = "podsafety-turnscope-overlay.yml"
 const settingsOverlays = "PI_CONFIG_FILES"
 
 // placesSessions is why an operator's pod may not set a variable that decides where Oh My Pi keeps
-// a session: a pod keeps its sessions as files on the issue's volume, where a resume reads them.
+// a session: Legion places a pod's sessions where a resume reads them, as files on the issue's
+// volume or in the runtime's session database.
 const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
 
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,
@@ -61,7 +65,8 @@ var baseline = []struct{ name, value, reserved string }{
 	// outranks it.
 	{"PI_CONFIG_DIR", ".omp", placesSessions},
 	// Outranks session.storage, and with OMP_SESSION_SQL_DSN_FILE would write the conversation to
-	// a database the repository names; `file` keeps each session a file.
+	// a database the repository names; `file` keeps each session a file. A runtime that keeps
+	// sessions in its own database sets sql and the URL file's pointer before Apply runs.
 	{"OMP_SESSION_STORAGE", "file", placesSessions},
 }
 

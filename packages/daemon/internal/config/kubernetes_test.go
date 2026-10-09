@@ -187,6 +187,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
+		{"session_dsn_secret", block.SessionDSNSecret, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !reflect.DeepEqual(tc.got, tc.want) {
@@ -243,6 +244,27 @@ func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
 	}
 	if got, want := resources[claim.RoleMerger], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "2Gi"}); got != want {
 		t.Errorf("merger = %+v, want %+v: the file's request under the default limit", got, want)
+	}
+}
+
+// `session_store: postgres` names the providers Secret's key that holds the session database's URL,
+// which every pod mounts for its Oh My Pi; `pvc`, the default, names none.
+func TestLoadForValidationSettlesTheSessionStore(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"postgres", kubernetesFile + "    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n", "SESSION_DSN"},
+		{"pvc", kubernetesFile + "    session_store: pvc\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			if err != nil {
+				t.Fatalf("LoadForValidation: %v", err)
+			}
+			if got := cfg.Runtime.Kubernetes.SessionDSNSecret; got != tc.want {
+				t.Errorf("SessionDSNSecret = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -475,9 +497,19 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, a cpu and a memory each both request and limit, and a role absent there takes the daemon's default",
 		},
 		{
-			name: "session_store postgres",
+			name: "session_store postgres without its key",
 			body: kubernetesFile + "    session_store: postgres\n",
-			want: "runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session lives on its issue's volume (pvc)",
+			want: "runtime.kubernetes.session_dsn_secret is required with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL",
+		},
+		{
+			name: "session_store postgres with an empty key",
+			body: kubernetesFile + "    session_store: postgres\n    session_dsn_secret: \"\"\n",
+			want: "runtime.kubernetes.session_dsn_secret must not be empty",
+		},
+		{
+			name: "session_store postgres with a key no Secret can hold",
+			body: kubernetesFile + "    session_store: postgres\n    session_dsn_secret: sessions/dsn\n",
+			want: `runtime.kubernetes.session_dsn_secret "sessions/dsn" is not a Secret data key ([-._a-zA-Z0-9]+)`,
 		},
 		{
 			name: "session_store neither pvc nor postgres",

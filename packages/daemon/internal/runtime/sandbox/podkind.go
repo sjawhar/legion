@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -72,7 +71,9 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
-// the workspace's place on the issue's volume. A resume expects the volume to hold what it left.
+// the workspace's place on the issue's volume. A resume of a session kept on the volume expects
+// the volume to hold what it left; a session kept in the database expects nothing of the volume, so
+// a resume on a new one provisions its workspace from the issue's pushed branch and continues.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {
@@ -83,7 +84,7 @@ func (issuePod) prepare(l *launch) error {
 		return err
 	}
 	l.workspace = working.Dir
-	l.expectVolume = l.resumeFile != ""
+	l.expectVolume = l.resumeFile != "" && !l.sessionsInDatabase
 	return nil
 }
 
@@ -175,11 +176,12 @@ func (issuePod) agentEnv(r *Runtime, l launch, credentialHelper string) []corev1
 }
 
 // provision is what a new issue pod needs before it starts: it reads whether workspace-init must
-// find the issue's volume holding retained sessions, mints the provisioning token for the
-// repository's owner, and writes it to the pod's init-only provisioning Secret. It waits on no
-// other pod: the issue's clone lives on the issue's own volume, which no other pod mounts.
+// find the issue's volume holding retained sessions (never under a session database, which keeps
+// none on it), mints the provisioning token for the repository's owner, and writes it to the pod's
+// init-only provisioning Secret. It waits on no other pod: the issue's clone lives on the issue's
+// own volume, which no other pod mounts.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" {
+	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionsInDatabase {
 		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
 		if err != nil {
 			return fmt.Errorf("read its issue's retained sessions: %w", err)
@@ -233,14 +235,14 @@ func (controllerPod) secretAnnotations(launch) map[string]string { return nil }
 
 // initContainers are one workspace-init, which mounts the controller's volume alone: `workspace-init
 // controller` provisions nothing and waits on no lock. It is told the image's PATH and, when the
-// pod is created to resume the controller, the session it must find, as the volume holds it, so a
-// lost volume brings up a fresh controller before any launcher starts. It takes the controller's
-// resources.
+// pod is created to resume a controller whose session is a file on the volume, the session it must
+// find, as the volume holds it, so a lost volume brings up a fresh controller before any launcher
+// starts; a session kept in the database is the launcher's to find (internal/launcher). It takes
+// the controller's resources.
 func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
 	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
-	if l.resumeFile != "" {
-		onVolume := TreeRoot + "/" + SessionsSubPath + strings.TrimPrefix(l.resumeFile, ompSessionsDir)
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: onVolume})
+	if l.resumeFile != "" && !l.sessionsInDatabase {
+		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: sessionOnVolume(l.resumeFile, TreeRoot)})
 	}
 	return []corev1.Container{{
 		Name:            initContainer,

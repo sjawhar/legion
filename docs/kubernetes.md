@@ -374,64 +374,210 @@ Two keys in `legion.yaml`, both inside the `runtime.kubernetes` mapping:
 ```yaml
 runtime:
   kubernetes:
-    session_store: postgres        # pvc (the default) keeps sessions on the tree's disk volume
+    session_store: postgres        # pvc (the default) keeps sessions on the issue's own volume
     session_dsn_secret: SESSION_DSN  # the providers-Secret key that holds the connection URL
 ```
 
-`pvc` is today's behaviour: each conversation is a file in the `sessions` directory of the tree's disk
-volume. `postgres` moves it into a database. The daemon never holds the connection string: you put it
-in the providers Secret (`legion-<project>-providers`, the same Secret that carries the provider API
-keys and `DISPATCH_TOKEN`) under the key `session_dsn_secret` names, as one `postgres://…` URL. Every pod
-already mounts that Secret read-only at `/var/run/legion/providers/<key>`, so no new volume is needed.
+`pvc` keeps each conversation a file in the `sessions` directory of the issue's volume. `postgres`
+keeps every pod agent's conversation, each role's and a daemon-launched controller's, in Oh My Pi's
+table. The daemon never holds the connection string: put it in the providers Secret
+(`legion-<project>-providers`) under the key `session_dsn_secret` names, as one `postgres://…` URL.
+Every issue pod, the controller's pod and the image probe mount that key read-only at
+`/var/run/legion/providers/OMP_SESSION_SQL_DSN`, whatever the key is called, so a Secret without it
+refuses boot at the image probe, naming the Secret and its keys
+(`internal/runtime/sandbox/manifest.go`, `providers`).
 
-With `postgres` on, the daemon adds exactly two variables to every pod it opens for a tree — the root
-architect, a sub-architect, each phase worker — in the one place a pod's environment is shaped
-(`podEnvironment`, `runtime-kubernetes.ts`): `OMP_SESSION_STORAGE=sql` and
-`OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/<key>`. Nothing else about the pod changes: same
-image, same volume and mounts, same `--resume` argument on a replacement. The init container never runs
-Oh My Pi and does not see the Secret; under `postgres` it also omits the recorded-session check it runs
-under `pvc` (`LEGION_RESUME_SESSION_FILE`), because the transcript is a database row it cannot look for.
-`HOME` and `OMP_PROFILE` come only from the image's own environment and the daemon never overrides them,
-which is what lets a replacement pod open the same row (its key embeds the home-relative sessions root).
+With `postgres` on, every generation a launcher starts gets two variables in its start command
+(`mainEnvironment`): `OMP_SESSION_STORAGE=sql` and
+`OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/OMP_SESSION_SQL_DSN`. The pod baseline
+(`internal/podsafety`) keeps them, where it would otherwise set `OMP_SESSION_STORAGE=file`, and the
+worker shim, seeing the pointer in its environment, never exports the URL file into Oh My Pi's
+environment. Neither variable may be the operator's (`pod.env`) or a provider key's, and neither
+may `OMP_SESSION_SQL_DSN`, the name the URL file is mounted under (`CheckPod`). Oh My Pi
+creates and migrates its own two tables, `omp_session_files` and `omp_session_files_parts`, in the
+`public` schema when it starts; Legion manages no schema. So the deployment's login needs to create
+tables there: since Postgres 15, `CREATE` on the database is not enough, and the create is refused
+with `permission denied for schema public`. Grant `USAGE, CREATE ON SCHEMA public` to the login
+(measured on Postgres 16.15: `CONNECT, CREATE ON DATABASE` alone is refused, the schema grant
+creates the table), or make the login the schema's owner.
 
-When that row is missing — the database lost it, or the connection string now points at another
-database — Oh My Pi does not refuse: it starts a fresh session with a **new** session id at that path.
-The daemon refuses it instead. Every relaunch that passes `--resume` — a phase worker's or sub-architect's
-respawn, a root's resurrection — mints its boot token with the session id the previous generation
-registered, and the registration route (`/process/started` for a root, `/worker/started` for the rest)
-answers a different id with `409 Worker respawn must resume the same agent session`; the extension exits
-the process on that answer, the pod ends, the daemon counts a launch failure, and — because the resumed
-path stays on the tree's or claim's locator — the next relaunch resumes the same path and expects the
-same session, until the role ends in `worker-died` (a root: `launch-failed`) at the bound — never a fresh
-agent under the old role or tree. A first launch, and a root re-admitted after `launch-failed`, resume
-nothing, record no expectation, and are accepted as before.
+Every agent in the deployment can read that URL file, as every pod mounts it, and so can read and
+rewrite every conversation in the table, the controller's included, with the login's rights. That
+is the trade LEGION-654's spec accepts for sessions that outlive their volumes: give the login no
+rights beyond the two tables' database, and treat its URL as a credential every agent holds.
 
-Name the key so that nothing reads it — `SESSION_DSN` is a good choice. The pod's worker shim exports
-every key of the providers Secret into Oh My Pi's process environment under the key's own name, as it
-does for every provider key, so the connection string is also visible there as `<key>=postgres://…`
-(the same exposure class as the provider keys: same user, same pod). A key named `OMP_SESSION_STORAGE`
-or `OMP_SESSION_SQL_DSN_FILE` would shadow the daemon's own value through that export, so the daemon
-refuses those two names at startup; `postgres` without a key, an empty key, a key with a `/` or other
-character Kubernetes does not allow in a Secret data key, and a key given under `pvc` are refused the
-same way, each naming the field.
+A resume under `postgres` is held to the table, not the volume. A role's launcher looks the recorded
+session up in the table through the same URL file before it starts the child
+(`internal/launcher`, `resumable`), and refuses the start when the table holds no such session
+(`resume session <path>: the session table holds no such session`): a launch failure, never a fresh
+agent. A database it cannot reach is asked again with a backoff (half a second, doubling to four
+seconds) for up to 30 seconds, the URL file read afresh each time, and only then refuses the start.
+Neither `workspace-init` looks for session files: an issue pod is not
+told `LEGION_EXPECT_ISSUE_VOLUME` for a session, and the controller's pod is not told
+`LEGION_RESUME_SESSION_FILE`. So a claim resumed on a new volume (an issue closed as `done` or its
+tree drained, its volume deleted, then re-admitted) provisions its workspace from the issue's pushed
+branch (`legion/<issue>`, or `main` when none was pushed) and continues its own session; anything
+it had not pushed is gone with the old volume. A child issue re-admitted as a root of its own keeps
+its roles' sessions under either store (`Machine.Retree`): under `postgres` they are in the table,
+and under `pvc` on the issue's own volume, which its Sandbox keeps across the move while the old
+tree lingers ([Volume retention](#volume-retention)).
 
-When the key is missing from the Secret, the pod still starts (the Secret is mounted whole, so a missing
-key is a missing file): Oh My Pi refuses with `OMP_SESSION_SQL_DSN_FILE names
-/var/run/legion/providers/<key>, which could not be read: ENOENT …`, exits 1, the pod goes `Failed`,
-the daemon quotes its log tail and counts a launch failure exactly as for any other boot failure — and
-never falls back to file storage. A blank file, a value the driver cannot parse, or an unreachable
-database ends the same way ([Refusals](#refusals) above).
+Such an agent is told so before its next turn. Provisioning records when it created a workspace, in
+the workspace's own `.jj/legion-created`, which jj never snapshots (`workspace.RecordCreated`). At
+every resume the role's launcher compares that record with when the session was last written: the
+row's `mtime_ms` under `postgres`, which Oh My Pi moves on every write and `legion sessions import`
+sets to the copied file's, and the file's own under `pvc`. A workspace created after that write
+starts the generation with `LEGION_WORKSPACE_RECREATED=true`; every other generation gets `false`,
+whatever the container's environment says, and so does a resume into a workspace with no record
+(one provisioned before the record was kept). A record that is empty or not one RFC 3339 instant,
+which an init container killed mid-write can leave, decides only that notice: the launcher logs it,
+takes the workspace as not recreated, and resumes. At session start a Legion session's plugin reads
+the variable and saves one message to the session, ahead of the next turn whatever starts it (a
+task, an Envoy event): `Your workspace was recreated since your last turn: it holds what was pushed
+to legion/<KEY> (main if nothing was), and anything you had not pushed is gone. …`
+(`packages/pi-legion/src/workspace-recreated.ts`, a steer that starts no turn), with an id of its
+own process in the message's `details`. A prompt, the daemon's next task or a person's direct
+message that pi-envoy delivers as a user turn, first recovers a failed last turn, and Oh My Pi
+recovers an empty `length` stop by moving the branch back to that turn's parent, which takes the
+saved message off the branch with it. The plugin's `before_agent_start`, which runs after that
+recovery on either path, sends the message again when the branch no longer holds this process's
+copy, a notice an earlier recreation saved not counting, and the turn saves it after the prompt.
+The recovery leaves the first copy in the process's live context, so that process's requests keep
+its first copy alone, and an earlier recreation's notice stays where the history put it. An Envoy
+card, a custom message sent to start a turn, goes through neither the recovery nor
+`before_agent_start`, so its branch keeps the saved message. Measured on Oh My Pi
+`18.8.3-sami.20261009-045702`, with resumed sessions whose last turn was an ordinary reply, an
+empty `length` stop, or an empty `length` stop in a session already told at an earlier recreation
+(file storage for all three, and SQL storage for the first two): the notice is in the stored
+session before the task arrives, the task's first model request carries this process's copy once,
+just after the history and before the task, and after the task the stored branch holds it, so a
+process lost in that turn resumes with the notice already there. With the plugin before the
+re-send, the `length` case's stored branch had lost it; with the plugin before the id, so did the
+case of a second recreation. A `task` subagent is never told.
 
-### Why no pod is tied to a node
+The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
+volume projects another session store than a pod created now would — one created before
+`postgres` was turned on, or after it was turned off — holds a move (`movedSessionStore`,
+`internal/runtime/sandbox/addresses.go`): the next relaunch of any of its roles replaces the pod,
+as it does a pod that dials a moved worker stream. The image probe's container is told
+`OMP_SESSION_SQL_DSN_FILE` too, so `legion probe-image`, which reads the providers directory as
+the shim does, never exports the URL into Oh My Pi's environment.
 
-`postgres` moves only the conversation, and the Go runtime refuses it until Stage 6
-([Configuration](#configuration)); under `pvc` the conversation stays on the volume. Under either store
-nothing ties a pod to a node: the issue's working copy — the jj workspace every phase of the issue
-edits — is on the issue's own `ReadWriteOnce` volume, which no other pod mounts, so the pod carries no
-affinity and the scheduler places it wherever the Legion pool has room
-([Issue sizing](#issue-sizing-one-reservation-per-pod)). A pod relaunched onto another node waits for
-its volume to detach from the old one first, which shows as transient `FailedAttachVolume` or
-`Multi-Attach` events until the old pod is gone.
+A resumed session also restores the model it last used, and since Oh My Pi 18.8.3, the release
+every pod runs under either store, `--mode rpc` refuses to resume one whose model the profile no
+longer has (`Could not restore model <provider>/<model>`, exit 1). So a change to the pods' model
+route (`runtime.kubernetes.pod`, `provider_keys`) that drops a model fails the launch of every agent
+resuming a session on it, `pvc` or `postgres`, until the route offers that model again. Keep the
+route unchanged across the switch below in particular: there every session outlives its volume.
+
+### Copying file sessions before turning it on
+
+This runbook, and `scripts/sessions-import-pods.sh`, copy only from the release before issue pods,
+`legion-v10.0.0`, whose every role runs in a Sandbox of its own and keeps its session on its tree's
+volume; the script refuses any other release by name. A deployment on `legion-v10.1.0` to
+`legion-v10.2.x`, which runs one pod per issue, has no copy path: its switch to `postgres` is a
+drain at a pushed boundary, every tree closed, and the sessions on those volumes are lost. Nor is
+there a copy path back: switching from `postgres` to `pvc` starts every agent fresh, as nothing
+copies a row out to a file.
+
+On `legion-v10.0.0`, a deployment whose sessions are files on its tree volumes copies each one into
+the table once, while those volumes still exist, after the last write to any of them and before any
+agent writes the same session under SQL storage. The order below is what keeps a copy current:
+nothing checks, at a resume, that a row still matches the file it was copied from, so a session
+written after its copy would resume from the older row without a word. Do not drain the deployment
+by lowering the linger instead: a closed tree's cleanup deletes its volume, and with it any session
+not yet copied. Steps 1 to 5 below take the place of steps 1 to 3 of [Upgrading a deployment with
+running trees](#upgrading-a-deployment-with-running-trees): its steps 1 and 2 drain every tree and
+so delete its volume, and its step 3 runs before step 1 here (below). Step 6 here hands back to that
+section.
+
+**A daemon-launched controller is cleared first.** Under `controller: daemon` the earlier release
+resumes a suspended controller at its next look, within a minute (`keep` in
+`internal/daemon/controller.go` at `legion-v10.0.0`), so the controller cannot be held still for
+the copy. Clear its claim before step 1 with step 3 of the upgrade section. Its Sandbox goes, and
+its volume and session go with it, so step 5 marks the claim lost and the controller this release
+launches starts a fresh session.
+
+1. **Stop every writer, keeping the linger as it is.** Tell every agent to push its work, then
+   suspend every claim (`legion claims suspend`) until each tree is at a pushed boundary: no pod
+   running and no claim recording a locator (`legion claims list --json`, every `locator` absent).
+2. **Save the claims and stop the daemon at once.** `legion claims list --json
+   --operator-token-file <file> > claims.json` (the daemon of any release prints the list this
+   command reads), then scale the daemon to 0 straight away, so nothing launches, resumes, or
+   cleans up a tree from here on.
+3. **Copy every tree.** Where a tree's volume is mounted and the session database is reachable, run,
+   for each tree the list names:
+
+   ```sh
+   legion sessions import --dsn-file <url file> --claims claims.json --tree <ROOT ISSUE> --tree-volume /legion
+   ```
+
+   `scripts/sessions-import-pods.sh <claims.json> <namespace> <worker image@sha256> <project>
+   <url secret> <url key> [--context <context>]` runs it for every tree the list names: one pod
+   of the worker image per tree, under gVisor, mounting the tree's volume read-only at `/legion`
+   and the URL key, printing the import's lines, then deleted. It finds each tree's volume and root
+   Sandbox by `legion-v10.0.0`'s labels (`legion.dev/project`, `legion.dev/role=architect`,
+   `legion.dev/tree` and `legion.dev/issue`), not by name, and schedules the pod as the root
+   Sandbox's pods were: its pod template's node selector, tolerations, priority class and service
+   account. Before anything it refuses a project whose Sandboxes are issue pods (a later release),
+   one with a Sandbox not `Suspended`, whose pod could still start, and one with a pod that has not
+   ended (any phase but `Succeeded` or `Failed`): each would be a writer the copy misses. It deletes
+   a pod an interrupted run left before creating one, reports a pod that fails at once, exits 1
+   when any tree's import did, names a tree whose volume or root Sandbox is gone, and names every
+   claim that records a session and belongs to no tree, the cleared controller's among them, which
+   step 5 marks.
+
+   For each claim of that tree it reads the recorded session file from the volume (its path below
+   the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads
+   the recorded path itself) and writes it as one row keyed by that recorded path: the whole file
+   as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh
+   My Pi reads a row an older release of it wrote. It creates the two tables with Oh My Pi's own
+   statements when the database has none. It prints one line per claim of the tree — `copied`,
+   `copied before (identical …)`, `recorded no session`, `failed` (a file the volume does not hold)
+   or `refused` (the table already holds that session with other content, which it leaves as it
+   is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded
+   session the table does not hold, then a count of each. It exits 1 on any `failed` or `refused`,
+   on a `missing` of the claims it was asked to copy (another tree's is reported only), and when
+   `--tree` selects no claim of the list, which is a mistyped key.
+4. **Copy every tree again.** Each run must print only `copied before` or `recorded no session`
+   for its tree's claims, and its `missing` lines may name only claims step 5 is to mark: one
+   whose volume was gone before step 3 (the cleared controller's, or a claim of a tree closed
+   earlier), or a `failed` you cannot fix. A `refused` here means a writer was still running: the
+   session grew on its volume after step 3 copied it, and the import never overwrites a row it
+   already holds, so it refuses the file it now finds. Going on would resume the agent from the
+   older row and lose every turn after it. Go back to step 1 instead: scale the earlier daemon back
+   up, suspend whatever runs, save the list again, and scale it to 0 at once (step 2); then delete
+   that row and its parts (`DELETE FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM
+   omp_session_files WHERE path = '<path>'`) and copy again. Nothing writes a row under SQL storage
+   before the switch, so in this runbook a `refused` has no other cause.
+5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
+   tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
+   under SQL storage, where a file store starts it fresh. Run this step even when step 4 printed
+   no `missing` line: it is where the claims list is checked against the stopped daemon's own
+   database (below), which no other step does. With the daemon still stopped, mark each lost in
+   the daemon's own database:
+
+   ```sh
+   legion sessions mark-lost --dsn-file <url file> --claims claims.json --daemon-dsn-file <file holding the daemon's postgres_dsn>
+   ```
+
+   It copies nothing. Its statements are plain SQL against the daemon's `claims` table as
+   `legion-v10.0.0` left it, never this release's store, which would migrate the database before
+   the dump the rollback restores. It first reads every claim of the list's project from the daemon's
+   database, the record once the daemon is stopped, and refuses, marking nothing, when one records
+   a session file the list does not give it: a claim the earlier daemon launched, or relaunched
+   onto a new session, after step 2 saved the list. It names each such claim; go back to step 1 as
+   step 4 says (scale the earlier daemon up, suspend, save the list again, scale it to 0).
+   Then, for every claim of the list whose recorded session the table lacks, it clears the
+   claim's session and session file and marks its workspace lost, as the daemon marks a claim
+   whose volume was lost, but only while the claim still records that session file. It prints
+   `marked lost` or `failed to mark lost` per claim, then a count, and exits 1 on any failure.
+   Each such claim starts a fresh session, a workflow role's in a workspace recovered from its
+   issue's branch.
+6. **Only then delete the old Sandboxes and their volumes**, then finish with steps 4 to 6 of
+   [Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees): its
+   two checks must come back empty, then the dump, then the rollout, with `session_store:
+   postgres` and `session_dsn_secret` set in it.
 
 ### The image guard
 
@@ -439,21 +585,10 @@ An Oh My Pi built before the `session.storage` setting ignores the two variables
 files without a word — the one silent fallback this setting must never allow. The check lives inside the
 image: `legion probe-image`, which the image build runs before it publishes, starts the image's own Oh My
 Pi with a nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints
-`session-storage=probed` on its OK line. Under `session_store: postgres` the daemon's worker-image probe
-requires that token in the probe pod's log: an image whose OK line
-lacks it is refused before the daemon serves — `pod <name> Succeeded without printing
-session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the
-session-storage setting)` — exactly as one lacking `daemon-api-version=<N>` is. Under `pvc` the token
-is not required. The daemon never probes a host Oh My Pi for this: pods run the image's build, not the
-host's.
-
-The probe cache records whether the token was seen (`sessionStorageProbed: true`). A pass cached under
-`pvc` on an image that printed the token is reused under `postgres`; one cached without the field —
-written by an older daemon, or for an image that never printed it — is ignored under `postgres`, logged
-`it records no session-storage probe, and this daemon runs session_store: postgres`, and the probe pod
-runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` plugins from one
-checkout, an image that prints the token also carries the plugins' storage-independent subagent guard
-([The extension under SQL storage](#the-extension-under-sql-storage)).
+`session-storage=probed` on its OK line. The daemon's image probe passes only an OK line that carries
+its daemon API contract, which a `legion probe-image` of this release prints only after that probe
+passed, under either store. The daemon never probes a host Oh My Pi for this: pods run the image's
+build, not the host's.
 
 ## Kubernetes runtime: the Go daemon on Agent Sandbox
 
@@ -607,6 +742,14 @@ write is `Migrate`, after both checks. So a refused boot leaves the database as 
 left it, and re-pinning the earlier release's image recovers. In the cluster a refused boot is a
 crash-looping Deployment: the earlier release's pods keep running, but nothing supervises them.
 
+**A rollout that also turns on `session_store: postgres` does not drain.** It replaces steps 1 to 3
+below with steps 1 to 5 of [Copying file sessions before turning it on](#copying-file-sessions-before-turning-it-on),
+which keep every tree's volume until its sessions are in the table. When `controller: daemon` ran,
+step 3 below runs before copy step 1: the earlier release resumes a suspended controller within a
+minute, so it cannot be held still for the copy, and copy step 5 marks its claim lost. Copy step 6
+deletes the per-claim Sandboxes and hands back to steps 4, 5 and 6 below: the two checks, the dump,
+and the rollout, with `session_store: postgres` set.
+
 No migration turns a per-claim Sandbox or locator into an issue pod's, and nothing on a tree volume
 of either earlier layout carries over (below), so the upgrade drains the deployment while it still
 runs the earlier release:
@@ -624,11 +767,11 @@ runs the earlier release:
 3. **Clear the controller's claim, if `controller: daemon` ran.** Set `controller: operator` and
    boot the build that ran it once. It stops the controller its earlier boot launched, logging
    `controller: stopping the controller an earlier boot under controller: daemon launched; this
-   daemon leaves the controller to its operator`: the stop deletes the claim's Sandbox and retires
-   the claim, so `legion claims list` shows `legion-<project>-controller` `retired`. That removes
-   the controller Sandbox of either earlier layout, the per-claim one and the one owning a `tree`
-   template, both of which the census refuses. In the cluster each of these boots is a
-   configuration change of its own through the deploy path.
+   daemon leaves the controller to its operator`: the stop deletes the claim's Sandbox, and with it
+   the controller's volume and session, and retires the claim, so `legion claims list` shows
+   `legion-<project>-controller` `retired`. That removes the controller Sandbox of either earlier
+   layout, the per-claim one and the one owning a `tree` template, both of which the census refuses.
+   In the cluster each of these boots is a configuration change of its own through the deploy path.
 4. **Check that nothing is left.** `<project>` below is `legion.yaml`'s `project` lowercased with
    every non-alphanumeric removed (`claim.ProjectToken`), the value of every Sandbox's
    `legion.dev/project` label and of the `claims.project` column. Both of these must come back
@@ -666,8 +809,11 @@ runs the earlier release:
 the root Sandbox's `volumeClaimTemplates` entry, so Agent Sandbox creates the volume's claim with
 that Sandbox as its owner, and deleting the root Sandbox deletes the volume (`sandboxManifest` in
 `internal/runtime/sandbox/manifest.go` and `Release` in `sandbox.go`, both at `legion-v10.0.0`).
-That loses every session recorded on the volume and every change in its working copies that was
-not pushed. A volume kept anyway is never mounted again: the earlier release names a tree's claim
+That loses every change in its working copies that was not pushed and, under `session_store: pvc`,
+every session recorded on the volume. Under `postgres` a session copied into the table first
+([Copying file sessions before turning it on](#copying-file-sessions-before-turning-it-on)) is
+kept, and its agent resumes it in a workspace recovered from its issue's pushed branch. A volume
+kept anyway is never mounted again: the earlier release names a tree's claim
 `tree-legion-<project>-<root issue>-architect`, from the root architect's own Sandbox
 (`SandboxName` and `TreeClaimName` in `names.go` at `legion-v10.0.0`), an issue-pod build on a tree
 volume `tree-legion-<project>-<root issue>`, from the root issue's Sandbox, and this release names
@@ -783,8 +929,13 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
   <limit>`;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - an image that is not pinned by digest;
-- `session_store: postgres` until Stage 6, since a pod's session lives on the issue's volume, and a
-  `session_dsn_secret` under `pvc`.
+- `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
+  one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
+  `pvc` (an inert key is refused, never ignored). At boot the daemon also refuses a
+  `session_dsn_secret` that is the providers Secret's `NATS_NKEY_SEED`, a `provider_keys` entry
+  that reads the same key (the shim would export the URL into Oh My Pi's environment), and an
+  operator's `pod.env` or `provider_keys` naming `OMP_SESSION_STORAGE` or
+  `OMP_SESSION_SQL_DSN_FILE` ([Selecting the store](#selecting-the-store)).
 
 `legion start --check-config` shows each of these before anything starts: a file carrying
 `tree_volume: 20Gi` is refused naming `issue_volume`; one carrying `resources: {tester: {limits:
