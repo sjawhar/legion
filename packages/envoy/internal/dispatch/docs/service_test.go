@@ -2637,7 +2637,7 @@ func (s *Service) recordActor(t *testing.T, room string, actor model.Actor) {
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		t.Fatalf("lock the document to record %s: %v", actor.ID, err)
 	}
-	if err := upsertPendingAuthors(ctx, tx, room, map[string]model.Actor{actorKey(actor): actor}, 0); err != nil {
+	if err := upsertPendingAuthors(ctx, tx, room, pendingAuthorsAt(map[string]model.Actor{actorKey(actor): actor}, 0)); err != nil {
 		t.Fatalf("record %s as a pending author: %v", actor.ID, err)
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -120,17 +120,21 @@ func (hold *roomHold) add(version int64) {
 	}
 	hold.mu.Lock()
 	defer hold.mu.Unlock()
-	if version <= hold.loaded || slices.Contains(hold.since, version) {
+	if version <= hold.loaded {
 		return
 	}
-	hold.since = append(hold.since, version)
+	// Appends arrive in ascending order, so the search lands at the end and the insert appends.
+	at, found := slices.BinarySearch(hold.since, version)
+	if found {
+		return
+	}
+	hold.since = slices.Insert(hold.since, at, version)
 	hold.foldLocked()
 }
 
-// foldLocked folds into loaded the run of held updates that follows it, version by version. The
-// caller holds mu.
+// foldLocked folds into loaded the run of held updates that follows it, version by version. since
+// is kept sorted (add), so the run is its prefix. The caller holds mu.
 func (hold *roomHold) foldLocked() {
-	slices.Sort(hold.since)
 	folded := 0
 	for folded < len(hold.since) && hold.since[folded] == hold.loaded+1 {
 		hold.loaded++
@@ -156,7 +160,6 @@ func (hold *roomHold) consumed(held heldUpdates) {
 // heldUpdates is a roomHold as of one moment, which an upload's commit deletes the pending
 // authors of.
 type heldUpdates struct {
-	hold    *roomHold
 	through int64
 	since   []int64
 }
@@ -167,7 +170,7 @@ func (hold *roomHold) snapshot() heldUpdates {
 	}
 	hold.mu.Lock()
 	defer hold.mu.Unlock()
-	return heldUpdates{hold: hold, through: hold.loaded, since: slices.Clone(hold.since)}
+	return heldUpdates{through: hold.loaded, since: slices.Clone(hold.since)}
 }
 
 // keepHold starts the roomHold of live, a room instance loaded at head, and lists it for the
@@ -190,14 +193,15 @@ func (s *Service) holdOf(live *crdt.Doc) *roomHold {
 // rAuthors, the authors of the R rows it read, and inflight, the unconsumed F credits it read from
 // state. authors is the version's own list, those and the writing transaction's own credits and
 // actor. upload is an upload's capture (uploadCapture): its version lists the uploader alone, and
-// its commit deletes the R rows its room's instance holds the writing update of, whose changes
-// its replacement holds or removed.
+// its commit deletes the R rows hold, its room instance's live record, held as of upload, whose
+// changes its replacement holds or removed.
 type authorCapture struct {
 	state    *roomState
 	authors  map[string]model.Actor
 	rAuthors []model.Actor
 	inflight []*inflightCredit
 	upload   *heldUpdates
+	hold     *roomHold
 }
 
 // capturePendingAuthors reads R in tx, which holds the document's advisory lock, and takes whom a
@@ -251,7 +255,7 @@ func uploadCapture(write *liveWrite) authorCapture {
 	inflight := state.unconsumedInflightLocked(write.forkSeq)
 	state.mu.Unlock()
 	held := write.forkHold.snapshot()
-	return authorCapture{state: state, inflight: inflight, upload: &held}
+	return authorCapture{state: state, inflight: inflight, upload: &held, hold: write.forkHold}
 }
 
 // unconsumedInflightLocked is state's F credits no committed version has listed, observed no later
@@ -275,7 +279,7 @@ func (capture authorCapture) consumeLocked() {
 		record.consumed = true
 	}
 	if capture.upload != nil {
-		capture.upload.hold.consumed(*capture.upload)
+		capture.hold.consumed(*capture.upload)
 	}
 }
 
@@ -288,31 +292,49 @@ func deleteCapturedPendingAuthors(ctx context.Context, tx pgx.Tx, room string, c
 	return deletePendingAuthors(ctx, tx, room, capture.rAuthors)
 }
 
-// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, as
-// recorded by the update stored at version. An author keeps one row per update that recorded it,
-// so an upload that holds one of those updates and not another deletes only the first.
-func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[string]model.Actor, version persistence.Version) error {
+// pendingAuthor is one author's R row: the author, and the version of the update whose write
+// recorded it.
+type pendingAuthor struct {
+	actor          model.Actor
+	writtenThrough persistence.Version
+}
+
+// pendingAuthorsAt is each of authors as recorded by the update stored at version.
+func pendingAuthorsAt(authors map[string]model.Actor, version persistence.Version) []pendingAuthor {
+	pending := make([]pendingAuthor, 0, len(authors))
+	for _, actor := range actorSlice(authors) {
+		pending = append(pending, pendingAuthor{actor: actor, writtenThrough: version})
+	}
+	return pending
+}
+
+// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, in one
+// statement, each as recorded by its own update. An author keeps one row per update that recorded
+// it, so an upload that holds one of those updates and not another deletes only the first.
+func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors []pendingAuthor) error {
 	if len(authors) == 0 {
 		return nil
 	}
-	actors := actorSlice(authors)
-	kinds := make([]string, 0, len(actors))
-	ids := make([]string, 0, len(actors))
-	encoded := make([]string, 0, len(actors))
-	for _, actor := range actors {
-		raw, err := json.Marshal(actor)
+	kinds := make([]string, 0, len(authors))
+	ids := make([]string, 0, len(authors))
+	encoded := make([]string, 0, len(authors))
+	versions := make([]int64, 0, len(authors))
+	for _, author := range authors {
+		raw, err := json.Marshal(author.actor)
 		if err != nil {
 			return fmt.Errorf("encode the document's pending authors: %w", err)
 		}
-		kinds = append(kinds, actor.Kind)
-		ids = append(ids, actor.ID)
+		kinds = append(kinds, author.actor.Kind)
+		ids = append(ids, author.actor.ID)
 		encoded = append(encoded, string(raw))
+		versions = append(versions, int64(author.writtenThrough))
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
-		select $1::uuid, kind, id, actor, $5 from unnest($2::text[], $3::text[], $4::jsonb[]) as author(kind, id, actor)
+		select $1::uuid, kind, id, actor, version
+		from unnest($2::text[], $3::text[], $4::jsonb[], $5::bigint[]) as author(kind, id, actor, version)
 		on conflict (artifact_id, actor_kind, actor_id, written_through) do update set actor = excluded.actor
-	`, room, kinds, ids, encoded, int64(version)); err != nil {
+	`, room, kinds, ids, encoded, versions); err != nil {
 		return fmt.Errorf("record the document's pending authors: %w", err)
 	}
 	return nil

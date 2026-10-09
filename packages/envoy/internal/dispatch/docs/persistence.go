@@ -226,7 +226,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		return 0, err
 	}
 	if include {
-		if err := upsertPendingAuthors(ctx, tx, room, authors, version); err != nil {
+		if err := upsertPendingAuthors(ctx, tx, room, pendingAuthorsAt(authors, version)); err != nil {
 			return 0, err
 		}
 	}

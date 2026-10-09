@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -595,6 +598,95 @@ func TestAJoinedWritesAuthorsAreRecordedByTheAppendsThatCreditedThem(t *testing.
 	}
 	if got := []int64{writtenBy(first), writtenBy(second)}; got[0] != head-1 || got[1] != head {
 		t.Fatalf("pending rows written through %v, want [%d %d]: each actor's own append", got, head-1, head)
+	}
+}
+
+// refusedCommitTx rolls its transaction back where it is asked to commit, and reports that the
+// commit failed, as a commit Postgres refuses does.
+type refusedCommitTx struct {
+	pgx.Tx
+}
+
+func (tx refusedCommitTx) Commit(ctx context.Context) error {
+	if err := tx.Tx.Rollback(ctx); err != nil {
+		return err
+	}
+	return errors.New("injected commit refusal")
+}
+
+// An upload whose commit fails leaves its room's record of the updates it holds exactly as it was,
+// folded run included, and deletes no pending author: the record moves only with a commit that
+// deleted the rows. A later upload that commits still deletes exactly the rows that record covers.
+func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, database)
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+	ctx := context.Background()
+	if err := taskA.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	hold := taskA.holdOf(taskA.srv.GetDoc(artifactID))
+	if hold == nil {
+		t.Fatal("task A's room lists no record of the updates it holds")
+	}
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	carol := model.Actor{Kind: "user", ID: "carol-on-task-a"}
+	// Two appends task A's room takes fold into its loaded head; bob's on task B breaks the run,
+	// so carol's after it is held one by one.
+	appendCreditedTo(t, taskA, artifactID, creditOf(nil), hold)
+	appendCreditedTo(t, taskA, artifactID, creditOf(&alice, alice), hold)
+	appendCreditedTo(t, taskB, artifactID, creditOf(&bob, bob), nil)
+	appendCreditedTo(t, taskA, artifactID, creditOf(&carol, carol), hold)
+	before := hold.snapshot()
+	if len(before.since) != 1 {
+		t.Fatalf("task A's room holds %v past its loaded head %d, want carol's append alone", before.since, before.through)
+	}
+
+	tx, err := taskA.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the failing upload: %v", err)
+	}
+	joined, ledger := taskA.Join(ctx, refusedCommitTx{Tx: tx})
+	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
+	uploader := model.Actor{Kind: "session", ID: "uploader-on-task-a"}
+	if _, err := taskA.ReplaceText(joined, artifactID, uploaded, uploader); err != nil {
+		t.Fatalf("upload the replacement: %v", err)
+	}
+	number := nextVersionNumber(t, taskA.store, artifactID)
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, $4)
+	`, artifactID, number, uploaded, []model.Actor{uploader}); err != nil {
+		t.Fatalf("insert the upload's version: %v", err)
+	}
+	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
+	if err := ledger.Commit(ctx); err == nil {
+		t.Fatal("the upload's commit succeeded, want the injected refusal")
+	}
+	ledger.Discard()
+	if after := hold.snapshot(); after.through != before.through || !slices.Equal(after.since, before.since) {
+		t.Fatalf("task A's room holds %v past %d after the failed upload, want %v past %d as before it", after.since, after.through, before.since, before.through)
+	}
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{alice, bob, carol}) {
+		t.Fatalf("pending authors after the failed upload = %+v, want alice, bob and carol: nothing committed", owed)
+	}
+
+	// The failed commit failed the room, which reloads; the next upload's room holds what that
+	// load read, every append so far, so its commit deletes every row.
+	if err := taskA.awaitRoomRecovery(ctx, artifactID); err != nil {
+		t.Fatalf("await task A's room's recovery: %v", err)
+	}
+	appendCreditedTo(t, taskB, artifactID, creditOf(&bob, bob), nil)
+	if err := taskA.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("reload task A's room: %v", err)
+	}
+	dave := model.Actor{Kind: "user", ID: "dave-on-task-b"}
+	appendCreditedTo(t, taskB, artifactID, creditOf(&dave, dave), nil)
+	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded again on task A.\n", uploader)
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{dave}) {
+		t.Fatalf("pending authors after the upload that committed = %+v, want dave alone: task A's room held every other row's update", owed)
 	}
 }
 

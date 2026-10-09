@@ -230,6 +230,7 @@ func (l *Ledger) recordVersion(artifactID string, version model.Version, capture
 	if write := l.liveWriteFor(artifactID); write != nil {
 		for _, author := range version.Authors {
 			delete(write.credits, actorKey(author))
+			delete(write.creditedBy, actorKey(author))
 		}
 	}
 }
@@ -282,11 +283,12 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 
 // recordSettlementCredit records, in the transaction that wrote the documents, who owes what once
 // it commits. It first deletes the pending authors each version this transaction wrote takes out
-// (deleteCapturedPendingAuthors), then records each write's authors no version of the transaction
-// lists (recordVersion) as written by the write's latest update, and each write's and seed's latest
-// edit source on the document's pending-settlement row. Deleting first means the write's own
-// authors are recorded after the delete that would otherwise take them out. Both commit or roll
-// back with the content, before the request context can be canceled after commit.
+// (deleteCapturedPendingAuthors), then records, in one statement per write, each write's authors no
+// version of the transaction lists (recordVersion), each at the append that recorded that author's
+// latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
+// document's pending-settlement row. Deleting first means the write's own authors are recorded
+// after the delete that would otherwise take them out. Both commit or roll back with the content,
+// before the request context can be canceled after commit.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
@@ -307,10 +309,12 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if write.actor == nil {
 			continue
 		}
-		for key, author := range write.credits {
-			if err := upsertPendingAuthors(ctx, l.tx, artifactID, map[string]model.Actor{key: author}, write.creditedBy[key]); err != nil {
-				return err
-			}
+		pending := make([]pendingAuthor, 0, len(write.credits))
+		for _, author := range actorSlice(write.credits) {
+			pending = append(pending, pendingAuthor{actor: author, writtenThrough: write.creditedBy[actorKey(author)]})
+		}
+		if err := upsertPendingAuthors(ctx, l.tx, artifactID, pending); err != nil {
+			return err
 		}
 		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.actor); err != nil {
 			return err
