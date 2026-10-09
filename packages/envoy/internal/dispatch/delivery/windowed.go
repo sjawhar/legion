@@ -5,10 +5,11 @@ import (
 	"time"
 )
 
-// minimumSearchWindow bounds the halving recursion shared by every GitHub list/search endpoint
-// with a 1,000-result cap (issue/PR search, Actions run listing): a query answering more than
-// 1,000 results in a window this narrow cannot be split further, and is reported as an error
-// rather than recursing forever.
+// minimumSearchWindow is GitHub's own query granularity, one second, and so the narrowest window
+// the halving recursion below can produce. A window must be at least two of them wide to halve
+// into two windows that each hold at least one second and do not overlap; a narrower one whose
+// total is past githubResultCap is reported as an error rather than split into a second half
+// that starts after its own end.
 const minimumSearchWindow = time.Second
 
 // githubResultCap is GitHub's own hard ceiling on one filtered query: both the GraphQL issue
@@ -38,9 +39,9 @@ const githubResultCap = 1000
 //
 // maxResults is the largest window the caller wants handed to one visit call -- its resumable
 // unit of work, not GitHub's cap. A window whose total exceeds it is halved, down to windows
-// GitHub can actually serve: only a window at minimumSearchWindow whose total is past
-// githubResultCap is an error, since results past that cap are unreachable however often the
-// caller retries.
+// GitHub can actually serve: only a window too narrow to halve (under two seconds) whose total
+// is past githubResultCap is an error, since results past that cap are unreachable however often
+// the caller retries.
 //
 // The two halves are NOT split at a bare midpoint on both sides: GitHub's date-range query
 // qualifiers (merged:A..B, created:A..B) are inclusive on BOTH ends, so searching [since, mid)
@@ -61,7 +62,7 @@ func walkWindowed[T any](
 		return fmt.Errorf("%s in [%s, %s]: %w", scope, formatWindowBound(since), formatWindowBound(until), err)
 	}
 
-	if total > maxResults && until.Sub(since) > minimumSearchWindow {
+	if total > maxResults && until.Sub(since) >= 2*minimumSearchWindow {
 		mid := since.Add(until.Sub(since) / 2)
 		if err := walkWindowed(since, mid, scope, maxResults, newFetcher, visit); err != nil {
 			return err
@@ -87,23 +88,9 @@ func walkWindowed[T any](
 	return visit(until, results)
 }
 
-// collectWindowed is walkWindowed for a caller that wants every result at once rather than one
-// window at a time.
-func collectWindowed[T any](since, until time.Time, scope string, maxResults int, newFetcher func(since, until time.Time) func() ([]T, int, error)) ([]T, error) {
-	var all []T
-	err := walkWindowed(since, until, scope, maxResults, newFetcher, func(_ time.Time, items []T) error {
-		all = append(all, items...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
-}
-
-// formatWindowBound writes a window bound the way the GitHub query itself spells it. time.Time's
-// own String carries a monotonic-clock reading ("m=-1204340.69"), which leaked into the
-// production freshness row's last_error through these messages.
+// formatWindowBound writes a window bound the way the GitHub query itself spells it, rather than
+// through time.Time's own String, whose monotonic-clock reading ("m=-1204340.69") would reach
+// the freshness row through these messages.
 func formatWindowBound(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }

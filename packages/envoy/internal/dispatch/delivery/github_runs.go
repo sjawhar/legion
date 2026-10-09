@@ -48,15 +48,14 @@ type FetchedJob struct {
 	Conclusion  *string
 }
 
-// workflowRunsPageSize bounds one page of the Actions run listing. A run object carries its head
-// commit's whole message, which GitHub truncates at 65,536 characters, so one run measures up to
-// about 80 KB: measured against the live API over 300 runs of a busy deploy repository, a run is
-// 13.7 KB at its smallest, 16 KB at the median, 77 KB at the 99th percentile and 79,943 bytes at
-// its largest. A page of 40 therefore fits comfortably most of the time and does not when a few
-// long squash-merge messages land together -- which is exactly what happened: one page of 40 in
-// a week of that repository's history measured past githubapp's 1 MiB response cap and failed
-// the pass every time it was retried. Ten runs is 800 KB at that measured worst case and
-// 148-208 KB in practice, so the cap bounds the page rather than the other way round.
+// workflowRunsPageSize bounds one page of the Actions run listing, so that a page fits inside
+// githubapp's 1 MiB response cap even when the largest runs land together. A run object carries
+// its head commit's whole message, which GitHub truncates at 65,536 characters, so one run
+// measures up to about 80 KB: measured against the live API over 300 runs of a busy deploy
+// repository, a run is 13.7 KB at its smallest, 16 KB at the median, 77 KB at the 99th
+// percentile and 79,943 bytes at its largest. Ten runs is 800 KB at that worst case and
+// 148-208 KB in practice; 40 is past the cap whenever a handful of long squash-merge messages
+// fall in one page.
 const workflowRunsPageSize = 10
 
 // runJobsPageSize bounds one page of a run's jobs listing, which is a different shape and sized
@@ -179,7 +178,7 @@ func FetchWorkflowRun(ctx context.Context, client *githubapp.Client, owner, repo
 		return FetchedRun{}, fmt.Errorf("mint installation token for %s/%s run %d: %w", owner, repo, runID, err)
 	}
 	path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d", url.PathEscape(owner), url.PathEscape(repo), runID)
-	body, status, header, err := client.Read(ctx, token, path)
+	body, status, header, err := readGitHubPage(ctx, client, token, path)
 	if err != nil {
 		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: %w", owner, repo, runID, err)
 	}

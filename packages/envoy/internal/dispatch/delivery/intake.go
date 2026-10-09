@@ -14,11 +14,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"path"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -85,14 +84,17 @@ func (in *Intake) Run(ctx context.Context) {
 	}
 
 	var sub *natsgo.Subscription
-	var boundSubjects []string
+	// The settings the handler routes by. Read on every poll and published here rather than
+	// captured by the handler closure: the durable's filter subject never changes, so a settings
+	// change must reach the running handler without rebinding anything.
+	var current atomic.Pointer[routeSettings]
 	defer func() {
 		if sub != nil {
 			_ = sub.Unsubscribe()
 		}
 	}()
 
-	rebind := func() {
+	refresh := func() {
 		settings, err := GetSettings(ctx, in.pool)
 		if err != nil {
 			if errors.Is(err, ErrNoSettings) {
@@ -106,31 +108,24 @@ func (in *Intake) Run(ctx context.Context) {
 			slog.Error("dispatch delivery: deploy_repo setting", "error", err)
 			return
 		}
-
-		subjects := []string{
-			"notifications.github.*.*.pr.*",
-			contracts.GithubWorkflowSubject(owner, repo, path.Base(settings.DeployWorkflowPath), ">"),
-		}
-		if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-			subjects = append(subjects, contracts.GithubWorkflowSubject(owner, repo, path.Base(settings.PRChecksWorkflowPath), ">"))
-		}
-		if sub != nil && slices.Equal(subjects, boundSubjects) {
+		current.Store(&routeSettings{settings: settings, owner: owner, repo: repo})
+		if sub != nil {
 			return
 		}
-		if sub != nil {
-			_ = sub.Unsubscribe()
-			sub = nil
-		}
-		newSub, ok := in.bind(subjects, func(ctx context.Context, payload map[string]string) error {
-			return in.route(ctx, settings, owner, repo, payload)
+		newSub, ok := in.bind(func(ctx context.Context, payload map[string]string) error {
+			routing := current.Load()
+			if routing == nil {
+				return nil
+			}
+			return in.route(ctx, routing.settings, routing.owner, routing.repo, payload)
 		})
 		if !ok {
 			return
 		}
-		sub, boundSubjects = newSub, subjects
+		sub = newSub
 	}
 
-	rebind()
+	refresh()
 	ticker := time.NewTicker(settingsPollInterval)
 	defer ticker.Stop()
 	for {
@@ -138,33 +133,49 @@ func (in *Intake) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			rebind()
+			refresh()
 		}
 	}
 }
 
-// settingsPollInterval is how often Run re-reads delivery_settings to notice a changed deploy
-// repository or workflow path and rebind the NATS consumer's filter subjects -- short enough that
-// a settings PUT takes effect in practice without an operator restarting the server.
-const settingsPollInterval = 30 * time.Second
+// settingsPollInterval is how often Run re-reads delivery_settings so a settings PUT reaches the
+// running handler -- which repository and which workflow paths it routes by -- without an
+// operator restarting the server. A var so a test can shrink it.
+var settingsPollInterval = 30 * time.Second
+
+// routeSettings is what the handler needs to route one envelope: the settings row and the deploy
+// repository split into its owner and name.
+type routeSettings struct {
+	settings DeliverySettings
+	owner    string
+	repo     string
+}
 
 // route dispatches one decoded payload to the PR or workflow handler by its kind field, and to
-// the right workflow kind (deploy or PR-checks) by comparing the payload's own workflow path
-// against the two configured ones.
+// the right workflow kind (deploy or PR-checks) by comparing the payload's own repository and
+// workflow path against the configured ones. It is the whole filter: the durable is handed every
+// GitHub notification on the bus (githubIntakeSubject), so everything this slice does not want
+// is discarded here, before any GitHub call or database write.
 func (in *Intake) route(ctx context.Context, settings DeliverySettings, owner, repo string, payload map[string]string) error {
 	switch payload["kind"] {
 	case "pr":
+		// Every repository's pull requests: the population spans any repository the configured
+		// authors merge into, not the deploy repository alone, and handlePullRequestEnvelope
+		// decides from the pull request itself.
 		return in.handlePullRequestEnvelope(ctx, settings, payload)
 	case "workflow":
+		// The workflow runs this slice records are the deploy repository's own. Another
+		// repository's run of a file with the same path is not one of them, and routing it would
+		// fetch a run this slice never stores.
+		if payload["repo"] != owner+"/"+repo {
+			return nil
+		}
 		switch payload["path"] {
 		case settings.DeployWorkflowPath:
 			return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
 		case settings.PRChecksWorkflowPath:
 			return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
 		default:
-			// Neither configured workflow: the filter subjects above are already scoped to
-			// owner/repo and the two configured workflow filenames, so this should not happen in
-			// practice; ignored defensively rather than treated as an error.
 			return nil
 		}
 	default:
@@ -172,95 +183,126 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, owner, r
 	}
 }
 
-// bind creates (on first run) or resumes (on a restart) one durable JetStream consumer filtered
-// to every subject in subjects (NATS 2.10's FilterSubjects), then binds a push subscription to
-// it. Checks ConsumerInfo before calling AddConsumer, exactly like
-// cmd/listener/durable.go's startListenerSubscription: a durable's DeliverSubject is a random
-// inbox chosen once at creation, and calling AddConsumer again with a freshly generated one on
-// every restart would try to change a durable's config out from under itself, which is refused
-// (or worse, silently wrong) rather than resuming the existing cursor. Unlike the listener's own
-// consumer, this package skips the rolling-deploy bind-retry/backoff machinery (bindListenerDurable):
-// Dispatch runs as one instance, not a rolling fleet, so "another process still holds the old
-// bind" is not a concern this package needs to handle.
+// deliveryConsumerName is the durable this package's events are read through: one push consumer
+// over githubIntakeSubject, with the flow control below. The server holds a backlog undelivered
+// until a subscriber attaches, so a restart with events waiting loses none of them and none of
+// them count against MaxAckPending in the meantime.
 const deliveryConsumerName = "delivery-events"
+
+// githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
+// handler decides what to do with each (route), and discards the ones this slice does not want,
+// which is a JSON decode and two map lookups per envelope.
+//
+// One subject rather than the narrow set this once carried -- the PR subject plus one per
+// configured workflow file, through NATS 2.10's FilterSubjects -- because a consumer carrying
+// that set matches nothing: with twelve messages on a subject one of those filters names, the
+// durable reports NumPending 0 and is handed none of them, while a consumer carrying that one
+// subject alone reports all twelve (TestIntakeDrainsABacklogPublishedBeforeItBinds). A filter
+// the server does not apply is silent -- the consumer looks healthy and simply never receives
+// anything -- so this takes the shape the server demonstrably serves and filters in the handler.
+// It also means the filter no longer depends on the settings row, so a settings change needs no
+// rebind.
+const githubIntakeSubject = "notifications.github.>"
 
 // intakeMessageTimeout bounds how long one envelope's own handling may take -- its GitHub calls
 // (a pull request plus its commit pages, or a workflow run plus its jobs pages, each with this
 // package's own bounded page retries) and its Postgres writes. A handler that runs past it is
 // cancelled, logged and acked: the five-minute reconcile is this package's catch-up mechanism,
-// so one slow envelope must not hold the consumer.
-const intakeMessageTimeout = time.Minute
+// so one slow envelope must not hold the consumer. A var so a test can shrink it.
+var intakeMessageTimeout = time.Minute
 
 // intakeMaxAckPending bounds how many messages NATS may have outstanding with this consumer at
-// once. This is the fix for the production incident this package's reconcile work came from: the
-// handler does its GitHub calls inline on the subscription's own delivery goroutine, one message
-// at a time, so with the server default of 1,000 outstanding messages and a 30-second ack wait,
-// every message past roughly the thirtieth was redelivered before the handler had even reached
-// it. Each redelivery was another copy in nats.go's per-subscription pending buffer, which filled
-// its 64 MiB limit and started dropping messages as a slow consumer (6,900 drops over four
-// hours, 543,070 deliveries against an ack floor of 41,575 for about 10,000 distinct messages).
-// Four outstanding messages is what a handler taking up to intakeMessageTimeout can acknowledge
-// well inside intakeAckWait, so the server never redelivers a message this consumer is still
-// working on and the pending buffer never holds more than a handful of envelopes.
-const intakeMaxAckPending = 4
+// once. The handler does its GitHub calls inline on the subscription's own delivery goroutine,
+// one message at a time, so the bound has to be what that one handler can acknowledge well
+// inside intakeAckWait; the server's own default of 1,000 is far past it, and messages it
+// redelivers under a handler still working accumulate in the client's pending buffer until that
+// buffer drops them. A var so a test can shrink it.
+var intakeMaxAckPending = 4
 
 // intakeAckWait is how long NATS waits for an acknowledgement before redelivering. Derived from
-// the two constants above rather than chosen: the last of intakeMaxAckPending outstanding
-// messages waits for the ones before it, so the bound is their total handling time, plus a
-// minute for the acknowledgement itself to land.
-const intakeAckWait = intakeMaxAckPending*intakeMessageTimeout + time.Minute
+// the two values above rather than chosen: the last of intakeMaxAckPending outstanding messages
+// waits for the ones before it, so the bound is their total handling time, plus a minute for the
+// acknowledgement itself to land. A function rather than a value so a test that shrinks either
+// input gets an ack wait derived from it.
+func intakeAckWait() time.Duration {
+	return time.Duration(intakeMaxAckPending)*intakeMessageTimeout + time.Minute
+}
 
 // deliveryConsumerConfig is the policy bind stamps on the durable, whether it creates it or
-// finds one an earlier release left with the server's defaults.
-func deliveryConsumerConfig(subjects []string) natsgo.ConsumerConfig {
+// finds one an earlier release left with another filter or the server's own flow control.
+func deliveryConsumerConfig() natsgo.ConsumerConfig {
 	return natsgo.ConsumerConfig{
 		Durable:        deliveryConsumerName,
 		DeliverSubject: natsgo.NewInbox(),
-		FilterSubjects: subjects,
+		FilterSubject:  githubIntakeSubject,
 		AckPolicy:      natsgo.AckExplicitPolicy,
-		AckWait:        intakeAckWait,
+		AckWait:        intakeAckWait(),
 		MaxAckPending:  intakeMaxAckPending,
 	}
 }
 
-func (in *Intake) bind(subjects []string, handle func(context.Context, map[string]string) error) (*natsgo.Subscription, bool) {
-	info, err := in.nats.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
-	wanted := deliveryConsumerConfig(subjects)
+// bind creates (on first run) or resumes (on a restart) the durable and subscribes to it.
+// Checks ConsumerInfo before AddConsumer, like cmd/listener/durable.go's
+// startListenerSubscription: a durable's DeliverSubject is a random inbox chosen once at
+// creation, and calling AddConsumer again with a freshly generated one on every restart would
+// try to change a durable's config out from under itself rather than resuming its cursor.
+// Unlike the listener's own consumer, this package skips the rolling-deploy bind-retry/backoff
+// machinery (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet.
+func (in *Intake) bind(handle func(context.Context, map[string]string) error) (*natsgo.Subscription, bool) {
+	js := in.nats.JS()
+	info, err := js.ConsumerInfo(bus.Stream, deliveryConsumerName)
+	wanted := deliveryConsumerConfig()
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
-		if _, err := in.nats.JS().AddConsumer(bus.Stream, &wanted); err != nil {
-			slog.Error("dispatch delivery: create NATS consumer", "name", deliveryConsumerName, "subjects", subjects, "error", err)
+		if _, err := js.AddConsumer(bus.Stream, &wanted); err != nil {
+			slog.Error("dispatch delivery: create NATS consumer", "name", deliveryConsumerName, "subject", githubIntakeSubject, "error", err)
 			return nil, false
 		}
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", deliveryConsumerName, "error", err)
 		return nil, false
-	case !slices.Equal(info.Config.FilterSubjects, subjects) ||
-		info.Config.AckWait != wanted.AckWait ||
-		info.Config.MaxAckPending != wanted.MaxAckPending:
-		// A settings change (a different deploy repository, a different workflow path) moved
-		// these subjects, or the durable still carries an earlier release's flow control (the
-		// server's own defaults, which redelivered faster than the handler could work -- see
-		// intakeMaxAckPending): update the existing durable in place, preserving its
-		// DeliverSubject and delivery cursor, so neither a settings PUT nor this policy needs an
-		// operator to notice a log line and restart the server. Every field here is one NATS
-		// lets an existing consumer change; nothing touches its deliver policy or ack policy,
-		// which it does not.
-		config := info.Config
-		config.FilterSubjects = subjects
-		config.AckWait = wanted.AckWait
-		config.MaxAckPending = wanted.MaxAckPending
-		if _, err := in.nats.JS().UpdateConsumer(bus.Stream, &config); err != nil {
-			slog.Error("dispatch delivery: update NATS consumer policy", "name", deliveryConsumerName, "configured_subjects", info.Config.FilterSubjects, "wanted_subjects", subjects, "error", err)
+	case len(info.Config.FilterSubjects) > 0:
+		// A durable an earlier release left carrying the filter-subject set the server does not
+		// apply (githubIntakeSubject). A consumer's filter cannot be moved from that set to one
+		// subject in place, so it is replaced -- at its own ack floor, so the replacement neither
+		// replays what it acknowledged nor skips what it had not.
+		recreate := wanted
+		recreate.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
+		recreate.OptStartSeq = info.AckFloor.Stream + 1
+		if err := js.DeleteConsumer(bus.Stream, deliveryConsumerName); err != nil {
+			slog.Error("dispatch delivery: replace multi-subject NATS consumer", "name", deliveryConsumerName, "error", err)
 			return nil, false
 		}
-		slog.Info("dispatch delivery: NATS consumer policy updated", "name", deliveryConsumerName, "subjects", subjects, "ack_wait", wanted.AckWait, "max_ack_pending", wanted.MaxAckPending)
+		if _, err := js.AddConsumer(bus.Stream, &recreate); err != nil {
+			slog.Error("dispatch delivery: create replacement NATS consumer", "name", deliveryConsumerName, "start_seq", recreate.OptStartSeq, "error", err)
+			return nil, false
+		}
+		slog.Info("dispatch delivery: multi-subject NATS consumer replaced", "name", deliveryConsumerName, "subject", githubIntakeSubject, "start_seq", recreate.OptStartSeq)
+	case info.Config.FilterSubject != wanted.FilterSubject ||
+		info.Config.AckWait != wanted.AckWait ||
+		info.Config.MaxAckPending != wanted.MaxAckPending:
+		// The durable carries an earlier release's filter or flow control: update it in place,
+		// preserving its delivery cursor, so this needs no operator to notice a log line and
+		// restart the server. Every field here is one NATS lets an existing consumer change;
+		// nothing touches its deliver policy or ack policy, which it does not.
+		config := info.Config
+		config.FilterSubject = wanted.FilterSubject
+		config.AckWait = wanted.AckWait
+		config.MaxAckPending = wanted.MaxAckPending
+		if _, err := js.UpdateConsumer(bus.Stream, &config); err != nil {
+			slog.Error("dispatch delivery: update NATS consumer policy", "name", deliveryConsumerName, "configured_subject", info.Config.FilterSubject, "wanted_subject", wanted.FilterSubject, "error", err)
+			return nil, false
+		}
+		slog.Info("dispatch delivery: NATS consumer policy updated", "name", deliveryConsumerName, "subject", wanted.FilterSubject, "ack_wait", wanted.AckWait, "max_ack_pending", wanted.MaxAckPending)
 	}
-	sub, err := in.nats.Subscribe("", func(msg *natsgo.Msg) {
+	// The subject must be the consumer's own filter subject: nats.go checks a bound
+	// subscription's subject against it, and refuses an empty one ("subject does not match
+	// consumer").
+	sub, err := in.nats.Subscribe(githubIntakeSubject, func(msg *natsgo.Msg) {
 		in.deliver(msg, handle)
 	}, natsgo.Bind(bus.Stream, deliveryConsumerName), natsgo.ManualAck())
 	if err != nil {
-		slog.Error("dispatch delivery: bind NATS consumer", "name", deliveryConsumerName, "subjects", subjects, "error", err)
+		slog.Error("dispatch delivery: bind NATS consumer", "name", deliveryConsumerName, "subject", githubIntakeSubject, "error", err)
 		return nil, false
 	}
 	return sub, true
@@ -270,11 +312,23 @@ func (in *Intake) bind(subjects []string, handle func(context.Context, map[strin
 // intakeMessageTimeout, and always acks: a malformed envelope has nothing to retry, and a handle
 // error (a failed GitHub call, or that deadline passing) is caught up by the next reconcile pass
 // rather than by NATS redelivery -- see the package doc comment. The deadline is what makes
-// intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold this
-// consumer's only in-flight slot past the ack wait and have the message redelivered underneath
-// it.
+// intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold an
+// in-flight slot past the ack wait and have the message redelivered underneath it.
 func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, map[string]string) error) {
-	defer func() { _ = msg.Ack() }()
+	defer func() {
+		err := msg.Ack()
+		if err == nil {
+			return
+		}
+		// Never discarded: an acknowledgement that does not reach the server leaves the message
+		// outstanding, and intakeMaxAckPending of those stop the consumer being given anything
+		// until the ack wait expires. The Nak gives the slot back at once; when it fails too
+		// (the connection is down, which is why the ack failed), the ack wait is the backstop.
+		slog.Error("dispatch delivery: acknowledge message", "subject", msg.Subject, "error", err)
+		if err := msg.Nak(); err != nil {
+			slog.Error("dispatch delivery: negatively acknowledge message", "subject", msg.Subject, "error", err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), intakeMessageTimeout)
 	defer cancel()
 
@@ -470,7 +524,7 @@ func fetchSessionTrailers(ctx context.Context, client *githubapp.Client, owner, 
 	seen := map[string]bool{}
 	for page := 1; page <= maxCommitPages; page++ {
 		commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
-		body, status, header, err := client.Read(ctx, token, commitsPath)
+		body, status, header, err := readGitHubPage(ctx, client, token, commitsPath)
 		if err != nil {
 			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
 		}

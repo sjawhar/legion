@@ -623,7 +623,7 @@ func searchAllInstallations(ctx context.Context, client *githubapp.Client, autho
 	var mu sync.Mutex
 	var found []FetchedPullRequest
 	err := SearchMergedPullRequestsAcrossInstallation(ctx, client, authors,
-		func(int64) time.Time { return since }, until,
+		func(int64) (time.Time, error) { return since, nil }, until, nil,
 		func(_ githubapp.Installation, _ time.Time, prs []FetchedPullRequest) error {
 			mu.Lock()
 			defer mu.Unlock()

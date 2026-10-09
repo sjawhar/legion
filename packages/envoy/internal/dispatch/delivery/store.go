@@ -139,15 +139,6 @@ func RecordReconcileError(ctx context.Context, pool *store.Pool, message string)
 	return err
 }
 
-// ReconcileProgress is how far one reconcile step has imported, and what it was measured
-// against. A step whose stored scope differs from the one the current settings make has no
-// usable progress: the window it recorded was measured against a repository, workflow path or
-// population that no longer applies, so its step backfills afresh rather than resuming it.
-type ReconcileProgress struct {
-	Through time.Time
-	Scope   string
-}
-
 // ReconcileProgressThrough reads one step's recorded progress under scope, or a zero time when
 // the step has none (no row, or a row recorded against another scope).
 func ReconcileProgressThrough(ctx context.Context, pool *store.Pool, step, scope string) (time.Time, error) {
@@ -180,6 +171,24 @@ func RecordReconcileProgress(ctx context.Context, pool *store.Pool, step, scope 
 			end,
 			updated_at = now()
 	`, step, scope, through)
+	return err
+}
+
+// PruneMergedPullRequestProgress deletes the merged-PR search progress of every installation
+// outside keep -- an App installation that was removed, or one whose repositories moved to
+// another. Its row would otherwise sit in delivery_reconcile_progress for good: nothing else
+// deletes a step's row, and the step name carries an installation id no listing answers any
+// more. keep empty deletes every installation's row, which is what an App with no installations
+// means.
+func PruneMergedPullRequestProgress(ctx context.Context, pool *store.Pool, keep []int64) error {
+	steps := make([]string, 0, len(keep))
+	for _, installationID := range keep {
+		steps = append(steps, mergedPullRequestsStep(installationID))
+	}
+	_, err := pool.Exec(ctx, `
+		delete from delivery_reconcile_progress
+		where step like 'merged_pull_requests/installation/%' and not (step = any($1))
+	`, steps)
 	return err
 }
 

@@ -216,16 +216,23 @@ func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings De
 	var failures []error
 	blocked := map[int64]bool{}
 
-	since := func(installationID int64) time.Time {
-		start, err := r.stepSince(ctx, mergedPullRequestsStep(installationID), scope, until)
-		if err != nil {
-			mu.Lock()
-			failures = append(failures, err)
-			blocked[installationID] = true
-			mu.Unlock()
-			return until.Add(-BackfillWindow)
+	since := func(installationID int64) (time.Time, error) {
+		return r.stepSince(ctx, mergedPullRequestsStep(installationID), scope, until)
+	}
+
+	// The listing this search already makes is the only answer to which installations still
+	// exist, so the rows of the ones that no longer do are dropped here rather than by a sweep
+	// of its own.
+	listed := func(installations []githubapp.Installation) {
+		keep := make([]int64, 0, len(installations))
+		for _, installation := range installations {
+			keep = append(keep, installation.ID)
 		}
-		return start
+		if err := PruneMergedPullRequestProgress(ctx, r.pool, keep); err != nil {
+			mu.Lock()
+			failures = append(failures, fmt.Errorf("prune installation progress: %w", err))
+			mu.Unlock()
+		}
 	}
 
 	visit := func(installation githubapp.Installation, windowUntil time.Time, prs []FetchedPullRequest) error {
@@ -261,7 +268,7 @@ func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings De
 		return nil
 	}
 
-	if err := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until, visit); err != nil {
+	if err := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until, listed, visit); err != nil {
 		mu.Lock()
 		failures = append(failures, fmt.Errorf("search merged pull requests: %w", err))
 		mu.Unlock()

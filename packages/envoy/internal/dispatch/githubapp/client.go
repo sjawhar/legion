@@ -80,7 +80,8 @@ const (
 // arrive, success or GitHub's own timeout, is cut off and reported as a bare client timeout
 // instead. This is that bound plus room for the connection and for transferring a response at
 // responseLimit.
-const RequestTimeout = 20 * time.Second
+// A var rather than a const so a test can shrink it; nothing outside a test writes it.
+var RequestTimeout = 20 * time.Second
 
 // ResponseTooLargeError reports a response that did not fit inside a caller's configured limit.
 type ResponseTooLargeError struct {

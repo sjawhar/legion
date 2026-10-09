@@ -380,17 +380,13 @@ func countRuns(t *testing.T, ctx context.Context, pool *store.Pool) int {
 	return count
 }
 
-// TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft is the consumer half of the
-// production incident. The handler does its GitHub calls inline on the subscription's own
-// delivery goroutine, one message at a time, so what NATS may have outstanding against it has to
-// be what it can acknowledge inside the ack wait. An earlier release set neither, leaving the
-// server's defaults -- 1,000 outstanding against a 30-second ack wait -- so every message past
-// roughly the thirtieth was redelivered before the handler had reached it, each redelivery
-// another copy in nats.go's per-subscription pending buffer, which filled its 64 MiB limit and
-// started dropping messages as a slow consumer: 6,900 drops over four hours, and 543,070
-// deliveries against an ack floor of 41,575 for about 10,000 distinct messages. Neither field can
-// be set once and forgotten, since the durable already exists in production: bind has to correct
-// it in place, which is what this holds.
+// TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft holds what bind does to the
+// durable production already has. An earlier release left it with the filter-subject set the
+// server does not apply -- so the consumer was handed nothing at all -- and with the server's
+// own flow control, 1,000 messages outstanding against a 30-second ack wait, which redelivers
+// faster than a handler doing its GitHub calls inline can acknowledge. Neither can be set once
+// and forgotten, since the durable already exists: bind has to correct both without an operator
+// noticing a log line, which is what this holds.
 func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	settings := seedDeliverySettings(t, ctx, pool)
@@ -417,7 +413,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	if err != nil {
 		t.Fatalf("pre-create the durable an earlier release left: %v", err)
 	}
-	if created.Config.MaxAckPending == intakeMaxAckPending || created.Config.AckWait == intakeAckWait {
+	if created.Config.MaxAckPending == intakeMaxAckPending || created.Config.AckWait == intakeAckWait() {
 		t.Fatalf("the pre-created durable already carries this release's flow control (%s/%d), so the test proves nothing",
 			created.Config.AckWait, created.Config.MaxAckPending)
 	}
@@ -434,22 +430,206 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 		if err != nil {
 			t.Fatalf("read consumer info: %v", err)
 		}
-		if info.Config.MaxAckPending == intakeMaxAckPending && info.Config.AckWait == intakeAckWait {
+		if info.Config.MaxAckPending == intakeMaxAckPending && info.Config.AckWait == intakeAckWait() {
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("durable ack_wait/max_ack_pending = %s/%d after %s, want %s/%d (bind must correct an earlier release's flow control in place)",
-				info.Config.AckWait, info.Config.MaxAckPending, 20*time.Second, intakeAckWait, intakeMaxAckPending)
+				info.Config.AckWait, info.Config.MaxAckPending, 20*time.Second, intakeAckWait(), intakeMaxAckPending)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !slices.Equal(info.Config.FilterSubjects, legacy.FilterSubjects) {
-		t.Fatalf("durable filter subjects = %v, want them left as they were (%v)", info.Config.FilterSubjects, legacy.FilterSubjects)
+	if info.Config.FilterSubject != githubIntakeSubject || len(info.Config.FilterSubjects) > 0 {
+		t.Fatalf("durable filter = %q / %v, want the one subject the server applies (%q)",
+			info.Config.FilterSubject, info.Config.FilterSubjects, githubIntakeSubject)
 	}
 	// The bound this release holds: what NATS may have outstanding has to be acknowledgeable
 	// inside the ack wait, handled one at a time under intakeMessageTimeout.
-	if worst := intakeMaxAckPending * intakeMessageTimeout; worst >= intakeAckWait {
-		t.Fatalf("intakeMaxAckPending*intakeMessageTimeout = %s, want less than intakeAckWait (%s)", worst, intakeAckWait)
+	if worst := time.Duration(intakeMaxAckPending) * intakeMessageTimeout; worst >= intakeAckWait() {
+		t.Fatalf("intakeMaxAckPending*intakeMessageTimeout = %s, want less than intakeAckWait (%s)", worst, intakeAckWait())
+	}
+}
+
+// TestWhichFilterShapeMatchesAWorkflowSubject pins why the durable an earlier release left was
+// handed nothing: it probes the same stored messages with each filter shape in turn and reports
+// what each one matches.
+func TestWhichFilterShapeMatchesAWorkflowSubject(t *testing.T) {
+	natsClient := intakeTestClient(t)
+	const stored = 12
+	for i := range stored {
+		publishWorkflowEnvelope(t, natsClient, "acme", "widgets", ".github/workflows/deploy.yml", int64(6000+i))
+	}
+	subject := contracts.GithubWorkflowSubject("acme", "widgets", "deploy.yml", "in_progress")
+	oldSet := []string{
+		"notifications.github.*.*.pr.*",
+		contracts.GithubWorkflowSubject("acme", "widgets", "deploy.yml", ">"),
+		contracts.GithubWorkflowSubject("acme", "widgets", "pr-checks.yml", ">"),
+	}
+	t.Logf("stored %d messages on %q", stored, subject)
+
+	probe := func(name string, config natsgo.ConsumerConfig) uint64 {
+		t.Helper()
+		config.AckPolicy = natsgo.AckExplicitPolicy
+		info, err := natsClient.JS().AddConsumer(bus.Stream, &config)
+		if err != nil {
+			t.Logf("%s: AddConsumer refused: %v", name, err)
+			return 0
+		}
+		defer func() {
+			if err := natsClient.JS().DeleteConsumer(bus.Stream, info.Name); err != nil {
+				t.Logf("delete probe consumer %s: %v", info.Name, err)
+			}
+		}()
+		t.Logf("%s: pending=%d", name, info.NumPending)
+		return info.NumPending
+	}
+
+	singleWorkflow := probe("FilterSubject = the workflow subject with >", natsgo.ConsumerConfig{FilterSubject: oldSet[1]})
+	probe("FilterSubject = the PR subject", natsgo.ConsumerConfig{FilterSubject: oldSet[0]})
+	probe("FilterSubject = the PR-checks workflow subject with >", natsgo.ConsumerConfig{FilterSubject: oldSet[2]})
+	pluralOne := probe("pull, FilterSubjects = [the workflow subject with >]", natsgo.ConsumerConfig{FilterSubjects: []string{oldSet[1]}})
+	pluralAll := probe("pull, FilterSubjects = the whole old set", natsgo.ConsumerConfig{FilterSubjects: oldSet})
+
+	// The same filters on a push consumer -- one carrying a DeliverSubject -- which is what this
+	// package's durable is. This is the axis the probes above do not cover.
+	pushSingle := probe("push, FilterSubject = the workflow subject with >",
+		natsgo.ConsumerConfig{DeliverSubject: natsgo.NewInbox(), FilterSubject: oldSet[1]})
+	pushPluralOne := probe("push, FilterSubjects = [the workflow subject with >]",
+		natsgo.ConsumerConfig{DeliverSubject: natsgo.NewInbox(), FilterSubjects: []string{oldSet[1]}})
+	pushPluralAll := probe("push, FilterSubjects = the whole old set",
+		natsgo.ConsumerConfig{DeliverSubject: natsgo.NewInbox(), FilterSubjects: oldSet})
+	pushWide := probe("push, FilterSubject = "+githubIntakeSubject,
+		natsgo.ConsumerConfig{DeliverSubject: natsgo.NewInbox(), FilterSubject: githubIntakeSubject})
+
+	// The whole config the stalled release built, field for field, under a name of its own: a
+	// durable push consumer with the three filter subjects and this package's flow control. Kept
+	// alive rather than probed, because the subscription bound to it below is the subject here.
+	old, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:        "probe-old-config",
+		DeliverSubject: natsgo.NewInbox(),
+		FilterSubjects: oldSet,
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		AckWait:        intakeAckWait(),
+		MaxAckPending:  intakeMaxAckPending,
+	})
+	if err != nil {
+		t.Fatalf("create the old-config durable: %v", err)
+	}
+	t.Logf("whole old config matched %d of %d stored messages", old.NumPending, stored)
+
+	// Each consumer matches every stored message, so what differs is the subscription bound to
+	// it. A plural-filter consumer leaves FilterSubject empty, and an empty subject is the only
+	// one nats.go accepts against it; a single-filter consumer must be subscribed on its own
+	// filter subject. Bind each the way its release does and count what actually arrives.
+	t.Logf("bound to the old config with an empty subject: %d of %d arrived", drain(t, natsClient, "probe-old-config", ""), stored)
+	single, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:        "probe-new-config",
+		DeliverSubject: natsgo.NewInbox(),
+		FilterSubject:  githubIntakeSubject,
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		AckWait:        intakeAckWait(),
+		MaxAckPending:  intakeMaxAckPending,
+	})
+	if err != nil {
+		t.Fatalf("create the single-filter durable: %v", err)
+	}
+	t.Logf("bound to the new config on its own filter subject: %d of %d arrived", drain(t, natsClient, single.Name, githubIntakeSubject), stored)
+
+	if pushWide != stored {
+		t.Fatalf("the push consumer this release creates matched %d of %d stored messages", pushWide, stored)
+	}
+	if singleWorkflow != stored {
+		t.Fatalf("the workflow subject matched %d of %d stored messages as a single pull FilterSubject", singleWorkflow, stored)
+	}
+	t.Logf("verdict: pull single=%d plural-one=%d plural-all=%d | push single=%d plural-one=%d plural-all=%d wide=%d (of %d stored)",
+		singleWorkflow, pluralOne, pluralAll, pushSingle, pushPluralOne, pushPluralAll, pushWide, stored)
+}
+
+// drain binds a push subscription to consumer on subject, the way this package's bind does, and
+// reports how many messages reach its handler within a short window.
+func drain(t *testing.T, natsClient *bus.Client, consumer, subject string) int {
+	t.Helper()
+	var mu sync.Mutex
+	arrived := 0
+	sub, err := natsClient.JS().Subscribe(subject, func(msg *natsgo.Msg) {
+		mu.Lock()
+		arrived++
+		mu.Unlock()
+		if err := msg.Ack(); err != nil {
+			t.Logf("ack on %s: %v", consumer, err)
+		}
+	}, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
+	if err != nil {
+		t.Logf("subscribe to %s on subject %q: %v", consumer, subject, err)
+		return 0
+	}
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe from %s: %v", consumer, err)
+		}
+	}()
+	time.Sleep(3 * time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	return arrived
+}
+
+// TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub holds the cost of the one filter
+// subject this release carries: the durable is handed every GitHub notification on the bus, and
+// the ones this slice does not want -- another repository's workflow, a workflow file neither
+// setting names -- must cost a decode and an acknowledgement, with no GitHub call and no row
+// written. Otherwise a wide filter would put the handler's serial GitHub work behind traffic it
+// has no interest in.
+func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/{owner}/{repo}/actions/runs/{run_id}", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("GitHub was called for an envelope the intake does not want: %s", r.URL.Path)
+	})
+
+	natsClient := intakeTestClient(t)
+	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	runCtx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go intake.Run(runCtx)
+	awaitBoundDurable(t, natsClient)
+
+	// A workflow file neither setting names, and another repository's run of the deploy file.
+	const unwanted = 8
+	for i := range unwanted {
+		workflowPath, owner, repo := ".github/workflows/unrelated.yml", "acme", "widgets"
+		if i%2 == 1 {
+			workflowPath, owner, repo = ".github/workflows/deploy.yml", "other-org", "other-repo"
+		}
+		publishWorkflowEnvelope(t, natsClient, owner, repo, workflowPath, int64(7000+i))
+	}
+
+	// Every one acknowledged: the ack floor reaches the last message the stream holds.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		stream, err := natsClient.JS().StreamInfo(bus.Stream)
+		if err != nil {
+			t.Fatalf("read stream info: %v", err)
+		}
+		info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		if err != nil {
+			t.Fatalf("read consumer info: %v", err)
+		}
+		if info.AckFloor.Stream >= stream.State.LastSeq && info.NumPending == 0 {
+			t.Logf("discarded %d envelopes: ack_floor=%d last_seq=%d redelivered=%d",
+				unwanted, info.AckFloor.Stream, stream.State.LastSeq, info.NumRedelivered)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the intake did not acknowledge every envelope it discarded\n%s", intakeStateReport(t, natsClient))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if stored := countRuns(t, ctx, pool); stored != 0 {
+		t.Fatalf("delivery_runs rows = %d, want 0 (a discarded envelope writes nothing)", stored)
 	}
 }
 
@@ -460,4 +640,290 @@ func pathBaseForTest(workflowPath string) string {
 		return workflowPath[i+1:]
 	}
 	return workflowPath
+}
+
+// shrinkIntakeFlowControl shrinks the intake's own timing so a test exercises its real flow
+// control in test time. intakeMaxAckPending is deliberately left alone: it is the bound under
+// test.
+func shrinkIntakeFlowControl(t *testing.T) {
+	t.Helper()
+	messageTimeout, pollInterval := intakeMessageTimeout, settingsPollInterval
+	intakeMessageTimeout, settingsPollInterval = 5*time.Second, time.Second
+	t.Cleanup(func() {
+		intakeMessageTimeout, settingsPollInterval = messageTimeout, pollInterval
+	})
+}
+
+// publishWorkflowEnvelope publishes one workflow-run envelope built as Envoy's own GitHub
+// normalizer builds it -- source "github", the delivery GUID as SourceEventID, and the dedupe
+// key that pairs with it ("github.<guid>"), which is what earns the publish a JetStream MsgId
+// (contracts.DedupeKeyNamesTheUpstreamEvent). Publishing through production's own path rather
+// than an ad-hoc envelope is what makes a burst test say anything about production: an envelope
+// carrying another dedupe key is stored under different rules. Reports JetStream's own duplicate
+// verdict, so a caller can tell a message the stream already held from a new one.
+func publishWorkflowEnvelope(t *testing.T, natsClient *bus.Client, owner, repo, workflowPath string, runID int64) bool {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{
+		"kind": "workflow", "action": "in_progress", "repo": owner + "/" + repo,
+		"path": workflowPath, "run_id": strconv.FormatInt(runID, 10),
+	})
+	if err != nil {
+		t.Fatalf("encode workflow payload: %v", err)
+	}
+	deliveryID := fmt.Sprintf("%s-%d", t.Name(), runID)
+	envelope := contracts.Envelope{
+		EventID:       deliveryID,
+		Source:        "github",
+		SourceEventID: deliveryID,
+		DedupeKey:     "github." + deliveryID,
+		Topic:         contracts.GithubWorkflowSubject(owner, repo, pathBaseForTest(workflowPath), "in_progress"),
+		Payload:       string(payload),
+		TraceID:       deliveryID,
+		IssuedAt:      time.Now().Unix(),
+	}
+	if !contracts.DedupeKeyNamesTheUpstreamEvent(envelope) {
+		t.Fatalf("the test envelope's dedupe key does not name its event, so it is not published the way production publishes")
+	}
+	duplicate, err := natsClient.PublishReportingDuplicate(envelope)
+	if err != nil {
+		t.Fatalf("publish workflow envelope: %v", err)
+	}
+	return duplicate
+}
+
+// intakeTestClient connects one NATS client for an intake test and closes it with the test.
+func intakeTestClient(t *testing.T) *bus.Client {
+	t.Helper()
+	natsClient, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	t.Cleanup(natsClient.Close)
+	return natsClient
+}
+
+// awaitBoundDurable waits for the intake to have created its durable and subscribed to it, so a
+// test that means to publish into a bound consumer does not race the bind.
+func awaitBoundDurable(t *testing.T, natsClient *bus.Client) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		if err == nil && info.PushBound && info.Config.MaxAckPending == intakeMaxAckPending {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("intake never bound its durable: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// awaitRuns waits for the intake to have stored want delivery_runs rows, and fails with the
+// stream's message count and the consumer's whole state when it does not -- the numbers that say
+// whether a shortfall is a consumer that stopped being given messages or messages that never
+// reached the stream.
+func awaitRuns(t *testing.T, ctx context.Context, pool *store.Pool, natsClient *bus.Client, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		stored := countRuns(t, ctx, pool)
+		if stored >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivery_runs rows = %d, want %d after %s\n%s", stored, want, within, intakeStateReport(t, natsClient))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// intakeStateReport is the stream's message count per subject and the consumer's delivery state,
+// one line each.
+func intakeStateReport(t *testing.T, natsClient *bus.Client) string {
+	t.Helper()
+	report := ""
+	if stream, err := natsClient.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: ">"}); err != nil {
+		report += fmt.Sprintf("stream: %v\n", err)
+	} else {
+		report += fmt.Sprintf("stream: %d messages, by subject %v\n", stream.State.Msgs, stream.State.Subjects)
+	}
+	if info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName); err != nil {
+		report += fmt.Sprintf("consumer: %v", err)
+	} else {
+		report += fmt.Sprintf("consumer: delivered=%d ack_floor=%d ack_pending=%d pending=%d redelivered=%d filter_subjects=%q",
+			info.Delivered.Consumer, info.AckFloor.Consumer, info.NumAckPending, info.NumPending, info.NumRedelivered, info.Config.FilterSubjects)
+	}
+	report += "\n" + singleFilterProbe(t, natsClient)
+	return report
+}
+
+// singleFilterProbe reports what a consumer carrying one filter subject sees of the same stream.
+// Read beside the intake consumer's own numbers it separates the two explanations of a shortfall:
+// a stream that does not hold the messages, or a multi-subject filter the server does not apply
+// the way one filter subject is applied.
+func singleFilterProbe(t *testing.T, natsClient *bus.Client) string {
+	t.Helper()
+	subject := contracts.GithubWorkflowSubject("acme", "widgets", "deploy.yml", "in_progress")
+	probe, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		FilterSubject: subject,
+		AckPolicy:     natsgo.AckExplicitPolicy,
+	})
+	if err != nil {
+		return fmt.Sprintf("single-filter probe on %q: %v", subject, err)
+	}
+	defer func() {
+		if err := natsClient.JS().DeleteConsumer(bus.Stream, probe.Name); err != nil {
+			t.Logf("delete the single-filter probe consumer: %v", err)
+		}
+	}()
+	return fmt.Sprintf("single-filter probe on %q: pending=%d", subject, probe.NumPending)
+}
+
+// TestIntakeKeepsUpWithABurstOfDeliveryEvents publishes more events at once than the consumer may
+// have outstanding and holds the whole path end to end: every one is stored, each costs exactly
+// one GitHub fetch, nothing is redelivered and nothing is left outstanding. A burst larger than
+// intakeMaxAckPending is the case that bound exists for, so a flow-control change that stalls the
+// consumer -- an acknowledgement that never reaches the server, a credit never given back --
+// fails here.
+func TestIntakeKeepsUpWithABurstOfDeliveryEvents(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+
+	const burst = 30
+	var mu sync.Mutex
+	fetches := map[int64]int{}
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("run_id"), 10, 64)
+		if err != nil {
+			t.Errorf("parse run id %q: %v", r.PathValue("run_id"), err)
+		}
+		mu.Lock()
+		fetches[id]++
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mustEncode(t, w, smallRun(id, time.Now().UTC()))
+	})
+
+	natsClient := intakeTestClient(t)
+	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	runCtx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go intake.Run(runCtx)
+	awaitBoundDurable(t, natsClient)
+
+	duplicates := 0
+	for i := range burst {
+		if publishWorkflowEnvelope(t, natsClient, "acme", "widgets", settings.DeployWorkflowPath, int64(4000+i)) {
+			duplicates++
+		}
+	}
+	if duplicates > 0 {
+		t.Fatalf("%d of %d publishes were duplicates the stream already held, so the burst never reached the consumer", duplicates, burst)
+	}
+	awaitRuns(t, ctx, pool, natsClient, burst, 60*time.Second)
+	t.Log(intakeStateReport(t, natsClient))
+
+	// A redelivery, which flow control that did not fit the handler would cause, arrives within
+	// the ack wait; give one time to land before reading the consumer's state.
+	time.Sleep(2 * time.Second)
+	info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	if err != nil {
+		t.Fatalf("read consumer info: %v", err)
+	}
+	if info.NumRedelivered != 0 || info.NumAckPending != 0 {
+		t.Fatalf("consumer redelivered=%d ack_pending=%d, want 0/0 (every message acknowledged once, none redelivered)", info.NumRedelivered, info.NumAckPending)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fetches) != burst {
+		t.Fatalf("distinct runs fetched = %d, want %d", len(fetches), burst)
+	}
+	for id, count := range fetches {
+		if count != 1 {
+			t.Fatalf("run %d fetched %d times, want exactly 1 (a redelivery repeats its GitHub calls)", id, count)
+		}
+	}
+}
+
+// TestIntakeDrainsABacklogPublishedBeforeItBinds pins what the server does with events that
+// arrive while no subscriber is attached: the window between the durable being created and the
+// subscription attaching to it, and the whole time the process is down. The backlog is held
+// undelivered rather than pushed at an inbox nobody is reading, so one larger than
+// intakeMaxAckPending drains in full once the intake comes up, with nothing waiting on the ack
+// wait to be redelivered.
+func TestIntakeDrainsABacklogPublishedBeforeItBinds(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+
+	backlog := 3 * intakeMaxAckPending
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("run_id"), 10, 64)
+		if err != nil {
+			t.Errorf("parse run id %q: %v", r.PathValue("run_id"), err)
+		}
+		mustEncode(t, w, smallRun(id, time.Now().UTC()))
+	})
+
+	natsClient := intakeTestClient(t)
+	for i := range backlog {
+		publishWorkflowEnvelope(t, natsClient, "acme", "widgets", settings.DeployWorkflowPath, int64(5000+i))
+	}
+
+	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	runCtx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go intake.Run(runCtx)
+
+	awaitRuns(t, ctx, pool, natsClient, backlog, 60*time.Second)
+	t.Log(intakeStateReport(t, natsClient))
+}
+
+// TestReconcilePrunesProgressOfAnInstallationThatNoLongerExists holds the one thing that ever
+// deletes a merged-PR progress row: the step's own installation listing. An App installation
+// that is removed, or whose repositories move to another, leaves a row keyed by an id no listing
+// answers for again, and nothing else would ever collect it.
+func TestReconcilePrunesProgressOfAnInstallationThatNoLongerExists(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+	scope := searchProgressScope(settings)
+
+	live, removed := int64(1), int64(999)
+	for _, installationID := range []int64{live, removed} {
+		if err := RecordReconcileProgress(ctx, pool, mergedPullRequestsStep(installationID), scope, time.Now().UTC().Add(-time.Hour)); err != nil {
+			t.Fatalf("seed installation %d progress: %v", installationID, err)
+		}
+	}
+
+	fake := newFakeGitHub(t)
+	fake.installations = []fakeInstallation{{id: live, repos: []string{"acme/widgets"}}}
+	NewReconcile(pool, fake.newTestClient()).runOnce(ctx)
+
+	rows, err := pool.Query(ctx, `select step from delivery_reconcile_progress where step like 'merged_pull_requests/installation/%' order by step`)
+	if err != nil {
+		t.Fatalf("read progress steps: %v", err)
+	}
+	defer rows.Close()
+	var steps []string
+	for rows.Next() {
+		var step string
+		if err := rows.Scan(&step); err != nil {
+			t.Fatalf("scan progress step: %v", err)
+		}
+		steps = append(steps, step)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read progress steps: %v", err)
+	}
+	if slices.Contains(steps, mergedPullRequestsStep(removed)) {
+		t.Fatalf("progress steps = %v, want the removed installation's row gone", steps)
+	}
+	if !slices.Contains(steps, mergedPullRequestsStep(live)) {
+		t.Fatalf("progress steps = %v, want the live installation's row kept", steps)
+	}
 }
