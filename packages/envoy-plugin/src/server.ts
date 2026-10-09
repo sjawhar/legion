@@ -1,10 +1,9 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import { agentSubject, zodSchemaApi } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
-import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import { dispatchFirstSkillFile } from "@legion/envoy-client/dispatch-first";
 import { machineID } from "@legion/envoy-client/machine";
 import {
@@ -13,7 +12,7 @@ import {
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
-import { type ToolDefinition, tool } from "@opencode-ai/plugin/tool";
+import { tool } from "@opencode-ai/plugin/tool";
 import { logger } from "./log";
 import { resolvePort } from "./port";
 
@@ -29,7 +28,37 @@ const skillsDirectory = [
   path.resolve(moduleDirectory, "../../../skills"),
 ].find((dir) => existsSync(dir));
 
-function toolSpec(name: string): ToolSpec {
+const PACKAGE_NAME = "@sjawhar/opencode-legion-envoy";
+
+/** The package root: the nearest directory above `from` whose package.json names this package.
+ *  The packed server.js sits in dist/src/, the repo's server.ts in src/. A manifest on the way up
+ *  that is missing, unreadable or not JSON is passed over. */
+function packageRoot(from: string): string {
+  for (let directory = from; ; directory = path.dirname(directory)) {
+    if (manifestName(path.join(directory, "package.json")) === PACKAGE_NAME) return directory;
+    if (path.dirname(directory) === directory) {
+      throw new Error(`envoy: no ${PACKAGE_NAME} package.json above ${from}`);
+    }
+  }
+}
+
+/** A manifest's `name`, or undefined when the file is missing, unreadable or not JSON. */
+function manifestName(manifest: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
+    return typeof parsed === "object" && parsed !== null && "name" in parsed
+      ? parsed.name
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Holds the `dispatch` shim the `shell.env` hook puts first on every shell command's PATH. */
+const PLUGIN_BIN = path.join(packageRoot(moduleDirectory), "bin");
+
+/** A spec by its name, typed so a misspelled name fails `tsc` rather than the plugin's load. */
+function toolSpec(name: (typeof envoyToolSpecs)[number]["name"]): ToolSpec {
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
   if (spec === undefined) throw new Error(`envoy tool contract has no ${name}`);
   return spec;
@@ -46,12 +75,12 @@ const sessionsSpec = toolSpec("envoy_sessions");
 
 export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
-  // Dispatch configuration never prevents Envoy from loading. Disabled native
-  // tools are visible in the host log, including normal unconfigured installs.
+  // Dispatch configuration never prevents Envoy from loading. A Dispatch the configuration
+  // cannot reach is visible in the host log, including normal unconfigured installs.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd });
   if (!dispatchConfig.enabled) {
     logger.warn(
-      `envoy: dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
+      `envoy: Dispatch disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
     );
   }
   // With Dispatch configured, every session carries the dispatch-first skill as an instruction
@@ -182,33 +211,6 @@ export default async (input: { serverUrl: URL }) => {
     clearInterval(heartbeatInterval);
   });
 
-  // Native Dispatch tools are present only when the shared configuration has
-  // both a server URL and bearer token. Each tool returns its details as
-  // OpenCode metadata so the post-execution hook can subscribe to its topic.
-  const dispatchTools: Record<string, ToolDefinition> = {};
-  if (dispatchConfig.enabled) {
-    for (const spec of dispatchToolSpecs) {
-      dispatchTools[spec.name] = tool({
-        description: spec.description,
-        args: spec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Dispatch" });
-          const result = await executeDispatchTool({
-            tool: spec.name,
-            args: args as Record<string, unknown>,
-            cwd: ctx.directory,
-            host: "opencode",
-            sessionId: ctx.sessionID,
-            sessionTitle: (await fetchTitle(ctx.sessionID)) ?? undefined,
-            config: dispatchConfig,
-            env: process.env,
-          });
-          return { title: "Dispatch", output: result.text, metadata: result.details };
-        },
-      });
-    }
-  }
-
   return {
     config: (
       cfg: { skills?: { paths?: string[] }; instructions?: string[] } & Record<string, unknown>
@@ -224,6 +226,23 @@ export default async (input: { serverUrl: URL }) => {
       if (dispatchFirst !== undefined) {
         cfg.instructions ??= [];
         if (!cfg.instructions.includes(dispatchFirst)) cfg.instructions.push(dispatchFirst);
+      }
+    },
+    // The `dispatch` command in every shell command: first on PATH, and told which OpenCode
+    // session runs it and that session's title.
+    "shell.env": async (
+      input: { cwd: string; sessionID?: string; callID?: string },
+      output: { env: Record<string, string> }
+    ) => {
+      output.env.PATH = `${PLUGIN_BIN}${path.delimiter}${output.env.PATH ?? process.env.PATH ?? ""}`;
+      output.env.DISPATCH_HOST = "opencode";
+      // OpenCode spreads output.env over its own process.env, so an absent key keeps the inherited value.
+      output.env.DISPATCH_SESSION_ID = "";
+      output.env.DISPATCH_SESSION_TITLE = "";
+      if (input.sessionID) {
+        output.env.DISPATCH_SESSION_ID = input.sessionID;
+        const title = trackedSessions.get(input.sessionID)?.title;
+        if (title) output.env.DISPATCH_SESSION_TITLE = title;
       }
     },
     event: async ({
@@ -295,7 +314,6 @@ export default async (input: { serverUrl: URL }) => {
       clearInterval(heartbeatInterval);
     },
     tool: {
-      ...dispatchTools,
       envoy_subscribe: tool({
         description: subscribeSpec.description,
         args: subscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,

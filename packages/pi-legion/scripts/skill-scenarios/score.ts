@@ -268,8 +268,8 @@ function brainstormSurface(runDir: string, run: string, label: string): Row {
   const entries = session(runDir);
   const calls = toolCalls(entries);
   // Whether Dispatch created an issue is its own answer in a tool's result, whatever reached it: a
-  // top-level `write` to the `xd://dispatch_issue` device, one inside an `eval` cell, or a host that
-  // calls the tool by name. A call Dispatch refused as a duplicate created nothing.
+  // `dispatch issue` command in a `bash` call, the same run from inside an `eval` cell, or a host
+  // that calls the tool by name. A call Dispatch refused as a duplicate created nothing.
   const results = toolResults(entries);
   const surface = surfaceOf(
     results.some((text) => CREATED.test(text)),
