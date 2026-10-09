@@ -30,6 +30,9 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
@@ -37,6 +40,27 @@ import (
 type Runtime struct {
 	Name       string
 	Kubernetes *Kubernetes
+}
+
+// ControllerLaunch is who launches the project's controller (`controller`).
+type ControllerLaunch string
+
+const (
+	// ControllerLaunchOperator is the default: the operator runs `legion controller start` on a
+	// machine of theirs, and the daemon launches no controller.
+	ControllerLaunchOperator ControllerLaunch = "operator"
+	// ControllerLaunchDaemon is the daemon launching the controller itself, as an Agent Sandbox pod
+	// it supervises like a root architect, minting its credential at every launch; the operator's
+	// controller secret route then refuses, since one controller per project runs.
+	ControllerLaunchDaemon ControllerLaunch = "daemon"
+)
+
+// Capabilities is the `capabilities` block: the deployment capabilities the operator has decided
+// (`capabilities.decided`, each with the reason), which the daemon's report shows as decided
+// rather than open (capabilities.Deployment). A decision records why the deployment leaves a
+// capability out; it closes nothing.
+type Capabilities struct {
+	Decided map[capabilities.Name]string
 }
 
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
@@ -84,8 +108,8 @@ type Config struct {
 
 	WorkerBootTimeout time.Duration
 	// WorkerBootRegistrationDeadlineIntervals × WorkerBootTimeout is the registration deadline: a
-	// pane whose process is alive but whose agent has not registered by then is retired and
-	// counted as a launch failure.
+	// pane whose process is alive but whose agent has not registered by then, or has not said it is
+	// ready that long after its registration, is retired and counted as a launch failure.
 	WorkerBootRegistrationDeadlineIntervals int
 	WorkerRPCTimeout                        time.Duration
 	WorkerStopTimeout                       time.Duration
@@ -133,6 +157,11 @@ type Config struct {
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
 	ControllerWakeInterval time.Duration
+	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
+	// the file says the daemon does, which only `runtime: kubernetes` with Dispatch allows.
+	ControllerLaunch ControllerLaunch
+	// Capabilities is the `capabilities` block; the zero value with none.
+	Capabilities Capabilities
 }
 
 const (
@@ -184,7 +213,7 @@ var countKeys = []struct {
 // would.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
-	"worker_idle_retire_seconds": `a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, "Process supervision")`,
+	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
@@ -237,6 +266,8 @@ type fileConfig struct {
 	Linger                 *time.Duration
 	ReviewRoundCap         *int
 	MaxFixAttempts         *int
+	Controller             *string
+	Capabilities           *Capabilities
 	Durations              map[string]int
 	Counts                 map[string]int
 }
@@ -366,6 +397,10 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
 			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
+		case "controller":
+			file.Controller, err = readString(value, key)
+		case "capabilities":
+			file.Capabilities, err = readCapabilities(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -542,8 +577,8 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 	}
 	urls := make([]string, 0, len(read))
 	for _, raw := range read {
-		if _, err := validURL(raw, key); err != nil {
-			return nil, fmt.Errorf("%s entry %q must be a valid URL", key, raw)
+		if _, err := endpointURL(raw, key); err != nil {
+			return nil, fmt.Errorf("%s entry %q%s", key, raw, strings.TrimPrefix(err.Error(), key))
 		}
 		if !slices.Contains(urls, raw) {
 			urls = append(urls, raw)
@@ -715,6 +750,27 @@ func validURL(value, key string) (*url.URL, error) {
 	return parsed, nil
 }
 
+// endpointURL is validURL for a URL that names an endpoint, never a request: NATS and Envoy
+// credentials belong in URL userinfo or a secret, not in a query that would reach a pod's
+// environment and any diagnostic that names it. An endpoint path remains valid.
+func endpointURL(value, key string) (*url.URL, error) {
+	parsed, err := validURL(value, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return nil, fmt.Errorf("%w; use URL userinfo or a secret for credentials", err)
+	}
+	return parsed, nil
+}
+
+func noQueryOrFragment(parsed *url.URL, key string) error {
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("%s must not include a query string or fragment", key)
+	}
+	return nil
+}
+
 // baseURL is the shipped `normalizeBaseUrl` (config.ts): a URL a path is appended to, so
 // a query or fragment is refused and trailing slashes are dropped.
 func baseURL(value, key string) (string, error) {
@@ -729,8 +785,8 @@ func baseURL(value, key string) (string, error) {
 // refused and trailing slashes are dropped. dispatchBase shares it after its own scheme check,
 // which must read the parsed URL's Scheme directly rather than re-parsing a normalized string.
 func trimmedBase(parsed *url.URL, key string) (string, error) {
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", fmt.Errorf("%s must not include a query string or fragment", key)
+	if err := noQueryOrFragment(parsed, key); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
@@ -823,12 +879,106 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := resolveStage3(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
+	if err := resolveControllerLaunch(file, &cfg); err != nil {
+		return Config{}, err
+	}
+	if file.Capabilities != nil {
+		cfg.Capabilities = *file.Capabilities
+	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {
 			return Config{}, err
 		}
 	}
 	return cfg, nil
+}
+
+// resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
+// daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
+// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses it
+// rather than read a key that sizes nothing.
+func resolveControllerLaunch(file fileConfig, cfg *Config) error {
+	cfg.ControllerLaunch = ControllerLaunchOperator
+	if file.Controller != nil {
+		switch launch := ControllerLaunch(*file.Controller); launch {
+		case ControllerLaunchOperator:
+		case ControllerLaunchDaemon:
+			if cfg.Runtime.Name != "kubernetes" {
+				return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+			}
+			cfg.ControllerLaunch = launch
+		default:
+			return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
+		}
+	}
+	if k := cfg.Runtime.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon {
+		if _, sized := k.Resources[claim.RoleController]; sized {
+			return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+		}
+	}
+	return nil
+}
+
+// readCapabilities reads `capabilities`: a mapping whose one member, `decided`, maps a deployment
+// capability (capabilities.Decidable) to the reason the operator decided it. A name the daemon
+// does not measure from its deployment is refused naming the ones it does — nothing else can be
+// decided here, since every other row is the image's, a live check's, or a ruling's — and so is a
+// blank reason: the reason is what the report shows in the gap's place, and a blank one records
+// nothing.
+func readCapabilities(value *yaml.Node, key string) (*Capabilities, error) {
+	if value.Tag == "!!null" {
+		return nil, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "decided")
+	if err != nil {
+		return nil, err
+	}
+	block := &Capabilities{}
+	decided, decidedKey := fields["decided"], key+".decided"
+	if decided == nil {
+		return block, nil
+	}
+	if decided.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping of capability to reason", decidedKey)
+	}
+	names := capabilities.Decidable()
+	for i := 0; i+1 < len(decided.Content); i += 2 {
+		name, reason := capabilities.Name(decided.Content[i].Value), decided.Content[i+1]
+		field := decidedKey + "." + string(name)
+		if !slices.Contains(names, name) {
+			return nil, fmt.Errorf("unknown key %s: a decision may name %s", field, orList(names))
+		}
+		if _, twice := block.Decided[name]; twice {
+			return nil, fmt.Errorf("%s names %s twice", decidedKey, name)
+		}
+		read, err := readNonEmptyString(reason, field)
+		if err != nil {
+			return nil, err
+		}
+		if read == nil {
+			return nil, fmt.Errorf("%s must not be empty", field)
+		}
+		if block.Decided == nil {
+			block.Decided = map[capabilities.Name]string{}
+		}
+		block.Decided[name] = *read
+	}
+	return block, nil
+}
+
+// orList is names as prose: "a, b or c".
+func orList(names []capabilities.Name) string {
+	words := make([]string, len(names))
+	for i, name := range names {
+		words[i] = string(name)
+	}
+	if len(words) < 2 {
+		return strings.Join(words, "")
+	}
+	return strings.Join(words[:len(words)-1], ", ") + " or " + words[len(words)-1]
 }
 
 // resolveStage2 settles the keys Stage 2 models. Each is read from the file alone: the shipped
@@ -898,7 +1048,7 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 		cfg.OperatorTokenFile = underConfig(*file.OperatorTokenFile, configDir)
 	}
 	if file.EnvoyURL != nil {
-		if _, err := validURL(*file.EnvoyURL, "envoy_url"); err != nil {
+		if _, err := endpointURL(*file.EnvoyURL, "envoy_url"); err != nil {
 			return err
 		}
 		cfg.EnvoyURL = *file.EnvoyURL

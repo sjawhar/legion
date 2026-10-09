@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test"
-import { dispatchToolSpecs } from "@legion/contracts"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport"
 import {
@@ -17,7 +16,6 @@ function sessionWith(followed: string[]): ChannelSession {
   return {
     delivery: {
       enqueue: async () => true,
-      announceFollow: async () => undefined,
       inbox: () => [],
     },
     topics: () => ["notifications.agent.ses_claude", ...followed],
@@ -34,13 +32,10 @@ function sessionWith(followed: string[]): ChannelSession {
 
 const identity = new SessionIdentity("ses_claude", process.cwd())
 
-test("declares every shared Envoy tool including the bounded inbox and shared Dispatch tools", () => {
-  const definitions = channelToolDefinitions(true)
+test("declares exactly the shared Envoy tools, the bounded inbox included", () => {
+  const definitions = channelToolDefinitions()
 
-  expect(definitions.map(({ name }) => name)).toEqual([
-    ...envoyToolSpecs.map(({ name }) => name),
-    ...dispatchToolSpecs.map(({ name }) => name),
-  ])
+  expect(definitions.map(({ name }) => name)).toEqual(envoyToolSpecs.map(({ name }) => name))
   expect(definitions.map(({ name }) => name)).toContain("envoy_inbox")
 })
 
@@ -86,67 +81,29 @@ test("sends Envoy messages through the shared transport", async () => {
   })
 })
 
-test("keeps Dispatch asks on Dispatch, follows no topic, and announces the followed ask once", async () => {
+test("a dispatch_* call is an unknown tool even with Dispatch configured, and reaches no Dispatch", async () => {
+  const requests: string[] = []
   const server = Bun.serve({
     port: 0,
-    fetch: async (request) => {
-      expect(new URL(request.url).pathname).toBe("/api/v1/issues/DSP-3/asks")
-      expect(request.headers.get("authorization")).toBe("Bearer test-token")
-      expect(await request.json()).toMatchObject({
-        question: "Approve the channel?",
-        actor: { kind: "session", id: "ses_claude", origin: { host: "claude" } },
-      })
-      return Response.json({
-        id: "ask-3",
-        issue_key: "DSP-3",
-        author: { kind: "session", id: "ses_claude" },
-        question: "Approve the channel?",
-        options: [],
-        multiple: false,
-        custom: true,
-        urgency: "med",
-        anchor: null,
-        state: "open",
-        answer: null,
-        created_at: "2026-09-13T00:00:00Z",
-      })
+    fetch: (request) => {
+      requests.push(`${request.method} ${new URL(request.url).pathname}`)
+      return Response.json({ error: "unexpected" }, { status: 500 })
     },
   })
   const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
-  const followed: string[] = []
-  const announced: unknown[] = []
-  const session = sessionWith(followed)
   const runtime: ChannelToolRuntime = {
     identity,
     client: {} as EnvoyClient,
-    session: {
-      ...session,
-      delivery: {
-        ...session.delivery,
-        announceFollow: async (details) => {
-          announced.push(details)
-        },
-      },
-    },
+    session: sessionWith([]),
   }
 
   try {
-    const result = await executeEnvoyTool(runtime, "dispatch_ask", {
-      issue: "DSP-3",
-      question: "Approve the channel?",
-    })
-
-    expect(result).toEqual({
-      text:
-        "Asked ask-3 on DSP-3 (urgency med): Approve the channel?\n" +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-3: envoy_subscribe notifications.dispatch.issue.DSP-3.>",
-      details: { issue: "DSP-3", ask: "ask-3", follows: { ask: "ask-3" } },
-    })
-    expect(followed).toEqual([])
-    expect(announced).toEqual([{ issue: "DSP-3", ask: "ask-3", follows: { ask: "ask-3" } }])
+    await expect(
+      executeEnvoyTool(runtime, "dispatch_ask", { issue: "DSP-3", question: "Approve?" }),
+    ).rejects.toThrow("Unsupported Envoy tool: dispatch_ask")
+    expect(requests).toEqual([])
   } finally {
     server.stop(true)
     process.env = previous

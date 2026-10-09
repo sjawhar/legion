@@ -7,6 +7,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // getDeliverySettings answers GET /api/v1/settings/delivery with the one delivery_settings row,
@@ -38,20 +39,21 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 // is no project-scoped equivalent for a cross-project configuration table, so this intentionally
 // does not force one.
 func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
 	var input struct {
-		DeployRepo           string   `json:"deploy_repo"`
-		DeployWorkflowPath   string   `json:"deploy_workflow_path"`
-		ProductionJobName    string   `json:"production_job_name"`
-		PRChecksWorkflowPath string   `json:"pr_checks_workflow_path"`
-		PopulationAuthors    []string `json:"population_authors"`
-		ExcludedRepos        []string `json:"excluded_repos"`
+		DeployRepo           string       `json:"deploy_repo"`
+		DeployWorkflowPath   string       `json:"deploy_workflow_path"`
+		ProductionJobName    string       `json:"production_job_name"`
+		PRChecksWorkflowPath string       `json:"pr_checks_workflow_path"`
+		PopulationAuthors    []string     `json:"population_authors"`
+		ExcludedRepos        []string     `json:"excluded_repos"`
+		Actor                *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
 		return
 	}
 	repoOwner, repoName, err := parseSourceRepo(input.DeployRepo)

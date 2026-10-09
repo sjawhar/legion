@@ -11,7 +11,7 @@ readonly omp_bin="${OMP_BIN:-omp}"
 readonly session_timeout=60
 readonly answer_timeout=90
 readonly teardown_timeout=15
-readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json"
+readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-envoy/package.json"
 readonly envoy_config="${HOME}/.config/opencode/envoy.json"
 
 fail() {
@@ -63,6 +63,10 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 plugin_version="$(jq -er '.version' "$plugin_pkg" 2>/dev/null)" ||
   fail "could not read .version out of ${plugin_pkg}"
 readonly plugin_version
+# A steered session replies by running the `dispatch` command its reply_with names, which the
+# plugin puts first on the session's PATH from its own bin/.
+[[ -x "$(dirname "$plugin_pkg")/bin/dispatch" ]] ||
+  fail "installed plugin ${plugin_version} ships no bin/dispatch; install one that ships the dispatch CLI"
 
 # Who asks. A human header (browser cookie or trusted identity header) makes the smoke card
 # human-authored, exactly as the dashboard would. Without one, the script is an agent: it
@@ -188,7 +192,7 @@ fi
 # POST below. Steer may be queued until the sleep reaches its next tool
 # boundary; BTW replies through its side turn.
 readonly sleep_sentinel="${workdir}/sleep-started"
-readonly prompt="Run exactly this one bash command first, before anything else: touch ${sleep_sentinel} && sleep 45. When a Dispatch message arrives, follow its reply_with instruction exactly; do not message any other session."
+readonly prompt="Run exactly this one bash command first, before anything else: touch ${sleep_sentinel} && sleep 45. When a Dispatch message arrives, follow its reply_with instruction exactly, running its dispatch command with bash; do not message any other session."
 tmux new-session -d -s "$session" -x 220 -y 50 -c "$workdir" "${launch_env[@]}" "$omp_bin" "$prompt"
 session_created=1
 

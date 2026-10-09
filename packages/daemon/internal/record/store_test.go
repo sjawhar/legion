@@ -207,6 +207,46 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
+// PullRequestsByIssue is removableWorkspaces' own batched read (internal/daemon/removable.go):
+// one query for every candidate's pull request instead of one PullRequest call per candidate. An
+// issue with no pull request is simply absent from the map, the same as PullRequest's own nil;
+// an empty issues slice returns an empty map without a query, and an issue not asked for is never
+// in the result even when it has a pull request of its own.
+func TestPullRequestsByIssueBatchesOneQueryPerIssueIntoOne(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	withPR := issueFixture("LEGION-220")
+	withoutPR := issueFixture("LEGION-221")
+	notAsked := issueFixture("LEGION-222")
+	pr := PullRequest{
+		Issue: withPR.Key, Repo: "sjawhar/legion", Number: 1220, Branch: "legion/LEGION-220",
+		HeadSHA: "deadbeef", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
+		CheckedHead: "deadbeef", State: PullRequestMerged,
+		Cancelled: []string{}, CheckRuns: []AttemptRun{}, Pushes: []ClassifiedPush{},
+		Required: []string{}, Workflows: []RequiredWorkflow{},
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, withPR))
+		must(t, records.PutIssue(ctx, tx, withoutPR))
+		must(t, records.PutIssue(ctx, tx, notAsked))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.PullRequestsByIssue(ctx, tx, []string{withPR.Key, withoutPR.Key})
+		must(t, err)
+		if len(got) != 1 {
+			t.Fatalf("pull requests by issue = %#v, want exactly one (withPR's)", got)
+		}
+		if !samePullRequest(got[withPR.Key], pr) {
+			t.Fatalf("pull requests by issue[%s] = %#v, want %#v", withPR.Key, got[withPR.Key], pr)
+		}
+		if empty, err := records.PullRequestsByIssue(ctx, tx, nil); err != nil || len(empty) != 0 {
+			t.Fatalf("pull requests of no issues = %#v, %v, want an empty map and no error", empty, err)
+		}
+	})
+}
+
 func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -766,6 +806,67 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 		must(t, err)
 		if unsettled == nil || unsettled.CheckedHead != "" {
 			t.Fatalf("never-settled pull request after 0028 = %+v, want no checked head", unsettled)
+		}
+	})
+}
+
+// Migration 0035 ends phase-end suspension. A transition's suspend queued before it named the phase
+// it ended ("leaves"); the field is gone, and the outbox decodes rows strictly, so each such row is
+// deleted rather than left to fail on every attempt or, read without the field, stop a role its
+// issue still needs. Every other supervise row stays queued and decodes: a close's suspend, a start
+// and a tree close.
+func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 35 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	queued := map[string]string{
+		"phase-end suspend": `{"op": "suspend", "tree": "LEGION-208", "role": "planner", "generation": 1, "leaves": "planning", "reason": "LEGION-208 left planning"}`,
+		"close suspend":     `{"op": "suspend", "tree": "LEGION-208", "role": "implementer", "generation": 1, "reason": "the tree of LEGION-208 lingers"}`,
+		"start":             `{"op": "start", "tree": "LEGION-208", "role": "implementer", "generation": 1, "phase": "implementing", "task": "Continue Workflow."}`,
+		"tree close":        `{"op": "tree_close", "tree": "LEGION-208", "role": "tester", "generation": 1, "linger": 1}`,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for name, payload := range queued {
+			_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ('supervise', 'LEGION-208', $1, 1, now(), $2)`, payload, name)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := NewStore().ClaimDue(ctx, tx, "LEGION", time.Now().Add(time.Hour), 10, time.Minute)
+		must(t, err)
+		kept := map[string]SuperviseRequest{}
+		for _, row := range rows {
+			payload, err := DecodeOutboxPayload(row)
+			if err != nil {
+				t.Fatalf("the %s row after 0035 does not decode: %v", row.LastError, err)
+			}
+			kept[row.LastError] = payload.(SuperviseRequest)
+		}
+		want := map[string]SuperviseRequest{
+			"close suspend": {Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Reason: "the tree of LEGION-208 lingers"},
+			"start":         {Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Phase: phase.Implementing, Task: "Continue Workflow."},
+			"tree close":    {Op: "tree_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 1, Linger: 1},
+		}
+		if !reflect.DeepEqual(kept, want) {
+			t.Fatalf("supervise rows after 0035 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
 		}
 	})
 }

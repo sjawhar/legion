@@ -60,6 +60,6 @@ writePage({
   title: "Configuration",
   description:
     "Every Dispatch setting: what it does, whether it is required, and what it means when unset.",
-  source: "packages/envoy/cmd/dispatch/settings.go",
+  sources: ["packages/envoy/cmd/dispatch/settings.go"],
   body: () => render(readSettings()),
 });

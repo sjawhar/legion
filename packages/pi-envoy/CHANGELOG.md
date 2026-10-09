@@ -4,20 +4,26 @@
 
 ### Added
 
-- Pictures reach the model (LEGION-541): a Dispatch tool result carries its `images` as image
-  blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
-  pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn
-  with its text unchanged), at most 8 and 10 MiB of them, each read with the session's own
-  Dispatch bearer within 20 s; a picture Dispatch cannot serve leaves the delivery its text. A
-  session is shown each picture once: a later delivery or `dispatch_read` that embeds one it was
-  already shown names it as shown earlier instead of sending it again, because every request
-  carries the session's history and Anthropic refuses one over 32 MB; `dispatch_doc_read` shows it
-  again. A delivery's pictures count as shown once the host took the message that carries them, so
-  the delivery Dispatch retries after a send that failed shows them again. A session that moves
-  onto a transcript (`/fork`, `/handoff`, `/resume`, a restart) counts the pictures that transcript
-  already shows: those a `dispatch_read` or `dispatch_doc_read` result or a card names as shown,
-  and a person's own turn whose every picture was shown beside it. The session id the extension
-  leaves or shuts down is forgotten.
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
+- Pictures reach the model (LEGION-541): a `dispatch` command writes each picture its result
+  carries to a file and prints a `- picture: <path>` line for the agent to open, and an Inbox
+  delivery of a message, comment, ask or answer that embeds pictures carries them beside its text
+  (a card with a `Pictures:` section, a person's own turn with its text unchanged), at most 8 and
+  10 MiB of them, each read with the session's own Dispatch bearer within 20 s; a picture Dispatch
+  cannot serve leaves the delivery its text. A session is shown each picture once: a later
+  delivery or `dispatch read` that embeds one it was already shown names it as shown earlier
+  instead of sending it again, because every request carries the session's history and Anthropic
+  refuses one over 32 MB; `dispatch doc-read` shows it again. A delivery's pictures count as shown
+  once the host took the message that carries them, so the delivery Dispatch retries after a send
+  that failed shows them again. A session that moves onto a transcript (`/fork`, `/handoff`,
+  `/resume`, a restart) counts the pictures that transcript already shows: those a `dispatch read`
+  or `dispatch doc-read` result or a card names as shown, and a person's own turn whose every
+  picture was shown beside it. The session id the extension leaves or shuts down is forgotten.
 - The live agent conversation stream names the `provider/model` that produced each assistant turn
   (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
   the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
@@ -42,6 +48,22 @@
 
 ### Changed
 
+- `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
+  native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which
+  makes the daemon's role prompts name that command; install both packages from the same commit.
+
+- `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
+  claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
+  it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
+  last stage), so the daemon mints that one grant with the longer `credential.pushTTL` (5 minutes)
+  rather than the ordinary 60-second `ttl` — jj's own working-copy snapshot before the network
+  push can outrun the ordinary grant on a near-full tree volume. Install this release together
+  with a Go `legion` built from the same commit: a daemon at 12 refuses the unknown field, and this
+  release against a daemon at 12 fails every grant mint, blocking every bash command in every pane.
+  Contract 13 also covers the worker image's `LEGION_REMOVABLE_WORKSPACES` payload, which the
+  image's own `legion` decodes strictly, so the daemon's image probe refuses an image that would
+  read a later shape of it the old way.
+
 - Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
   steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
   clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
@@ -55,7 +77,26 @@
   agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
   rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
   skill reaches every installed user of this package, not only its author.
-
+- **Breaking:** the package is renamed `@sjawhar/pi-envoy` and carries the Envoy entry alone
+  (LEGION-247). `@sjawhar/pi-legion-envoy` gets no further release. What stays here is
+  `extensions/envoy.ts` (published as `dist/envoy.js`): Envoy messaging, subscriptions, delivery,
+  the `dispatch` command and the `dispatch-first` context, with the four skills every session
+  with Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) at
+  `dist/skills`. The Legion entry (`extensions/legion.ts`), its modules (the former `src/legion/`),
+  the task agents in `agents/`, the eight Legion skills and the `legion.daemonApiVersion` manifest
+  field moved to `@sjawhar/pi-legion` (`packages/pi-legion`), which a Legion pane loads beside this
+  package; this manifest has no `legion` key. The two entries meet through a versioned in-process
+  interface in the private workspace package `@legion/pi-shared` (`packages/pi-shared`, version 1,
+  one object on `globalThis` under `Symbol.for("legion.pi-shared.envoy-plugin-interface")`): this
+  entry publishes it at factory time, and the Legion entry claims roles, matches injected user turns
+  and reads the bootstrapped session through it, refusing to run in a Legion session when no
+  `@sjawhar/pi-envoy` is loaded, when the loaded one speaks another interface version, or when
+  `@sjawhar/pi-legion-envoy` is still installed beside it. Both plugins release from one commit and
+  the daemon's boot gate refuses a pair whose interface versions differ. A person who installed the
+  one package reinstalls once:
+  `omp plugin uninstall @sjawhar/pi-legion-envoy && omp plugin install @sjawhar/pi-envoy`; a Legion
+  deployment also runs `omp plugin install @sjawhar/pi-legion` in the daemon's profile, and the
+  worker image carries both at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.

@@ -1,14 +1,22 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"net"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -114,6 +122,74 @@ func TestHelloResolverReleasesAKnownTokenWhenTheBootGivesUpRatherThanBecomingRea
 	}
 }
 
+// flakyClaimStore fails its first read and answers every later read with its claim.
+type flakyClaimStore struct {
+	mu    sync.Mutex
+	reads int
+	claim supervise.Claim
+}
+
+func (s *flakyClaimStore) ClaimByBootTokenHash(context.Context, []byte) (supervise.Claim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	if s.reads == 1 {
+		return supervise.Claim{}, false, errors.New("read claim: context deadline exceeded")
+	}
+	return s.claim, true, nil
+}
+
+// A store that fails to read a hello's claim says nothing about the boot token, so the hello is not
+// refused as an unknown one: the daemon closes the connection unacked and logs the failed read,
+// and the shim's redial, which follows any hello it gets no ack for, is accepted once the store
+// answers. The listener and the resolver are the daemon's own; the two dials are the shim's.
+func TestAHelloWhoseClaimReadFailsOnceIsAcceptedOnTheRedialWithNoRefusal(t *testing.T) {
+	const token = claim.Token("legion-test-legion-1-implementer")
+	const bootToken = "the-pane-boot-token"
+	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
+	sup.machines[token] = &member{}
+	close(sup.restored)
+	store := &flakyClaimStore{claim: supervise.Claim{Token: token, Generation: 1}}
+
+	logs := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	listener, err := stream.Listen(ctx, "unix://"+filepath.Join(shortTempDir(t), "worker-stream.sock"),
+		sup.helloResolver(api.NewBootTokens(store), time.Second),
+		stream.Options{RPCTimeout: time.Second, Log: slog.New(slog.NewTextHandler(logs, nil))})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	conn, err := net.Dial("unix", strings.TrimPrefix(listener.Addr(), "unix://"))
+	if err != nil {
+		t.Fatalf("dial the worker stream: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	first := &shim{t: t, conn: conn, lines: bufio.NewReader(conn), writer: shimwire.NewWriter(conn)}
+	first.send(shimwire.Hello2{BootToken: bootToken})
+	first.closed()
+
+	dialShim(t, listener.Addr(), bootToken)
+	select {
+	case event := <-listener.Events():
+		if event != (stream.Hello{Claim: token, Generation: 1}) {
+			t.Fatalf("the listener reported %#v, want the redial's hello", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the redial's hello never reached the listener's events")
+	}
+
+	logged := logs.String()
+	if strings.Contains(logged, "rejected hello") {
+		t.Fatalf("a hello the store could not resolve was refused:\n%s", logged)
+	}
+	if n := strings.Count(logged, "worker-stream: could not resolve a hello's boot token"); n != 1 ||
+		!strings.Contains(logged, "read claim: context deadline exceeded") {
+		t.Fatalf("the listener logged the failed read %d times, want once with the store's error:\n%s", n, logged)
+	}
+}
+
 // relaunchingStore is a supervise.Store/api.BootTokenStore fake whose current row remembers only
 // its latest PutClaim, exactly as a real claim row does: ClaimByBootTokenHash finds the hash of
 // whichever generation was written last, never an earlier one.
@@ -139,6 +215,12 @@ func (s *relaunchingStore) PutClaim(_ context.Context, c supervise.Claim) error 
 	s.current = c
 	return nil
 }
+
+func (s *relaunchingStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (s *relaunchingStore) CheckLaunch(context.Context, supervise.Claim) error { return nil }
 
 func (s *relaunchingStore) PutDelivery(context.Context, claim.Token, supervise.Delivery) error {
 	return nil
@@ -170,6 +252,7 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 	type result struct {
 		stale bool
 		known bool
+		err   error
 	}
 
 	for _, tc := range []struct {
@@ -216,8 +299,8 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			done := make(chan result, 1)
 			go func() {
-				_, _, stale, known := resolve(boot1)
-				done <- result{stale, known}
+				_, _, stale, known, err := resolve(boot1)
+				done <- result{stale, known, err}
 			}()
 
 			select {
@@ -246,8 +329,8 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			select {
 			case got := <-done:
-				if !got.known {
-					t.Fatalf("resolve(%q) known = false, want true", boot1)
+				if got.err != nil || !got.known {
+					t.Fatalf("resolve(%q) known = %t, err = %v, want known and no error", boot1, got.known, got.err)
 				}
 				if !got.stale {
 					t.Fatalf("resolve(%q) stale = false, want true: %s", boot1, tc.staleFailureWhy)
@@ -258,9 +341,9 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			// Generation 2's own, freshly minted hello is accepted once restoration has already
 			// closed.
-			launched, generation, stale, known := resolve(boot2)
-			if !known || stale || generation != 2 || launched != claim.Token("a-claim") {
-				t.Fatalf("resolve(%q) = (%q, %d, stale=%t, known=%t), want (a-claim, 2, false, true)", boot2, launched, generation, stale, known)
+			launched, generation, stale, known, err := resolve(boot2)
+			if err != nil || !known || stale || generation != 2 || launched != claim.Token("a-claim") {
+				t.Fatalf("resolve(%q) = (%q, %d, stale=%t, known=%t, %v), want (a-claim, 2, false, true, nil)", boot2, launched, generation, stale, known, err)
 			}
 		})
 	}

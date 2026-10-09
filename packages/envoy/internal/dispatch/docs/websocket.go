@@ -61,13 +61,13 @@ type servicePersistenceAdapter struct {
 	service *Service
 }
 
-type classifiedUpdateStore interface {
-	AppendUpdateWithClass(context.Context, string, []byte, bool) (persistence.Version, error)
-}
-
+// LoadDoc is the durable state a room loads, and records the head it was read at, which the
+// room's load (onLoadDocument) takes next on the same goroutine (ygo's loadRoom) to start the
+// instance's roomHold.
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
-	if update, ok := a.service.takePreload(room); ok {
-		return update, nil
+	if loaded, ok := a.service.takePreload(room); ok {
+		a.service.loadedHeads.Store(room, loaded.Version)
+		return loaded.Update, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
@@ -77,58 +77,35 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		a.service.failRoom(room, err)
 		return nil, err
 	}
+	a.service.loadedHeads.Store(room, result.Version)
 	return result.Update, nil
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
-	if a.service.roomFailed(room) {
-		return nil
-	}
-	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
-	if found && durable {
-		defer a.service.finishDurableAppend(room)
-	}
-	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
-		return nil
-	}
-	var err error
-	if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
-	} else {
-		_, err = a.store.AppendUpdate(context.Background(), room, update)
-	}
-	if err != nil {
-		a.service.failRoom(room, err)
-		return err
-	}
-	if found && durable && contentChanged {
-		a.service.scheduleSettleAfterAppend(room)
-	}
-	return nil
+	return a.StoreUpdateContext(context.Background(), room, update)
 }
 
+// StoreUpdateContext appends a room's update with the in-flight credit its update observer
+// recorded (AppendUpdateWithCredit). An update that never reaches the store - its room failed, or
+// a live write or a settlement already made it durable - lands its credit here instead: the room
+// drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
-	if found && durable {
+	class, found := a.service.consumeUpdateClass(room, update)
+	if found && class.durable {
 		defer a.service.finishDurableAppend(room)
 	}
+	defer class.credit.landed()
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
-	var err error
-	if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
-	} else {
-		_, err = a.store.AppendUpdate(ctx, room, update)
-	}
-	if err != nil {
+	if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit); err != nil {
 		a.service.failRoom(room, err)
 		return err
 	}
-	if found && durable && contentChanged {
+	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
 	}
 	return nil
@@ -167,17 +144,17 @@ type preloadedDocument struct {
 // still the one it loaded: every write that changes a document's stored state raises its head (an
 // append, a rebuild), and compaction keeps both the head and the state. A stale or absent preload
 // is no answer, and the caller loads the room itself.
-func (s *Service) takePreload(room string) ([]byte, bool) {
+func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
-		return nil, false
+		return persistence.LoadResult{}, false
 	}
 	preload := value.(*preloadedDocument)
 	head, err := s.persistence.Head(context.Background(), room)
 	if err != nil || head != preload.loaded.Version {
-		return nil, false
+		return persistence.LoadResult{}, false
 	}
-	return preload.loaded.Update, true
+	return preload.loaded, true
 }
 
 // documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema
@@ -240,8 +217,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
 	// until it is replaced from markdown. The server decides it here, for every client at once, by
-	// the read and the rendering `/text` answers with (readTree), so a socket is refused exactly
-	// when that read is ErrDocOutsideSchema.
+	// the same stored document and rendering `/text` answers with (readDocument), so a socket is
+	// refused exactly when that read is ErrDocOutsideSchema.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
 		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
@@ -419,7 +396,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	owed, err := settlementPending(ctx, rooms, room)
+	// The load takes no advisory lock, which a durable writer can hold for as long as its
+	// transaction runs: the row it reads is written whole by each writer's transaction, so a
+	// plain read sees one writer's commit or the one before it.
+	owed, lastActor, err := readOwedSettlement(ctx, rooms, room)
 	if err != nil {
 		return err
 	}
@@ -442,8 +422,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		contentMarkdown = &markdown
 		askBlocks = askBlockIDs(tree)
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	// The room this load publishes holds the state it takes from here until ygo retires it
+	// (releaseIfUnusedLocked).
+	state := s.lockState(room)
 	state.closed = !open
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
@@ -454,14 +435,26 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
-	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
-	// the load is a settlement's own warm-up, which settles it next. A room that failed again
-	// while this load ran leaves the row for its own replacement.
-	if state.failed == nil && owed && !state.settleWarming {
+	// that is gone, so an open room settles once rather than waiting for an edit to arm one - unless
+	// the load is a settlement's own warm-up, which settles it next. Its authors are in the
+	// document's pending authors, which that settlement reads; the room restores only the latest
+	// edit source the settlement names. A closed room keeps the row; it settles only after its
+	// issue reopens. A room that failed again while this load ran leaves the row for its own
+	// replacement.
+	if owed && open && lastActor != nil {
+		state.lastActor = lastActor
+		state.unsettled = true
+	}
+	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
 	}
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	replica := s.keepReplica(doc, contentMarkdown)
+	var head persistence.Version
+	if loaded, ok := s.loadedHeads.LoadAndDelete(room); ok {
+		head = loaded.(persistence.Version)
+	}
+	hold := s.keepHold(doc, head)
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
 		// before ygo's persistence observer, which the room registers after OnLoadDocument, hands
@@ -480,13 +473,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
 			s.observeAskBlocksForUpdate(room, tree)
 		})
-		s.recordUpdateClass(room, update, contentChanged, true)
+		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
-			s.creditContentChange(room, origin)
+			class.credit = s.creditContentChange(room, origin, hold)
 			if s.afterCreditUpdate != nil {
 				s.afterCreditUpdate(room)
 			}
 		}
+		s.recordUpdateClass(room, update, class)
 		s.scheduleSettle(room)
 	})
 	return nil
@@ -517,9 +511,8 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // observe already showed a real change, so the no-op path, the common one, pays for neither.
 func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
 	askBlocks := askBlockIDs(tree)
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	var author *model.Actor
 	if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
 		author = new(SettlementActor)
@@ -534,41 +527,51 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
 // happened is not credited either. A committed transaction's live write, which Ledger.Commit
 // applies, was credited when the transaction committed and is not credited again. Any other update
 // is a browser edit by one of the peers, which ygo applies while that peer's connection is
-// registered. ygo does not say which connection sent it, so every connected peer joins `pending`:
-// when exactly one is connected it is the latest edit source and replaces `lastActor`, and
+// registered. ygo does not say which connection sent it, so every connected peer is credited with
+// it: when exactly one is connected it is the latest edit source and replaces `lastActor`, and
 // otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
-func (s *Service) creditContentChange(room string, origin any) {
+//
+// The credit goes to F, the room's in-flight credits, until the edit's append lands it
+// (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
+// no advisory lock and touches no database: nothing reads F without holding state.mu.
+func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
 	if _, published := origin.(*liveWriteOrigin); published {
-		return
+		return nil
 	}
 	if _, service := s.serviceOrigins.Load(origin); service {
-		return
+		return nil
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: make(map[string]model.Actor, len(state.connected))}
 	for _, actor := range state.connected {
-		state.creditAuthor(actor)
+		record.authors[actorKey(actor)] = actor
 	}
-	sole, _ := soleConnectedActor(state.connected)
-	state.lastActor = sole
+	record.lastActor, _ = soleConnectedActor(state.connected)
+	state.inflight[record.seq] = record
+	state.lastActor = record.lastActor
+	state.unsettled = true
+	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold}
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits
 // observed while it is connected (creditContentChange), never for connecting or for an agent's
 // edit.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.connected[id] = actor
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
+// removeConnection forgets a browser that left room, and with the last one, once ygo has retired
+// the room, the room's state (releaseIfUnusedLocked). A document without state has none to forget.
 func (s *Service) removeConnection(room string, id uint64) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
 	delete(state.connected, id)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 // settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its
@@ -576,14 +579,16 @@ func (s *Service) removeConnection(room string, id uint64) {
 // timer's settlement: Shutdown reports which documents settled, and stops ygo, only once it has
 // returned.
 func (s *Service) settleLastPeer(_ context.Context, room string) {
-	state := s.room(room)
-	state.mu.Lock()
-	if !s.takeSettleTimer(state.settle) {
-		state.mu.Unlock()
+	state := s.lockExistingState(room)
+	if state == nil {
 		return
 	}
-	generation := state.gen
-	state.mu.Unlock()
+	if !s.takeSettleTimer(state.settle) {
+		s.unlockState(room, state)
+		return
+	}
+	generation := state.roomGeneration
+	s.unlockState(room, state)
 	defer s.settleWG.Done()
 	s.settleRoom(room, generation)
 }

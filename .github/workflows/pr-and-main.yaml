@@ -52,6 +52,9 @@ jobs:
       - name: Check no file names the private deployment repository, company, or internal host
         run: .github/scripts/check-private-names.sh
 
+      - name: Check no current file names the pre-split Oh My Pi plugin
+        run: .github/scripts/check-plugin-names.sh
+
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, so this required job checks them at every
       # push. pr-title.yaml checks them again when the pull request is edited. A push to main or a
@@ -74,7 +77,7 @@ jobs:
       # packages/daemon), so it is formatted here with the daemon.
       - name: Check the Go daemon's formatting
         run: |
-          unformatted=$(gofmt -l packages/daemon packages/pi-envoy/scripts/grant-rig/daemon-pane.go)
+          unformatted=$(gofmt -l packages/daemon packages/pi-legion/scripts/grant-rig/daemon-pane.go)
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
             echo "$unformatted"
@@ -210,6 +213,9 @@ jobs:
 
       - name: Test the private-name check
         run: .github/scripts/check-private-names.test.sh
+
+      - name: Test the plugin-name check
+        run: .github/scripts/check-plugin-names.test.sh
 
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib

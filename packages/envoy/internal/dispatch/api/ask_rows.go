@@ -59,6 +59,15 @@ const waitingOnExpression = `case
 	else coalesce(lr.turn, 'human')
 end`
 
+// askItemRefExpression is the SPA item route of the ask aliased a, whose issue is aliased i and
+// whose project document is aliased ar: an issue ask's `/issues/<key>/asks/<id>`, which lands an
+// anchored ask on its document and an unanchored one on its Conversation turn (the bare issue page
+// reads no `?ask=`), or a document ask's `?ask=` link. listOpenAsks and listMyAnswers share it.
+const askItemRefExpression = `case
+	when i.key is not null then '/issues/' || i.key || '/asks/' || a.id::text
+	else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?ask=' || a.id::text
+end`
+
 // askWaitingOn reads whom the open ask askID waits on, for the approval route's hand-back decision.
 func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) {
 	var waitingOn string

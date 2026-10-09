@@ -17,7 +17,7 @@ import (
 )
 
 // roleParts are the shared role prompts: each role's own part, the phase workers' cores and the
-// mechanics fragments (Compose), and the controller's prompt (ControllerPromptPath).
+// mechanics fragments (Compose), and the controller's prompt (ControllerPromptPaths).
 //
 //go:embed roles
 var roleParts embed.FS
@@ -106,12 +106,18 @@ func syncPrompt(path string, body []byte, kind string) error {
 	return nil
 }
 
-// ControllerPromptPath is the state-local controller prompt the launcher can pass to Oh My Pi.
-func (c *Composer) ControllerPromptPath() (string, error) {
+// ControllerPromptPaths are the controller's prompt files, in order: its shared role part, then the
+// daemon's part for how it was launched — headless in a pod the daemon supervises (`controller:
+// daemon`), or in the operator's terminal by `legion controller start`.
+func (c *Composer) ControllerPromptPaths(headless bool) ([]string, error) {
 	if c == nil {
-		return "", fmt.Errorf("controller role prompt: nil composer")
+		return nil, fmt.Errorf("controller role prompt: nil composer")
 	}
-	return filepath.Join(c.sharedDir, "controller-root.md"), nil
+	launch := "controller-interactive.md"
+	if headless {
+		launch = "controller-headless.md"
+	}
+	return []string{filepath.Join(c.sharedDir, "controller-root.md"), filepath.Join(c.goDir, launch)}, nil
 }
 
 // Compose returns the shared role parts followed by this daemon's parts: the role's own, then the

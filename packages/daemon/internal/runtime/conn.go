@@ -34,6 +34,10 @@ type Conn interface {
 	// a turn is in flight, which is how a restart tells a delivery already in progress from one
 	// that never arrived.
 	GetState(ctx context.Context) (ConnState, error)
+	// Abort asks the agent to end the turn it is running, keeping its process and session, and
+	// returns on the agent's answer. The turn's end is the agent_end the stream observes, which can
+	// arrive after the answer; an agent between turns answers and nothing ends.
+	Abort(ctx context.Context) error
 	// Shutdown asks the agent to end its own process — the graceful half of a stop.
 	Shutdown(ctx context.Context) error
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a

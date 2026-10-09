@@ -12,7 +12,7 @@ readonly delivery_timeout=90
 readonly teardown_timeout=15
 readonly curl_connect_timeout=2
 readonly curl_max_time=5
-readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json"
+readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-envoy/package.json"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2

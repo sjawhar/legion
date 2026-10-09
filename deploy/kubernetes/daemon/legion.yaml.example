@@ -2,12 +2,14 @@
 # The Legion daemon's file, complete for a Kubernetes deployment. Relative paths resolve against
 # this file's directory, and the loader refuses any key it does not know, naming it.
 #
-# Every value is a placeholder; replace each with yours. As written, the file passes
+# Every value but bind is a placeholder; replace each with yours. bind: 0.0.0.0 is real: a daemon
+# whose own pod restarts onto a new IP binds every interface (below). As written, the file passes
 # `legion start --check-config` once the three token files and the kubeconfig it names exist and
 # LEGION_POSTGRES_DSN (or postgres_dsn below) names a Postgres.
-# 192.0.2.10 is a documentation address (RFC 5737) and every example.com host a documentation
-# domain (RFC 2606); the App ids are made up; the image digest is all zeros, where yours is the one
-# a Worker Image workflow run or a legion-v<version> release publishes.
+# Every example.com host is a documentation domain (RFC 2606) and legion-daemon-widgets.legion.svc
+# the Service name this example's convention gives (below); the App ids are made up; the image
+# digest is all zeros, where yours is the one a Worker Image workflow run or a legion-v<version>
+# release publishes.
 
 project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
 state_dir: ./state                     # the daemon's local state
@@ -24,6 +26,8 @@ bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
+controller: operator                   # who runs the controller: operator (legion controller start,
+                                       # the default) or daemon (a pod this daemon launches and keeps)
 
 operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read
 dispatch_url: https://dispatch.example.com
@@ -56,6 +60,17 @@ runtime:
     tree_volume: 20Gi
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
+    resources:                         # each role's CPU and memory requests and limits: a pod reserves
+                                       # what it requests and never bursts past its limit. The figures are
+                                       # examples sized for the 4-vCPU node a tree runs on
+                                       # (docs/kubernetes.md, "Tree sizing"); a role absent here reserves
+                                       # nothing, which the daemon reports as the resource-limits gap
+      architect: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
+      planner: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
+      implementer: { requests: { cpu: 1, memory: 2Gi }, limits: { cpu: 4, memory: 6Gi } }
+      tester: { requests: { cpu: 2, memory: 4Gi }, limits: { cpu: 4, memory: 12Gi } }
+      reviewer: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
+      merger: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
       env:
         PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
@@ -74,3 +89,13 @@ runtime:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
+
+# The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
+# capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets
+# broker (runtime.kubernetes.agent_secrets), model fallback (retry.modelFallback in the operator's
+# overlay, read by the image probe) and every role's resources above. A gap never stops the daemon;
+# it is yours to close, or to decide here, by name and with the reason, which the report then
+# shows in the gap's place. This example configures no broker, so it decides that one.
+capabilities:
+  decided:
+    secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"

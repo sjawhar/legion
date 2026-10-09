@@ -8,10 +8,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -44,6 +46,9 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_SHIM_TEST_SHADOWED", "")
+	// This test may itself run inside a pod that names a workspace; the refusal is about a shim
+	// told to warm one it was never told of.
+	t.Setenv("LEGION_WORKSPACE", "")
 
 	marker := filepath.Join(dir, "spawned")
 	omp := []string{"--", "sh", "-c", "touch " + marker}
@@ -62,6 +67,8 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 		{"an unreadable providers directory", append([]string{"--connect", connect, "--boot-token-file", token, "--provider-env-dir", filepath.Join(dir, "absent")}, omp...), 1, []string{"--provider-env-dir " + filepath.Join(dir, "absent") + " is unreadable"}},
 		{"no wrapped command", []string{"--connect", connect, "--boot-token-file", token, "--"}, 1, []string{"no wrapped command"}},
 		{"--agent-secrets-key-dir alone", append([]string{"--connect", connect, "--boot-token-file", token, "--agent-secrets-key-dir", dir}, omp...), 1, []string{"given together or not at all"}},
+		{"--warm-codegraph without LEGION_WORKSPACE", append([]string{"--connect", connect, "--boot-token-file", token, "--warm-codegraph"}, omp...), 1, []string{"--warm-codegraph", "LEGION_WORKSPACE"}},
+		{"a --stop-grace that is not positive", append([]string{"--connect", connect, "--boot-token-file", token, "--stop-grace", "0s"}, omp...), 1, []string{"--stop-grace 0s is not a positive duration"}},
 		{"--socket mode, which is not ported", append([]string{"--socket", socket}, omp...), 2, []string{"-socket"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,11 +162,127 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 	}
 }
 
+// With --warm-codegraph (the Sandbox runtime passes it for a role in an issue pod; a pane never
+// does) and LEGION_WORKSPACE set, the shim starts and, once the agent has written its first line,
+// builds that workspace's CodeGraph index in the background: `codegraph status --json` on the
+// workspace, then `init` on one never initialized. The agent's own exit status is still the
+// shim's, and the build never holds it up — here the agent waits for the build, since a warm-up
+// ends with the agent (the test below), and the shim returns the moment both are done.
+func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "codegraph"), []byte(fakeCodegraph), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	workspaceDir := t.TempDir()
+	t.Setenv("LEGION_WORKSPACE", workspaceDir)
+	codegraphLog := filepath.Join(dir, "codegraph.log")
+
+	daemon := acknowledgeHello(ln)
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"legion", "worker-shim",
+		"--connect", "unix://" + socket, "--boot-token-file", token, "--warm-codegraph",
+		"--", "sh", "-c", `echo '{"type":"fake_ready"}'; while ! grep -qs '^init$' "$0"; do sleep 0.01; done; exit 7`, codegraphLog}, &stdout, &stderr)
+	if code != 7 {
+		t.Fatalf("exit %d, want the child's 7; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if err := <-daemon; err != nil {
+		t.Fatalf("the daemon side: %v", err)
+	}
+	if calls := logLines(t, codegraphLog); !slices.Equal(calls, []string{"status --json", "init"}) {
+		t.Fatalf("codegraph calls = %v, want status --json then init on the workspace; stdout: %s", calls, stdout.String())
+	}
+}
+
+// A role's stop is one signal to its whole process group (internal/launcher's signalGeneration:
+// `kill(-1)` in the role's PID namespace): Oh My Pi exits at once on its own SIGTERM, the shim
+// follows its child, and the `codegraph init` the warm-up still has in flight dies with them. That
+// build's lease, `.codegraph/legion-warm.lock`, is released by the warm-up once its dead child is
+// reaped — which can only happen while the shim process is still alive. So the command returns
+// only once an in-flight warm-up has let go, with the agent's exit status as before: a shim that
+// exits the moment the agent does leaves the lease behind, and the role's relaunch within
+// warmLeaseStale (60 s) reads it as a live build elsewhere and skips its own warm-up, so the
+// issue's index stays partial until a launch a minute later takes the lease over. Measured in the
+// LEGION-629 tester pod with the branch's `legion worker-shim --warm-codegraph` wrapping the real
+// Oh My Pi: `kill -TERM -- -<shim pgid>` twelve seconds into the build left the lease, with no
+// `[legion]` line logged, and the next launch logged `skipped: another process holds`.
+//
+// Here the agent exits the moment the lease exists, and the fake `codegraph init` ends half a
+// second later, as the real one does when the group signal reaches it; at the command's return the
+// lease must be gone.
+func TestWorkerShimLetsAnInFlightWarmUpReleaseItsLeaseBeforeItExits(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const slowInit = `#!/bin/sh
+case "$1" in
+  status) printf '{"initialized":false}\n' ;;
+  init) sleep 0.5; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "codegraph"), []byte(slowInit), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	workspaceDir := t.TempDir()
+	t.Setenv("LEGION_WORKSPACE", workspaceDir)
+	lease := filepath.Join(workspaceDir, ".codegraph", "legion-warm.lock")
+
+	daemon := acknowledgeHello(ln)
+
+	var stdout, stderr bytes.Buffer
+	started := time.Now()
+	code := run(context.Background(), []string{"legion", "worker-shim",
+		"--connect", "unix://" + socket, "--boot-token-file", token, "--warm-codegraph",
+		"--", "sh", "-c", `echo '{"type":"fake_ready"}'; while [ ! -e "$0" ]; do sleep 0.01; done; exit 7`, lease}, &stdout, &stderr)
+	elapsed := time.Since(started)
+	if code != 7 {
+		t.Fatalf("exit %d, want the child's 7; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if _, err := os.Stat(lease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the shim returned %s after the agent exited with the warm-up's lease still at %s (stat: %v): a relaunch within the minute will skip its warm-up; stderr: %s", elapsed, lease, err, stderr.String())
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("the shim took %s to return after the agent exited; the wait for the warm-up must be bounded", elapsed)
+	}
+	if err := <-daemon; err != nil {
+		t.Fatalf("the daemon side: %v", err)
+	}
+}
+
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
-// the pod's baseline: the overlay written under LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, ahead of the operator's, and the baseline variables where the pod leaves them
-// unset. Without it the agent starts on the environment it always had. With --pod-safety and no
-// state directory the shim refuses naming it, before anything is dialled or spawned.
+// the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
+// PI_CONFIG_FILES, ahead of the operator's, and the two session-placing variables where the pod
+// leaves them unset. Without it the agent starts on the environment it always had. With
+// --pod-safety and no state directory the shim refuses naming it, before anything is dialled or
+// spawned.
 func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "s")
@@ -174,39 +297,19 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 	}
 	state := t.TempDir()
 	t.Setenv("PI_CONFIG_FILES", "/etc/operator.yml")
-	t.Setenv("OTEL_SDK_DISABLED", "")
+	// Restored by t.Setenv's cleanup; unset so the pod row proves the baseline fills it and the
+	// pane row that nothing does.
+	t.Setenv("OMP_SESSION_STORAGE", "")
+	os.Unsetenv("OMP_SESSION_STORAGE")
 	t.Setenv("LEGION_STATE_DIR", "")
 	marker := filepath.Join(dir, "spawned")
-	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OTEL_SDK_DISABLED-unset}" = "$2" ] && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED-unset}" >&2; exit 8`
-	shim := func(podSafety bool, overlays, otel string) []string {
+	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OMP_SESSION_STORAGE-unset}" = "$2" ] && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OMP_SESSION_STORAGE=${OMP_SESSION_STORAGE-unset}" >&2; exit 8`
+	shim := func(podSafety bool, overlays, sessions string) []string {
 		args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token}
 		if podSafety {
 			args = append(args, "--pod-safety")
 		}
-		return append(args, "--", "sh", "-c", check, marker, overlays, otel)
-	}
-	acknowledge := func() chan error {
-		daemon := make(chan error, 1)
-		go func() {
-			daemon <- func() error {
-				conn, err := ln.Accept()
-				if err != nil {
-					return err
-				}
-				defer conn.Close()
-				if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
-					return err
-				}
-				if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
-					return err
-				}
-				// Held open until the shim closes it: a stream the daemon drops is one the shim
-				// dials again, which would outlive the agent's exit.
-				_, err = io.Copy(io.Discard, conn)
-				return err
-			}()
-		}()
-		return daemon
+		return append(args, "--", "sh", "-c", check, marker, overlays, sessions)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -225,20 +328,45 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 
 	t.Setenv("LEGION_STATE_DIR", state)
 	for name, tc := range map[string]struct {
-		podSafety      bool
-		overlays, otel string
+		podSafety          bool
+		overlays, sessions string
 	}{
-		"a pod":  {true, filepath.Join(state, "podsafety-overlay.yml") + ":/etc/operator.yml", "true"},
-		"a pane": {false, "/etc/operator.yml", ""},
+		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file"},
+		"a pane": {false, "/etc/operator.yml", "unset"},
 	} {
-		daemon := acknowledge()
+		daemon := acknowledgeHello(ln)
 		stdout.Reset()
 		stderr.Reset()
-		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.otel), &stdout, &stderr); code != 7 {
-			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q and OTEL_SDK_DISABLED %q; stderr: %s", name, code, tc.overlays, tc.otel, stderr.String())
+		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions), &stdout, &stderr); code != 7 {
+			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q and OMP_SESSION_STORAGE %q; stderr: %s", name, code, tc.overlays, tc.sessions, stderr.String())
 		}
 		if err := <-daemon; err != nil {
 			t.Fatalf("%s: the daemon side: %v", name, err)
 		}
 	}
+}
+
+// acknowledgeHello is a daemon that accepts one shim, acks its hello and then holds the stream
+// open until the shim closes it: a stream the daemon drops is one the shim dials again, which
+// would outlive the agent's exit. Its result is the daemon side's error, once.
+func acknowledgeHello(ln net.Listener) chan error {
+	daemon := make(chan error, 1)
+	go func() {
+		daemon <- func() error {
+			conn, err := ln.Accept()
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
+				return err
+			}
+			if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
+				return err
+			}
+			_, err = io.Copy(io.Discard, conn)
+			return err
+		}()
+	}()
+	return daemon
 }

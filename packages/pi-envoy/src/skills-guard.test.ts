@@ -1,131 +1,66 @@
-import { expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
+import { dispatchToolSpecs } from "@legion/contracts";
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
+import {
+  anchors,
+  brokenRelativeLinks,
+  brokenSkillLinks,
+  bundledAgents,
+  files,
+  longSkillBodies,
+  misnamedSkills,
+  oversizedFiles,
+  REPO_ROOT,
+  shippedAgents,
+  skillLinks,
+  stageSkills,
+  unresolvedAgentDispatches,
+} from "@legion/pi-shared/test/skills-guard";
 
-// The skills this package stages into dist/skills are read by agents, and how much of each reaches
-// the model is decided by Oh My Pi: a tool result over 51,200 bytes (`tools.artifactSpillThreshold`,
-// 50 KiB) spills to an artifact that keeps only 20 KB at each end, so a longer skill arrives with
-// its middle cut out. A `skill://` read is otherwise whole (no line limit, no line-length cap), so
-// the file's own byte count is the measure. Reads by filesystem path stop at 300 lines, which is
-// why every reference is linked as `skill://<name>/<path>`, why each such link must resolve (the
-// daemon's boot gate checks only the name before the first `/`), and why each legion-worker
-// reference must be linked from somewhere a worker reads.
-const repoRoot = path.resolve(import.meta.dir, "../../..");
-const skillsRoot = path.join(repoRoot, "skills");
-const workerRoot = path.join(skillsRoot, "legion-worker");
-// Everything an agent reads that can link into a skill: the skills themselves and the daemon's
-// prompts (its role prompts in roles/ and its overlays in go/).
-const linkingRoots = [skillsRoot, path.join(repoRoot, "packages/daemon/internal/prompts")];
-const SPILL_THRESHOLD_BYTES = 50 * 1024;
-// A link's path stops at whitespace, a closing bracket or quote, a code span, or Markdown emphasis
-// (`**skill://…/pr-body.md**`); `#anchor` is kept so it can be checked against the target's headings.
-const LINK = /skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)\/([^\s)`'"\]>*]+)/g;
+// The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
+// dist/skills: the partition scripts/pi-plugin-prepack.sh gives @sjawhar/pi-envoy, staged here as
+// its prepack stages it. A `skill://` link resolves by name through Oh My Pi's discovery, so it is
+// held to the repository's skills/, where both plugins' skills live.
+const repoSkillsRoot = path.join(REPO_ROOT, "skills");
+const skillAndPromptRoots = [
+  repoSkillsRoot,
+  path.join(REPO_ROOT, "packages/daemon/internal/prompts"),
+];
+const packageRoot = path.resolve(import.meta.dir, "..");
+// LEGION_TEST_OMP names the pinned Oh My Pi binary, as in extensions/dispatch-first-omp.test.ts: the
+// fork pin CI's pi-envoy job installs. A run without one skips the rule that reads it, except on
+// GitHub Actions.
+const omp = process.env.LEGION_TEST_OMP;
+const onActions = process.env.GITHUB_ACTIONS === "true";
+let staged: string;
 
-function files(directory: string): string[] {
-  return readdirSync(directory, { recursive: true, encoding: "utf8" })
-    .map((entry) => path.join(directory, entry))
-    .filter((file) => statSync(file).isFile());
-}
+beforeAll(() => {
+  staged = stageSkills("@sjawhar/pi-envoy");
+});
 
-/** Every `skills/<name>/SKILL.md`. */
-function skillFiles(): string[] {
-  return readdirSync(skillsRoot)
-    .map((name) => path.join(skillsRoot, name, "SKILL.md"))
-    .filter((file) => existsSync(file));
-}
+afterAll(() => {
+  rmSync(path.dirname(staged), { recursive: true, force: true });
+});
 
-/**
- * The lines outside fenced code blocks, where a Markdown reader finds headings: a fence opens on
- * three or more backticks or tildes (up to three spaces in), closes on a line holding only a run of
- * the same character at least as long, and an unclosed fence runs to the end of the file.
- */
-function outsideFences(markdown: string): string[] {
-  const kept: string[] = [];
-  let fence: string | undefined;
-  for (const line of markdown.split("\n")) {
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
-    if (fence === undefined) {
-      if (marker === undefined) kept.push(line);
-      else fence = marker;
-    } else if (
-      marker?.[0] === fence[0] &&
-      marker.length >= fence.length &&
-      line.trim() === marker
-    ) {
-      fence = undefined;
-    }
-  }
-  return kept;
-}
-
-/** GitHub's heading anchor: lower-cased, punctuation dropped, each space a hyphen. */
-function anchors(markdown: string): Set<string> {
-  return new Set(
-    outsideFences(markdown).flatMap((line) => {
-      const heading = /^#{1,6}\s+(.+?)\s*#*$/.exec(line)?.[1];
-      if (heading === undefined) return [];
-      return [
-        heading
-          .toLowerCase()
-          .replace(/[^\p{L}\p{N}\s_-]/gu, "")
-          .replace(/\s/g, "-"),
-      ];
-    })
-  );
-}
-
-/** Every `skill://<name>/<path>[#anchor]` link, as `{source, name, target, anchor}`. */
-function links(): { source: string; name: string; target: string; anchor: string | undefined }[] {
-  return linkingRoots
-    .flatMap(files)
-    .filter((file) => file.endsWith(".md"))
-    .flatMap((file) =>
-      [...readFileSync(file, "utf8").matchAll(LINK)].map(([, name = "", raw]) => {
-        // A link that ends a sentence carries its full stop.
-        const [target = "", anchor] = (raw ?? "").replace(/[.,;:]+$/, "").split("#");
-        return { source: path.relative(repoRoot, file), name, target, anchor };
-      })
-    );
-}
-
-test("every skill file is under Oh My Pi's spill threshold, so a skill:// read arrives whole", () => {
-  const oversized = files(skillsRoot)
-    .map((file) => ({ file: path.relative(repoRoot, file), bytes: statSync(file).size }))
-    .filter(({ bytes }) => bytes >= SPILL_THRESHOLD_BYTES);
-  expect(oversized).toEqual([]);
+test("every staged file is under Oh My Pi's spill threshold, so a skill:// read arrives whole", () => {
+  expect(oversizedFiles(staged)).toEqual([]);
 });
 
 test("every skill body stays under 500 lines, its detail in references", () => {
-  const long = skillFiles()
-    .map((file) => ({
-      file: path.relative(repoRoot, file),
-      lines: readFileSync(file, "utf8").split("\n").length,
-    }))
-    .filter(({ lines }) => lines >= 500);
-  expect(long).toEqual([]);
+  expect(longSkillBodies(staged)).toEqual([]);
 });
 
-// Oh My Pi resolves `skill://<name>` by the frontmatter name, and the link check below resolves it
-// by the directory, so the two must agree.
 test("every skill's frontmatter name is its directory's name", () => {
-  const misnamed = skillFiles()
-    .map((file) => {
-      const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(file, "utf8"))?.[1] ?? "";
-      return {
-        directory: path.basename(path.dirname(file)),
-        name: /^name:\s*(.*?)\s*$/m.exec(frontmatter)?.[1],
-      };
-    })
-    .filter(({ directory, name }) => name !== directory);
-  expect(misnamed).toEqual([]);
+  expect(misnamedSkills(staged)).toEqual([]);
 });
 
 test("the injected dispatch-first skill fits its budget on every host", () => {
-  const file = dispatchFirstSkillFile(skillsRoot);
+  const file = dispatchFirstSkillFile(staged);
   const skill = readFileSync(file, "utf8");
   expect(skill.split("\n").length).toBeLessThan(60);
   // Oh My Pi and Claude Code inject the marker-wrapped body; OpenCode adds the whole file under an
@@ -135,18 +70,52 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
 });
 
-test("every skill://<name>/<path> link names a file that exists, and its #anchor a heading in it", () => {
-  const broken = links().flatMap(({ source, name, target, anchor }) => {
-    const link = `skill://${name}/${target}`;
-    const file = path.join(skillsRoot, name, target);
-    if (!existsSync(file)) return [`${source}: ${link} names no file`];
-    if (anchor !== undefined && !anchors(readFileSync(file, "utf8")).has(anchor)) {
-      return [`${source}: ${link}#${anchor} names no heading`];
-    }
-    return [];
-  });
-  expect(broken).toEqual([]);
+// Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
+// to call a native tool it no longer has: each names the command (`dispatch ask`) instead.
+test("no skill or daemon prompt names a native Dispatch tool", () => {
+  const toolName = new RegExp(`\\b(${dispatchToolSpecs.map((spec) => spec.name).join("|")})\\b`);
+  const named = skillAndPromptRoots
+    .flatMap(files)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) =>
+      readFileSync(file, "utf8")
+        .split("\n")
+        .flatMap((line, index) => {
+          const match = toolName.exec(line);
+          return match === null
+            ? []
+            : [`${path.relative(REPO_ROOT, file)}:${index + 1}: ${match[0]}`];
+        })
+    );
+  expect(named).toEqual([]);
 });
+
+test("every skill://<name>/<path> link names a file that exists, and its #anchor a heading in it", () => {
+  expect(brokenSkillLinks(skillLinks([staged]), repoSkillsRoot)).toEqual([]);
+});
+
+test("every relative link resolves to a file inside the staged partition", () => {
+  expect(brokenRelativeLinks(staged)).toEqual([]);
+});
+
+// This plugin's skills reach every session with Dispatch, including one with no other plugin
+// installed (the Envoy entry injects dispatch-first into each request), so a task agent they
+// dispatch must come with this plugin (`agents/`, which ships none today) or with Oh My Pi itself
+// (what `omp agents unpack` writes, read off the pinned binary rather than listed here). A
+// `skill://legion-*` mention in these skills is held to no such partition, on purpose: each is a
+// sentence conditioned on a Legion role (skills/dispatch/SKILL.md:218 and :385,
+// skills/dispatch-brainstorming/SKILL.md:3, :9 and :32, skills/dispatch-first/SKILL.md:53), inert
+// for a person and right for a pane with both plugins, and `brokenSkillLinks` above resolves a
+// `skill://<name>/<path>` link against the repository's skills/ for the same reason.
+test.skipIf(omp === undefined && !onActions)(
+  "every task agent the staged skills dispatch is one this plugin ships or Oh My Pi bundles",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const available = new Set([...shippedAgents(packageRoot), ...(await bundledAgents(omp))]);
+    expect(unresolvedAgentDispatches([staged], available)).toEqual([]);
+  },
+  60_000
+);
 
 test("a heading inside a code fence is no anchor, since a Markdown reader renders none", () => {
   const markdown = [
@@ -161,16 +130,4 @@ test("a heading inside a code fence is no anchor, since a Markdown reader render
     "# After",
   ].join("\n");
   expect([...anchors(markdown)]).toEqual(["outside", "after"]);
-});
-
-test("every legion-worker reference is linked from a skill or a prompt", () => {
-  const linked = new Set(
-    links()
-      .filter(({ name }) => name === "legion-worker")
-      .map(({ target }) => target)
-  );
-  const unlinked = files(path.join(workerRoot, "references"))
-    .map((file) => path.relative(workerRoot, file))
-    .filter((reference) => !linked.has(reference));
-  expect(unlinked).toEqual([]);
 });

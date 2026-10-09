@@ -163,6 +163,12 @@ func (s *memStore) PutClaim(_ context.Context, c Claim) error {
 	return nil
 }
 
+func (s *memStore) AdmitClaim(ctx context.Context, c Claim) (Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (s *memStore) CheckLaunch(context.Context, Claim) error { return nil }
+
 func (s *memStore) PutDelivery(_ context.Context, token claim.Token, d Delivery) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

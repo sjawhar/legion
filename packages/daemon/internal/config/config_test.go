@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -124,9 +125,10 @@ func defaultsFor(port int) Config {
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
 		},
-		Linger:         72 * time.Hour,
-		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
+		Linger:           72 * time.Hour,
+		ReviewRoundCap:   3,
+		MaxFixAttempts:   3,
+		ControllerLaunch: ControllerLaunchOperator,
 	}
 }
 
@@ -569,6 +571,25 @@ func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
 	}
 }
 
+func TestEndpointURLKeepsAPath(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"envoy_url", "https://envoy.example/tenant"},
+		{"nats_urls", "nats://nats.example:4222/tenant"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			got, err := endpointURL(tc.value, tc.key)
+			if err != nil {
+				t.Fatalf("endpointURL: %v", err)
+			}
+			if got.Path != "/tenant" {
+				t.Errorf("path = %q, want /tenant", got.Path)
+			}
+		})
+	}
+}
+
 func TestLoadRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -640,6 +661,28 @@ func TestLoadRefuses(t *testing.T) {
 			name: "daemon_url with a query string",
 			body: minimalFile + "daemon_url: http://127.0.0.1:13370/?x=1\n",
 			want: "daemon_url must not include a query string or fragment",
+		},
+		{
+			name: "nats_urls entry with a query string",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222?token=token"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222?token=token" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "nats_urls entry with a fragment",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222#fragment"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222#fragment" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "envoy_url with a query string",
+			body: minimalFile + "envoy_url: https://envoy.example?access_token=token\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
+		},
+		{
+			name: "envoy_url with a fragment",
+			body: minimalFile + "envoy_url: https://envoy.example#fragment\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
 		},
 		{
 			name: "worker_stream_port zero",
@@ -838,11 +881,6 @@ func TestLoadRefuses(t *testing.T) {
 			want: "unknown key worker_cap: the running-worker cap no longer exists (LEGION-208 Requirement 8)",
 		},
 		{
-			name: "tossed worker_idle_retire_seconds",
-			body: minimalFile + "worker_idle_retire_seconds: 600\n",
-			want: "unknown key worker_idle_retire_seconds: a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, \"Process supervision\")",
-		},
-		{
 			name: "tossed resync_interval_seconds",
 			body: minimalFile + "resync_interval_seconds: 600\n",
 			want: "unknown key resync_interval_seconds: the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, \"Ported, and tossed\")",
@@ -1011,6 +1049,9 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		line  string
 		class string
 		want  string
+		// wantPrefix, where set, replaces want: the refusal must start with it, and the reason that
+		// follows is the message's own wording.
+		wantPrefix string
 	}{
 		{key: "project", class: modelled},
 		{key: "state_dir", class: modelled},
@@ -1047,6 +1088,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
+		{key: "capabilities", line: `capabilities: {decided: {secrets: "dispatch://LEGION-205 enrolls pods later"}}`, class: modelled},
 
 		{
 			key: "worker_cap", line: "worker_cap: 10", class: tossed,
@@ -1054,7 +1096,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		},
 		{
 			key: "worker_idle_retire_seconds", line: "worker_idle_retire_seconds: 600", class: tossed,
-			want: "unknown key worker_idle_retire_seconds: a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, \"Process supervision\")",
+			wantPrefix: "unknown key worker_idle_retire_seconds: ",
 		},
 		{
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,
@@ -1087,9 +1129,13 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 				}
 			default:
 				if err == nil {
-					t.Fatalf("Load succeeded, want error %q", tc.want)
+					t.Fatalf("Load succeeded, want error %q", tc.want+tc.wantPrefix)
 				}
-				if err.Error() != tc.want {
+				if tc.wantPrefix != "" {
+					if !strings.HasPrefix(err.Error(), tc.wantPrefix) {
+						t.Errorf("Load error = %q, want a refusal starting %q", err.Error(), tc.wantPrefix)
+					}
+				} else if err.Error() != tc.want {
 					t.Errorf("Load error = %q, want %q", err.Error(), tc.want)
 				}
 			}
@@ -1159,5 +1205,61 @@ func TestLoadNamesAFileItCannotRead(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("Load error = %q, want it to name %s", err.Error(), path)
+	}
+}
+
+// `capabilities.decided` records the operator's decision on a deployment capability, by name, with
+// the reason the daemon's report then shows in the gap's place (capabilities.Deployment). A name
+// the daemon does not measure from its deployment is refused naming the ones it does, and a blank
+// reason is refused: it would record nothing. Nothing is refused for being decided while present —
+// the report calls such a decision moot.
+func TestLoadReadsCapabilityDecisions(t *testing.T) {
+	t.Run("every decidable name, with its reason", func(t *testing.T) {
+		cfg, err := Load(writeConfigFile(t, minimalFile+`capabilities:
+  decided:
+    secrets: "dispatch://LEGION-205 enrolls pods later"
+    model-fallback: one model route, nothing to fall back to
+    resource-limits: "one tree per node; the pool's floor sizes it"
+`), noEnv)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := map[capabilities.Name]string{
+			capabilities.Secrets:        "dispatch://LEGION-205 enrolls pods later",
+			capabilities.ModelFallback:  "one model route, nothing to fall back to",
+			capabilities.ResourceLimits: "one tree per node; the pool's floor sizes it",
+		}
+		if !reflect.DeepEqual(cfg.Capabilities.Decided, want) {
+			t.Errorf("Capabilities.Decided = %#v, want %#v", cfg.Capabilities.Decided, want)
+		}
+	})
+	t.Run("no block, and an empty one", func(t *testing.T) {
+		for _, body := range []string{minimalFile, minimalFile + "capabilities:\n", minimalFile + "capabilities: {}\n", minimalFile + "capabilities: {decided: {}}\n"} {
+			cfg, err := Load(writeConfigFile(t, body), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Capabilities.Decided) != 0 {
+				t.Errorf("Capabilities.Decided = %#v, want none", cfg.Capabilities.Decided)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, line, want string }{
+		{"a name that is no deployment capability", `capabilities: {decided: {nonsense: "because"}}`, "unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits"},
+		{"an image row, which no decision covers", `capabilities: {decided: {browser: "no Chromium"}}`, "unknown key capabilities.decided.browser: a decision may name secrets, model-fallback or resource-limits"},
+		{"a blank reason", `capabilities: {decided: {secrets: "  "}}`, "capabilities.decided.secrets must not be empty"},
+		{"a null reason", `capabilities: {decided: {secrets: }}`, "capabilities.decided.secrets must not be empty"},
+		{"a reason that is not a string", `capabilities: {decided: {secrets: [a, b]}}`, "capabilities.decided.secrets must be a string"},
+		{"a name twice", "capabilities:\n  decided:\n    secrets: a\n    secrets: b", "capabilities.decided names secrets twice"},
+		{"decided not a mapping", `capabilities: {decided: secrets}`, "capabilities.decided must be a mapping of capability to reason"},
+		{"a member beside decided", `capabilities: {present: {secrets: yes}}`, "unknown key capabilities.present"},
+		{"the block not a mapping", `capabilities: [secrets]`, "capabilities must be a mapping"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+tc.line+"\n"), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

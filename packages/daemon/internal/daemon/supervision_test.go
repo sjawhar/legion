@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 func architect() api.SpawnRequest {
@@ -364,6 +366,131 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	if resumed := rt.CallsOf("Resume")[0]; resumed.Spec.ResumeSessionFile != "/sessions/architect.jsonl" ||
 		!reflect.DeepEqual(resumed.Previous, loc) {
 		t.Errorf("resumed %+v, want the recorded session after the dead incarnation", resumed)
+	}
+}
+
+// heldClock is the machines' time held still until the test fires the timers armed for one wait,
+// so a daemon test sees the deadline it fires and nothing else.
+type heldClock struct {
+	mu     sync.Mutex
+	timers []*heldTimer
+}
+
+type heldTimer struct {
+	clock *heldClock
+	after time.Duration
+	f     func()
+	done  bool
+}
+
+func (c *heldClock) Now() time.Time { return time.Now() }
+
+func (c *heldClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	timer := &heldTimer{clock: c, after: d, f: f}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (t *heldTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	if t.done {
+		return false
+	}
+	t.done = true
+	return true
+}
+
+// fire runs, once each, every timer armed for after that has neither fired nor been stopped, and
+// reports how many it ran. A timer one of them arms waits for the next fire.
+func (c *heldClock) fire(after time.Duration) int {
+	c.mu.Lock()
+	var due []*heldTimer
+	for _, timer := range c.timers {
+		if !timer.done && timer.after == after {
+			timer.done = true
+			due = append(due, timer)
+		}
+	}
+	c.mu.Unlock()
+	for _, timer := range due {
+		timer.f()
+	}
+	return len(due)
+}
+
+// An agent registered over the API that never says it is ready is relaunched at the deadline as
+// the same session one generation later, with one launch failure charged, through the daemon's own
+// API, store, stream and machines. The relaunched agent's shim says hello, the agent registers and
+// says it is ready, and it is sent the task the claim held.
+func TestRunRelaunchesAClaimWhoseAgentRegisteredAndNeverSaidReady(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	clock := &heldClock{}
+	o.clock = clock
+	d := startDaemon(t, cfg, o)
+	spawn := architect()
+	spawn.Task = "Say hello."
+	token := d.spawn(spawn)
+	first := lastLaunch(t, rt, token)
+
+	register := func(bootToken string) claim.RegisterResponse {
+		t.Helper()
+		status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+			BootToken: bootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
+			AgentID: "agent", PluginContract: 1,
+		}, false)
+		if status != http.StatusOK {
+			t.Fatalf("register = %d; body %s", status, body)
+		}
+		var registered claim.RegisterResponse
+		if err := json.Unmarshal(body, &registered); err != nil {
+			t.Fatalf("decode the registration: %v", err)
+		}
+		return registered
+	}
+	register(first.BootToken)
+	registered := d.claim(token)
+	if registered.State != string(supervise.StateRegistered) || registered.Locator == nil {
+		t.Fatalf("after the registration the claim is %+v, want registered with its process", registered)
+	}
+
+	deadline := cfg.WorkerBootTimeout * time.Duration(cfg.WorkerBootRegistrationDeadlineIntervals)
+	if fired := clock.fire(deadline); fired != 1 {
+		t.Fatalf("%d deadlines were armed for the registered claim, want the one its registration armed", fired)
+	}
+	relaunched := d.claim(token)
+	if relaunched.State != string(supervise.StateLaunching) || relaunched.Generation != 2 || relaunched.Budgets.LaunchFailures != 1 {
+		t.Fatalf("after the deadline the claim is %s at generation %d with %d launch failures, want launching at 2 with 1",
+			relaunched.State, relaunched.Generation, relaunched.Budgets.LaunchFailures)
+	}
+	if suspends := rt.CallsOf("Suspend"); len(suspends) != 1 || !reflect.DeepEqual(suspends[0].Locator, *registered.Locator) {
+		t.Fatalf("suspended %+v, want the registered agent's process once", suspends)
+	}
+	resumes := rt.CallsOf("Resume")
+	if len(resumes) != 1 || resumes[0].Spec.ResumeSessionFile != "/sessions/architect.jsonl" ||
+		resumes[0].Spec.Generation != 2 || !reflect.DeepEqual(resumes[0].Previous, registered.Locator) {
+		t.Fatalf("resumed %+v, want the registered session at generation 2 after its process", resumes)
+	}
+
+	second := lastLaunch(t, rt, token)
+	sh := dialShim(t, record.address, second.BootToken)
+	secret := register(second.BootToken).Secret
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_architect", Secret: secret, Generation: 2,
+	}, false); status != http.StatusNoContent {
+		t.Fatalf("ready = %d; body %s", status, body)
+	}
+	if prompt := sh.prompt(); prompt.Message != "Say hello." {
+		t.Fatalf("the relaunched agent was prompted %+v, want the task the claim held", prompt)
+	}
+	if c := d.claim(token); c.State != string(supervise.StateReady) || c.Budgets.LaunchFailures != 0 {
+		t.Fatalf("after the relaunched agent's ready the claim is %s with %d launch failures, want ready with 0",
+			c.State, c.Budgets.LaunchFailures)
 	}
 }
 
@@ -738,18 +865,19 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.LaunchFailureLimit = 1
 	rt := fake.NewRuntime()
-	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
+	// The tree's root first: its spawn opens the operator tree its workers bind to.
+	root := d.spawn(architect())
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	planner := architect()
 	planner.Issue, planner.Role = "LEGION-4", claim.RolePlanner
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError {
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError || !strings.Contains(string(body), "tmux refused") {
 		t.Fatalf("spawn of the claim meant to fail = %d; body %s", status, body)
 	}
 	project, _ := claim.ProjectToken(cfg.Project)
 	failed, _ := claim.NewToken(project, "LEGION-4", claim.RolePlanner)
-	root := d.spawn(architect())
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
 	suspended := d.spawn(worker)
@@ -905,6 +1033,9 @@ func streamEventTypes(t *testing.T) []string {
 	return sealed
 }
 
+// putClaim stores c as every claim the daemon stores is: a claim of an admitted tree, bound to the
+// tree's open lifecycle epoch. No workflow issue backs these trees, so their authority is the
+// operator's, as the lifecycle migration gives a tree it finds only claims of.
 func putClaim(t *testing.T, cfg config.Config, c supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -916,7 +1047,10 @@ func putClaim(t *testing.T, cfg config.Config, c supervise.Claim) {
 	if _, err := st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := st.PutClaim(ctx, c); err != nil {
+	if _, err := st.OpenTreeLifecycle(ctx, c.Project, c.Tree, treelifecycle.AuthorityOperator); err != nil {
+		t.Fatalf("admit the tree of %s: %v", c.Token, err)
+	}
+	if _, err := st.AdmitClaim(ctx, c); err != nil {
 		t.Fatalf("put %s: %v", c.Token, err)
 	}
 }
@@ -997,5 +1131,31 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 	}
 	if relaunched := lastLaunch(t, rt, worker); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-2" {
 		t.Errorf("the worker relaunched with %+v, want a fresh session recovering legion/LEGION-2", relaunched)
+	}
+}
+
+// A process the runtime reports at a stale address — alive, but holding an address the daemon no
+// longer hands its processes (LEGION-592: the daemon restarted with its worker stream, its API or a
+// service at another address and re-adopted the pod) — relaunches its recorded session at once, and
+// the observation charges nothing: the daemon's own configuration moved, not a fault of the agent's.
+func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	token := d.spawn(architect())
+	readyClaim(t, d, rt, token)
+	loc := d.claim(token).Locator
+
+	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.StaleAddress, Detail: "pod dials a stale address"})
+
+	testwait.Eventually(t, "the relaunch", func() bool {
+		c := d.claim(token)
+		return c.Generation == 2 && c.State == string(supervise.StateLaunching)
+	})
+	if relaunched := lastLaunch(t, rt, token); relaunched.ResumeSessionFile == "" {
+		t.Errorf("relaunched with %+v, want the recorded session resumed", relaunched)
+	}
+	if c := d.claim(token); c.Budgets.LaunchFailures != 0 {
+		t.Errorf("the stale address was charged: %+v", c.Budgets)
 	}
 }

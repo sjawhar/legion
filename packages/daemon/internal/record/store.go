@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -93,6 +94,12 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
 	}
 	return nil
+}
+
+// OpenTreeLifecycle is the admission fact's transactional entry point into the shared lifecycle
+// barrier.
+func (s *Postgres) OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
+	return treelifecycle.Open(ctx, tx, project, tree, authority)
 }
 
 func scanIssue(row scanner) (*Issue, error) {
@@ -194,6 +201,34 @@ func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*P
 		return nil, fmt.Errorf("read pull request for %s: %w", issue, err)
 	}
 	return pr, nil
+}
+
+// PullRequestsByIssue is every pull request of issues, keyed by issue, in one query: for a
+// caller that would otherwise call PullRequest once per issue (removableWorkspaces' own candidate
+// loop, where issues is a tree's done siblings), replacing N round trips with one. An issue with
+// no pull request is simply absent from the result, the same as a nil PullRequest from PullRequest
+// itself. Empty issues returns an empty map without a query.
+func (s *Postgres) PullRequestsByIssue(ctx context.Context, tx pgx.Tx, issues []string) (map[string]PullRequest, error) {
+	byIssue := map[string]PullRequest{}
+	if len(issues) == 0 {
+		return byIssue, nil
+	}
+	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where issue = any($1)", issues)
+	if err != nil {
+		return nil, fmt.Errorf("list the pull requests of %d issue(s): %w", len(issues), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		pr, err := scanPullRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list the pull requests of %d issue(s): %w", len(issues), err)
+		}
+		byIssue[pr.Issue] = *pr
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the pull requests of %d issue(s): %w", len(issues), err)
+	}
+	return byIssue, nil
 }
 
 func (s *Postgres) PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error) {

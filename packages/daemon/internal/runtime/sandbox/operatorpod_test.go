@@ -82,9 +82,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}},
-			{Name: "boot", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
-		}}, want: "runtime.kubernetes.pod.volumes[1].name boot is a volume Legion puts in every pod"},
-		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/boot"), want: overlaps("/var/run/legion/boot", "/var/run/legion/boot", false)},
+			{Name: "launcher-tester", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
+		}}, want: "runtime.kubernetes.pod.volumes[1].name launcher-tester is a volume Legion puts in every pod"},
+		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/launcher"), want: overlaps("/var/run/legion/launcher", "/var/run/legion/launcher", false)},
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
 		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
 		{name: "a mount above the sessions Legion mounts", pod: mountAt("/home/legion/.omp/profiles/legion/agent"),
@@ -102,9 +102,6 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: keyPointer("DISPATCH_TOKEN", byRuntime)},
 		{name: "a provider key for the settings overlays", keys: map[string]string{"PI_CONFIG_FILES": "overlays"},
 			want: keyNames("PI_CONFIG_FILES", byBaseline)},
-		{name: "a provider key for a baseline variable", keys: map[string]string{"OTEL_SDK_DISABLED": "otel"},
-			want: keyNames("OTEL_SDK_DISABLED", byBaseline)},
-		{name: "a provider key for another baseline variable", keys: map[string]string{"PI_AUTO_QA": "qa"}, want: keyNames("PI_AUTO_QA", byBaseline)},
 		{name: "a provider key for the config root", keys: map[string]string{"PI_CONFIG_DIR": "root"}, want: keyNames("PI_CONFIG_DIR", bySessions)},
 		{name: "a provider key for the session store", keys: map[string]string{"OMP_SESSION_STORAGE": "store"},
 			want: keyNames("OMP_SESSION_STORAGE", bySessions)},
@@ -119,8 +116,8 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key reading a providers secret's key", keys: map[string]string{"FOO": "NATS_NKEY_SEED"},
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
-		{name: "an operator's own overlays and a baseline variable it overrides",
-			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml", "OTEL_SDK_DISABLED": "false"}}},
+		{name: "an operator's own overlays, which the baseline composes with",
+			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"})

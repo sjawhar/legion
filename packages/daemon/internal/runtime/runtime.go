@@ -25,26 +25,29 @@ import (
 
 // Runtime is what the supervisor has instead of a process table. Every method is about one
 // agent's process, addressed by the locator the runtime itself minted, except `Release`, which is
-// about a claim whether or not a process runs for it, and `Observe` and `ReconcileOrphans`, which
-// are about all of them.
+// about a claim whether or not a process runs for it, `Observe` and `ReconcileOrphans`, which are
+// about all of them, and `CleanupTree`, which is about a whole tree.
 //
 // A locator that no longer names the claim's current process — nothing is there, or something
 // else is — is a process already stopped as far as `Suspend` and `Release` are concerned: neither
 // acts on it, and neither returns an error for it. `Suspend` leaves a newer incarnation the runtime
-// recorded for the claim alone; a process of the claim that no locator records — a sandbox's pod
-// the controller recreated — it stops all the same, so it cannot keep running on the claim's token.
-// `Release` still ends whatever else the runtime holds for the claim. A state the runtime cannot
-// verify is an error, never "stopped".
+// recorded for the claim alone. What a claim's process shares with the other processes of its
+// issue or tree — a sandbox's issue pod, its volume and Secrets — outlives every claim's `Suspend`
+// and `Release`, and only `CleanupTree` deletes it. A state the runtime cannot verify is an error,
+// never "stopped".
 type Runtime interface {
 	// Spawn starts an agent and returns the locator that identifies the process it started —
 	// including the incarnation, captured at spawn, that later observations are fenced against.
+	// On an error the caller owns stopping any previous process of the claim, and Spawn has
+	// stopped any process it started itself.
 	Spawn(ctx context.Context, spec SpawnSpec) (Locator, error)
 	// Resume starts the same agent again from the session file the spec names, after waiting
 	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, nil
 	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
-	// name, as a sandbox does, waits out whatever holds that name even when prev is nil. A claim
-	// resumes the agent it recorded or none: a fresh agent on a claim that had one is the failure
-	// the same-agent refusal exists to catch.
+	// place, as a sandbox finds a role's container in its issue's pod, waits out whatever runs
+	// there even when prev is nil. A claim resumes the agent it recorded or none: a fresh agent on
+	// a claim that had one is the failure the same-agent refusal exists to catch. On an error the
+	// caller owns stopping prev (Suspend), and Resume has stopped any process it started itself.
 	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
 	// Suspend stops the process gracefully, within the runtime's stop grace, and keeps everything
 	// a later Resume needs: the agent's session, and whatever the runtime holds for the claim. The
@@ -54,8 +57,9 @@ type Runtime interface {
 	Suspend(ctx context.Context, loc Locator) error
 	// Release ends the claim, whether or not a process runs for it. The process k.Locator records,
 	// while it is still the claim's, is sent a shutdown frame over the claim's connection and given
-	// the runtime's stop grace to end itself; then it, and whatever else the runtime holds for the
-	// claim, are gone. k.Locator is nil when no process runs.
+	// the runtime's stop grace to end itself; then it is gone, and the runtime forgets the claim.
+	// What the claim's process shared with its issue or tree stays for CleanupTree. k.Locator is
+	// nil when no process runs.
 	Release(ctx context.Context, k Known) error
 	// Probe is one observation of one locator, now. `Uncertain` is a verdict, not a failure: a
 	// returned error means the runtime itself could not be asked, and an error is never a
@@ -71,8 +75,8 @@ type Runtime interface {
 	// released is never an orphan, known or not. What an earlier sweep adopted protects nothing: a
 	// process no sweep's known set names any more is the orphan sweep's. An entry that fails
 	// Validate is an error, and nothing of its claim is ended: tmux, which knows a claim's
-	// processes only by the locators it is given, then ends nothing at all; the sandbox, which
-	// finds a claim's Sandbox by the claim's own name, keeps that one and sweeps the rest.
+	// processes only by the locators it is given, then ends nothing at all. The sandbox deletes no
+	// issue Sandbox of a tree whose lifecycle is open or releasing: those are CleanupTree's alone.
 	ReconcileOrphans(ctx context.Context, known []Known, grace time.Duration) error
 	// AdoptWorkingCopy hands the agent's working copy the git identity its commits are authored
 	// with, in the place the working copy actually lives (which under a sandbox is not a
@@ -88,6 +92,18 @@ type Runtime interface {
 	// init-container budget (its fetch's clone plus its own lock wait) for a launch whose pod runs
 	// provisioning first. The supervisor adds it only while a claim is still StateLaunching.
 	ProvisionBound() time.Duration
+	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
+	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);
+	// nil once nothing of it remains. A runtime that holds nothing per tree returns nil at once.
+	CleanupTree(ctx context.Context, tree string) error
+}
+
+// IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
+// lock, says the issue's durable close and its complete stored role population allow it (false
+// finishes the close without acting). Process-only runtimes have no shared issue resources to
+// suspend.
+type IssueSuspender interface {
+	SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error
 }
 
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
@@ -124,6 +140,30 @@ func (k Known) Validate() error {
 		return fmt.Errorf("known claim %s: its locator is claim %s's process", k.Claim, k.Locator.Claim)
 	}
 	return nil
+}
+
+// RemovableWorkspace is one sibling of a tree the daemon has judged safe to remove by lifecycle
+// alone (dispatch://LEGION-583): Issue it belongs to, and MergedHead, the merged pull request's
+// head commit when it merged, empty for one that never did — GitHub deletes a squash merge's
+// branch, so that commit carries no remote bookmark of its own, and workspace-init's push-safety
+// check needs the head to tell that commit from one that was never pushed at all. internal/runtime
+// is as low as this type can live: internal/workspace already imports internal/runtime for its
+// credential helper's GitIdentity, so the reverse import internal/workspace's own type would need
+// is a cycle; internal/workspace uses this type directly instead of a type of its own.
+type RemovableWorkspace struct {
+	Issue      string `json:"issue"`
+	MergedHead string `json:"mergedHead,omitempty"`
+}
+
+// RemovableWorkspacesPayload is LEGION_REMOVABLE_WORKSPACES' own wire shape (dispatch://LEGION-583):
+// Workspaces, the daemon's removable-workspace candidates, and NotAfter, the absolute instant past
+// which workspace-init must no longer trust them, together in one JSON object so the two can
+// never arrive apart. relaunch (internal/runtime/sandbox) encodes it; workspace-init
+// (cmd/legion/workspace_init.go) decodes it strictly — an unknown field, a zero NotAfter, or an
+// empty Workspaces is the same malformed input as invalid JSON: remove nothing, logged why.
+type RemovableWorkspacesPayload struct {
+	NotAfter   time.Time            `json:"notAfter"`
+	Workspaces []RemovableWorkspace `json:"workspaces"`
 }
 
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
@@ -182,6 +222,17 @@ const (
 	// is a fourth verdict precisely so that it is never read as either: the supervisor re-arms
 	// the probe and counts the streak, and changes no state on it.
 	Uncertain ObservationKind = "uncertain"
+	// StaleAddress: the process the locator recorded is running, but holds an address a process
+	// launched now is not handed — one of the addresses a runtime hands every new process from the
+	// daemon's configuration (the worker stream it dials, the daemon's API, NATS, Envoy, Dispatch,
+	// the secrets broker) moved since this one was launched, as each does when the daemon restarts
+	// with its key changed (the worker stream's: `advertise_host`, `bind` when no `advertise_host` is
+	// set, `worker_stream_port`). Only the Sandbox runtime reports it, since a pod's argv and
+	// environment are fixed at its launch. The detail names each address that moved. The
+	// supervisor's response is its own (supervise's repoint). Distinct from a "stale" event (Handle's
+	// own fence vocabulary, an observation of an incarnation the claim no longer holds): this one
+	// names the claim's current, live incarnation.
+	StaleAddress ObservationKind = "stale_address"
 )
 
 // Observation is one runtime fact about one process, with the moment it was observed and, for a

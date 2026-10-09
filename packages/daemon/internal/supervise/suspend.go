@@ -2,16 +2,18 @@ package supervise
 
 import (
 	"context"
-	"errors"
 	"fmt"
+
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // ErrSuspendHeld answers a suspension that arrived while the claim's agent is in a turn: the
 // machine holds it and suspends the claim itself (holdSuspension). It is not a refusal. A caller
 // that keeps the request durably asks again, and the claim answers nil once it is suspended.
-var ErrSuspendHeld = errors.New("the suspension is held for the agent's turn to end")
+var ErrSuspendHeld = wait.New("the suspension is held for the agent's turn to end")
 
-// suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
+// suspend stops the process and keeps the session. A suspension ends the claim's phase (the
+// workflow suspends a worker only when its issue closes or its run is over), so a task
 // queued for a phase and still pending unconfirmed (acknowledged and then refused, or lost to the
 // transport) is retired with it (settle): the next resume is started with its new phase's task,
 // never handed the finished one's. A task of no phase — an operator's own, an architect's — is
@@ -27,9 +29,10 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 // holdSuspension is a suspension that arrives while the agent is in a turn, and this is the one
 // statement of what a held suspension (Machine.held) does.
 //
-// The workflow suspends a worker as it records the phase completion the worker reports from a tool
-// call inside its turn. Stopping the process at once would cut that call off before Oh My Pi writes
-// its result, and a session resumed from that transcript holds a report with no answer. So the
+// A worker's issue can close, or an operator suspend it, while it is in a turn: the production
+// check's sign-off, say, arriving while the implementer's report of the check is still a tool call
+// inside that turn. Stopping the process at once would cut that call off before Oh My Pi writes its
+// result, and a session resumed from that transcript holds a report with no answer. So the
 // suspension is held:
 //
 //   - It runs when the turn ends (turnEnded), or when the stop timeout runs out first
@@ -39,8 +42,9 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //     so the stop timeout bounds the wait only while the runtime can stop the process. A claim
 //     whose turn ended stays idle meanwhile and is handed nothing (sendPending); a turn it starts
 //     anyway is cut off at the next try.
-//   - A process that dies first leaves the claim suspended, charged nothing (endHeld). A prompt
-//     retirement meanwhile is the held stop itself (suspendHeld), charged nothing.
+//   - A process that dies first, or is found at a stale address (repoint), leaves the claim
+//     suspended, charged nothing (endHeld). A prompt retirement meanwhile is the held stop itself
+//     (suspendHeld), charged nothing.
 //   - A start run against the claim drops it (StartedBy), and every other end of the process drops
 //     it with the process (letGo).
 //   - It lives in memory only. A restart forgets it, so whoever holds the request asks again: the
@@ -139,10 +143,11 @@ func (m *Machine) dropHeld() {
 	m.disarm(TimerSuspend)
 }
 
-// endHeld is the claim's process found dead while a suspension is held. Nothing is left to hold the
-// suspension for, so the claim is suspended rather than relaunched, and nothing is charged: died
-// asks before it charges anything. A runtime that cannot stop the dead process is logged and the
-// claim is suspended all the same, as a failed claim is (fail).
+// endHeld is the claim's process found dead, or alive holding an address a process launched now is
+// not handed (repoint), while a suspension is held. Nothing is left to hold the suspension for, so
+// the claim is suspended rather than relaunched, and nothing is charged: died asks before it charges
+// anything. A runtime that cannot stop the process is logged and the claim is suspended all the
+// same, as a failed claim is (fail).
 func (m *Machine) endHeld(ctx context.Context) error {
 	request := *m.held
 	m.dropHeld()

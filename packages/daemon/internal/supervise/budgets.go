@@ -9,8 +9,9 @@ import (
 // Budgets are a claim's retry counters, each a separate policy with its own reset point.
 //
 //   - LaunchFailures: launches that never became a working agent — a spawn or resume the runtime
-//     refused, a process that died, one that never registered. Reset only by the agent's ready:
-//     a registration alone proves nothing about the next launch.
+//     refused, a process that died, one whose agent never registered or registered and never said
+//     it was ready. Reset only by the agent's ready: a registration alone proves nothing about the
+//     next launch.
 //   - Deaths: processes that died after their agent was ready and while it had work outstanding —
 //     a pending task, whose turn was running or which was sent and not yet begun. The relaunch
 //     reaches ready again whatever killed the last process, so ready cannot bound these; an agent
@@ -44,8 +45,12 @@ type Limits struct {
 }
 
 // relaunchAfterFailure charges one launch failure for a process that did not survive, and
-// relaunches the same session after it — or fails the claim when the budget is spent.
+// relaunches the same session after it — or fails the claim when the budget is spent. A relaunch
+// the tree lifecycle refuses (its cleanup reserved) is checked before the charge, so it costs none.
 func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
+	if err := m.checkLaunch(ctx); err != nil {
+		return err
+	}
 	m.claim.Budgets.LaunchFailures++
 	if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
 		return m.fail(ctx, "launch failures ran out")

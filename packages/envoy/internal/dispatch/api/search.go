@@ -338,9 +338,10 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "q must be at least 2 characters")
 		return
 	}
-	// q is capped as dispatch_search caps it, counted after trimming so a query the tool sends is
-	// never refused here, and a project must be a key (an empty one searches every project). Both
-	// ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps it short.
+	// q is capped as `dispatch search` caps it, counted after trimming so a query the command
+	// sends is never refused here, and a project must be a key (an empty one searches every
+	// project). Both ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps
+	// it short.
 	if length := len16(searchText); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
 		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)

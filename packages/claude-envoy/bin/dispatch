@@ -1,0 +1,6 @@
+#!/bin/sh
+# The dispatch CLI, bundled into this plugin's dist/ by its build.
+here=$(cd "$(dirname "$0")" && pwd)
+cli="$here/../dist/dispatch.js"
+[ -f "$cli" ] || { echo "dispatch: $cli is missing; build the plugin (bun run build)" >&2; exit 2; }
+exec bun "$cli" "$@"

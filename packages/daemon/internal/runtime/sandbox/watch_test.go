@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // next is the next observation, failing the test when none arrives within a second.
@@ -53,6 +55,7 @@ func TestAnObservationCarriesTheRecordedIncarnation(t *testing.T) {
 	t.Run("gone", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{runningSandbox(t, workerToken, claim.RoleTester), runningPod(workerToken, recorded, claim.RoleTester)},
 			withoutController())
+		g.reportLauncher(workerToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
 		observations, err := g.r.Observe(g.ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -65,7 +68,7 @@ func TestAnObservationCarriesTheRecordedIncarnation(t *testing.T) {
 			t.Fatalf("%s at %+v, want Alive at the recorded locator", obs.Kind, obs.Locator)
 		}
 		g.update(g.pod(SandboxName(workerToken)), func(p *corev1.Pod) {
-			p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 137, "Error")}}
+			p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 137, "Error")}}
 		})
 		if obs := next(t, observations); obs.Kind != runtime.Gone || obs.Locator != loc {
 			t.Fatalf("%s at %+v, want Gone at the recorded locator", obs.Kind, obs.Locator)
@@ -76,6 +79,7 @@ func TestAnObservationCarriesTheRecordedIncarnation(t *testing.T) {
 	t.Run("not the recorded process", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{runningSandbox(t, workerToken, claim.RoleTester), runningPod(workerToken, recorded, claim.RoleTester)},
 			withoutController())
+		g.reportLauncher(workerToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
 		observations, err := g.r.Observe(g.ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -97,23 +101,24 @@ func TestAnObservationCarriesTheRecordedIncarnation(t *testing.T) {
 	})
 }
 
-// A pod killed while no runtime ran is reported Gone the moment a new runtime is told of its
-// claim, stamped with the incarnation recorded before, and nothing is relaunched; a claim that
-// lived through it is Alive at its recorded incarnation (B3, re-adoption).
+// An issue pod killed while no runtime ran is reported Gone the moment a new runtime is told of
+// its claim, stamped with the incarnation recorded before, and nothing is relaunched; a claim in
+// another issue pod that lived through it is Alive at its recorded incarnation (B3, re-adoption).
 func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
-	killed := podObject(SandboxName(workerToken), "uid-pod-worker", "uid-sandbox-tester", claimLabels(claim.RoleTester), corev1.PodStatus{
-		Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 137, "Error")},
+	killed := podObject(SandboxName(childToken), "uid-pod-child", "uid-sandbox-implementer", claimLabels(claim.RoleImplementer), corev1.PodStatus{
+		Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(string(claim.RoleImplementer), 137, "Error")},
 	})
 	g := newRig(t, []k8sruntime.Object{
-		runningSandbox(t, workerToken, claim.RoleTester), killed,
+		runningSandbox(t, childToken, claim.RoleImplementer), killed,
 		runningSandbox(t, rootToken, claim.RoleArchitect), runningPod(rootToken, "uid-pod-root", claim.RoleArchitect),
 	})
+	g.reportLauncher(rootToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
 	observations, err := g.r.Observe(g.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, root := sandboxLocator(workerToken, "uid-pod-worker"), sandboxLocator(rootToken, "uid-pod-root")
-	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &worker}, {Claim: rootToken, Locator: &root}}, 0); err != nil {
+	child, root := sandboxLocator(childToken, "uid-pod-child"), sandboxLocator(rootToken, "uid-pod-root")
+	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: childToken, Locator: &child}, {Claim: rootToken, Locator: &root}}, 0); err != nil {
 		t.Fatal(err)
 	}
 	seen := map[claim.Token]runtime.Observation{}
@@ -121,8 +126,8 @@ func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
 		obs := next(t, observations)
 		seen[obs.Locator.Claim] = obs
 	}
-	if obs := seen[workerToken]; obs.Kind != runtime.Gone || obs.Locator != worker {
-		t.Errorf("the killed worker: %s at %+v, want Gone at %s", obs.Kind, obs.Locator, worker.Incarnation)
+	if obs := seen[childToken]; obs.Kind != runtime.Gone || obs.Locator != child {
+		t.Errorf("the killed child issue's role: %s at %+v, want Gone at %s", obs.Kind, obs.Locator, child.Incarnation)
 	}
 	if obs := seen[rootToken]; obs.Kind != runtime.Alive || obs.Locator != root {
 		t.Errorf("the living root: %s at %+v, want Alive at %s", obs.Kind, obs.Locator, root.Incarnation)
@@ -132,10 +137,59 @@ func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
 	}
 }
 
+// A re-adopted claim whose issue pod lived through the restart but whose role launcher has not
+// yet reconnected (every real launcher redials every second, internal/launcher/launcher.go's
+// reconnectDelay; a fresh listener's first sweep can run before that) is Uncertain, never Gone or
+// NotRecordedProcess, at its unchanged recorded locator, exactly as evaluate() is written
+// (observe.go: "!connected" is Uncertain) and as the supervisor's judge() is written
+// (supervise/machine.go: Uncertain only counts a streak and re-arms the same probe timer — it
+// starts no deadline, suspends nothing, and relaunches nothing). Once the launcher reports in,
+// the very next evaluation is Alive at that same locator, with no write in between: the stage 4a
+// live re-adopt check hit exactly this ordering (LEGION-462).
+func TestADisconnectedLauncherAtReadoptionIsUncertainThenAliveNeverRelaunched(t *testing.T) {
+	g := newRig(t, []k8sruntime.Object{runningSandbox(t, rootToken, claim.RoleArchitect), runningPod(rootToken, "uid-pod-root", claim.RoleArchitect)},
+		withOptions(func(o *Options) { o.ProbeInterval = 50 * time.Millisecond }))
+	loc := sandboxLocator(rootToken, "uid-pod-root")
+	observations, err := g.r.Observe(g.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: rootToken, Locator: &loc}}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if obs := next(t, observations); obs.Kind != runtime.Uncertain || obs.Locator != loc || !strings.Contains(obs.Detail, "disconnected") {
+		t.Fatalf("%s at %+v (%q), want Uncertain quoting the disconnected launcher at the recorded locator", obs.Kind, obs.Locator, obs.Detail)
+	}
+	g.reportLauncher(rootToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
+	alive := false
+	for range 5 {
+		obs := next(t, observations)
+		if obs.Locator != loc {
+			t.Fatalf("%s at %+v, want every observation at the one recorded locator %s", obs.Kind, obs.Locator, loc.Incarnation)
+		}
+		switch obs.Kind {
+		case runtime.Alive:
+			alive = true
+		case runtime.Uncertain:
+			continue
+		default:
+			t.Fatalf("%s at %+v, want Uncertain until the launcher reconnects, then Alive — never %s", obs.Kind, obs.Locator, obs.Kind)
+		}
+		break
+	}
+	if !alive {
+		t.Fatal("the launcher reported in, but no Alive observation followed within 5 probe intervals")
+	}
+	if writes := g.writes(); len(writes) > 0 {
+		t.Fatalf("a disconnected-then-reconnected launcher wrote %v; re-adoption only observes, it never relaunches", writes)
+	}
+}
+
 // Suspend drops the claim from the watch, as tmux does: when it returns the watch no longer holds
-// the claim, Observe delivers nothing of it evaluated after that moment while its pod goes, and a
-// Probe of the recorded locator answers Gone (P1). The live suspend check in
-// live_lifecycle_test.go applies the same rule.
+// the claim, Observe delivers nothing of it evaluated after that moment while its launcher reports
+// the child gone, and a Probe of the recorded locator answers Gone (P1) — while the issue pod,
+// which other roles share, stays. The live suspend check in live_lifecycle_test.go applies the
+// same rule.
 func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	g := newRig(t, nil)
 	observations, err := g.r.Observe(g.ctx)
@@ -155,7 +209,13 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	if recorded, ok := g.r.recorded(workerToken); ok {
 		t.Fatalf("Suspend returned with the claim still in the watch, at %s", recorded.Incarnation)
 	}
-	g.eventually("the pod to be gone", func() bool { return g.pod(loc.Sandbox.Name) == nil })
+	g.eventually("the launcher to report the child gone", func() bool {
+		state, connected := g.r.launchers.state(workerToken, loc.Sandbox.PodUID)
+		return connected && state.Child == nil
+	})
+	if g.pod(loc.Sandbox.Name) == nil {
+		t.Fatal("suspending one role removed the issue pod")
+	}
 	var late []runtime.Observation
 	for window := time.After(200 * time.Millisecond); ; {
 		select {
@@ -183,6 +243,7 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 func TestAVerdictEvaluatedAcrossSuspendIsNotDelivered(t *testing.T) {
 	g := newRig(t, []k8sruntime.Object{runningSandbox(t, workerToken, claim.RoleTester), runningPod(workerToken, recorded, claim.RoleTester)},
 		withoutController())
+	g.reportLauncher(workerToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
 	observations, err := g.r.Observe(g.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +266,7 @@ func TestAVerdictEvaluatedAcrossSuspendIsNotDelivered(t *testing.T) {
 		return false, nil, nil
 	})
 	g.update(g.pod(SandboxName(workerToken)), func(p *corev1.Pod) {
-		p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 143, "Error")}}
+		p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 143, "Error")}}
 	})
 	select {
 	case <-reading:
@@ -225,6 +286,7 @@ func TestEveryWatchedClaimIsEvaluatedEachProbeInterval(t *testing.T) {
 	g := newRig(t, []k8sruntime.Object{runningSandbox(t, workerToken, claim.RoleTester), runningPod(workerToken, recorded, claim.RoleTester)},
 		withoutController(), withOptions(func(o *Options) { o.ProbeInterval = 50 * time.Millisecond }))
 	loc := sandboxLocator(workerToken, recorded)
+	g.reportLauncher(workerToken, shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}})
 	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &loc}}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +313,9 @@ func TestAStaleKnownLocatorNeverDisplacesANewerIncarnation(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
 	stale := g.spawn(spec)
+	if err := g.r.Suspend(g.ctx, stale); err != nil {
+		t.Fatal(err)
+	}
 	spec.Generation, spec.BootToken = 2, "boot-g2"
 	newer := g.spawn(spec)
 	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &stale}}, time.Hour); err != nil {
@@ -262,7 +327,7 @@ func TestAStaleKnownLocatorNeverDisplacesANewerIncarnation(t *testing.T) {
 	if err := g.r.Suspend(g.ctx, stale); err != nil {
 		t.Fatal(err)
 	}
-	if mode := g.sandbox(newer.Sandbox.Name).mode(); mode != modeRunning {
-		t.Fatalf("a stale Suspend after a stale sweep left the newer incarnation's sandbox %s", mode)
+	if obs, err := g.r.Probe(g.ctx, newer); err != nil || obs.Kind != runtime.Alive {
+		t.Fatalf("a stale Suspend after a stale sweep left the newer generation %s, %v", obs.Kind, err)
 	}
 }
