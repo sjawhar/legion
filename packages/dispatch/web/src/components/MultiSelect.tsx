@@ -56,8 +56,12 @@ export interface MultiSelectProps {
   readonly options: readonly string[];
   /** Row text for a value; the search matches this text. Defaults to the value itself. */
   readonly optionLabel?: (value: string) => string;
-  /** Muted text at the end of a value's row, such as how many items carry it. */
+  /** Muted text at the end of a value's row, such as how many items carry it. The row's
+   *  accessible name reads it after the label and a comma ("api, 3"), never run together. */
   readonly optionDetail?: (value: string) => string;
+  /** What the row's accessible name says in place of `optionDetail`'s text, such as "3 PRs" for
+   *  a bare count. Defaults to that text. */
+  readonly optionDetailLabel?: (value: string) => string;
   readonly searchLabel: string;
   readonly selected: readonly string[];
   readonly triggerAriaLabel?: string;
@@ -84,6 +88,7 @@ export function MultiSelect({
   open,
   options,
   optionDetail,
+  optionDetailLabel,
   optionLabel = (value) => value,
   searchLabel,
   selected,
@@ -268,8 +273,13 @@ export function MultiSelect({
                 {visibleOptions.map((option) => {
                   const isSelected = selected.includes(option);
                   const label = optionLabel(option);
+                  const detail = optionDetail?.(option);
+                  const spokenDetail = optionDetailLabel?.(option) ?? detail;
                   return (
                     <button
+                      aria-label={
+                        spokenDetail === undefined ? undefined : `${label}, ${spokenDetail}`
+                      }
                       aria-selected={isSelected}
                       className={rowClassName(activeRow === option)}
                       disabled={disabled}
@@ -289,9 +299,9 @@ export function MultiSelect({
                       <TruncatedText className="min-w-0 flex-1" title={label}>
                         {label}
                       </TruncatedText>
-                      {optionDetail === undefined ? null : (
+                      {detail === undefined ? null : (
                         <span className={`shrink-0 text-xs tabular-nums ${textMutedOnSurface}`}>
-                          {optionDetail(option)}
+                          {detail}
                         </span>
                       )}
                     </button>

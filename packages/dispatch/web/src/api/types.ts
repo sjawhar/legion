@@ -84,6 +84,7 @@ export type {
   DeliverySettings,
   DeliverySettingsInput,
   DeliveryTimelineResponse,
+  DeliveryWaitingPR,
   DispatchEvent,
   DispatchUser,
   DocEditOp,

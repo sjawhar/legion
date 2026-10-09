@@ -405,19 +405,20 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 // handlePullRequestEnvelope and reconcile's completePartialPullRequest call, so "a live webhook
 // completes a PR" and "reconcile completes a partial row" write through the exact same last
 // steps, never two copies that can drift from each other. A rate-limited commit fetch returns the
-// *githubapp.RateLimitError without upserting anything: writing the row Partial: false with no
-// sessions or commit keys on a rate limit would complete it with empty attribution exactly as
-// permanently as a real "these commits name nothing" answer, and the next pass would never revisit
-// it to try again -- leaving the row untouched (still partial, for reconcile's own caller;
-// unwritten, for intake's) means whichever path calls this next actually retries the fetch
-// instead of accepting a false empty answer.
+// *githubapp.RateLimitError without upserting anything, leaving the row as it was (still partial,
+// for reconcile's own caller; unwritten, for intake's) so whichever path calls this next retries
+// the fetch. Any other failed commit fetch still writes the row complete, with its issue resolved
+// from what was read, but leaves its attribution inputs unread (null): storing them would record
+// a partial answer as permanently as a real "these commits name nothing", while unread inputs are
+// what the reconcile's backfill reads again (reconcileAttributionInputs), sessions with them.
 func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest) error {
 	messages, err := fetchCommitMessages(ctx, github, owner, repo, number)
+	commitsRead := err == nil
 	if err != nil {
 		if limited, ok := githubapp.AsRateLimit(err); ok {
 			return limited
 		}
-		slog.Warn("dispatch delivery: fetch commit messages", "repo", repoFull, "number", number, "error", err)
+		slog.Warn("dispatch delivery: fetch commit messages; the attribution backfill reads them again", "repo", repoFull, "number", number, "error", err)
 	}
 	inputs := attributionInputsFrom(attributionFacts{
 		Repo: repoFull, URL: fetched.URL, Title: fetched.Title, Body: fetched.Body,
@@ -427,12 +428,16 @@ func completePullRequest(ctx context.Context, pool *store.Pool, github *githubap
 	if err != nil {
 		return err
 	}
+	var stored *AttributionInputs
+	if commitsRead {
+		stored = &inputs
+	}
 	return UpsertPullRequest(ctx, pool, DeliveryPullRequest{
 		Repo: repoFull, Number: number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
 		CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
 		MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
 		Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessionTrailers(messages),
-		Attribution: &inputs, Partial: false,
+		Attribution: stored, Partial: false,
 	})
 }
 
@@ -523,6 +528,11 @@ func fetchCommitMessages(ctx context.Context, client *githubapp.Client, owner, r
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s PR #%d: %w", owner, repo, number, err)
 	}
+	return fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
+}
+
+// fetchCommitMessagesWithToken is fetchCommitMessages under a token the caller already holds.
+func fetchCommitMessagesWithToken(ctx context.Context, client *githubapp.Client, token, owner, repo string, number int) ([]string, error) {
 	var messages []string
 	for page := 1; page <= maxCommitPages; page++ {
 		commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)

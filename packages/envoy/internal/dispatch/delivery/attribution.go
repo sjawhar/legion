@@ -28,9 +28,12 @@ import (
 // Sources 1, 3, 4 and 5 read what GitHub says about the pull request, which does not change once it
 // has merged, so those inputs (AttributionInputs) are read from GitHub once and stored on its row.
 // Sources 2 and 3 also read Dispatch's external links, which change whenever someone links an issue,
-// so the issue is resolved from the database alone, again on every reconcile pass
-// (AttributePullRequests): an issue that links a pull request tomorrow credits it then, with no
-// GitHub call.
+// and every source reads whether the issue it names exists, so a stored row's issue is resolved
+// again from the database alone (AttributePullRequests), a batch of rows a pass, the rows checked
+// longest ago first: an issue that links a pull request tomorrow credits it within one walk of the
+// table, with no GitHub call. Nothing in the schema says which rows a change could affect (a link
+// carries no time, and adding or removing one leaves its issue's updated_at alone), so the walk
+// visits them all in turn.
 
 // attributionSource names the source a pull request's issue came from.
 type attributionSource string
@@ -125,19 +128,19 @@ func citedIssues(repo, body string) []string {
 // own columns) resolve through the same text.
 func attributionSelect(url, titleKeys, citedIssues, branchKeys, commitKeys string) string {
 	return `select s.key, s.source from (
-		select t.key, 'title_body' as source, 0 as rank, t.n
+		select t.key, '` + string(sourceTitleBody) + `' as source, 0 as rank, t.n
 			from unnest(` + titleKeys + `) with ordinality t(key, n) join issues i on i.key = t.key
 		union all
-		select l.issue_key, 'external_link', 1, 0
+		select l.issue_key, '` + string(sourceExternalLink) + `', 1, 0
 			from issue_external_links l where l.url = ` + url + `
 		union all
-		select l.issue_key, 'github_issue_link', 2, c.n
+		select l.issue_key, '` + string(sourceGitHubIssueLink) + `', 2, c.n
 			from unnest(` + citedIssues + `) with ordinality c(url, n) join issue_external_links l on l.url = c.url
 		union all
-		select b.key, 'branch', 3, b.n
+		select b.key, '` + string(sourceBranch) + `', 3, b.n
 			from unnest(` + branchKeys + `) with ordinality b(key, n) join issues i on i.key = b.key
 		union all
-		select m.key, 'commit_message', 4, m.n
+		select m.key, '` + string(sourceCommitMessage) + `', 4, m.n
 			from unnest(` + commitKeys + `) with ordinality m(key, n) join issues i on i.key = m.key
 	) s order by s.rank, s.n limit 1`
 }
@@ -163,27 +166,46 @@ func resolveStoredIssueKey(ctx context.Context, pool *store.Pool, url string, in
 	return &key, source, nil
 }
 
-// AttributePullRequests resolves the issue of every stored pull request whose inputs have been
-// read, from the database alone, and writes each one that changed: an issue that links a pull
-// request, or cites one of its GitHub issues, credits it here; one that no longer does uncredits
-// it. Answers how many rows it changed.
-func AttributePullRequests(ctx context.Context, pool *store.Pool) (int64, error) {
-	tag, err := pool.Exec(ctx, `
-		with resolved as (
-			select src.repo, src.number, (select r.key from (`+attributionSelect(
+// AttributionResolveBatch is how many stored rows one reconcile pass resolves again
+// (AttributePullRequests): a 28-day population is about 4,000 rows, so a pass costs a bounded
+// few milliseconds however large the table grows, and the walk comes round to every row in a
+// handful of passes at today's size.
+const AttributionResolveBatch = 1000
+
+// AttributePullRequests resolves again, from the database alone, the issue of up to limit stored
+// pull requests whose inputs have been read, those checked longest ago first, and writes each
+// one that changed: an issue that links a pull request, or cites one of its GitHub issues,
+// credits it here; one that no longer does uncredits it. Every row it reads is marked checked
+// now, so the next pass takes the rows after it. Answers how many rows it changed.
+func AttributePullRequests(ctx context.Context, pool *store.Pool, limit int) (int64, error) {
+	var changed int64
+	err := pool.QueryRow(ctx, `
+		with batch as (
+			select repo, number, url, issue_key, attribution_title_keys, attribution_cited_issues,
+				attribution_branch_keys, attribution_commit_keys
+			from delivery_pull_requests
+			where attribution_title_keys is not null
+			order by attribution_checked_at nulls first, repo, number
+			limit $1
+		), resolved as (
+			select src.repo, src.number, r.key, src.issue_key is distinct from r.key as changed
+			from batch src
+			left join lateral (`+attributionSelect(
 		"src.url", "src.attribution_title_keys", "src.attribution_cited_issues",
-		"src.attribution_branch_keys", "src.attribution_commit_keys")+`) r) as key
-			from delivery_pull_requests src
-			where src.attribution_title_keys is not null
+		"src.attribution_branch_keys", "src.attribution_commit_keys")+`) r on true
+		), written as (
+			update delivery_pull_requests pr
+			set issue_key = resolved.key,
+				updated_at = case when resolved.changed then now() else pr.updated_at end,
+				attribution_checked_at = now()
+			from resolved
+			where pr.repo = resolved.repo and pr.number = resolved.number
+			returning resolved.changed
 		)
-		update delivery_pull_requests pr
-		set issue_key = resolved.key, updated_at = now()
-		from resolved
-		where pr.repo = resolved.repo and pr.number = resolved.number
-			and pr.issue_key is distinct from resolved.key
-	`)
+		select count(*) filter (where changed) from written
+	`, limit).Scan(&changed)
 	if err != nil {
 		return 0, fmt.Errorf("attribute stored pull requests: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return changed, nil
 }

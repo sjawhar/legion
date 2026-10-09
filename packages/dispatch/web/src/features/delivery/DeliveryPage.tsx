@@ -48,6 +48,9 @@ const SEARCH_DEBOUNCE_MS = 250;
 
 const COLOR_FACETS = COLOR_FACET_OPTIONS.map((option) => option.value);
 
+/** The colour-by facet the page uses when its URL names none, as the prototype does. */
+const DEFAULT_COLOR_BY: ColorFacet = "repo";
+
 type Mode = "timeline" | "list";
 
 /** How the filtered PRs are shown: dots on the timeline or a sortable list, the facet the merges
@@ -95,7 +98,7 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
   const to = searchParams.get("to") ?? defaultWindowRef.current.to;
   const search = searchParams.get("q") ?? "";
   const colorByParam = searchParams.get("colorBy");
-  const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? "repo";
+  const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? DEFAULT_COLOR_BY;
   const lanes = searchParams.get("lanes") === "1";
   const mode: Mode = searchParams.get("mode") === "list" ? "list" : "timeline";
   const view = useMemo(() => ({ colorBy, lanes, mode }), [colorBy, lanes, mode]);
@@ -128,7 +131,8 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
         }
         if (next.filters.search.trim() === "") params.delete("q");
         else params.set("q", next.filters.search);
-        params.set("colorBy", next.view.colorBy);
+        if (next.view.colorBy === DEFAULT_COLOR_BY) params.delete("colorBy");
+        else params.set("colorBy", next.view.colorBy);
         if (next.view.lanes) params.set("lanes", "1");
         else params.delete("lanes");
         if (next.view.mode === "list") params.set("mode", "list");
@@ -246,6 +250,17 @@ export function DeliveryPage(): ReactNode {
       return mergedMs >= startMs && mergedMs <= endMs;
     });
   }, [data, state.brush]);
+  // The waiting line's population, whatever the brush: the pull requests still waiting at the
+  // read window's start, and every tracked merge of the read window. The brush narrows the line's
+  // time range, never what it counts, so a merge before the brush that has not shipped holds the
+  // line up across it.
+  const waitingMerges = useMemo(
+    () => [
+      ...(data?.waiting ?? []),
+      ...(data?.prs ?? []).filter((pr) => pr.deployed_status !== "not_tracked"),
+    ],
+    [data]
+  );
   const colorScale = useMemo(
     () => buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}),
     [data, state.view.colorBy]
@@ -376,6 +391,7 @@ export function DeliveryPage(): ReactNode {
                       onSelect={setSelection}
                       prs={shownPRs}
                       runs={data.runs}
+                      waiting={waitingMerges}
                       window={activeWindow}
                     />
                   ) : (
@@ -384,6 +400,7 @@ export function DeliveryPage(): ReactNode {
                       colorBy={state.view.colorBy}
                       colorScale={colorScale}
                       onSelect={(id) => setSelection({ kind: "pr", id })}
+                      onSelectRun={(id) => setSelection({ kind: "deploy", id })}
                       prs={shownPRs}
                       selectedId={selection?.kind === "pr" ? selection.id : undefined}
                     />

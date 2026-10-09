@@ -190,12 +190,12 @@ type DeliveryShippedPRView struct {
 	Title string `json:"title"`
 }
 
-// DeliveryRunView is one `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a production
-// deploy (Production succeeded; sized by PRs) and/or a pipeline failure (FailedJobs,
-// RootFailingJob, or a failed Production). Mirrors packages/contracts/src/dispatch-api.ts's
-// DeliveryRun exactly. PRs is every population pull request in the window the run shipped first,
-// whatever facets the request names, and is always a slice, never nil, so it serializes as `[]`
-// for a run that shipped none.
+// DeliveryRunView is one deploy run on `GET /api/v1/delivery/timeline`: a production deploy
+// (Production succeeded; sized by PRs) and/or a pipeline failure (FailedJobs, RootFailingJob, or a
+// failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly. PRs
+// is every population pull request in the window the run shipped first, whatever facets the
+// request names, and is always a slice, never nil, so it serializes as `[]` for a run that
+// shipped none.
 type DeliveryRunView struct {
 	ID             int64                      `json:"id"`
 	URL            string                     `json:"url"`
@@ -235,18 +235,28 @@ type DeliveryComponentView struct {
 	Parent *string `json:"parent"`
 }
 
+// DeliveryWaitingPRView is one pull request of the deploy repository that merged before the
+// window and had not shipped by its start, matching the request's facets and search: the
+// waiting-to-deploy line starts the window counting it, and stops when it ships.
+type DeliveryWaitingPRView struct {
+	MergedAt   time.Time  `json:"merged_at"`
+	DeployedAt *time.Time `json:"deployed_at"`
+}
+
 // DeliveryTimelineResponse is `GET /api/v1/delivery/timeline?from&to&q&<facets>`: merges, deploys,
 // pipeline failures and waiting-to-deploy PRs within [from, to) and the given facets. Runs holds
-// kind: "deploy" runs only. FacetCounts counts, per facet, the window's pull requests by that
-// facet's values with every other facet and the search applied and its own selection ignored, so
-// picking a value never zeroes its own count. ColorCounts counts the window's pull requests by
-// each colour-by facet's value with no facet applied, so a value keeps its colour while facets
-// change. Components names every component of the projects the window's issues belong to, and
-// IssueTitles every issue the window's pull requests name, so a facet value a selection filtered
-// out of PRs still has its label.
+// deploy runs only. Waiting holds the pull requests that merged before the window and had not
+// shipped by its start, under the same facets and search. FacetCounts counts, per facet, the
+// window's pull requests by that facet's values with every other facet and the search applied and
+// its own selection ignored, so picking a value never zeroes its own count. ColorCounts counts
+// the window's pull requests by each colour-by facet's value with no facet applied, so a value
+// keeps its colour while facets change. Components names every component of the projects the
+// window's issues belong to, and IssueTitles every issue the window's pull requests name, so a
+// facet value a selection filtered out of PRs still has its label.
 type DeliveryTimelineResponse struct {
 	Window      DeliveryWindowView               `json:"window"`
 	PRs         []DeliveryPRView                 `json:"prs"`
+	Waiting     []DeliveryWaitingPRView          `json:"waiting"`
 	Runs        []DeliveryRunView                `json:"runs"`
 	FacetCounts map[string]map[string]int        `json:"facet_counts"`
 	ColorCounts map[string]map[string]int        `json:"color_counts"`

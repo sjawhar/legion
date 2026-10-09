@@ -198,14 +198,21 @@ const PullRequestColumns = `repo, number, title, url, author, created_at, merged
 
 // ScanPullRequest decodes one PullRequestColumns row into a DeliveryPullRequest.
 func ScanPullRequest(row pgx.Row) (DeliveryPullRequest, error) {
+	return scanPullRequest(row)
+}
+
+// scanPullRequest is ScanPullRequest for a row that selects more columns after
+// PullRequestColumns, scanned into extra in order.
+func scanPullRequest(row pgx.Row, extra ...any) (DeliveryPullRequest, error) {
 	var pr DeliveryPullRequest
 	var inputs AttributionInputs
-	if err := row.Scan(
+	dest := []any{
 		&pr.Repo, &pr.Number, &pr.Title, &pr.URL, &pr.Author, &pr.CreatedAt, &pr.MergedAt,
 		&pr.FirstCommitAt, &pr.MergeCommitSHA, &pr.Additions, &pr.Deletions, &pr.Rework,
 		&pr.IssueKey, &pr.Sessions, &pr.Partial, &pr.UnfetchableAt, &pr.UnfetchableReason, &pr.UpdatedAt,
 		&inputs.TitleKeys, &inputs.CitedIssues, &inputs.BranchKeys, &inputs.CommitKeys,
-	); err != nil {
+	}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return DeliveryPullRequest{}, err
 	}
 	if inputs.TitleKeys != nil {
@@ -287,6 +294,80 @@ func nonNil(list []string) []string {
 		return []string{}
 	}
 	return list
+}
+
+// StoreAttributionInputs writes the attribution inputs the backfill read for a complete row, the
+// session trailers its commits name and the issue resolved from them, leaving every other fact
+// the row holds alone. Conditioned on the inputs still being unread, so a concurrent completion
+// that stored them first is never overwritten by this older read.
+func StoreAttributionInputs(ctx context.Context, pool *store.Pool, repo string, number int, inputs AttributionInputs, sessions []string, issueKey *string) error {
+	_, err := pool.Exec(ctx, `
+		update delivery_pull_requests
+		set attribution_title_keys = $3, attribution_cited_issues = $4, attribution_branch_keys = $5,
+			attribution_commit_keys = $6, sessions = $7, issue_key = $8, attribution_checked_at = now(),
+			updated_at = now()
+		where repo = $1 and number = $2 and attribution_title_keys is null
+	`, repo, number, nonNil(inputs.TitleKeys), nonNil(inputs.CitedIssues), nonNil(inputs.BranchKeys),
+		nonNil(inputs.CommitKeys), nonNil(sessions), issueKey)
+	return err
+}
+
+// WaitingPullRequest is one pull request ListPullRequestsWaitingAt answers, with the run that
+// later shipped it and when, both nil while it still waits.
+type WaitingPullRequest struct {
+	DeliveryPullRequest
+	DeployRun  *int64
+	DeployedAt *time.Time
+}
+
+// ListPullRequestsWaitingAt lists the deploy repository's pull requests merged before at that had
+// not shipped by then, oldest merge first, up to maxPullRequestsPerWindow, each with the run that
+// shipped it afterwards: what the timeline's waiting line starts its window from. A pull request
+// ships with the earliest-finishing successful production job whose run's head commit is at or
+// after its merge (containment.go), so one merged at or before the newest such head among the
+// jobs that finished before at had shipped by then, and every later one had not: that head, read
+// through delivery_runs_kind_started newest first, is the one bound this needs. The shipping run
+// is read here rather than from the window's own runs, which start at the window and so can miss
+// a run whose head commit came before it.
+func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo, productionJobName string, at time.Time) ([]WaitingPullRequest, error) {
+	rows, err := pool.Query(ctx, `
+		select `+PullRequestColumns+`, ship.run_id, ship.completed_at
+		from delivery_pull_requests pr
+		left join lateral (
+			select r.run_id, j.completed_at
+			from delivery_runs r
+			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = $2
+			where r.repo = $1 and r.kind = 'deploy' and j.conclusion = 'success'
+				and j.completed_at is not null and r.head_commit_at >= pr.merged_at
+			order by j.completed_at
+			limit 1
+		) ship on true
+		where pr.repo = $1 and pr.merged_at < $3 and pr.merged_at > coalesce((
+			select r.head_commit_at
+			from delivery_runs r
+			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = $2
+			where r.repo = $1 and r.kind = 'deploy' and j.conclusion = 'success' and j.completed_at < $3
+			order by r.head_commit_at desc
+			limit 1
+		), '-infinity')
+		order by pr.merged_at
+		limit $4
+	`, deployRepo, productionJobName, at, maxPullRequestsPerWindow)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	waiting := []WaitingPullRequest{}
+	for rows.Next() {
+		var w WaitingPullRequest
+		pr, err := scanPullRequest(rows, &w.DeployRun, &w.DeployedAt)
+		if err != nil {
+			return nil, err
+		}
+		w.DeliveryPullRequest = pr
+		waiting = append(waiting, w)
+	}
+	return waiting, rows.Err()
 }
 
 // DeletePullRequest removes a stored row: a provisional row written from an envelope alone

@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { DeliveryPR, DeliverySettings, DeliveryTimelineResponse } from "../../api/types";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { DeliveryPage } from "./DeliveryPage";
 
 // The list view, so the page renders without the timeline chart, whose library needs a canvas.
@@ -36,6 +37,7 @@ const emptyTimeline: DeliveryTimelineResponse = {
   issue_titles: {},
   prs: [],
   runs: [],
+  waiting: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };
 
@@ -44,12 +46,14 @@ const notConfigured = new ApiError(404, {
   error: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 });
 
-function renderPage() {
+function renderPage(url = DELIVERY_URL) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <MemoryRouter initialEntries={[DELIVERY_URL]}>
+    <MemoryRouter initialEntries={[url]}>
       <QueryClientProvider client={queryClient}>
-        <DeliveryPage />
+        <KeymapProvider>
+          <DeliveryPage />
+        </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -260,8 +264,8 @@ test("the facet column offers each value with its count, sends a pick to the ser
     renderPage();
 
     expect(await screen.findByText("1 PRs in current filter/window")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Repository" }).textContent).toBe("Any repository");
-    fireEvent.click(screen.getByRole("button", { name: "Priority" }));
+    expect(screen.getByRole("button", { name: /^Repository/ }).textContent).toBe("Any repository");
+    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
     const priorityOptions = within(screen.getByRole("listbox", { name: "Priority options" }));
     const options = priorityOptions.getAllByRole("option").map((option) => option.textContent);
     expect(options).toEqual(["No issue3", "P01"]);
@@ -272,9 +276,9 @@ test("the facet column offers each value with its count, sends a pick to the ser
         expect.objectContaining({ priority: ["P0"], repo: [] })
       )
     );
-    expect(screen.getByRole("button", { name: "Priority" }).textContent).toBe("1 selected");
+    expect(screen.getByRole("button", { name: /^Priority/ }).textContent).toBe("1 selected");
 
-    fireEvent.click(screen.getByRole("button", { name: "Dispatch issue" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Dispatch issue/ }));
     expect(screen.getByRole("option", { name: /ACME-1 — Ship widgets/ })).toBeDefined();
 
     const colorBy = screen.getByLabelText("Color merges by") as HTMLSelectElement;
@@ -306,7 +310,7 @@ test("the header names the window and the freshness row the prototype's six sour
     expect(screen.getByText(/^Generated .* · window/)).toBeDefined();
     // No brush window in the URL: nothing to clear.
     expect(screen.queryByRole("button", { name: "clear brush window" })).toBeNull();
-    const row = screen.getByRole("status", { name: "Source freshness" });
+    const row = screen.getByRole("region", { name: "Source freshness" });
     const sources = [...row.querySelectorAll("[data-source]")].map((node) =>
       node.getAttribute("data-source")
     );
@@ -346,7 +350,7 @@ test("the list sorts by its headers and a row opens the PR's details", async () 
     expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
 
     fireEvent.click(screen.getByText("feat: a shipped widget"));
-    const details = await screen.findByRole("complementary", { name: "Details" });
+    const details = await screen.findByRole("dialog", { name: "Details" });
     expect(within(details).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe(
       "https://github.com/acme/widgets/pull/2"
     );
@@ -354,9 +358,81 @@ test("the list sorts by its headers and a row opens the PR's details", async () 
     expect(within(details).getByText("Public API")).toBeDefined();
     expect(within(details).getByText("70 min")).toBeDefined();
     fireEvent.click(within(details).getByRole("button", { name: "Close details" }));
-    expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the drill-down is a dialog: focus moves into it, Escape closes it and focus returns to the row", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    prs: [listedPR],
+  });
+  try {
+    renderPage();
+    const row = await screen.findByRole("row", { name: /feat: a waiting widget/ });
+    row.focus();
+    fireEvent.keyDown(row, { key: "Enter" });
+    const details = await screen.findByRole("dialog", { name: "Details" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(details).getByRole("button", { name: "Close details" })
+      )
+    );
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
+    expect(document.activeElement).toBe(row);
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+/** happy-dom has no canvas, and ECharts throws without a 2D context: a context that accepts every
+ *  call lets the timeline mount, though it paints nothing. */
+function stubCanvasContext(): () => void {
+  const original = HTMLCanvasElement.prototype.getContext;
+  const state: Record<string | symbol, unknown> = {};
+  const context = new Proxy(state, {
+    get(target, key) {
+      if (key in target) return target[key];
+      if (key === "measureText") return (text: string) => ({ width: text.length * 6 });
+      if (key === "getImageData") return () => ({ data: new Uint8ClampedArray(4) });
+      return () => ({ addColorStop() {} });
+    },
+    set(target, key, value) {
+      target[key] = value;
+      return true;
+    },
+  });
+  HTMLCanvasElement.prototype.getContext = (() => context) as unknown as typeof original;
+  return () => {
+    HTMLCanvasElement.prototype.getContext = original;
+  };
+}
+
+test("a brush window narrows the merges shown but the waiting line still counts what waits before it", async () => {
+  const restoreCanvas = stubCanvasContext();
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    // Merged 28 days before the window and not shipped: the server's `waiting`.
+    waiting: [{ merged_at: "2024-05-04T00:00:00Z", deployed_at: null }],
+    // Merged inside the window at 01:00, before the brush, and still waiting.
+    prs: [listedPR],
+  });
+  try {
+    renderPage(
+      "/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z&ws=2024-06-01T06%3A00%3A00Z&we=2024-06-01T12%3A00%3A00Z"
+    );
+    const chart = await screen.findByRole("img", { name: /^Delivery timeline/ });
+    expect(chart.getAttribute("aria-label")).toContain(
+      "0 merged pull requests, 2 waiting to deploy at the start"
+    );
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+    restoreCanvas();
   }
 });

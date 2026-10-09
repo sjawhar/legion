@@ -1,4 +1,4 @@
-import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { DeliveryPR } from "../../api/types";
 import {
@@ -15,12 +15,15 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { type ColorFacet, colorKeyFor, PLACEHOLDER_COLOR } from "./lib/colorScale";
-import { buildPRListRows, compareIssueSort, formatMinutes, type PRListRow } from "./lib/prList";
-
-/** Every body row is this tall, so the window of rows on screen is arithmetic, with no measuring. */
-const ROW_HEIGHT_PX = 36;
-/** Rows rendered past each edge of the scrolled-to window. */
-const OVERSCAN_ROWS = 12;
+import {
+  buildPRListRows,
+  compareIssueSort,
+  formatMinutes,
+  type PRListRow,
+  ROW_HEIGHT_PX,
+  scrollTopToShowRow,
+  visibleRowRange,
+} from "./lib/prList";
 
 type ColumnId =
   | "color"
@@ -117,7 +120,17 @@ function compareRows(a: PRListRow, b: PRListRow, id: SortId, desc: boolean): num
   return direction * (Number(left) - Number(right));
 }
 
-function Cell({ row, id, color }: { row: PRListRow; id: ColumnId; color: string }): ReactNode {
+function Cell({
+  row,
+  id,
+  color,
+  onSelectRun,
+}: {
+  row: PRListRow;
+  id: ColumnId;
+  color: string;
+  onSelectRun: (runId: number) => void;
+}): ReactNode {
   const { pr } = row;
   switch (id) {
     case "color":
@@ -175,15 +188,33 @@ function Cell({ row, id, color }: { row: PRListRow; id: ColumnId; color: string 
           <span className={dangerText}>-{pr.deletions}</span>
         </span>
       );
-    case "deployed":
+    case "deployed": {
+      const runId = pr.deploy_run;
+      const label = <span className={DEPLOYED_TONE[pr.deployed_status]}>{row.deployedLabel}</span>;
       return (
         <span className="truncate">
-          <span className={DEPLOYED_TONE[pr.deployed_status]}>{row.deployedLabel}</span>
+          {runId === null ? (
+            label
+          ) : (
+            // The list's way to a deploy's drill-down, which the chart offers only to a pointer.
+            <button
+              aria-label={`Open deploy run #${runId}`}
+              className="underline"
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelectRun(runId);
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          )}
           {row.deployedMs === undefined ? null : (
             <span className={textSecondaryOnSurface}> {dateTime.format(row.deployedMs)}</span>
           )}
         </span>
       );
+    }
     case "leadTime":
       return row.leadTimeMinutes === undefined ? null : (
         <span className="tabular-nums" title="Merge to production">
@@ -196,7 +227,10 @@ function Cell({ row, id, color }: { row: PRListRow; id: ColumnId; color: string 
 }
 
 /** The filtered PRs as a sortable table, one line per row, coloured by the same facet as the
- *  timeline; only the rows scrolled into view are rendered. A row opens the DrillDown. */
+ *  timeline; only the rows scrolled into view are rendered. A row opens the DrillDown, and a
+ *  deployed row's "deployed" opens its deploy run's. The rows are one keyboard stop: arrow up and
+ *  down move between them, scrolling the next one into the rendered window, Home and End jump to
+ *  the ends, and Enter opens the focused row. */
 export function PRList({
   prs,
   allRepos,
@@ -204,6 +238,7 @@ export function PRList({
   colorScale,
   selectedId,
   onSelect,
+  onSelectRun,
 }: {
   prs: readonly DeliveryPR[];
   allRepos: readonly string[];
@@ -211,18 +246,26 @@ export function PRList({
   colorScale: Map<string, string>;
   selectedId: string | undefined;
   onSelect: (id: string) => void;
+  onSelectRun: (runId: number) => void;
 }): ReactNode {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [sort, setSort] = useState<{ id: SortId; desc: boolean }>({ id: "merged", desc: true });
   const [scrollTop, setScrollTop] = useState(0);
   // Unmeasured (the first render, or a DOM with no layout), the window is the browser's height.
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
+  // The row the keyboard is on (the one row in the tab order), and whether a key just moved it,
+  // so the render that brings it into the window also moves focus there.
+  const [focusIndex, setFocusIndex] = useState(0);
+  const focusPendingRef = useRef(false);
+  // At most one scroll update per frame: a fling fires scroll events faster than React renders.
+  const scrollFrameRef = useRef<number | null>(null);
 
   const rows = useMemo(() => buildPRListRows(prs, allRepos), [prs, allRepos]);
   const sorted = useMemo(
     () => [...rows].sort((a, b) => compareRows(a, b, sort.id, sort.desc)),
     [rows, sort]
   );
+  const activeIndex = Math.min(focusIndex, Math.max(0, sorted.length - 1));
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -236,11 +279,32 @@ export function PRList({
     return () => observer.disconnect();
   }, []);
 
-  const first = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS);
-  const last = Math.min(
-    sorted.length,
-    Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT_PX) + OVERSCAN_ROWS
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
+    },
+    []
   );
+
+  const { first, last } = visibleRowRange(scrollTop, viewportHeight, sorted.length);
+
+  useLayoutEffect(() => {
+    if (!focusPendingRef.current) return;
+    focusPendingRef.current = false;
+    scrollRef.current
+      ?.querySelector<HTMLElement>(`tbody tr[aria-rowindex="${activeIndex + 2}"]`)
+      ?.focus({ preventScroll: true });
+  });
+
+  const moveFocus = (index: number) => {
+    const target = Math.min(sorted.length - 1, Math.max(0, index));
+    const element = scrollRef.current;
+    const top = scrollTopToShowRow(target, element?.scrollTop ?? scrollTop, viewportHeight);
+    if (element !== null) element.scrollTop = top;
+    setScrollTop(top);
+    setFocusIndex(target);
+    focusPendingRef.current = true;
+  };
 
   const toggleSort = (id: SortId) =>
     setSort((current) => (current.id === id ? { id, desc: !current.desc } : { id, desc: false }));
@@ -248,7 +312,14 @@ export function PRList({
   return (
     <div
       className={`min-h-0 flex-1 overflow-auto rounded border max-xl:h-[70dvh] max-xl:flex-none ${borderDefault} ${surfaceBg} ${textPrimaryOnSurface}`}
-      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        if (scrollFrameRef.current !== null) return;
+        scrollFrameRef.current = window.requestAnimationFrame(() => {
+          scrollFrameRef.current = null;
+          setScrollTop(element.scrollTop);
+        });
+      }}
       ref={scrollRef}
     >
       <table aria-rowcount={sorted.length + 1} className="grid min-w-[1152px] text-xs">
@@ -306,20 +377,35 @@ export function PRList({
                 aria-selected={row.pr.id === selectedId}
                 className={`absolute flex h-9 w-full cursor-pointer items-center border-b outline-none ${borderDefault} ${row.pr.id === selectedId ? surfaceMutedBg : surfaceMutedHoverBg}`}
                 key={row.pr.id}
-                onClick={select}
+                onClick={() => {
+                  setFocusIndex(index);
+                  select();
+                }}
                 onKeyDown={(event) => {
-                  // Only the row itself: Enter on the PR link inside it opens GitHub.
+                  const next: Record<string, number> = {
+                    ArrowDown: index + 1,
+                    ArrowUp: index - 1,
+                    Home: 0,
+                    End: sorted.length - 1,
+                  };
+                  const target = next[event.key];
+                  if (target !== undefined) {
+                    event.preventDefault();
+                    moveFocus(target);
+                    return;
+                  }
+                  // Only the row itself: Enter on a link or button inside it is that control's.
                   if (event.key === "Enter" && event.target === event.currentTarget) select();
                 }}
                 style={{ transform: `translateY(${index * ROW_HEIGHT_PX}px)` }}
-                tabIndex={0}
+                tabIndex={index === activeIndex ? 0 : -1}
               >
                 {COLUMNS.map((column) => (
                   <td
                     className={`flex min-w-0 items-center px-1.5 py-0 whitespace-nowrap ${COLUMN_CLASS[column.id]}`}
                     key={column.id}
                   >
-                    <Cell color={color} id={column.id} row={row} />
+                    <Cell color={color} id={column.id} onSelectRun={onSelectRun} row={row} />
                   </td>
                 ))}
               </tr>
