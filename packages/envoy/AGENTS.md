@@ -2224,10 +2224,12 @@ shared one and a reread the shared one refuses spends none of its address's; `42
 with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per login (`LauncherLimits.PerLogin`) — the per-login
-bucket keys on the signed request object itself (`launcherLoginKey`): `service:<name>` for a
-service's login, whatever its `login_hint` names, and `person:<login>` for a person's machine login,
-so the two never share a bucket; an attacker naming a specific victim operator or service
-repeatedly can still lock out its machine logins at a low rate; this is inherent to a per-login
+bucket keys on the signed request object itself (`launcherLoginKey`): one shared `service` bucket
+for every service's login, whatever service or `login_hint` it names, since a service's name is the
+machine's own claim and a bucket per name would give every invented name one, and `person:<login>`
+for a person's machine login, so the two never share a bucket; an attacker naming a specific
+victim operator, or naming any service, repeatedly can still lock out those machine logins at a
+low rate; this is inherent to a per-login
 limit on an unauthenticated route and is an accepted risk, not a bug. A request object `Login`
 refuses (a person's login with no `login_hint`, or `anyone`, a replayed `jti`) is
 `400 REQUEST_INVALID`. Read `routes()`

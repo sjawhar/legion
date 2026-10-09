@@ -40,8 +40,8 @@ type machineLoginStateResponse struct {
 }
 
 // machineLogin is POST /v1/launcher-credentials: public, rate-limited per source address and per
-// login (limits.go): a service's login buckets on its service, a person's machine login on the
-// person its login_hint names, in key spaces of their own (launcherLoginKey). The request object is
+// login (limits.go): every service's login spends one shared bucket, a person's machine login the
+// bucket of the person its login_hint names, in key spaces of their own (launcherLoginKey). The request object is
 // verified once here — to resolve the key the rate limiter buckets on before any state is written —
 // and again, redundantly but harmlessly, by MachineLogin.Login itself; an invalid object is refused
 // at the first check and never reaches the limiter or the store, and one Login refuses (a person's
@@ -71,12 +71,16 @@ func (s *server) machineLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, machineLoginResponse{PendingID: pendingID, Code: code})
 }
 
-// launcherLoginKey is the per-login bucket a machine login spends: service:<name> for a service's
-// login, whatever its login_hint names, and person:<login> for a person's machine login, so a
-// service's logins and a person's never share a bucket, whatever a login_hint spells.
+// launcherLoginKey is the per-login bucket a machine login spends: one shared bucket, "service",
+// for every service's login, whatever service or login_hint it names, and person:<login> for a
+// person's machine login. A service's name is the machine's own unauthenticated claim (anything
+// record.ValidService admits), so a bucket per name would hand a fresh bucket, and a fresh row in
+// every signed-in person's pending list, to every name a flood invents. A broker that registers no
+// service (BROKER_SERVICES unset) still serves a service's login, so the bucket cannot key on the
+// registered set instead. The two key spaces never meet: no person's key is "service".
 func launcherLoginKey(obj record.RequestObject) string {
-	if service := obj.Service(); service != "" {
-		return "service:" + service
+	if obj.Service() != "" {
+		return "service"
 	}
 	return "person:" + record.CanonicalLogin(obj.LoginHint)
 }

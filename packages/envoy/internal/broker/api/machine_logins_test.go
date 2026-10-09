@@ -19,7 +19,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -267,13 +266,8 @@ func TestAServiceLoginWaitsInEveryonesPendingList(t *testing.T) {
 	ts := newTestServer(t)
 	start := func(loginHint, service, host string) string {
 		t.Helper()
-		compact, err := record.Sign(newSigningKey(t), ts.URL, []record.AuthorizationDetail{
-			{Type: "launcher_credential", Identifier: host, Service: service},
-		}, "", loginHint, time.Now())
-		if err != nil {
-			t.Fatalf("record.Sign: %v", err)
-		}
-		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, loginHint, host, service)})
 		if status != http.StatusAccepted {
 			t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
 		}

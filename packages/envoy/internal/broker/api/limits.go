@@ -11,11 +11,12 @@ import (
 )
 
 // LauncherLimits bounds POST /v1/launcher-credentials, the one route an unauthenticated caller
-// can use to make the broker do work on their behalf. Every source address and every login has its
-// own token bucket, a service's login keyed on its service and a person's machine login on the
-// person its login_hint names (launcherLoginKey): a flood from one address cannot keep the broker
-// busy verifying and recording machine-login requests, and a flood naming one operator or one
-// service cannot bury that operator's or that service's pending machine logins.
+// can use to make the broker do work on their behalf. Every source address has its own token
+// bucket, and so does every person a machine login's login_hint names, while every service's login
+// spends one shared bucket, whatever service it names (launcherLoginKey): a flood from one address
+// cannot keep the broker busy verifying and recording machine-login requests, a flood naming one
+// operator cannot bury that operator's pending machine logins, and a flood of invented service
+// names cannot buy itself a bucket per name.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit

@@ -89,8 +89,8 @@ machine login nobody decides expires after 15 minutes, a fixed time rather than 
 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
-source address and per login: per named person for a person's machine, per service for a service's
-login, in buckets of their own.
+source address and per login: per named person for a person's machine, and one limit shared by
+every service's login, whatever service it names.
 
 ## Owner and tier: who may have which secret
 
