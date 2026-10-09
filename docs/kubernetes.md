@@ -707,7 +707,7 @@ runtime:
       priority_class: legion
     resources:                  # optional; a role's reservation, each field both request and limit, so every
                                 # role is covered for the resource-limits capability with or without this block
-      tester: { cpu: 1, memory: 4Gi }      # both fields set
+      tester: { cpu: 1, memory: 6Gi }      # both fields set
       reviewer: { memory: 2Gi }            # cpu stays the default, 750m
       controller: { cpu: 2, memory: 8Gi }  # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
@@ -1205,11 +1205,20 @@ operator's context: the daemon's identity creates no pod and has no exec
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
 kubectl -n legion exec -it <pod> -c architect -- sh
+export XDG_STATE_HOME=/home/legion/.local/state/architect   # the role's state home (below)
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```
 
-The shell runs as the issue's agents do, user 1000 under gVisor, with nothing they lack. The clone
-is at `/legion/repos/github.com/<owner>/<repo>` and the issue's workspace at
+The shell runs as the issue's agents do, user 1000 under gVisor, but it carries the container's
+environment, not the agent's: a role container's spec holds only what the kubelet resolves
+(`POD_UID`, the operator's Secret references), and every other variable the agent is told, among
+them `XDG_STATE_HOME=/home/legion/.local/state/<role>`, the role's state home, arrives in its
+launcher's start command (`launchEnvironment`, `manifest.go`). The `export` above sets that one, so
+an `omp` started in the shell roots its state where the role's agent does rather than under the
+profile's config root; for the agent's whole environment, read `/proc/<agent pid>/environ`, the
+process whose `argv[0]` is `omp` under the role's `legion worker-shim`, as stage 4a's `pod-baseline`
+does (`xargs -0 sh -c 'exec env -i "$@" omp …' agent-env </proc/<pid>/environ`). The clone is at
+`/legion/repos/github.com/<owner>/<repo>` and the issue's workspace at
 `/legion/workspaces/<owner>/<repo>/<issue key lowercased>` (`workspace.Location`,
 `internal/workspace/provision.go`); no other issue's workspace is on this volume.
 
@@ -1309,6 +1318,159 @@ run out — no later than its registration deadline. Size the pool's limits for
 `admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum, or keep
 `admission_cap` within what the limits place.
 
+### Volume retention
+
+Node loss reattaches the EBS volume to a replacement node and the pod resumes where it left off (on
+another node it first waits for the detach, which shows as transient `FailedAttachVolume` or
+`Multi-Attach` events). Volume loss — a PVC that lost the issue's clone and every retained session of
+the issue, as a fresh EBS volume after node loss can — is detected through the `workspace-init` init
+container, which every role's launcher waits behind: it expects the issue's clone
+(`LEGION_EXPECT_ISSUE_VOLUME`) once the launching claim resumes a session or any stored claim of the
+issue recorded one (`IssueHasSessions`), and exits 3 only once both the clone and every retained
+session are gone. Under `restartPolicy: Always` a failed init container never turns the pod
+`Failed`; the kubelet leaves it `Pending` in `Init:Error` or `Init:CrashLoopBackOff` and keeps
+retrying it forever on its own. The runtime does not wait for a phase that will not come: `evaluate`
+reads the init container's current or last-terminated state as **Gone**, with `WorkspaceLost` true
+for workspace-init's exit 3 (`the issue's volume was lost: …`, `internal/runtime/sandbox/observe.go`),
+and `relaunch` replaces the init-failed pod outright (delete, then recreate) instead of waiting on
+its launchers. The loss is one issue's: the supervisor logs `supervise: the issue's volume was lost
+with the session; relaunching a fresh session` (`internal/supervise/machine.go`) and stamps every
+other claim of that issue `workspaceLost`, dropping the session each recorded on the volume, and
+touches no other issue of the tree, whose volumes are their own; each stamped claim's replacement
+starts fresh from the committed issue bookmark until its own fresh session registers, even after the
+new pod rebuilt the clone, and a role first created later uses the ordinary fresh-worker path. A
+pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt begins:
+`Your workspace was recreated from `legion/<KEY>` because the issue's volume was lost. Anything you
+had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before
+continuing.`
+
+One PVC per issue, `issue-legion-<project>-<issue key lowercased>` (`ReadWriteOnce`, `issue_volume`,
+`storage_class`), created by Agent Sandbox from the issue Sandbox's one claim template when the
+Sandbox is first created, owned by it and labelled by project and issue, never by tree, so
+`kubectl -n legion get pvc -l legion.dev/issue=<KEY>` finds it; the controller's Sandbox owns one the
+same way, `issue-legion-<project>-controller`, labelled by project and role. Nothing annotates or
+ages a volume; it goes with its Sandbox, and the Sandbox goes:
+
+- at a child issue's close as `done`: its claims are retired with their sessions dropped
+  (`issue_close`), and the close's durable effect foreground-deletes the Sandbox, the PVC with it
+  (`SuspendIssue` with release, `internal/runtime/sandbox/issue_suspend.go`), logging `sandbox
+  runtime: released the closed issue's Sandbox and the volume it owned`; a later `todo` starts the
+  child fresh. A child set `backlog`, `icebox` or `triage` instead keeps its Sandbox, `Suspended`,
+  and its volume until the tree closes;
+- at the tree's close, linger expiry: the tree's cleanup foreground-deletes every remaining issue
+  Sandbox of the tree, in any order, each taking the volume it owns (`CleanupTree`,
+  `internal/runtime/sandbox/cleanup.go`);
+- by the orphan sweep, for a Sandbox of a tree whose cleanup confirmed or that has no lifecycle:
+  the sweep keeps every Sandbox of a live tree and, deleting a closed tree's, takes its volume with
+  it through the owner reference (`ReconcileOrphans`, `internal/runtime/sandbox/sandbox.go`).
+
+A child of a closed tree re-admitted as a root of its own while its old tree lingers keeps its
+Sandbox, its volume and its roles' sessions: the Sandbox is relabelled for the new tree
+(`ensureSandbox`, `internal/runtime/sandbox/relaunch.go`), and the Sandbox alone — the daemon's
+identity has no PVC verb, which is why the claim carries no tree label to go stale. Re-admitted
+after the old tree's cleanup took its Sandbox and volume, it starts fresh on a new volume with
+`the issue's volume was lost` logged once, its re-pointed claims' sessions gone with the volume
+([Kubernetes runtime: the Go daemon on Agent Sandbox](#kubernetes-runtime-the-go-daemon-on-agent-sandbox)
+says why `Retree` keeps them). A near-full volume slows jj's
+working-copy snapshot before a push, which is why `legion push`'s grant lives `credential.pushTTL`
+(5 minutes) in place of the usual 60 seconds (`internal/credential/grants.go`;
+`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics).
+
+### Liveness rules
+
+The daemon probes a pod by reading it and consulting the worker stream's live registrations:
+
+- the Sandbox itself not found (deleted, or never created) → **dead (gone)**, distinct from a
+  present Sandbox with no pod;
+- pod not found (the Sandbox is present, with no pod of its own) → **dead (gone)**, naming the
+  Sandbox's operating mode, its `Suspended` condition if any, and any same-named pod that is not
+  this Sandbox's (a stranger holding the name);
+- pod present but its uid is not the recorded one → **dead (not the recorded process)**; the stop that
+  follows refuses to delete it (the delete carries the recorded uid as a precondition, and Kubernetes
+  answers 409), so a stranger wearing a reused name is never destroyed;
+- pod carrying a `deletionTimestamp`, or in phase `Succeeded` or `Failed` → **dead (gone)**; for a
+  `Failed` pod the last 20 log lines of the failing container (the init container when it exited
+  non-zero, else the main one) are quoted in the daemon log;
+- `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
+  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
+  bounded by its own `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, then
+  `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; it waits on no other pod
+  and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
+  and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
+  The boot watchdog re-arms on it, bounded by its registration deadline
+  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
+  6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchTimeout`
+  (30 min; `sandbox.Runtime.ProvisionBound`) until the shim's first hello, which can only arrive
+  once both init containers have finished: from there the daemon re-arms the base deadline alone,
+  the same one a tmux pane runs under throughout. A pod that never says hello is retired at launch
+  plus the base deadline plus the bound, armed as one (36 min at the defaults); one that says hello
+  and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
+  one whose agent registers and never says it is ready is retired at its registration plus the base
+  deadline alone (6 min from the registration, again from a daemon restart that finds it
+  registered), then resumed as the same session one generation later and counted as a launch
+  failure. A tmux pane carries no bound to begin with, since it starts the agent at once with no
+  init phase. Nothing serializes the pods of one tree against each other: each issue pod is created
+  as its launch comes, and only the relaunches, suspension, release and orphan deletion of one pod
+  take turns, keyed by its Sandbox's name (`lockPod`);
+- the init container **terminated non-zero** (its current state, or `LastTerminationState` once the
+  kubelet has already restarted it) → **dead (gone)**, its log tail quoted, `WorkspaceLost` set when
+  it is `workspace-init` exiting 3; under `restartPolicy: Always` the pod never turns `Failed` for
+  this — the kubelet leaves it `Pending` in `Init:Error`/`Init:CrashLoopBackOff` and keeps retrying
+  the container itself — so the daemon reads the failed attempt directly instead of waiting for a
+  phase that will not come, and `relaunch` replaces the pod outright rather than waiting on its
+  launchers;
+- `Pending`, unscheduled (`PodScheduled=False`), for longer than `worker_boot_timeout_seconds` →
+  **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it and
+  its stop deletes the pod. A pod already scheduled but stuck before either init container starts
+  — an image pull or a volume mount that never finishes — is not caught here: it stays **alive**
+  under the `Pending` rule below, bounded only by the registration deadline above, the same as any
+  other pod still provisioning;
+- the Sandbox's `Ready` condition reports `MultiplePods` or `ReconcilerError` → **unknown**: the
+  Sandbox controller itself cannot resolve the pod it owns, so nothing here can either;
+- `Pending` otherwise → **alive**;
+- `Running`: judged through the recorded role's own container, never the whole pod — a neighbour
+  role's container restart changes nothing here. No status at all for that container → **unknown**.
+  A connected role `legion launcher` reporting a child of the recorded generation is **alive**,
+  even when Kubernetes still shows the container's previous instance terminated for a moment after
+  a restart: that one answer is asked first, and it alone outranks the terminated status. Otherwise
+  a terminated role container → **dead (gone)**, its log tail quoted. Otherwise, with no launcher
+  connected → **unknown** (a booting or redialing launcher is not death; the boot watchdog
+  decides). Otherwise the connected launcher's remaining answers: a child of another generation is
+  **dead (not the recorded process)**, a last-reported exit matching the recorded generation is
+  **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**,
+  and no child ever reported is **dead (gone)**;
+- phase `Unknown` → **unknown**;
+- the API read failed → **alive** if the pod's stream is registered (live proof), else **unknown**.
+
+`unknown` never marks anything dead by itself. A graceful stop sends the RPC `shutdown` frame over the
+registered stream, waits up to the stop timeout, then deletes the pod with that many seconds of grace
+(0 when the caller skips the graceful step) and the recorded uid as precondition, then deletes the
+per-pod Secret. Before a replacement generation is created, the previous generation's pod is deleted
+the same way and awaited until it is gone (force-deleted at grace 0 if it outlives the stop timeout):
+two generations never share a working copy.
+
+A phase worker or sub-architect pod that dies mid-task — its container crashed, or the pod was
+deleted — is relaunched by the daemon itself, as the same agent one generation later
+(`legion-<issue>-<role>-g<n+1>`, its command carrying `--resume=<the recorded session>`), and
+prompted with the daemon's catch-up rather than a replay of the interrupted task (LEGION-179). The
+death is seen twice over: at once, when the pod's worker stream closes and the daemon's one
+reconnect (`connect` awaiting a fresh registration for `worker_rpc_timeout_seconds`) finds none;
+and, for a death the stream never reported, on the next resync tick, which probes every located,
+ready-confirmed worker claim with the rules above. Each death counts one `launchFailures`, so a
+pod that keeps dying before its `/worker/ready` reaches `worker-died` at `MAX_LAUNCH_FAILURES`
+exactly like a boot that never confirms; a confirmed ready resets the count. A finished worker whose
+pod dies while idle — no longer its issue's active phase, nothing queued for it — is retired, not
+relaunched (`… after finishing: <issue>'s active phase is <role> …; retired, not relaunched`); the
+architect's next `spawn_worker` resumes it. To exercise this on a kind cluster, crash the process
+from the node rather than deleting the pod gracefully (a graceful stop lets the shim shut OMP down
+cleanly): `node=$(kind get nodes --name <cluster>)`, `cid=$(docker exec "$node" crictl ps -q --name
+worker --label io.kubernetes.pod.name=<pod>)`, `pid=$(docker exec "$node" crictl inspect --output
+go-template --template '{{.info.pid}}' "$cid")`, `docker exec "$node" kill -9 "$pid"` — a
+`kill -9 1` from inside the pod's own pid namespace is dropped by the kernel. Expect the daemon log
+line `<role token>: worker process died (its stream closed and the one reconnect was refused);
+launch failure 1/3; relaunching the same agent with --resume and its catch-up`, then
+`respawning <issue> by resuming OMP session <path>`, within seconds.
+
 ### Trust model: the provisioning token
 
 The provisioning token, the implement App's installation token, is a credential for the whole
@@ -1328,7 +1490,7 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   It mounts neither the issue's volume nor the config home. Every other provisioning command is
   bounded by `workspace.CommandTimeout` (5 minutes, fixed), but this one clone's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: it runs under
-  `workspace.FetchTimeout` (30 minutes) instead. The daemon's own registration deadline (below,
+  `workspace.FetchTimeout` (30 minutes) instead. The daemon's own registration deadline (above,
   "Liveness rules") carries a matching bound under Kubernetes, so this wider bound has room to run
   before the daemon would otherwise retire the pod for an agent that never registered.
 - **`workspace-init`** mounts the issue's volume, the feed read-only, and the config home — never
@@ -1834,64 +1996,6 @@ For a daemon contract change, first merge the worker image and the two plugin re
 the daemon, and relaunch every live root, worker, and controller. The boot log is the checklist:
 each line naming an older or unrecorded `pi-legion` process identifies one process to relaunch.
 
-### Volume retention
-
-Node loss reattaches the EBS volume to a replacement node and the pod resumes where it left off (on
-another node it first waits for the detach, which shows as transient `FailedAttachVolume` or
-`Multi-Attach` events). Volume loss — a PVC that lost the issue's clone and every retained session of
-the issue, as a fresh EBS volume after node loss can — is detected through the `workspace-init` init
-container, which every role's launcher waits behind: it expects the issue's clone
-(`LEGION_EXPECT_ISSUE_VOLUME`) once the launching claim resumes a session or any stored claim of the
-issue recorded one (`IssueHasSessions`), and exits 3 only once both the clone and every retained
-session are gone. Under `restartPolicy: Always` a failed init container never turns the pod
-`Failed`; the kubelet leaves it `Pending` in `Init:Error` or `Init:CrashLoopBackOff` and keeps
-retrying it forever on its own. The runtime does not wait for a phase that will not come: `evaluate`
-reads the init container's current or last-terminated state as **Gone**, with `WorkspaceLost` true
-for workspace-init's exit 3 (`the issue's volume was lost: …`, `internal/runtime/sandbox/observe.go`),
-and `relaunch` replaces the init-failed pod outright (delete, then recreate) instead of waiting on
-its launchers. The loss is one issue's: the supervisor logs `supervise: the issue's volume was lost
-with the session; relaunching a fresh session` (`internal/supervise/machine.go`) and stamps every
-other claim of that issue `workspaceLost`, dropping the session each recorded on the volume, and
-touches no other issue of the tree, whose volumes are their own; each stamped claim's replacement
-starts fresh from the committed issue bookmark until its own fresh session registers, even after the
-new pod rebuilt the clone, and a role first created later uses the ordinary fresh-worker path. A
-pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt begins:
-`Your workspace was recreated from `legion/<KEY>` because the issue's volume was lost. Anything you
-had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before
-continuing.`
-
-One PVC per issue, `issue-legion-<project>-<issue key lowercased>` (`ReadWriteOnce`, `issue_volume`,
-`storage_class`), created by Agent Sandbox from the issue Sandbox's one claim template when the
-Sandbox is first created, owned by it and labelled by project and issue, never by tree, so
-`kubectl -n legion get pvc -l legion.dev/issue=<KEY>` finds it; the controller's Sandbox owns one the
-same way, `issue-legion-<project>-controller`, labelled by project and role. Nothing annotates or
-ages a volume; it goes with its Sandbox, and the Sandbox goes:
-
-- at a child issue's close as `done`: its claims are retired with their sessions dropped
-  (`issue_close`), and the close's durable effect foreground-deletes the Sandbox, the PVC with it
-  (`SuspendIssue` with release, `internal/runtime/sandbox/issue_suspend.go`), logging `sandbox
-  runtime: released the closed issue's Sandbox and the volume it owned`; a later `todo` starts the
-  child fresh. A child set `backlog`, `icebox` or `triage` instead keeps its Sandbox, `Suspended`,
-  and its volume until the tree closes;
-- at the tree's close, linger expiry: the tree's cleanup foreground-deletes every remaining issue
-  Sandbox of the tree, in any order, each taking the volume it owns (`CleanupTree`,
-  `internal/runtime/sandbox/cleanup.go`);
-- by the orphan sweep, for a Sandbox of a tree whose cleanup confirmed or that has no lifecycle:
-  the sweep keeps every Sandbox of a live tree and, deleting a closed tree's, takes its volume with
-  it through the owner reference (`ReconcileOrphans`, `internal/runtime/sandbox/sandbox.go`).
-
-A child of a closed tree re-admitted as a root of its own while its old tree lingers keeps its
-Sandbox, its volume and its roles' sessions: the Sandbox is relabelled for the new tree
-(`ensureSandbox`, `internal/runtime/sandbox/relaunch.go`), and the Sandbox alone — the daemon's
-identity has no PVC verb, which is why the claim carries no tree label to go stale. Re-admitted
-after the old tree's cleanup took its Sandbox and volume, it starts fresh on a new volume with
-`the issue's volume was lost` logged once, its re-pointed claims' sessions gone with the volume
-([Kubernetes runtime: the Go daemon on Agent Sandbox](#kubernetes-runtime-the-go-daemon-on-agent-sandbox)
-says why `Retree` keeps them). A near-full volume slows jj's
-working-copy snapshot before a push, which is why `legion push`'s grant lives `credential.pushTTL`
-(5 minutes) in place of the usual 60 seconds (`internal/credential/grants.go`;
-`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics).
-
 ### RBAC the daemon needs
 
 For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:
@@ -1907,101 +2011,6 @@ For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its
 No `get` or `list` on Secrets: either returns Secret data, and a list would hand the daemon every Secret in the namespace, `legion-<project>-providers` and its provider keys included, which the design says the daemon never holds. The orphan sweep names each per-pod Secret from the pod it belongs to (they share the name) and deletes by name.
 
 A 403 fails the spawn (or stop) naming the verb and resource, e.g. `create secrets/legion-…`.
-
-### Liveness rules
-
-The daemon probes a pod by reading it and consulting the worker stream's live registrations:
-
-- the Sandbox itself not found (deleted, or never created) → **dead (gone)**, distinct from a
-  present Sandbox with no pod;
-- pod not found (the Sandbox is present, with no pod of its own) → **dead (gone)**, naming the
-  Sandbox's operating mode, its `Suspended` condition if any, and any same-named pod that is not
-  this Sandbox's (a stranger holding the name);
-- pod present but its uid is not the recorded one → **dead (not the recorded process)**; the stop that
-  follows refuses to delete it (the delete carries the recorded uid as a precondition, and Kubernetes
-  answers 409), so a stranger wearing a reused name is never destroyed;
-- pod carrying a `deletionTimestamp`, or in phase `Succeeded` or `Failed` → **dead (gone)**; for a
-  `Failed` pod the last 20 log lines of the failing container (the init container when it exited
-  non-zero, else the main one) are quoted in the daemon log;
-- `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
-  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
-  bounded by its own `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, then
-  `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; it waits on no other pod
-  and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
-  and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
-  The boot watchdog re-arms on it, bounded by its registration deadline
-  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
-  6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchTimeout`
-  (30 min; `sandbox.Runtime.ProvisionBound`) until the shim's first hello, which can only arrive
-  once both init containers have finished: from there the daemon re-arms the base deadline alone,
-  the same one a tmux pane runs under throughout. A pod that never says hello is retired at launch
-  plus the base deadline plus the bound, armed as one (36 min at the defaults); one that says hello
-  and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
-  one whose agent registers and never says it is ready is retired at its registration plus the base
-  deadline alone (6 min from the registration, again from a daemon restart that finds it
-  registered), then resumed as the same session one generation later and counted as a launch
-  failure. A tmux pane carries no bound to begin with, since it starts the agent at once with no
-  init phase. Nothing serializes the pods of one tree against each other: each issue pod is created
-  as its launch comes, and only the relaunches, suspension, release and orphan deletion of one pod
-  take turns, keyed by its Sandbox's name (`lockPod`);
-- the init container **terminated non-zero** (its current state, or `LastTerminationState` once the
-  kubelet has already restarted it) → **dead (gone)**, its log tail quoted, `WorkspaceLost` set when
-  it is `workspace-init` exiting 3; under `restartPolicy: Always` the pod never turns `Failed` for
-  this — the kubelet leaves it `Pending` in `Init:Error`/`Init:CrashLoopBackOff` and keeps retrying
-  the container itself — so the daemon reads the failed attempt directly instead of waiting for a
-  phase that will not come, and `relaunch` replaces the pod outright rather than waiting on its
-  launchers;
-- `Pending`, unscheduled (`PodScheduled=False`), for longer than `worker_boot_timeout_seconds` →
-  **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it and
-  its stop deletes the pod. A pod already scheduled but stuck before either init container starts
-  — an image pull or a volume mount that never finishes — is not caught here: it stays **alive**
-  under the `Pending` rule below, bounded only by the registration deadline above, the same as any
-  other pod still provisioning;
-- the Sandbox's `Ready` condition reports `MultiplePods` or `ReconcilerError` → **unknown**: the
-  Sandbox controller itself cannot resolve the pod it owns, so nothing here can either;
-- `Pending` otherwise → **alive**;
-- `Running`: judged through the recorded role's own container, never the whole pod — a neighbour
-  role's container restart changes nothing here. No status at all for that container → **unknown**.
-  A connected role `legion launcher` reporting a child of the recorded generation is **alive**,
-  even when Kubernetes still shows the container's previous instance terminated for a moment after
-  a restart: that one answer is asked first, and it alone outranks the terminated status. Otherwise
-  a terminated role container → **dead (gone)**, its log tail quoted. Otherwise, with no launcher
-  connected → **unknown** (a booting or redialing launcher is not death; the boot watchdog
-  decides). Otherwise the connected launcher's remaining answers: a child of another generation is
-  **dead (not the recorded process)**, a last-reported exit matching the recorded generation is
-  **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**,
-  and no child ever reported is **dead (gone)**;
-- phase `Unknown` → **unknown**;
-- the API read failed → **alive** if the pod's stream is registered (live proof), else **unknown**.
-
-`unknown` never marks anything dead by itself. A graceful stop sends the RPC `shutdown` frame over the
-registered stream, waits up to the stop timeout, then deletes the pod with that many seconds of grace
-(0 when the caller skips the graceful step) and the recorded uid as precondition, then deletes the
-per-pod Secret. Before a replacement generation is created, the previous generation's pod is deleted
-the same way and awaited until it is gone (force-deleted at grace 0 if it outlives the stop timeout):
-two generations never share a working copy.
-
-A phase worker or sub-architect pod that dies mid-task — its container crashed, or the pod was
-deleted — is relaunched by the daemon itself, as the same agent one generation later
-(`legion-<issue>-<role>-g<n+1>`, its command carrying `--resume=<the recorded session>`), and
-prompted with the daemon's catch-up rather than a replay of the interrupted task (LEGION-179). The
-death is seen twice over: at once, when the pod's worker stream closes and the daemon's one
-reconnect (`connect` awaiting a fresh registration for `worker_rpc_timeout_seconds`) finds none;
-and, for a death the stream never reported, on the next resync tick, which probes every located,
-ready-confirmed worker claim with the rules above. Each death counts one `launchFailures`, so a
-pod that keeps dying before its `/worker/ready` reaches `worker-died` at `MAX_LAUNCH_FAILURES`
-exactly like a boot that never confirms; a confirmed ready resets the count. A finished worker whose
-pod dies while idle — no longer its issue's active phase, nothing queued for it — is retired, not
-relaunched (`… after finishing: <issue>'s active phase is <role> …; retired, not relaunched`); the
-architect's next `spawn_worker` resumes it. To exercise this on a kind cluster, crash the process
-from the node rather than deleting the pod gracefully (a graceful stop lets the shim shut OMP down
-cleanly): `node=$(kind get nodes --name <cluster>)`, `cid=$(docker exec "$node" crictl ps -q --name
-worker --label io.kubernetes.pod.name=<pod>)`, `pid=$(docker exec "$node" crictl inspect --output
-go-template --template '{{.info.pid}}' "$cid")`, `docker exec "$node" kill -9 "$pid"` — a
-`kill -9 1` from inside the pod's own pid namespace is dropped by the kernel. Expect the daemon log
-line `<role token>: worker process died (its stream closed and the one reconnect was refused);
-launch failure 1/3; relaunching the same agent with --resume and its catch-up`, then
-`respawning <issue> by resuming OMP session <path>`, within seconds.
 
 ## The controller
 

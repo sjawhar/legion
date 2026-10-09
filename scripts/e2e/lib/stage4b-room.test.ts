@@ -11,10 +11,10 @@ const lib = join(import.meta.dir);
 const include = 'include "stage4b-room";';
 const GiB = 1073741824;
 // The run's overrides (stage4b-sandbox-tree.sh's override_cpu and override_memory over the
-// defaults): 2.95 CPU and 13 GiB a pod.
+// defaults): 2.95 CPU and 14 GiB a pod.
 const overridden = {
   ...defaults,
-  tester: { cpu: "1", memory: "4Gi" },
+  tester: { cpu: "1", memory: "5Gi" },
   reviewer: { cpu: "500m", memory: "2Gi" },
   merger: { cpu: "200m", memory: "1Gi" },
 };
@@ -85,7 +85,7 @@ describe("issue_pod_reservation", () => {
         "expected",
         JSON.stringify(overridden),
       ])
-    ).toEqual({ cpu: 2.95, memory: 13 * GiB });
+    ).toEqual({ cpu: 2.95, memory: 14 * GiB });
   });
 });
 
