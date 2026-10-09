@@ -19,7 +19,7 @@ func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
 				{
 					// A run with exactly one associated pull request.
 					"id": 1, "head_sha": "sha1", "html_url": "https://github.com/acme/widgets/actions/runs/1",
-					"status": "completed", "conclusion": "success",
+					"status": "completed", "conclusion": "success", "head_branch": "main", "event": "push",
 					"run_started_at": "2024-01-01T00:00:00Z", "created_at": "2024-01-01T00:00:00Z",
 					"updated_at":    "2024-01-01T00:10:00Z",
 					"head_commit":   map[string]any{"timestamp": "2023-12-31T23:55:00Z"},
@@ -28,7 +28,7 @@ func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
 				{
 					// A run with zero associated pull requests (e.g. a push run).
 					"id": 2, "head_sha": "sha2", "html_url": "https://github.com/acme/widgets/actions/runs/2",
-					"status": "completed", "conclusion": "failure",
+					"status": "completed", "conclusion": "failure", "head_branch": "", "event": "",
 					"run_started_at": "2024-01-01T01:00:00Z", "created_at": "2024-01-01T01:00:00Z",
 					"updated_at":    "2024-01-01T01:05:00Z",
 					"head_commit":   map[string]any{"timestamp": "2024-01-01T00:59:00Z"},
@@ -77,15 +77,24 @@ func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
 	if one.PRNumber == nil || *one.PRNumber != 7 {
 		t.Fatalf("run 1 PRNumber = %v, want 7 (exactly one associated PR)", one.PRNumber)
 	}
+	if one.HeadBranch == nil || *one.HeadBranch != "main" || one.Event == nil || *one.Event != "push" {
+		t.Fatalf("run 1 HeadBranch, Event = %v, %v, want main, push", one.HeadBranch, one.Event)
+	}
 
 	zero := runs[1]
 	if zero.PRNumber != nil {
 		t.Fatalf("run 2 PRNumber = %v, want nil (zero associated PRs)", zero.PRNumber)
 	}
+	if zero.HeadBranch != nil || zero.Event != nil {
+		t.Fatalf("run 2 HeadBranch, Event = %v, %v, want nil for GitHub's empty strings", zero.HeadBranch, zero.Event)
+	}
 
 	many := runs[2]
 	if many.PRNumber != nil {
 		t.Fatalf("run 3 PRNumber = %v, want nil (more than one associated PR)", many.PRNumber)
+	}
+	if many.HeadBranch != nil || many.Event != nil {
+		t.Fatalf("run 3 HeadBranch, Event = %v, %v, want nil when GitHub sends neither", many.HeadBranch, many.Event)
 	}
 	if many.Conclusion == nil || *many.Conclusion != "neutral" {
 		t.Fatalf("run 3 Conclusion = %v, want the raw GitHub value 'neutral' to pass through unfiltered", many.Conclusion)

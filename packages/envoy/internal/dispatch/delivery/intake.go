@@ -476,6 +476,7 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliveryS
 		Repo: repoFull, RunID: runID, Kind: kind, PRNumber: fetched.PRNumber, HeadSHA: fetched.HeadSHA,
 		HeadCommitAt: fetched.HeadCommitAt, StartedAt: fetched.StartedAt, CompletedAt: fetched.CompletedAt,
 		Conclusion: mapRunConclusionPtr(fetched.Conclusion), URL: fetched.URL,
+		HeadBranch: fetched.HeadBranch, Event: fetched.Event,
 	}); err != nil {
 		return fmt.Errorf("upsert run %d: %w", runID, err)
 	}

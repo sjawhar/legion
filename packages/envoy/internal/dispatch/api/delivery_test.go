@@ -88,7 +88,7 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 	if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
 		Repo: "acme/widgets", RunID: 100, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "deadbeef",
 		HeadCommitAt: merged, StartedAt: deployedAt, CompletedAt: &deployedAt, Conclusion: &runSuccess,
-		URL: "https://github.com/acme/widgets/actions/runs/100",
+		URL: "https://github.com/acme/widgets/actions/runs/100", HeadBranch: new("main"), Event: new("push"),
 	}); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
@@ -367,6 +367,7 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 	if err := delivery.UpsertRun(ctx, database.Pool, delivery.DeliveryRun{
 		Repo: "acme/widgets", RunID: 7, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "abc", HeadCommitAt: start,
 		StartedAt: start, CompletedAt: new(start.Add(time.Hour)), Conclusion: &failure, URL: "https://github.com/acme/widgets/actions/runs/7",
+		HeadBranch: new("main"), Event: new("push"),
 	}); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

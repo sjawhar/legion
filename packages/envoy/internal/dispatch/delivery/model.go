@@ -97,7 +97,9 @@ const (
 
 // DeliveryRun is one run of the deploy workflow or the PR-checks workflow on the configured
 // deploy repository, identified by (Repo, RunID). CompletedAt and Conclusion are nil while the
-// run is still in progress.
+// run is still in progress. HeadBranch and Event are GitHub's head_branch and event; both are nil
+// on a row stored before they were (the reconcile's backfill step fills them), and a nil counts in
+// no measure that filters on it.
 type DeliveryRun struct {
 	Repo         string                 `json:"repo"`
 	RunID        int64                  `json:"run_id"`
@@ -109,6 +111,8 @@ type DeliveryRun struct {
 	CompletedAt  *time.Time             `json:"completed_at"`
 	Conclusion   *DeliveryRunConclusion `json:"conclusion"`
 	URL          string                 `json:"url"`
+	HeadBranch   *string                `json:"head_branch"`
+	Event        *string                `json:"event"`
 }
 
 // DeliveryRunJob is one job of a DeliveryRun, identified within it by Name (GitHub does not

@@ -197,11 +197,12 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		return deliveryPopulation{}, err
 	}
 
-	// Every deploy run with a head commit at or after `from`: the containment algorithm needs
-	// every apply from there forward, unbounded past `to`, since a PR merged just before `to` may
-	// first ship after it -- bounding this query to [from, to) would wrongly read such a PR as
-	// "waiting". The timeline's runs[] list is filtered to [from, to) separately.
-	applyRuns, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, from)
+	// Every deploy run on main with a head commit at or after `from`: the containment algorithm
+	// needs every apply from there forward, unbounded past `to`, since a PR merged just before `to`
+	// may first ship after it -- bounding this query to [from, to) would wrongly read such a PR as
+	// "waiting". A production job on another branch ships no PR (decision 7). The timeline's
+	// runs[] list is filtered to [from, to) separately.
+	applyRuns, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", from)
 	if err != nil {
 		return deliveryPopulation{}, err
 	}

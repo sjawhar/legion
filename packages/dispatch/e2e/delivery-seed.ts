@@ -32,12 +32,12 @@ export async function seedDeliveryFixture(): Promise<void> {
        ('acme/widgets', 2, 'fix: a waiting widget', 'https://github.com/acme/widgets/pull/2', 'octocat',
         '2024-06-01T02:00:00Z', '2024-06-01T03:00:00Z', 4, 1, true, null, ARRAY[]::text[], false)`,
     `INSERT INTO delivery_runs (
-       repo, run_id, kind, head_sha, head_commit_at, started_at, completed_at, conclusion, url
+       repo, run_id, kind, head_sha, head_commit_at, started_at, completed_at, conclusion, url, head_branch, event
      ) VALUES
        ('acme/widgets', 500, 'deploy', 'deadbeef', '2024-06-01T01:00:00Z',
-        '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/500'),
+        '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/500', 'main', 'push'),
        ('acme/widgets', 501, 'deploy', 'cafef00d', '2024-06-01T03:00:00Z',
-        '2024-06-01T12:00:00Z', '2024-06-01T12:20:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/501')`,
+        '2024-06-01T12:00:00Z', '2024-06-01T12:20:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/501', 'main', 'push')`,
     `INSERT INTO delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion) VALUES
        ('acme/widgets', 500, 'build', '2024-06-01T01:30:00Z', '2024-06-01T01:32:00Z', 'success'),
        ('acme/widgets', 500, 'widgets-release / widgets-release', '2024-06-01T01:32:00Z', '2024-06-01T01:40:00Z', 'success'),
@@ -99,24 +99,24 @@ export async function seedMeasuresFixture(): Promise<void> {
        ('acme/widgets', 113, 'Add rework share metric', 'https://github.com/acme/widgets/pull/113', 'octocat',
         '2026-09-18T09:00:00Z', '2026-09-18T15:00:00Z', '2026-09-18T08:00:00Z', 50, 4, false, 'ACME-101', ARRAY[]::text[], false)`,
     `INSERT INTO delivery_runs (
-       repo, run_id, kind, head_sha, head_commit_at, started_at, completed_at, conclusion, url
+       repo, run_id, kind, head_sha, head_commit_at, started_at, completed_at, conclusion, url, head_branch, event
      ) VALUES
        ('acme/widgets', 501, 'deploy', 'aaa101', '2026-09-05T12:30:00Z', '2026-09-05T12:00:00Z',
-        '2026-09-05T13:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/501'),
+        '2026-09-05T13:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/501', 'main', 'push'),
        ('acme/widgets', 502, 'deploy', 'aaa102', '2026-09-06T13:30:00Z', '2026-09-06T13:35:00Z',
-        '2026-09-06T14:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/502'),
+        '2026-09-06T14:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/502', 'main', 'push'),
        ('acme/widgets', 503, 'deploy', 'aaa103', '2026-09-09T09:30:00Z', '2026-09-09T09:35:00Z',
-        '2026-09-09T10:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/503'),
+        '2026-09-09T10:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/503', 'main', 'push'),
        ('acme/widgets', 504, 'deploy', 'aaa104', '2026-09-13T08:45:00Z', '2026-09-13T08:50:00Z',
-        '2026-09-13T09:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/504'),
+        '2026-09-13T09:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/504', 'main', 'push'),
        ('acme/widgets', 505, 'deploy', 'aaa105', '2026-09-17T07:45:00Z', '2026-09-17T07:50:00Z',
-        '2026-09-17T08:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/505'),
+        '2026-09-17T08:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/505', 'main', 'push'),
        ('acme/widgets', 506, 'deploy', 'aaa106', '2026-09-11T08:00:00Z', '2026-09-11T08:30:00Z',
-        '2026-09-11T09:05:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/506'),
+        '2026-09-11T09:05:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/506', 'main', 'push'),
        ('acme/widgets', 507, 'deploy', 'aaa107', '2026-09-14T08:30:00Z', '2026-09-14T08:35:00Z',
-        '2026-09-14T09:05:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/507'),
+        '2026-09-14T09:05:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/507', 'main', 'push'),
        ('acme/widgets', 508, 'deploy', 'aaa108', '2026-09-19T09:50:00Z', '2026-09-19T10:00:00Z',
-        null, 'cancelled', 'https://github.com/acme/widgets/actions/runs/508')`,
+        null, 'cancelled', 'https://github.com/acme/widgets/actions/runs/508', 'main', 'push')`,
     `INSERT INTO delivery_run_jobs (repo, run_id, name, completed_at, conclusion) VALUES
        ('acme/widgets', 501, 'widgets-release / widgets-release', '2026-09-05T13:00:00Z', 'success'),
        ('acme/widgets', 502, 'widgets-release / widgets-release', '2026-09-06T14:00:00Z', 'success'),

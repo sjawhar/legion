@@ -38,6 +38,8 @@ type FetchedRun struct {
 	Conclusion   *string
 	PRNumber     *int // non-nil only when GitHub associates the run with exactly one pull request
 	URL          string
+	HeadBranch   *string // GitHub's head_branch; nil when it sends none or an empty one
+	Event        *string // GitHub's event (push, pull_request, workflow_dispatch, ...); nil likewise
 }
 
 // FetchedJob is one job of a FetchedRun.
@@ -80,6 +82,8 @@ type workflowRunItem struct {
 	RunStartedAt *time.Time `json:"run_started_at"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+	HeadBranch   string     `json:"head_branch"`
+	Event        string     `json:"event"`
 	PullRequests []struct {
 		Number int `json:"number"`
 	} `json:"pull_requests"`
@@ -95,6 +99,8 @@ func fetchedRunFromItem(item workflowRunItem) FetchedRun {
 		StartedAt:  item.CreatedAt,
 		Conclusion: item.Conclusion,
 		URL:        item.HTMLURL,
+		HeadBranch: nonEmpty(item.HeadBranch),
+		Event:      nonEmpty(item.Event),
 	}
 	if item.HeadCommit != nil {
 		run.HeadCommitAt = item.HeadCommit.Timestamp
@@ -115,6 +121,15 @@ func fetchedRunFromItem(item workflowRunItem) FetchedRun {
 		run.PRNumber = &number
 	}
 	return run
+}
+
+// nonEmpty is s, or nil when GitHub sent an empty string: a stored empty branch or event would
+// match neither a "main" filter nor tell a reader the value was never known.
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // ListWorkflowRuns walks every run of the workflow at workflowPath in owner/repo created in

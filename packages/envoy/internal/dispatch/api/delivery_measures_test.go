@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -55,6 +56,8 @@ type measuresFixture struct {
 		StartedAt    time.Time                       `json:"started_at"`
 		CompletedAt  *time.Time                      `json:"completed_at"`
 		Conclusion   *delivery.DeliveryRunConclusion `json:"conclusion"`
+		HeadBranch   *string                         `json:"head_branch"`
+		Event        *string                         `json:"event"`
 		Production   *struct {
 			Conclusion  delivery.DeliveryJobConclusion `json:"conclusion"`
 			CompletedAt time.Time                      `json:"completed_at"`
@@ -127,6 +130,7 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 		if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
 			Repo: fixture.Settings.DeployRepo, RunID: run.RunID, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: run.HeadSHA,
 			HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
+			HeadBranch: run.HeadBranch, Event: run.Event,
 			URL: "https://github.com/" + fixture.Settings.DeployRepo + "/actions/runs/" + strconv.FormatInt(run.RunID, 10),
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.RunID, err)
@@ -336,14 +340,16 @@ func TestGetDeliveryMeasuresComputesTheFixture(t *testing.T) {
 		t.Errorf("issue facet deploys_with_prs = %d, want 5", issue.DeployFrequency.DeploysWithPRs)
 	}
 
-	// A ninth deploy started in the window whose production job succeeded, with a head commit
-	// before acme/widgets#113's merge: a deploy, but not #113's, and it ships no window PR.
+	// A ninth run started in the window whose production job succeeded, on branch feature/x: not
+	// a deploy (LEGION-294's "a successful production job on main"), and every number stays as it
+	// was. Its head commit is after acme/widgets#113's merge, so on main it would ship #113 too.
 	ninthStarted := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 	ninthDone := time.Date(2026, 9, 20, 10, 30, 0, 0, time.UTC)
 	if err := delivery.UpsertRun(t.Context(), database.Pool, delivery.DeliveryRun{
 		Repo: fixture.Settings.DeployRepo, RunID: 509, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "aaa109",
-		HeadCommitAt: time.Date(2026, 9, 18, 14, 0, 0, 0, time.UTC), StartedAt: ninthStarted, CompletedAt: &ninthDone,
+		HeadCommitAt: time.Date(2026, 9, 20, 9, 50, 0, 0, time.UTC), StartedAt: ninthStarted, CompletedAt: &ninthDone,
 		Conclusion: new(delivery.DeliveryRunConclusionSuccess), URL: "https://github.com/acme/widgets/actions/runs/509",
+		HeadBranch: new("feature/x"), Event: new("push"),
 	}); err != nil {
 		t.Fatalf("seed run 509: %v", err)
 	}
@@ -353,13 +359,18 @@ func TestGetDeliveryMeasuresComputesTheFixture(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("seed run 509's production job: %v", err)
 	}
-	ninth := getDeliveryMeasures(t, handler, measuresFixtureWindow).Measures
-	if f := ninth.DeployFrequency; f.SuccessfulDeploys != 6 || f.DeploysWithPRs != 5 {
-		t.Errorf("with run 509: deploy_frequency = %+v, want {6, 5}", f)
+	ninth := getDeliveryMeasures(t, handler, measuresFixtureWindow)
+	if !reflect.DeepEqual(ninth.Measures, body.Measures) {
+		t.Errorf("with run 509 on feature/x, measures = %+v, want them unchanged: %+v", ninth.Measures, body.Measures)
 	}
 	for _, pr := range getDeliveryTimeline(t, handler, measuresFixtureWindow).PRs {
 		if pr.ID == "acme/widgets#113" && pr.DeployedStatus != delivery.DeployedStatusWaiting {
-			t.Errorf("acme/widgets#113 deployed_status = %q with run 509, want waiting", pr.DeployedStatus)
+			t.Errorf("acme/widgets#113 deployed_status = %q with run 509 on feature/x, want waiting", pr.DeployedStatus)
+		}
+	}
+	for _, run := range getDeliveryTimeline(t, handler, measuresFixtureWindow).Runs {
+		if run.ID == 509 {
+			t.Errorf("the timeline's runs[] lists run 509 on feature/x, want only runs on main")
 		}
 	}
 }
