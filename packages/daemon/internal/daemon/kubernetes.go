@@ -216,7 +216,7 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 // newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller:
 // constructs the client from runtime.kubernetes.agent_secrets and starts its
 // machine login on a background context at boot, logging the confirmation code exactly once —
-// pod enrollment is held until a human approves it on the Dispatch credential page. The client
+// pod enrollment is held until a person signed in to Dispatch approves it on the credential page. The client
 // itself is returned too, read-only, so the state route can show the login's current status
 // (source.State, agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever
 // handed the daemon's key or its won credential. Nil, nil without the block.
@@ -225,8 +225,7 @@ func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *
 	if k == nil || k.AgentSecrets == nil {
 		return nil, nil
 	}
-	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, Operator: k.AgentSecrets.Operator, HTTP: &http.Client{Timeout: 30 * time.Second}}
-	operator := k.AgentSecrets.Operator
+	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, HTTP: &http.Client{Timeout: 30 * time.Second}}
 	go func() {
 		code, err := client.Login(context.Background())
 		if err != nil {
@@ -234,8 +233,8 @@ func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *
 			return
 		}
 		log.Info(fmt.Sprintf(
-			"agent-secrets machine login: enter code %s on the Dispatch credential page (approver: %s); pod enrollment is held until approved",
-			code, operator,
+			"agent-secrets machine login: enter code %s on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved",
+			code,
 		))
 	}()
 	return brokerEnroller{client: client}, client

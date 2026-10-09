@@ -970,7 +970,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 		{"every role reserved", everyRole, secretsGap},
 		{"the controller's pod unreserved under controller: daemon", everyRole + "controller: daemon\n", secretsGap +
 			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: controller; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
-		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, operator: operator@example.com}\n", ""},
+		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example}\n", ""},
 		{"both decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n    resource-limits: one tree per node\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

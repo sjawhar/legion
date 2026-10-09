@@ -40,8 +40,7 @@ var (
 )
 
 // Client speaks the broker's machine-login and enrollment routes. URL is the broker's base URL
-// with no path (also the request object's audience); Operator is the email of the person who
-// approves this machine's logins (the request object's login_hint); HTTP is the client every call
+// with no path (also the request object's audience); HTTP is the client every call
 // goes through, nil for http.DefaultClient. cred is the launcher credential a login has won, if
 // any; login is the most recent login's status. Both are set only by Login and its poll goroutine,
 // and cleared only when the broker refuses cred as invalid. loginMu serializes Login's own
@@ -50,9 +49,8 @@ var (
 // loginMu makes "start at most one pending login" atomic, so every concurrent caller observes the
 // same winner.
 type Client struct {
-	URL      string
-	Operator string
-	HTTP     *http.Client
+	URL  string
+	HTTP *http.Client
 
 	cred    atomic.Pointer[credential]
 	login   atomic.Pointer[LoginState]
@@ -117,8 +115,8 @@ func IsPermanent(err error) bool {
 }
 
 // Login mints a fresh key, signs a machine-login request object naming os.Hostname() and
-// "legion-daemon" as the launcher_credential it asks to hold and c.Operator, the approving
-// person's email, as its login_hint, POSTs it to /v1/launcher-credentials, spawns the poll
+// "legion-daemon" as the launcher_credential it asks to hold (a service's login, which anyone
+// signed in to Dispatch approves, so it names no approver), POSTs it to /v1/launcher-credentials, spawns the poll
 // goroutine, and returns the confirmation code. Idempotent while a login is pending: a second
 // call returns the same code without starting another one — loginMu holds this true even under
 // real concurrency, so callers racing Login (doProof's automatic re-login-on-401, from concurrent
@@ -137,7 +135,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets login: hostname: %w", err)
 	}
-	request, err := signRequestObject(key, c.URL, host, launcherService, c.Operator, time.Now())
+	request, err := signRequestObject(key, c.URL, host, launcherService, time.Now())
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets login: sign request object: %w", err)
 	}

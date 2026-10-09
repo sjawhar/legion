@@ -98,7 +98,7 @@ func thumbprintOfJWKForTest(m map[string]any) (string, error) {
 func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 	key := mustTestKey(t)
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "legion-daemon", "sjawhar", now)
+	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "legion-daemon", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +114,11 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 		t.Fatalf("header has no embedded jwk: %+v", header)
 	}
 
-	// login_hint is non-empty in this call so it is present; reason is always empty for a
-	// machine login and so, mirroring envoy's omitempty requestClaims, is entirely absent from
-	// the wire — pinning that no extra or misnamed claim leaks onto a machine-login object.
-	want := []string{"aud", "authorization_details", "exp", "iat", "iss", "jti", "login_hint"}
+	// A service's login names no approver, since anyone signed in to Dispatch approves it, so
+	// login_hint is absent; reason is always empty for a machine login and so, mirroring envoy's
+	// omitempty requestClaims, is absent too — pinning that no extra or misnamed claim leaks onto a
+	// machine-login object.
+	want := []string{"aud", "authorization_details", "exp", "iat", "iss", "jti"}
 	if got := sortedKeys(payload); !reflect.DeepEqual(got, want) {
 		t.Fatalf("payload claim names = %v, want %v", got, want)
 	}
@@ -139,9 +140,6 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 
 	if payload["aud"] != "https://secrets.test" {
 		t.Fatalf("aud = %v", payload["aud"])
-	}
-	if payload["login_hint"] != "sjawhar" {
-		t.Fatalf("login_hint = %v", payload["login_hint"])
 	}
 
 	details, ok := payload["authorization_details"].([]any)
@@ -165,7 +163,7 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 // credential rather than a service one) never puts an empty string on the wire.
 func TestSignRequestObjectWithNoServiceOmitsIt(t *testing.T) {
 	key := mustTestKey(t)
-	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "", "sjawhar", time.Now())
+	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +179,7 @@ func TestSignRequestObjectWithNoServiceOmitsIt(t *testing.T) {
 // RFC 7638 thumbprint (the value a broker recomputes and compares), not an arbitrary identifier.
 func TestSignRequestObjectIssuerIsTheKeysThumbprint(t *testing.T) {
 	key := mustTestKey(t)
-	compact, err := signRequestObject(key, "https://secrets.test", "host", "legion-daemon", "sjawhar", time.Now())
+	compact, err := signRequestObject(key, "https://secrets.test", "host", "legion-daemon", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

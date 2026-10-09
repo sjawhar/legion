@@ -62,7 +62,7 @@ func TestAgentSecretsBlockReason(t *testing.T) {
 				t.Fatalf("reason = %q, want empty (nothing missing)", got)
 			}
 			if tc.wantBlocked {
-				const wantTail = "(the production broker with Plan D's rules, and an attended machine login approved on the Dispatch credential page, supply them)"
+				const wantTail = "(the production broker with Plan D's rules, and the person who approves this run's credential request, supply them)"
 				if !strings.HasSuffix(got, wantTail) {
 					t.Fatalf("reason %q does not end with %q", got, wantTail)
 				}

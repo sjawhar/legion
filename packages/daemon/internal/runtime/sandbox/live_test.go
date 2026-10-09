@@ -630,13 +630,13 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	if r.dyn, err = dynamic.NewForConfig(own); err != nil {
 		fail("%v", err)
 	}
-	if env.agentSecretsURL != "" && env.agentSecretsOperator != "" {
-		client := &agentsecrets.Client{URL: env.agentSecretsURL, Operator: env.agentSecretsOperator}
+	if env.agentSecretsURL != "" {
+		client := &agentsecrets.Client{URL: env.agentSecretsURL}
 		code, err := client.Login(r.ctx)
 		if err != nil {
 			fail("%v", err)
 		}
-		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page as %s\n", code, env.agentSecretsOperator)
+		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page, signed in as anyone\n", code)
 		var state agentsecrets.LoginState
 		pollErr := r.poll(10*time.Minute, "machine login "+code+" to be approved", func() (bool, error) {
 			state = client.LoginStatus()

@@ -101,16 +101,16 @@ const (
 // probed.
 var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
-// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base
-// URL, the email of the person the daemon's own machine logins are approved by (the daemon runs its
-// own login at boot, on a background context, and logs the confirmation code once; no file ever
-// carries a launcher credential, since Login wins and holds it only in process memory), the
-// audience of the projected token every pod carries for it, and that token's lifetime. The audience
-// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most the cluster's
-// admission policy admits for a Legion worker token; the API server issues none under 600.
+// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base URL (the daemon runs
+// its own machine login at boot, on a background context, and logs the confirmation code once; no
+// file ever carries a launcher credential, since Login wins and holds it only in process memory),
+// the audience of the projected token every pod carries for it, and that token's lifetime. The
+// login is the legion-daemon service's, which anyone signed in to Dispatch approves, so the block
+// names no approver. The audience defaults to the broker's own (`agent-secrets`) and the lifetime
+// to 3600 s, the most the cluster's admission policy admits for a Legion worker token; the API
+// server issues none under 600.
 type AgentSecretsConfig struct {
 	URL                string
-	Operator           string
 	Audience           string
 	TokenExpirySeconds int
 }
@@ -135,6 +135,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if fields["operator"] != nil {
+		return nil, fmt.Errorf("%s.operator was removed (LEGION-664): the daemon's machine login is the legion-daemon service's, which anyone signed in to Dispatch approves, so it names no approver; delete the key", agentSecretsKey)
+	}
 	block := &AgentSecretsConfig{Audience: defaultAgentSecretsAudience, TokenExpirySeconds: defaultTokenExpirySeconds}
 	if block.URL, err = requiredString(fields["url"], agentSecretsKey+".url", ""); err != nil {
 		return nil, err
@@ -147,9 +150,6 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
 	}
 	block.URL = strings.TrimSuffix(block.URL, "/")
-	if block.Operator, err = requiredString(fields["operator"], agentSecretsKey+".operator", ""); err != nil {
-		return nil, err
-	}
 	if audience, err := optionalString(fields["audience"], agentSecretsKey+".audience"); err != nil {
 		return nil, err
 	} else if audience != "" {

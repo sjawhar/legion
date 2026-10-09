@@ -88,7 +88,7 @@ func TestContractMachineLoginEnrollRevokeExpireReenroll(t *testing.T) {
 	withFastPolling(t)
 	rig := brokertest.NewRig(t)
 	ctx := context.Background()
-	client := &Client{URL: rig.URL, Operator: rig.Operator}
+	client := &Client{URL: rig.URL}
 
 	code, err := client.Login(ctx)
 	if err != nil {

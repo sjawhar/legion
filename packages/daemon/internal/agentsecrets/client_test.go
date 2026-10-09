@@ -36,7 +36,7 @@ type fakeBroker struct {
 
 type loginClaims struct {
 	iss       string
-	loginHint string
+	loginHint any
 	host      string
 	service   string
 }
@@ -95,7 +95,7 @@ func (b *fakeBroker) handleLoginRequest(w http.ResponseWriter, r *http.Request) 
 	code := fmt.Sprintf("CODE-%d", b.loginSeq)
 	b.logins = append(b.logins, loginClaims{
 		iss:       fmt.Sprint(payload["iss"]),
-		loginHint: fmt.Sprint(payload["login_hint"]),
+		loginHint: payload["login_hint"],
 		host:      fmt.Sprint(detail["identifier"]),
 		service:   fmt.Sprint(detail["service"]),
 	})
@@ -229,7 +229,7 @@ func withCredential(t *testing.T, c *Client, id string) {
 
 func newIssuedClient(t *testing.T) (*fakeBroker, *Client) {
 	broker, server := newFakeBroker(t)
-	c := &Client{URL: server.URL, Operator: "sjawhar", HTTP: server.Client()}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
 	withCredential(t, c, "cred-1")
 	return broker, c
 }
@@ -247,7 +247,7 @@ var podEnrollment = PodEnrollment{
 func TestLoginThenEnrollSignsProofs(t *testing.T) {
 	withFastPolling(t)
 	broker, server := newFakeBroker(t)
-	c := &Client{URL: server.URL, Operator: "sjawhar", HTTP: server.Client()}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
 
 	code, err := c.Login(context.Background())
 	if err != nil {
@@ -261,8 +261,8 @@ func TestLoginThenEnrollSignsProofs(t *testing.T) {
 		t.Fatal(err)
 	}
 	login := broker.lastLogin()
-	if login.loginHint != "sjawhar" || login.service != "legion-daemon" || login.host != wantHost {
-		t.Fatalf("login request = %+v, want host %q", login, wantHost)
+	if login.loginHint != nil || login.service != "legion-daemon" || login.host != wantHost {
+		t.Fatalf("login request = %+v, want host %q, service legion-daemon and no login_hint: a service's login names no approver", login, wantHost)
 	}
 
 	// The login is still pending: Enroll must fail closed, naming the code, not error hard.
@@ -310,7 +310,7 @@ func TestExpiredCredentialTriggersAFreshLoginWithANewKey(t *testing.T) {
 	broker.enrollAnswers = []enrollAnswer{
 		{status: http.StatusUnauthorized, body: `{"code":"LAUNCHER_INVALID","error":"expired"}`},
 	}
-	c := &Client{URL: server.URL, Operator: "sjawhar", HTTP: server.Client()}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
 
 	if _, err := c.Login(context.Background()); err != nil {
 		t.Fatal(err)
@@ -386,7 +386,7 @@ func TestReLoginPollSurvivesCallerContextCancellation(t *testing.T) {
 func TestConcurrentLoginStartsExactlyOnePendingLogin(t *testing.T) {
 	withFastPolling(t)
 	broker, server := newFakeBroker(t)
-	c := &Client{URL: server.URL, Operator: "sjawhar", HTTP: server.Client()}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
 
 	const n = 20
 	codes := make([]string, n)
@@ -537,7 +537,7 @@ func TestRevokeIsIdempotent(t *testing.T) {
 }
 
 func TestAnUnreachableBrokerIsATransientError(t *testing.T) {
-	c := &Client{URL: "http://127.0.0.1:1", Operator: "sjawhar", HTTP: &http.Client{Timeout: time.Second}}
+	c := &Client{URL: "http://127.0.0.1:1", HTTP: &http.Client{Timeout: time.Second}}
 	withCredential(t, c, "cred-1")
 	_, err := c.Enroll(context.Background(), podEnrollment)
 	if err == nil || IsPermanent(err) {
@@ -566,7 +566,7 @@ func TestARefusalBodyThatIsNotTheContractsShapeFallsBackToUNKNOWN(t *testing.T) 
 // network and names the pending code.
 func TestEnrollWithNoCredentialNamesTheCode(t *testing.T) {
 	_, server := newFakeBroker(t)
-	c := &Client{URL: server.URL, Operator: "sjawhar", HTTP: server.Client()}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
 	c.login.Store(&LoginState{State: "pending", Code: "CODE-9"})
 	_, err := c.Enroll(context.Background(), podEnrollment)
 	var api *APIError
