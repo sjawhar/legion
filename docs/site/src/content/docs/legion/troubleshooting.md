@@ -363,10 +363,10 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
   at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
   pods are not enrolled until then.
-- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login names
-  no approver now, since anyone signed in approves a service's login. Delete the `operator` key from
-  `legion.yaml`.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
   ```
+- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login is
+  the `legion-daemon` service's, which anyone signed in to Dispatch approves, so the block names no
+  approver. Delete the key.
