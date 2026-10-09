@@ -4,8 +4,9 @@
 // GET /api/v1/delivery/measures; nothing is computed here. Three differences, each from LEGION-567's
 // slice 2 plan: the change-failure-rate card says flags arrive with flag confirmation while the
 // server stores none; the P0 card links each issue inside Dispatch and dates its count by the
-// response's computed_at; and the card grid reflows on narrow screens, where the prototype is
-// desktop-only.
+// response's computed_at; and the cards and the strip lay themselves out for the panel's own
+// width, since Dispatch's sidebar leaves it narrower than the prototype's page and a phone
+// narrower still, where the prototype is desktop-only.
 import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -78,8 +79,10 @@ function KpiCard(props: {
       className={`flex min-w-0 flex-col gap-1 rounded border px-2.5 py-2 ${surfaceBg} ${borderDefault}`}
       data-kpi={props.title}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className={`truncate text-xs ${textMutedOnSurface}`}>{props.title}</span>
+      <div className="flex items-start justify-between gap-2">
+        {/* Two lines at most: a narrow card (Dispatch's sidebar leaves the grid narrower than the
+            prototype's page) shows its whole title rather than cutting it to a word. */}
+        <span className={`line-clamp-2 min-w-0 text-xs ${textMutedOnSurface}`}>{props.title}</span>
         {props.met === undefined ? null : <Badge met={props.met} />}
       </div>
       {props.children}
@@ -134,10 +137,14 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
   ];
 
   return (
-    <section className={`rounded border ${borderDefault}`}>
+    <section className={`@container rounded border ${borderDefault}`}>
+      {/* Columns follow the panel's own width, not the viewport's, since the page's sidebar takes a
+          share of the viewport that varies with the breakpoint. A card needs 212px for its badge
+          and a title of at most two lines ("Deploy runs reaching production" at text-xs), so six
+          columns need 83.5rem, three 42.25rem and two 28.5rem, padding and gaps included. */}
       <fieldset
         aria-label="KPI targets"
-        className="grid min-w-0 grid-cols-2 gap-2 px-3 pt-2 text-sm md:grid-cols-3 xl:grid-cols-6"
+        className="grid min-w-0 grid-cols-1 gap-2 px-3 pt-2 text-sm @min-[28.5rem]:grid-cols-2 @min-[42.25rem]:grid-cols-3 @min-[83.5rem]:grid-cols-6"
       >
         <KpiCard
           met={status?.deploys_per_day}
@@ -351,16 +358,18 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
         </KpiCard>
       </fieldset>
 
-      <div
-        className="flex items-center gap-6 overflow-x-auto px-3 py-2 text-sm"
-        data-testid="measures-strip"
-      >
-        {strip.map((stat) => (
-          <div className="flex items-baseline gap-2 whitespace-nowrap" key={stat.label}>
-            <span className={`text-lg font-semibold ${textPrimaryOnSurface}`}>{stat.value}</span>
-            <span className={`text-xs ${textMutedOnCanvas}`}>{stat.label}</span>
-          </div>
-        ))}
+      {/* The prototype's strip scrolls sideways and its fold link follows the stats. In the
+          narrower panel Dispatch's sidebar leaves, a scrolling strip hides stats behind the link,
+          so the stats wrap, each whole, and the link takes its own line where they fill the row. */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-3 py-2 text-sm">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1" data-testid="measures-strip">
+          {strip.map((stat) => (
+            <div className="flex items-baseline gap-2 whitespace-nowrap" key={stat.label}>
+              <span className={`text-lg font-semibold ${textPrimaryOnSurface}`}>{stat.value}</span>
+              <span className={`text-xs ${textMutedOnCanvas}`}>{stat.label}</span>
+            </div>
+          ))}
+        </div>
         {data === undefined ? null : (
           <div className="ml-auto shrink-0 whitespace-nowrap">
             <DisclosureToggle
