@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -556,10 +557,86 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	}
 }
 
-// A launch the previous daemon persisted and never finished — its locator not yet recorded when
-// it died — has no process to re-adopt; boot launches it again rather than leave a claim that
-// waits on a pane nothing knows.
+// A launch the previous daemon began and never finished has no process to re-adopt; boot launches
+// it again rather than leave a claim that waits on a process nothing knows. The previous daemon
+// left one of two rows: launching with no locator, its process (if one opened at all) never
+// recorded; or queued at the generation it had, a launch it released at boot (supervise's
+// ReleaseUncertainLaunch writes the release) and stopped before the relaunch wrote its next
+// generation (LEGION-650).
 func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state supervise.ClaimState
+	}{
+		{name: "stored launching with no process recorded", state: supervise.StateLaunching},
+		{name: "stored queued at its generation, released and never relaunched", state: supervise.StateQueued},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			project, _ := claim.ProjectToken(cfg.Project)
+			token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
+			putClaim(t, cfg, supervise.Claim{
+				Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-3", Role: claim.RolePlanner,
+				Generation: 1, State: tc.state, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
+			})
+			writePrompt(t, cfg, token)
+			rt := fake.NewRuntime()
+
+			d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+
+			testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
+				c := d.claim(token)
+				return c.State == string(supervise.StateLaunching) && c.Locator != nil
+			})
+			spawns := rt.CallsOf("Spawn")
+			if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
+				t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
+			}
+		})
+	}
+}
+
+// refuseRelease has the store refuse every write of token's claim as queued, as a store that does
+// not answer refuses the release of an uncertain launch, until the returned function lets it through.
+func refuseRelease(t *testing.T, cfg config.Config, token claim.Token) func() {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	name := "legion_test_refuse_" + strings.ToLower(randomSuffix(t))
+	for _, statement := range []string{
+		"create function " + name + "() returns trigger language plpgsql as $$ begin raise exception 'the store refused the write'; end $$",
+		"create trigger " + name + " before insert or update on claims for each row when (new.token = '" + string(token) +
+			"' and new.state = 'queued') execute function " + name + "()",
+	} {
+		if _, err := st.Pool().Exec(ctx, statement); err != nil {
+			t.Fatalf("make the store refuse the release: %v", err)
+		}
+	}
+	var once sync.Once
+	let := func() {
+		once.Do(func() {
+			for _, statement := range []string{"drop trigger if exists " + name + " on claims", "drop function if exists " + name + "()"} {
+				if _, err := st.Pool().Exec(ctx, statement); err != nil {
+					t.Errorf("let the store take the release: %v", err)
+				}
+			}
+		})
+	}
+	t.Cleanup(func() {
+		let()
+		st.Close()
+	})
+	return let
+}
+
+// A release of an uncertain launch the store does not take, outside the daemon's stop, leaves the
+// claim launch_uncertain, which nothing but a release moves on. The daemon tries the release again
+// at each orphan sweep and relaunches the claim once the store takes it, rather than leave it
+// stranded until the next restart (LEGION-650).
+func TestRunRetriesAReleaseTheStoreRefusedAtTheNextOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
 	token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
@@ -568,16 +645,29 @@ func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
 	})
 	writePrompt(t, cfg, token)
+	letRelease := refuseRelease(t, cfg, token)
 	rt := fake.NewRuntime()
+	logs := &syncBuffer{}
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 20 * time.Millisecond
+	d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
 
-	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	testwait.Eventually(t, "the store to refuse the release", func() bool {
+		return strings.Contains(logs.String(), `"msg":"supervise: release an uncertain launch`)
+	})
+	if c := storedClaim(t, cfg, token); c.State != supervise.StateLaunchUncertain || c.Locator != nil {
+		t.Fatalf("after the refused release the store holds %s with locator %+v, want launch_uncertain with none", c.State, c.Locator)
+	}
+	if spawns := rt.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("spawns while the store refuses the release = %+v, want none", spawns)
+	}
+	letRelease()
 
-	testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
+	testwait.Eventually(t, "the claim to be launched again without a restart", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
-	spawns := rt.CallsOf("Spawn")
-	if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
+	if spawns := rt.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
 		t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
 	}
 }
@@ -1121,7 +1211,7 @@ func TestRunRelaunchesAFreshSessionWhenTheIssueVolumeIsLostAndTellsTheIssue(t *t
 
 	testwait.Eventually(t, "the root's fresh relaunch and its sibling's dropped session", func() bool {
 		r, s := d.claim(root), d.claim(sibling)
-		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Session == "" && s.Session == ""
+		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Locator != nil && r.Session == "" && s.Session == ""
 	})
 	if fresh := lastLaunch(t, rt, root); fresh.ResumeSessionFile != "" || fresh.WorkspaceRecoveredFrom != "legion/LEGION-1" {
 		t.Errorf("the root relaunched with %+v, want a fresh session recovering legion/LEGION-1", fresh)
@@ -1161,7 +1251,7 @@ func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
 
 	testwait.Eventually(t, "the relaunch", func() bool {
 		c := d.claim(token)
-		return c.Generation == 2 && c.State == string(supervise.StateLaunching)
+		return c.Generation == 2 && c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
 	if relaunched := lastLaunch(t, rt, token); relaunched.ResumeSessionFile == "" {
 		t.Errorf("relaunched with %+v, want the recorded session resumed", relaunched)

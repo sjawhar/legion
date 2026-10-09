@@ -205,6 +205,15 @@ func claimRuns(state supervise.ClaimState) bool {
 	return !claimEnded(state) && state != supervise.StateSuspended
 }
 
+// holdsRole is whether held's claim keeps its role through the decision in flight: it runs
+// (claimRuns), and that decision is not stopping its process for good (supervise.ClaimView's
+// Stopping) — a suspension, a failure, a release. The routing reads it, so no notice is routed to
+// a sub-architect whose session is being stopped; it goes on up the tree, as it will once the stop
+// returns.
+func holdsRole(held supervise.ClaimView) bool {
+	return claimRuns(held.State) && !held.Stopping
+}
+
 // claimEnded is whether a claim in state will not hold its role again: this daemon does not
 // supervise it (""), or it failed or retired. A suspended claim has not ended: the operator's
 // resume or deliver starts it again (`legion claims resume`).
@@ -220,19 +229,26 @@ func claimTookRole(state supervise.ClaimState) bool {
 	return state == supervise.StateReady || state == supervise.StateWorking || state == supervise.StateIdle
 }
 
-// supervisedClaim is token's claim as this daemon supervises it, or the zero Claim, whose state is
-// "", when it does not supervise it.
-func (r *outbox) supervisedClaim(token claim.Token) supervise.Claim {
+// supervisedClaim is token's claim as this daemon supervises it, or the zero view, whose state is
+// "", when it does not supervise it. It is the machine's View, which never waits on a decision in
+// flight: the outbox runs one row at a time, and an architect's relaunch can hold its machine for
+// minutes while the runtime waits out its pods.
+func (r *outbox) supervisedClaim(token claim.Token) supervise.ClaimView {
 	machine, ok := r.supervisor.Machine(token)
 	if !ok {
-		return supervise.Claim{}
+		return supervise.ClaimView{}
 	}
-	return machine.Claim()
+	return machine.View()
 }
 
 // claimState is the state of token's claim, or "" when this daemon does not supervise it.
 func (r *outbox) claimState(token claim.Token) supervise.ClaimState {
 	return r.supervisedClaim(token).State
+}
+
+// holdsItsRole is holdsRole for token's claim, the owning-architect walk's runs.
+func (r *outbox) holdsItsRole(token claim.Token) bool {
+	return holdsRole(r.supervisedClaim(token))
 }
 
 // architectEnded says why nobody will hold the role of the owning architect, in state, for a
@@ -249,11 +265,12 @@ func architectEnded(tree treeSnapshot, state supervise.ClaimState) string {
 	return ""
 }
 
-// stoppedWithTree says whether the owning architect of a notice, its claim in state, has stopped
-// with its finished tree: the tree lingers or has closed (lingers), and the claim does not run, as
-// the close suspended it or it failed or retired. Nothing more is sent to such an architect, not
-// even through the Envoy registration its stopped session left behind: re-admission starts it with
-// the tree's record rather than the notices of its close.
-func stoppedWithTree(lingers bool, state supervise.ClaimState) bool {
-	return lingers && !claimRuns(state)
+// stoppedWithTree says whether the owning architect of a notice, its claim held, has stopped with
+// its finished tree: the tree lingers or has closed (lingers), and the claim holds its role no
+// longer (holdsRole), as the close suspended it, or is suspending it now, or it failed or retired.
+// Nothing more is sent to such an architect, not even through the Envoy registration its stopped
+// session left behind: re-admission starts it with the tree's record rather than the notices of its
+// close.
+func stoppedWithTree(lingers bool, held supervise.ClaimView) bool {
+	return lingers && !holdsRole(held)
 }

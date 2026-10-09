@@ -52,7 +52,7 @@ var retreeable = append([]ClaimState{StateQueued}, gone...)
 // lands.
 func (m *Machine) Retree(ctx context.Context, tree string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if m.claim.Tree == tree {
 		return nil
 	}
