@@ -914,8 +914,8 @@ broker login reaching `issued` is the one change a running daemon sees), as `cap
 to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
 --json` under `capabilities` (daemon API contract 16: every row as `{name, status, detail,
 decision?, configLine?}`, `status` one of `present`, `installed`, `unchecked`, `live`, `withheld`,
-`decided` or `open`, the image rows `present` once the probe passed — `codegraph` `installed`, as
-above — and `unchecked` before it or under tmux);
+`decided` or `open`, the image rows `present` once the probe passed and `unchecked` before it or
+under tmux);
 the controller's `tick` notice, whose `openCapabilities` names the open rows so the day's report
 names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-config`, which prints
 after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a
