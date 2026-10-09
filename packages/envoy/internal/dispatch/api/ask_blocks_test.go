@@ -454,8 +454,9 @@ func TestAnUploadedCopyOfASpecOpensNoAskForItsCopiedBlocks(t *testing.T) {
 	for {
 		text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+copied+"/text", nil, "alice").Body.String()
 		if strings.Contains(text, `#rec-answered urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\"`) &&
-			strings.Contains(text, `#rec-resolved urgency=\"med\" multiple=\"false\" state=\"resolved\"`) &&
-			strings.Contains(text, `#rec-open urgency=\"med\" multiple=\"false\" state=\"open\"`) {
+			strings.Contains(text, `copied_from=\"`+asks["rec-answered"]+`\"`) &&
+			strings.Contains(text, `#rec-resolved urgency=\"med\" multiple=\"false\" state=\"resolved\" copied_from=\"`+asks["rec-resolved"]+`\"`) &&
+			strings.Contains(text, `#rec-open urgency=\"med\" multiple=\"false\" state=\"open\" copied_from=\"`+asks["rec-open"]+`\"`) {
 			break
 		}
 		if time.Now().After(deadline) {

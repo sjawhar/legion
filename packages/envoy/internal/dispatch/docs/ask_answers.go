@@ -33,12 +33,14 @@ func (state askServerState) restore(node *pmdoc.Node) {
 }
 
 // serverRewrite is an ask block whose server attributes settlement repaired to agree with its ask:
-// the attributes as settlement found them, whether the repair wrote an answer, the index of the
-// repair in the reconciliation's repairs, and the index in its events of the block.repaired the
-// repair emitted, or -1 for a new ask's block, whose repair emits none.
+// whether the block is a copy of that ask (copiedAskSources), the attributes as settlement found
+// them, whether the repair wrote an answer, the index of the repair in the reconciliation's
+// repairs, and the index in its events of the block.repaired the repair emitted, or -1 for a new
+// ask's block or a copy, whose repair emits none.
 type serverRewrite struct {
 	node   *pmdoc.Node
 	ask    model.Ask
+	copied bool
 	found  askServerState
 	answer bool
 	repair int
@@ -82,7 +84,7 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdo
 	for _, index := range answered {
 		rewrite := r.rewrites[index]
 		rewrite.found.restore(rewrite.node)
-		changes[index], _ = setAskServerAttributes(rewrite.node, rewrite.ask, true)
+		changes[index], _ = setAskServerAttributes(rewrite.node, rewrite.ask, rewrite.copied, true)
 	}
 	returned := map[int]bool{}
 	if rendered {
@@ -96,7 +98,7 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdo
 		switch {
 		case returned[index]:
 		case changes[index]:
-			r.repairs[rewrite.repair].set = askServerAttributes(rewrite.ask, true)
+			r.repairs[rewrite.repair].set = askServerAttributes(rewrite.ask, rewrite.copied, true)
 		default:
 			droppedRepairs[rewrite.repair] = true
 			if rewrite.event >= 0 {
@@ -128,7 +130,7 @@ func (r *settlementReconciliation) returnAnswersWithRoom(tree *pmdoc.Node, befor
 			err = weigh(was, grown)
 		}
 		if err != nil {
-			setAskServerAttributes(rewrite.node, rewrite.ask, true)
+			setAskServerAttributes(rewrite.node, rewrite.ask, rewrite.copied, true)
 			continue
 		}
 		document = grown
@@ -142,7 +144,7 @@ func (r *settlementReconciliation) returnAnswersWithRoom(tree *pmdoc.Node, befor
 func (rewrite *serverRewrite) withAnswer(document rendering) (rendering, error) {
 	alone := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{rewrite.node}}
 	withheld, err := renderTree(alone)
-	setAskServerAttributes(rewrite.node, rewrite.ask, false)
+	setAskServerAttributes(rewrite.node, rewrite.ask, rewrite.copied, false)
 	if err != nil {
 		return rendering{}, err
 	}

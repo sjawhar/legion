@@ -35,8 +35,12 @@ type settlementReconciliation struct {
 	repairs   []askRepair
 	events    []model.Event
 	retracted []model.Ask
+	// owedCopies are the other documents showing a copy of an ask this settlement retracts, whose
+	// settlement nameVersion marked owed; the settlement arms each once it commits.
+	owedCopies []string
 	// indexedAskBlocks are the blocks with a recorded author that this settlement indexed or
-	// found indexed, whose author the room forgets once it commits (consumeAskAuthors).
+	// found indexed, whose author the room forgets once it commits (consumeAskAuthors). A copy
+	// is neither: its author is kept for the ask it opens once its source is retracted.
 	indexedAskBlocks []string
 	// rewrites are the ask blocks whose server attributes repairAsk repaired, which
 	// withholdAnswers reads again where a repair wrote back an answer.
@@ -63,15 +67,15 @@ func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set 
 // repairAsk repairs the server attributes of node, the ask block carrying blockID in the tree
 // settlement read, to agree with ask (setAskServerAttributes), and records the repair for
 // repairLive and, when event is not nil, the block.repaired it emits - each where withholdAnswers
-// finds it again.
-func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, event *model.Event) {
+// finds it again. copied says node is a copy of ask, which another document indexes.
+func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, copied bool, event *model.Event) {
 	found := readAskServerState(node)
-	changed, wroteAnswer := setAskServerAttributes(node, ask, false)
+	changed, wroteAnswer := setAskServerAttributes(node, ask, copied, false)
 	if !changed {
 		return
 	}
-	rewrite := serverRewrite{node: node, ask: ask, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
-	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, false)})
+	rewrite := serverRewrite{node: node, ask: ask, copied: copied, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false)})
 	if event != nil {
 		rewrite.event = len(r.events)
 		r.events = append(r.events, *event)
@@ -115,7 +119,9 @@ func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, e
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing
-// the retractions whose reason names it and stamping it into every event that carries one.
+// the retractions whose reason names it and stamping it into every event that carries one, and
+// marks owed the settlement of every other document showing a copy of an ask it retracts
+// (owedCopiesOfRetracted).
 func (r *settlementReconciliation) nameVersion(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -142,6 +148,11 @@ func (r *settlementReconciliation) nameVersion(
 			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
 		))
 	}
+	copies, err := owedCopiesOfRetracted(ctx, tx, artifactID, owner, r.retracted)
+	if err != nil {
+		return err
+	}
+	r.owedCopies = copies
 	return nil
 }
 
@@ -228,17 +239,19 @@ func (s *Service) reconcileAskBlocks(
 		return settlementReconciliation{}, err
 	}
 	for _, block := range blocks {
-		if _, recorded := credit.askSources.authors[block.id]; recorded {
-			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
-		}
 		ask, exists := rows[block.id]
 		if !exists {
 			// A copy is read-only here: its source's state is written into the block, and
 			// nothing this settlement does writes the source's row.
 			if source, copied := sources[block.id]; copied {
-				reconciled.repairAsk(block.node, block.id, source, nil)
+				reconciled.repairAsk(block.node, block.id, source, true, nil)
 				continue
 			}
+		}
+		if _, recorded := credit.askSources.authors[block.id]; recorded {
+			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
+		}
+		if !exists {
 			blockActor, known := credit.askSources.author(block.id, actor)
 			if !known {
 				continue
@@ -254,7 +267,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
 			))
-			reconciled.repairAsk(block.node, block.id, ask, nil)
+			reconciled.repairAsk(block.node, block.id, ask, false, nil)
 			continue
 		}
 		delete(rows, block.id)
@@ -319,7 +332,7 @@ func (s *Service) reconcileAskBlocks(
 			actor,
 			model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
 		)
-		reconciled.repairAsk(block.node, block.id, ask, &repaired)
+		reconciled.repairAsk(block.node, block.id, ask, false, &repaired)
 	}
 	reconciled.withholdAnswers(artifactID, tree, before)
 
@@ -609,148 +622,6 @@ func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[strin
 	return asks, nil
 }
 
-// copiedAskSources finds the ask each block of blocks was copied from, keyed by block id, among the
-// blocks no ask of this document indexes (rows). Block ids are unique per document only
-// (asks_block_id_unique is on block_artifact_id and block_id), so a document copied from another
-// carries its ask blocks' ids, and an id an author chose, such as `decision`, can name unrelated
-// questions on two documents. A block is therefore a copy only of an ask on another document of
-// the same owner - the same issue, or for a project document the same project's other documents -
-// that indexes the same block id and asks the block's question, or once asked it: the copy can be
-// of an earlier version, from before the ask was reworded (an ask.opened or ask.edited event names
-// each question it has asked). A block reworded on the copy is a new question and opens an ask. An
-// ask settlement retracted because its block left its document is no source: a block cut from one
-// document and pasted into another is the only one left, and opens an ask as any new block does.
-// Of several sources, the earliest asked is the original, since a copy that opened asks of its own
-// before copies were recognised came after it. The copy shows its source's state as of this
-// settlement; answering the source later changes the copy at the copy's next settlement. The rows
-// are read, never locked or written: settlement holds this document's owner row and room lock, and
-// a source's answer route takes the source's ask row before its own document's room.
-func copiedAskSources(
-	ctx context.Context,
-	tx pgx.Tx,
-	artifactID string,
-	owner artifactOwner,
-	blocks []askBlock,
-	rows map[string]model.Ask,
-) (map[string]model.Ask, error) {
-	var unindexed []string
-	for _, block := range blocks {
-		if _, indexed := rows[block.id]; !indexed {
-			unindexed = append(unindexed, block.id)
-		}
-	}
-	if len(unindexed) == 0 {
-		return nil, nil
-	}
-	// The owner's documents come first (artifacts_issue_key for an issue), then each one's asks
-	// under the copied ids through asks_block_id_unique.
-	documents := `d.issue_key = $3`
-	ownerKey := owner.Project
-	if owner.IssueKey != nil {
-		ownerKey = *owner.IssueKey
-	} else {
-		documents = `d.issue_key is null and d.session_id is null and d.project_key = $3`
-	}
-	query, err := tx.Query(ctx, `
-		select `+AskColumns+`
-		from artifacts d
-		join asks a on a.block_artifact_id = d.id and a.block_id = any($1)
-		where `+documents+` and d.id <> $2
-		order by a.created_at, a.id
-	`, unindexed, artifactID, ownerKey)
-	if err != nil {
-		return nil, fmt.Errorf("load copied ask sources: %w", err)
-	}
-	defer query.Close()
-	candidates := map[string][]model.Ask{}
-	for query.Next() {
-		ask, err := ScanAsk(query)
-		if err != nil {
-			return nil, fmt.Errorf("scan copied ask source: %w", err)
-		}
-		if settlementRetracted(ask) {
-			continue
-		}
-		candidates[*ask.BlockID] = append(candidates[*ask.BlockID], ask)
-	}
-	if err := query.Err(); err != nil {
-		return nil, fmt.Errorf("iterate copied ask sources: %w", err)
-	}
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	sources := map[string]model.Ask{}
-	var reworded []askBlock
-	for _, block := range blocks {
-		matched := false
-		for _, ask := range candidates[block.id] {
-			if ask.Question == block.question {
-				sources[block.id] = ask
-				matched = true
-				break
-			}
-		}
-		if !matched && len(candidates[block.id]) > 0 {
-			reworded = append(reworded, block)
-		}
-	}
-	if len(reworded) == 0 {
-		return sources, nil
-	}
-	asked, err := questionsAsked(ctx, tx, reworded, candidates)
-	if err != nil {
-		return nil, err
-	}
-	for _, block := range reworded {
-		for _, ask := range candidates[block.id] {
-			if _, once := asked[ask.ID][block.question]; once {
-				sources[block.id] = ask
-				break
-			}
-		}
-	}
-	return sources, nil
-}
-
-// questionsAsked is every question each candidate of the blocks has asked, keyed by ask id, read
-// from the ask.opened and ask.edited events that record its questions (events_ask_payload_id).
-func questionsAsked(ctx context.Context, tx pgx.Tx, blocks []askBlock, candidates map[string][]model.Ask) (map[string]map[string]struct{}, error) {
-	var ids []string
-	for _, block := range blocks {
-		for _, ask := range candidates[block.id] {
-			ids = append(ids, ask.ID)
-		}
-	}
-	rows, err := tx.Query(ctx, `
-		select payload->>'id', coalesce(payload->>'question', ''), coalesce(payload#>>'{previous,question}', '')
-		from events
-		where type in ('ask.opened', 'ask.edited') and payload->>'id' = any($1)
-	`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("load questions copied asks asked: %w", err)
-	}
-	defer rows.Close()
-	asked := map[string]map[string]struct{}{}
-	for rows.Next() {
-		var id, question, previous string
-		if err := rows.Scan(&id, &question, &previous); err != nil {
-			return nil, fmt.Errorf("scan question a copied ask asked: %w", err)
-		}
-		if asked[id] == nil {
-			asked[id] = map[string]struct{}{}
-		}
-		for _, text := range []string{question, previous} {
-			if text != "" {
-				asked[id][text] = struct{}{}
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate questions copied asks asked: %w", err)
-	}
-	return asked, nil
-}
-
 func createAskBlock(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -831,13 +702,13 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 
 // askServerAttributeNames are the attributes of an ask block the server keeps in agreement with
 // its ask row (setAskServerAttributes).
-var askServerAttributeNames = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"}
+var askServerAttributeNames = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid", "copied_from"}
 
 // askServerAttributes is setAskServerAttributes for ask as it stands now, leaving its answer out
 // when withholdAnswer, for a repair to make again on another tree (repairLive).
-func askServerAttributes(ask model.Ask, withholdAnswer bool) func(*pmdoc.Node) bool {
+func askServerAttributes(ask model.Ask, copied, withholdAnswer bool) func(*pmdoc.Node) bool {
 	return func(node *pmdoc.Node) bool {
-		changed, _ := setAskServerAttributes(node, ask, withholdAnswer)
+		changed, _ := setAskServerAttributes(node, ask, copied, withholdAnswer)
 		return changed
 	}
 }
@@ -846,9 +717,14 @@ func askServerAttributes(ask model.Ask, withholdAnswer bool) func(*pmdoc.Node) b
 // changed any and whether it wrote an answer (pmdoc.IsAnswerAttribute): its words, or the options
 // it selects, which are caller text the server keeps. With withholdAnswer it leaves the answer out
 // of the block, taking off any the block holds, and writes the rest: the block still says who
-// answered and when.
-func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool) (changed, answered bool) {
+// answered and when. A copied block, one ask was copied from on another document
+// (copiedAskSources), names that ask in copied_from, so a reader of the copy finds where it is
+// answered.
+func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, copied, withholdAnswer bool) (changed, answered bool) {
 	desired := pmdoc.Attrs{"state": ask.State}
+	if copied {
+		desired["copied_from"] = ask.ID
+	}
 	if ask.State == "answered" && ask.Answer != nil {
 		desired["answered_by"] = ask.Answer.User
 		desired["answered_at"] = ask.Answer.At.UTC().Format(time.RFC3339Nano)

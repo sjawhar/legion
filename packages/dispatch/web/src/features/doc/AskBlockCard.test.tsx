@@ -23,6 +23,7 @@ const schema = new Schema({
         answered_at: { default: undefined },
         answered_by: { default: undefined },
         blockId: { default: null },
+        copied_from: { default: undefined },
         invalid: { default: undefined },
         multiple: { default: false },
         selected: { default: undefined },
@@ -220,6 +221,61 @@ test.each([
     // The reference copy control lives in the card's metadata line, once.
     expect(card.section.querySelectorAll('[aria-label^="Copy reference"]')).toHaveLength(1);
     expect(within(hosted).getByRole("button", { name: /^Copy reference/ })).toBeDefined();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a block copied from another document's ask links to the document where that ask is answered", async () => {
+  const source: Ask = {
+    ...ask,
+    block_artifact: { id: "artifact-plan", primary: false, slug: "plan" },
+    id: "ask-source",
+  };
+  const card = renderCard({
+    indexed: false,
+    node: askNode({ copied_from: "ask-source", state: "open" }),
+    thread: threadRead(source),
+  });
+  try {
+    const link = await card.header.findByRole("link", { name: "plan" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-b-1");
+    expect(getAsk).toHaveBeenCalledWith("ask-source");
+    expect(card.header.getByText(/Copied from/).textContent).toBe(
+      "Copied from plan, answered there"
+    );
+    // No ask of its own: no composer, the block's attributes record what its source shows.
+    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a project document's copied block links to its source under the project", async () => {
+  const source: Ask = {
+    ...ask,
+    block_artifact: { id: "artifact-plan", primary: false, slug: "plan" },
+    id: "ask-source",
+    issue_key: null,
+  };
+  const card = renderCard({
+    indexed: false,
+    node: askNode({ copied_from: "ask-source", state: "open" }),
+    owner: { project: "CORE", slug: "notes" },
+    thread: threadRead(source),
+  });
+  try {
+    const link = await card.header.findByRole("link", { name: "plan" });
+    expect(link.getAttribute("href")).toBe("/projects/CORE/documents/plan#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a block with an ask of its own names no source, whatever its attributes hold", () => {
+  const card = renderCard({ node: askNode({ copied_from: "ask-source", state: "open" }) });
+  try {
+    expect(card.header.queryByText(/Copied from/)).toBeNull();
   } finally {
     card.unmount();
   }

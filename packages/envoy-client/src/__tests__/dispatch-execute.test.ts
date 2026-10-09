@@ -3967,7 +3967,12 @@ describe("executeDispatchTool", () => {
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
-    const requestOver = async (blocks: string[], version4: string[], asks: unknown[]) => {
+    const requestOver = async (
+      blocks: string[],
+      version4: string[],
+      asks: unknown[],
+      sources: Record<string, unknown> = {}
+    ) => {
       const posts: string[] = [];
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const target = new URL(String(url));
@@ -3998,6 +4003,10 @@ describe("executeDispatchTool", () => {
         }
         // An issue's document lists its asks under the issue: the artifact route refuses it.
         if (target.pathname === "/api/v1/issues/DSP-42/asks") return response(asks);
+        // The ask a copied block names in copied_from, read by its id.
+        const sourceRead = /^\/api\/v1\/asks\/([^/]+)$/.exec(target.pathname);
+        const source = sourceRead === null ? undefined : sources[sourceRead[1] ?? ""];
+        if (source !== undefined) return response({ ask: source, replies: [] });
         if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
           posts.push(target.pathname);
           return response(
@@ -4059,16 +4068,70 @@ describe("executeDispatchTool", () => {
       expect(posts).toEqual([]);
     });
 
-    test("a copied block whose source ask is open names that ask and the document it is open on", async () => {
+    test("a copied block names the ask settlement says it was copied from, open on its own document", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source"}\nQuestion of b-1?\n:::',
+        ],
+        [],
+        {
+          "ask-source": {
+            ...blockAsk("b-1", "open"),
+            id: "ask-source",
+            block_artifact: { id: "artifact-1", slug: "plan", primary: false },
+          },
+        }
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on plan: answer it there"
+      );
+      expect(refusal).not.toContain("has not opened yet");
+      expect(posts).toEqual([]);
+    });
+
+    test("a copied block whose source is answered since the copy settled says to fold the answer in", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source"}\nQuestion of b-1?\n:::',
+        ],
+        [],
+        {
+          "ask-source": {
+            ...blockAsk("b-1", "answered"),
+            id: "ask-source",
+            block_artifact: { id: "artifact-1", slug: "plan", primary: false },
+          },
+        }
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, answered on plan but still open in version 4: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it"
+      );
+      expect(posts).toEqual([]);
+    });
+
+    test("an ask on another document under the same block id is not named when settlement names no copy", async () => {
       const { outcome, posts } = await requestOver(
         ["b-1"],
         [opening("b-1", "open")],
         [
           {
             ...blockAsk("b-1", "open"),
-            id: "ask-source",
+            id: "ask-unrelated",
+            question: "Totally unrelated question?",
             created_at: "2026-10-08T10:00:00Z",
-            block_artifact: { id: "artifact-1", slug: "plan" },
+            block_artifact: { id: "artifact-1", slug: "unrelated-doc" },
           },
         ]
       );
@@ -4077,10 +4140,76 @@ describe("executeDispatchTool", () => {
         () => "",
         (error: Error) => error.message
       );
-      expect(refusal.split("\n")[1]).toBe(
-        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on the document it was copied from (plan)"
+      expect(refusal.split("\n")[1]).toBe("- block b-1, whose ask Dispatch has not opened yet");
+      expect(refusal).not.toContain("ask-unrelated");
+      expect(posts).toEqual([]);
+    });
+
+    test("a copied block of a project document names its source under the project's document", async () => {
+      const posts: string[] = [];
+      const notes = {
+        id: "artifact-notes",
+        issue_key: null,
+        project: "CORE",
+        ref_key: "CORE/notes",
+        slug: "notes",
+        name: "notes.md",
+        kind: "doc",
+        primary: false,
+        approval: { state: "draft", latest_version: 2 },
+        created_by: { kind: "session", id: "session-1" },
+        created_at: "2026-09-18T00:00:00Z",
+        versions: [],
+      };
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+        if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/blocks") {
+          return response([{ id: "b-1", type: "ask", from: 0, to: 90 }]);
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/versions/2") {
+          return response({
+            number: 2,
+            markdown:
+              ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-plan"}\nQuestion of b-1?\n:::',
+          });
+        }
+        // A project document's own asks: the copy has none.
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/asks") return response([]);
+        if (target.pathname === "/api/v1/asks/ask-plan") {
+          return response({
+            ask: {
+              ...blockAsk("b-1", "open"),
+              id: "ask-plan",
+              issue_key: null,
+              block_artifact: { id: "artifact-plan", slug: "plan", primary: false },
+            },
+            replies: [],
+          });
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/approval-requests") {
+          posts.push(target.pathname);
+          return response({}, 201);
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const refusal = await executeDispatchTool({
+        tool: "dispatch_request_approval",
+        args: { project: "CORE", artifact: "notes", summary: "Proposes a nightly export." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      }).then(
+        () => "",
+        (error: Error) => error.message
       );
-      expect(refusal).not.toContain("has not opened yet");
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on plan: answer it there"
+      );
       expect(posts).toEqual([]);
     });
 

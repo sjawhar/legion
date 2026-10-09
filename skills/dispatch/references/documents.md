@@ -145,10 +145,12 @@ artifact by the slug shown in the upload result or by its filename, and a projec
 slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
 filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
 `artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
-A document you upload holding a copy of another document's `:::ask` block, under the same `#id` and the same
-question, on the same issue (or the same project for a project document), opens no ask: the copy shows the state and
-answer of the ask it was copied from, as of the copy's last settlement, and cannot be answered there. Answer the
-original. A copy whose question you reword opens a new ask.
+A document you upload holding a copy of another document's `:::ask` block, under the same `#id` and with the same
+question, options, `multiple` and urgency, on the same issue (or the same project for a project document), opens no
+ask: the copy shows the state and answer of the ask it was copied from, names it in `copied_from`, and cannot be
+answered there. Answer the original. The copy shows the original as of the copy's last settlement, which an edit to
+the copy brings up to date. A copy whose text you change opens a new ask, and so does a copy once the original's
+block leaves its document.
 
 A picture meant to be seen inline in a message, comment or ask is not uploaded with `dispatch_artifact`: pass its local
 path in that tool's `images` (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a

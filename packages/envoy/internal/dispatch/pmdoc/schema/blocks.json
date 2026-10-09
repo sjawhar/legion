@@ -56,6 +56,10 @@
         "invalid": {
           "kind": "string",
           "server": true
+        },
+        "copied_from": {
+          "kind": "string",
+          "server": true
         }
       }
     }

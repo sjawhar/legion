@@ -1,5 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Link } from "react-router-dom";
 
 import type { Ask } from "../../api/types";
 import {
@@ -16,7 +18,8 @@ import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { itemRoute } from "../refs/routes";
+import { askQuery } from "../refs/reference-target";
+import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
 
@@ -40,7 +43,9 @@ export interface AskBlockCardProps {
  * recorded outcome — once the server has indexed the block into an ask row and the surface is
  * live. Until then, and on a read-only surface (closed issue, version view), the block reads its
  * own attributes: the options with the chosen ones ticked and the note, and the header names who
- * answered. The question itself is the editor's content, so no part of this card repeats it. */
+ * answered. A block copied from another document's ask has no ask of its own: it shows its
+ * source's state, and the header links to the document where that ask is answered. The question
+ * itself is the editor's content, so no part of this card repeats it. */
 export function AskBlockCard({
   ask,
   host,
@@ -108,6 +113,9 @@ export function AskBlockCard({
                 {facts.state === "resolved" ? "Resolved" : "Closed"}
               </span>
             ) : null}
+            {ask === undefined && !malformed && facts.copiedFrom !== undefined ? (
+              <CopiedFromLink askId={facts.copiedFrom} blockId={facts.blockId} owner={owner} />
+            ) : null}
           </header>
           {malformed ? (
             <p className={`mb-2 text-sm font-medium ${dangerText}`}>{facts.malformedReason}</p>
@@ -135,6 +143,48 @@ export function AskBlockCard({
         host.footer
       )}
     </>
+  );
+}
+
+/** Where a copied block is answered: the document holding the ask settlement names in the
+ * block's `copied_from`, linked at that block. An issue's documents link under the issue; a
+ * project document's source is another document of the same project. */
+function CopiedFromLink({
+  askId,
+  blockId,
+  owner,
+}: {
+  askId: string;
+  blockId: string;
+  owner: { project: string; slug: string } | undefined;
+}): ReactNode {
+  const source = useQuery(askQuery(askId)).data?.ask;
+  const artifact = source?.block_artifact;
+  let path: string | undefined;
+  if (source !== undefined && artifact !== undefined) {
+    if (source.issue_key !== null) {
+      path = artifact.primary
+        ? buildIssuePath({ key: source.issue_key, kind: "spec" })
+        : buildIssuePath({ key: source.issue_key, kind: "artifact", slug: artifact.slug });
+    } else if (owner !== undefined) {
+      path = buildProjectPath({ kind: "document", project: owner.project, slug: artifact.slug });
+    }
+  }
+  return (
+    <span className="inline-flex items-center gap-x-2" data-dispatch-ask-copied-from={askId}>
+      <span aria-hidden="true">·</span>
+      <span>
+        Copied from{" "}
+        {path === undefined || artifact === undefined ? (
+          "another document"
+        ) : (
+          <Link to={`${path}#b-${encodeURIComponent(blockId)}`}>
+            {artifact.primary ? "the spec" : artifact.slug}
+          </Link>
+        )}
+        , answered there
+      </span>
+    </span>
   );
 }
 

@@ -1493,17 +1493,27 @@ type or attribute, or requiring a new attribute requires a document migration an
 
 An ask block whose id no ask of its document indexes is a copy when another document of the same
 owner (the same issue, or for a project document the same project's other documents) holds an ask
-under that id that asks, or once asked, the block's question (`copiedAskSources`): a record copy
-of a spec uploaded beside it carries its blocks under their ids. Block ids are unique per document
-only (`asks_block_id_unique` is on `block_artifact_id` and `block_id`), so the question has to
-match as well, since an author-chosen id such as `decision` can name unrelated questions on two
-documents. A copy opens no ask: settlement writes its source's state and answer into the block,
-the earliest-asked source where several match, and the block stays read-only there, since the copy
-has no ask row an answer or resolve route could reach and settlement only reads the source's. It
-shows the source as of the copy's last settlement; answering the source later reaches the copy at
-its next settlement. A copy whose question is reworded, a source settlement retracted because its
-block left its document (a cut and paste), and an id no ask of the owner indexes open an ask as
-any new block does (LEGION-651).
+under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the
+block asks - its question, options, `multiple` and urgency, which a copy carries unchanged
+(`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
+blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
+`block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
+such as `decision` can name unrelated questions on two documents. Where several asks match, the
+earliest asked is the source, so two unrelated asks of one owner under one id asking the same
+thing are one question to a copy. A copy opens no ask: settlement writes its source's state and
+answer into the block and names the source in the server-owned `copied_from`, which an upload
+cannot set (`asUploaded`). The block is read-only there, since the copy has no ask row an answer or
+resolve route could reach and settlement only reads the source's; `dispatch_request_approval`'s
+refusal and the dashboard's decision card name the source from `copied_from`. A copy shows its
+source as of its own last settlement, and settles when its own content changes, when a restart
+resumes a settlement it owed, or when settlement retracts its source: a retraction marks owed, and
+arms, the settlement of every other document of the owner whose latest version holds the block
+with no ask of its own under that id (`owedCopiesOfRetracted`), whose next settlement opens the
+block's own ask, so a block pasted elsewhere and then cut, in either order, is open in one place.
+An answer to the source reaches a copy only at the copy's next settlement. A copy whose text is
+changed and an id no ask of the owner indexes open an ask as any new block does (LEGION-651). A
+project document's lookups read `artifacts_project_documents` (migration 0083), an issue
+document's `artifacts_issue_key`; `copied_asks_plan_test.go` holds both.
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
@@ -1558,7 +1568,7 @@ rowspan, or rows the budget ran out partway through. Where a table outside the a
 it first, the check can write span cells the document did not, and the ask is refused unless
 padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
-canonical markdown.
+canonical markdown, and a copy also `copied_from`, the ask it was copied from.
 
 ## Critical conventions
 

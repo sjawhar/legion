@@ -1808,63 +1808,56 @@ async function refuseOpenDecisionBlocks(
   if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0) return;
-  const [ownerAsks, version] = await Promise.all([
-    resolved.issue === undefined
-      ? client.getArtifactAsks(artifact.id)
-      : client.listIssueAsks(resolved.issue.key),
+  const [documentAsks, version] = await Promise.all([
+    blockAsks(client, resolved),
     client.docRead(artifact.id, latest),
   ]);
-  const withBlocks = ownerAsks.filter(
-    (ask): ask is Ask & { readonly block_id: string } => typeof ask.block_id === "string"
-  );
-  const asks = new Map(
-    withBlocks
-      .filter((ask) => ask.block_artifact?.id === artifact.id)
-      .map((ask) => [ask.block_id, ask])
-  );
-  // A block copied from another document of the issue opens no ask of its own: Dispatch shows it
-  // the state of the ask it was copied from, the earliest asked under its id.
-  const sources = new Map<string, Ask>();
-  for (const ask of withBlocks) {
-    if (ask.block_artifact?.id === artifact.id) continue;
-    const earlier = sources.get(ask.block_id);
-    if (earlier === undefined || ask.created_at < earlier.created_at)
-      sources.set(ask.block_id, ask);
-  }
+  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
-  const open = blocks.flatMap((block) => {
-    const ask = asks.get(block.id);
-    const named =
-      ask === undefined
-        ? `block ${block.id}`
-        : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
-    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
-    // whose lines carries a state is open.
-    const states = lines
-      .filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`))
-      .map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
-    if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
-    if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
-    if (ask === undefined) {
-      const source = sources.get(block.id);
-      if (source?.state === "open" && resolved.issue !== undefined) {
-        return [
-          `${named}, a copy of ask dispatch://${resolved.issue.key}/ask/${source.id}, which is open on the document it was copied from (${source.block_artifact?.slug ?? "another document"})`,
-        ];
-      }
-      return [`${named}, whose ask Dispatch has not opened yet`];
-    }
-    if (ask.state === "open") return [named];
-    // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
+  // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
+  const stillOpen = (named: string, state: string, where: string): string => {
     const next =
-      ask.state === "answered"
-        ? "fold the answer into the text"
-        : "write the decision into the text";
-    return [
-      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`,
-    ];
-  });
+      state === "answered" ? "fold the answer into the text" : "write the decision into the text";
+    return `${named}, ${state}${where} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`;
+  };
+  const open = await Promise.all(
+    blocks.map(async (block): Promise<string[]> => {
+      const ask = asks.get(block.id);
+      // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
+      // quotes the opener (in code, say) can add an open block but never hide one; a block none of
+      // whose lines carries a state is open.
+      const openers = lines.filter(
+        (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+      );
+      const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+      const named =
+        ask === undefined
+          ? `block ${block.id}`
+          : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+      if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
+      if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
+      if (ask !== undefined)
+        return ask.state === "open" ? [named] : [stillOpen(named, ask.state, "")];
+      // A block copied from another document's ask opens none: settlement names that ask in
+      // `copied_from` and shows its state, and the source is where it is answered.
+      const sourceId = openers
+        .map((line) => /\bcopied_from="([^"]+)"/.exec(line)?.[1])
+        .find((id) => id !== undefined);
+      if (sourceId === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
+      const source = (await client.getAsk(sourceId)).ask;
+      const slug = source.block_artifact?.slug;
+      const ref =
+        resolved.issue !== undefined
+          ? `dispatch://${resolved.issue.key}/ask/${source.id}`
+          : slug === undefined
+            ? source.id
+            : `dispatch://${artifact.project}/artifact/${slug}/ask/${source.id}`;
+      const where = slug === undefined ? "the document it was copied from" : slug;
+      const copy = `${named}, a copy of ask ${ref}`;
+      if (source.state === "open") return [`${copy}, which is open on ${where}: answer it there`];
+      return [stillOpen(copy, source.state, ` on ${where}`)];
+    })
+  ).then((judged) => judged.flat());
   if (open.length === 0) return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(
