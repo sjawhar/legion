@@ -261,12 +261,13 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 	})
 }
 
-// A settlement stamps a block id on every block that lacks one, in one update the room broadcasts
-// to its peers. ygo checks each update the service broadcasts by decoding it alone under the
-// server's pending queue (Server.MaxPendingItems), and the stamp of a block the document already
-// holds leans on that block, so a settlement stamping more blocks than ygo's default queue of
-// 100,000 broadcasts only under the server's maxUpdateItems. Refused, the broadcast fails the room
-// on every reload, and the document is never stamped.
+// A settlement stamps a block id on every block that lacks one, in one update it broadcasts to the
+// room's peers and appends to the store. The stamp of a block the document already holds leans on
+// that block, so the update decoded alone parks one item per stamp, more than ygo's default queue
+// of 100,000 here. The store's check decodes it under maxUpdateItems (newDocumentCopy), and ygo's
+// check of the broadcast takes no pending queue (reearth/ygo#268, in the pinned fork); a check at
+// ygo's default queue refuses it, which fails the room on every reload, and the document is never
+// stamped.
 func TestASettlementStampsMoreBlocksThanYgosDefaultQueue(t *testing.T) {
 	service, artifactID := newTestService(t)
 	// The settlement runs below, once, on the test's own goroutine.
