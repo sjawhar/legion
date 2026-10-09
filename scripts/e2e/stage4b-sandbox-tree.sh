@@ -922,7 +922,7 @@ liveness_verdict() {
   local phase=$1 mark=$2
   shift 2
   tail -n "+$((mark + 1))" "$daemon_log" |
-    jq -R -s -c --arg phase "$phase" --argjson boot "$boot_timeout" "$@" -f "$root/scripts/e2e/lib/controller-liveness-verdict.jq"
+    jq -R -s -c -L "$root/scripts/e2e/lib" --arg phase "$phase" --argjson boot "$boot_timeout" "$@" -f "$root/scripts/e2e/lib/controller-liveness-verdict.jq"
 }
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
@@ -1101,20 +1101,18 @@ pod_watch_verdict() {
   [ ! -s "$work/pod-watch-verdict.txt" ]
 }
 # never_scheduled_deaths WATCH DAEMONLOG prints, one a line, each incarnation the daemon found dead
-# (`supervise: process died`) whose pod, the incarnation's pod uid, the watch saw `PodScheduled=False`
-# with reason `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon
-# retired at its boot deadline because the scheduler never placed it. It reads the pod's own
-# conditions, never the daemon's detail text.
+# (`supervise: process died`) whose pod, the incarnation's pod uid, the watch saw unschedulable and
+# never scheduled (stage4b-pods.jq): a pod the daemon retired at its boot deadline because the
+# scheduler never placed it. It reads the pod's own conditions, never the daemon's detail text.
 never_scheduled_deaths() {
   local watch=$1 log=$2
-  jq -s -r --rawfile log "$log" '
+  jq -s -r -L "$root/scripts/e2e/lib" --rawfile log "$log" '
+    include "stage4b-pods";
     ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died") | .incarnation)) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
     | $died[] | . as $i | ($i | split("/")[0]) as $uid
     | [ $pods[] | select(.metadata.uid == $uid) ] as $seen
-    | select(($seen | length) > 0
-        and any($seen[]; any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))
-        and (any($seen[]; (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True")) | not))
+    | select(($seen | length) > 0 and any($seen[]; unschedulable) and (any($seen[]; scheduled) | not))
     | $i
   ' "$watch" | sort -u
 }

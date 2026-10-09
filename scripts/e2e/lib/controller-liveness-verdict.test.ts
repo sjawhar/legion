@@ -11,6 +11,7 @@ import { scriptFunctions } from "./script-functions";
 // in the down phase the relaunches as the Sandbox runtime reports them: failed launches, and the pod
 // watch's record of the pods they made.
 
+const library = fileURLToPath(new URL(".", import.meta.url));
 const program = fileURLToPath(new URL("./controller-liveness-verdict.jq", import.meta.url));
 const root = join(import.meta.dir, "..", "..", "..");
 const dir = mkdtempSync(join(tmpdir(), "controller-liveness-verdict-test."));
@@ -106,10 +107,9 @@ const pod = (uid: string, cpu: string, scheduling: { node?: string; unschedulabl
     },
   },
 });
-// The pod watch as the down phase leaves it: the deleted pod and the pod the Agent Sandbox
-// controller recreates from the old template, both scheduled and both requesting the negative
-// control's 250m, then the relaunch's pod, first Pending and then Unschedulable, requesting 100000
-// CPU in the API server's canonical form.
+// The pod watch as the down phase leaves it: the deleted pod and the pod recreated from the old
+// template, both scheduled at the negative control's 250m, then the relaunch's pod, first Pending
+// and then Unschedulable, at 100000 CPU in the API server's canonical form.
 const watch = [
   pod(deletedPod, "250m", { node: "node-a" }),
   pod("uid-recreated", "250m", { node: "node-b" }),
@@ -125,7 +125,19 @@ function verdict(
   named: Record<string, string> = downArgs,
   podWatch?: unknown[]
 ): Verdict {
-  const args = ["-R", "-s", "-c", "--arg", "phase", phase, "--argjson", "boot", "120"];
+  const args = [
+    "-R",
+    "-s",
+    "-c",
+    "-L",
+    library,
+    "--arg",
+    "phase",
+    phase,
+    "--argjson",
+    "boot",
+    "120",
+  ];
   for (const [name, value] of Object.entries(named)) args.push("--arg", name, value);
   if (podWatch !== undefined) {
     const file = join(dir, `watch-${++runs}.json`);
@@ -321,9 +333,9 @@ describe("controller-liveness-verdict.jq, up and operator", () => {
     expect(() => verdict([], "sideways", {})).toThrow(
       /phase must be down, up or operator, not "sideways"/
     );
-    expect(() => runJq(["-R", "-s", "--arg", "phase", "up", "-f", program], "")).toThrow(
-      /boot .* is required/
-    );
+    expect(() =>
+      runJq(["-R", "-s", "-L", library, "--arg", "phase", "up", "-f", program], "")
+    ).toThrow(/boot .* is required/);
   });
 });
 
@@ -331,19 +343,17 @@ describe("the texts the verdict counts are the daemon's own", () => {
   test("the daemon writes both lines, and the machine its launch lines, with the text the verdict matches", () => {
     const daemon = join(root, "packages", "daemon", "internal");
     const controller = readFileSync(join(daemon, "daemon", "controller.go"), "utf8");
-    expect(controller).toContain(
-      `const controllerNotRegistered = ${JSON.stringify(notRegistered)}`
-    );
-    expect(controller).toContain(
-      `controllerNotRegistered+${JSON.stringify(daemonForm.slice(notRegistered.length))}`
-    );
+    expect(controller).toContain(JSON.stringify(notRegistered));
+    expect(controller).toContain(JSON.stringify(daemonForm.slice(notRegistered.length)));
     expect(readFileSync(join(daemon, "controller", "liveness.go"), "utf8")).toContain(
       JSON.stringify(noHolder)
     );
     const machine = readFileSync(join(daemon, "supervise", "machine.go"), "utf8");
-    expect(machine).toContain('m.log.Warn("supervise: launch failed", "generation"');
-    expect(machine).toContain('m.log.Info("supervise: launched", "generation"');
     const jq = readFileSync(program, "utf8");
+    for (const text of ["supervise: launch failed", "supervise: launched"]) {
+      expect(machine).toContain(JSON.stringify(text));
+      expect(jq).toContain(JSON.stringify(text));
+    }
     expect(jq).toContain(`def not_registered: ${JSON.stringify(notRegistered)};`);
     expect(jq).toContain(`def no_holder: ${JSON.stringify(noHolder)};`);
   });
