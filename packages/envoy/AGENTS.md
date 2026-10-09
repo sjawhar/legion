@@ -59,7 +59,7 @@ set), so its slot is finished with that update and the worker takes it rather th
 settlement that wrote into the room renders its version from the document as it stands after the
 repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version
 too. A document's pending authors are in one of two places: F, the room's local in-flight credits
-(`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0083`.
+(`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F. Its append takes the document's
 advisory lock, writes an unconsumed credit to R in that update's transaction, then removes it from
 F after the transaction ends. A joined write records its authors directly in R in the transaction
@@ -604,7 +604,7 @@ is the one list of those holders. Every lookup takes a state through `lockState`
 forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The
 `doc_settlements_pending` row (migration 0063) says only that a settlement is owed and records
-its latest edit source; migration `0083`'s `doc_pending_authors` rows hold the authors. A browser
+its latest edit source; migration `0084`'s `doc_pending_authors` rows hold the authors. A browser
 update credits only the peers connected for that update, never the room's accumulated state, in
 the room-local F record. Its append moves an unconsumed credit to R under the document lock; a
 joined write records its own authors in R when its content commits. A version reads R under that

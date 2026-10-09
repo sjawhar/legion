@@ -315,7 +315,7 @@
   nothing still holds it. Before, every document opened since a restart kept its state and counted
   against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
 - A document's pending authors now survive room release, process restart and overlapping Dispatch
-  tasks in `doc_pending_authors` (migration `0083`). A browser update is first an in-flight,
+  tasks in `doc_pending_authors` (migration `0084`). A browser update is first an in-flight,
   room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
   document lock. A joined write records its authors in R in its content transaction. A version
   reads R under that lock and may capture F only from its own room; after its transaction commits,
