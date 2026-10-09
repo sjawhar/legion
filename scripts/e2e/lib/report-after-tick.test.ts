@@ -184,6 +184,22 @@ describe("report_after_tick", () => {
     expect(code).toBe(0);
   });
 
+  test("eval code that writes to another device while a comment mentions xd://dispatch_message is not the report's call", () => {
+    const code = `// writing another_device, not xd://dispatch_message here, issue ${report}\nawait tool.write({ path: "xd://another_device", content: "{}" });`;
+    const { code: exitCode, stdout } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_x",
+        name: "eval",
+        arguments: { language: "js", code },
+      })
+    );
+    expect(stdout).toBe(
+      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write`
+    );
+    expect(exitCode).toBe(1);
+  });
+
   test("a message the start turn posts on another issue is not the report's call", () => {
     for (const call of Object.values(surfaces)) {
       const { code, stdout } = run(

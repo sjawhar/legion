@@ -5,17 +5,18 @@
 
 # calls(name) is whether a message content entry calls the tool name, by any of the ways Oh My Pi
 # gives the model: the tool itself, a write whose path is the tool's device, xd://<name>, alone,
-# eval code that calls tool.<name>(...), or eval code that calls the generic tool.write(...) naming
-# the device xd://<name> among its arguments (the two ways a model can reach a device from eval).
+# eval code that calls tool.<name>(...), or eval code whose tool.write(...) call itself names the
+# device xd://<name> before the call's own closing brace (the two ways a model can reach a device
+# from eval). The device must fall inside that write call's own arguments, not merely anywhere in
+# the code string, so a comment or an unrelated tool.write to another device never counts.
 def calls(name):
   .type? == "toolCall" and (
     .name == name
     or (.name == "write" and ((.arguments.path? // "") | tostring | test("^\\s*xd://" + name + "\\s*$")))
-    or (.name == "eval" and (
-         ((.arguments.code? // "") | tostring) as $code
-         | ($code | test("\\btool\\." + name + "\\s*\\("))
-           or (($code | test("\\btool\\.write\\s*\\(")) and ($code | test("xd://" + name + "\\b")))
-       ))
+    or (.name == "eval" and ((.arguments.code? // "") | tostring | (
+         test("\\btool\\." + name + "\\s*\\(")
+         or test("\\btool\\.write\\s*\\([^}]*xd://" + name + "\\b")
+       )))
   );
 
 # device_arguments are the arguments a write to a tool's device hands the tool: its content, which
