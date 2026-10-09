@@ -112,6 +112,12 @@ const (
 // agentModelsMark carries one of those states on the OK line.
 const agentModelsMark = "agent-models="
 
+// extensionsMark is on the OK line once the load probe has run the pod's lane with extension
+// discovery on, the two plugin roots explicit beside it: a CLI that predates that lane probed the
+// roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
+// into its profile, which a pod of this daemon would load twice.
+const extensionsMark = "extensions=discovered"
+
 // capabilitiesMark is on the OK line once the probe has checked the capability list
 // (internal/capabilities, CheckImage) and found every image-site capability present: a CLI that
 // predates the check prints no such token, having checked none of them.
@@ -130,15 +136,16 @@ const (
 	ModelFallbackOff = "off"
 )
 
-// OKLine is that line: the OMP invocation probed, the session-storage mark, the agent-models mark
-// (AgentModelsResolved or AgentModelsSkipped), the capabilities mark, the model-fallback mark
-// (ModelFallbackOn or ModelFallbackOff), and the daemon API contract the image's plugin declared,
-// last. The daemon's probe Sandbox passes the image only on a line that confirms the daemon's own
-// contract (ConfirmedContract) with the agents' models resolved (AgentModels) and the capability
-// list checked (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its
+// OKLine is that line: the OMP invocation probed, the session-storage mark, the extensions mark,
+// the agent-models mark (AgentModelsResolved or AgentModelsSkipped), the capabilities mark, the
+// model-fallback mark (ModelFallbackOn or ModelFallbackOff), and the daemon API contract the
+// image's plugin declared, last. The daemon's probe Sandbox passes the image only on a line that
+// confirms the daemon's own contract (ConfirmedContract) with the extensions mark
+// (ExtensionsDiscovered), the agents' models resolved (AgentModels) and the capability list
+// checked (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its
 // ImageReport.
 func OKLine(omp string, contract int, agentModels, modelFallback string) string {
-	return fmt.Sprintf("%s (%s) %s %s%s %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels,
+	return fmt.Sprintf("%s (%s) %s %s %s%s %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels,
 		capabilitiesMark, modelFallbackMark, modelFallback, contract)
 }
 
@@ -188,6 +195,13 @@ var capabilitiesChecked = markPattern(capabilitiesMark)
 // CapabilitiesChecked is whether an OK line in output carries the capabilities mark; false when
 // output holds none: no OK line, or one from a CLI that predates the capability check.
 func CapabilitiesChecked(output string) bool { return capabilitiesChecked.MatchString(output) }
+
+// extensionsDiscovered is the extensions mark on an OK line.
+var extensionsDiscovered = markPattern(extensionsMark)
+
+// ExtensionsDiscovered is whether an OK line in output carries the extensions mark; false when
+// output holds none: no OK line, or one from a CLI that predates the discovery-on pod lane.
+func ExtensionsDiscovered(output string) bool { return extensionsDiscovered.MatchString(output) }
 
 // modelFallbackState is the model-fallback mark on an OK line.
 var modelFallbackState = markPattern(modelFallbackMark)

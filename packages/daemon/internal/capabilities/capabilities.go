@@ -61,15 +61,11 @@ type Capability struct {
 	// the sentence that says so and names the issue whose landing changes that; "" otherwise. The
 	// report's job is to name what a worker lacks, so a tool the image carries but no pod loads is
 	// not present: CheckImage and Deployment.Report render such a row installed, with this sentence
-	// after the evidence, rather than present.
+	// after the evidence, rather than present. No row awaits at present: CodeGraph did, until
+	// LEGION-629 turned extension discovery on in the pod's launch (runtime/sandbox/manifest.go,
+	// agentArgv), so the profile's plugin now loads in every pod.
 	Awaits string
 }
-
-// codeGraphAwaits is why the codegraph row is installed, not present: a pod's agent is launched
-// `--no-extensions` with the Envoy and Legion plugins as its explicit extensions
-// (runtime/sandbox/manifest.go, agentArgv), so the profile's CodeGraph plugin never loads and no
-// worker has the tool until the launch loads profile plugins (LEGION-629).
-const codeGraphAwaits = "a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"
 
 // Table is every capability, in the order the probe prints them: the declared list, printed
 // whole. Image rows are checked by CheckImage; the others are rendered as what they are.
@@ -79,7 +75,7 @@ var Table = []Capability{
 	{EvalPython, SiteImage, "evaluates Python through the interpreter `omp setup python` manages", "", ""},
 	{Browser, SiteImage, "drives a headless Chromium through the browser tools", "", ""},
 	{LSP, SiteImage, "reads diagnostics and symbols from the Go, TypeScript and Python language servers", "", ""},
-	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", "", codeGraphAwaits},
+	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", "", ""},
 	{WebSearch, SiteLive, "searches the web through the web-search tool", "", ""},
 	{Skills, SiteImage, "loads the skills Legion's prompts name", "", ""},
 	{MCP, SiteLive, "reaches the MCP servers the deployment configures", "", ""},

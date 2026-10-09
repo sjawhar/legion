@@ -58,23 +58,29 @@ committed that transaction, and ygo hands the worker an update for it too (the d
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
 repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version
-too. The settlement takes its authors under the room's state lock before it copies that tree, so
-an edit credited after the take stays pending for the next version that holds it. Each pending
-author carries the sequence number of the credit that made it pending (`roomState.creditSeq`).
-Every version takes the sequence no later than it reads the tree it records - a settlement and a
-version read straight from the room before their copy; a transaction's version before its fork
-reads the room; an upload as of its write's last read of the room (`liveWrite.forkSeq`) - and its
-commit releases every pending entry credited through that sequence, not the keys it captured
-(`versionPending`, `Service.commitVersion`). An author who edits again after a version took its
-authors stays pending for the second edit, as does one whose edit the version's tree holds while
-its update observer, which ygo runs only once the edit's transaction has released the document,
-had not yet credited it. That edit's own settlement writes no version and releases nothing, and
-the next version credits them (LEGION-503). A transaction whose version holds every change of its
-own write does not credit that write again at commit (`liveWrite.versioned`). An upload, whose
-route writes its version itself, records it (`Ledger.WroteVersion`): when its write changed the
-document, it clears every credit pending at the write's room read, whether its replacement removed
-that edit or kept it, and its version credits the uploader alone; an edit credited after that read
-stays pending for the next version. An upload that changed nothing clears nothing.
+too. A document's pending authors are in one of two places: F, the room's local in-flight credits
+(`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
+`creditContentChange` puts a browser update's connected peers in F. Its append takes the document's
+advisory lock, writes an unconsumed credit to R in that update's transaction, then removes it from
+F after the transaction ends. A joined write records its authors directly in R in the transaction
+that commits its content. A version takes that same lock, reads R and its own room's F, then, when
+it commits, deletes the R rows it read and marks the F credits it read consumed. An append queued
+behind that commit finds a consumed credit and writes nothing to R. Each author is therefore in
+exactly one of F, R, or a committed version's list. A later edit gets a new credit and remains
+pending for the next version, even when the earlier edit's version is still committing. A
+settlement that writes no version leaves R intact. An upload whose replacement changed the document
+lists its uploader, deletes only the R rows whose writing update its room's instance held (each row
+records that update's version, `written_through`; the instance holds every update through the head
+it loaded and each it took since, `roomHold`), and consumes only the F credits that existed at its
+last room read (`liveWrite.forkSeq`); a row another task's room stored, and a later credit, remain
+pending. An upload that changed nothing clears nothing.
+
+The cross-task rule is scoped: a task can list and remove only R from another task. A version may
+also list F from its own room, the within-task exception, because its commit holds that room's
+state lock from before the database commit until it consumes those credits. The append then takes
+the document lock after the commit and observes the consumption instead of reintroducing the
+author in R. A task never reads, consumes, or releases another task's F; every author crosses a
+task boundary only after the append has put it in R.
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read
@@ -330,9 +336,11 @@ room for (`withholdAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
 The handler ends the transaction with
-`ledger.Commit`, which commits, credits the writes' actor to their rooms, releases the authors a
-version the transaction wrote named, then applies and broadcasts the updates, and last publishes
-the events its document operations appended, ahead of the handler's own; it defers
+`ledger.Commit`, which records each settlement credit with the document content and takes each
+version's authors back out of that record, commits, credits the writes' actor to their rooms,
+releases the authors a version the transaction wrote named, then applies and broadcasts the
+updates, and last publishes the events its document operations appended, ahead of the handler's
+own; it defers
 `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
 every version and the durable document as they were.
 
@@ -588,6 +596,33 @@ before ygo's persistence observer runs (`onLoadDocument`), so the stranded appen
 publish it runs inside, and the publish, its request and the document's writer slot are released
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
+
+The service keeps a document's state (`docs.roomState`, `docs/roomstate.go`: its connected
+browsers, writer slot, settlement timer, pending authors) only while ygo holds
+a room for it, loaded or loading, or something on the document still holds the state; `unusedLocked`
+is the one list of those holders. Every lookup takes a state through `lockState` or
+`lockExistingState`, which never hand out a forgotten state, and ends with `unlockState`, which
+forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
+`OnUnloadDocument` when the room goes, or a holder's own end - releases it. The
+`doc_settlements_pending` row (migration 0063) says only that a settlement is owed and records
+its latest edit source; migration `0084`'s `doc_pending_authors` rows hold the authors. A browser
+update credits only the peers connected for that update, never the room's accumulated state, in
+the room-local F record. Its append moves an unconsumed credit to R under the document lock; a
+joined write records its own authors in R when its content commits. A version reads R under that
+lock and F from its own room, deletes the R rows it listed and consumes its local F only after its
+commit. `Ledger.commit` holds `state.mu` from before that commit through consumption, so an append
+that gets the document lock next cannot restore an author the version listed. A version on another
+task sees and removes R but never that task's F. Thus a room can disappear or the process can
+restart after every pending author has reached R, without losing or duplicating a later version's
+authors; a service repair is credited to no one. An in-flight credit holds its state until its
+append lands (`unusedLocked`). A forced eviction (`evictRoom`) forgets the state anyway, and the
+append still reaches the credit through its `UpdateCredit`, so it writes or skips the author all
+the same.
+
+The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms,
+never documents touched since the process started (LEGION-513). A room an `Apply` opened with no
+peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
+`PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, the one its
 reads walk, not the live tree, since ygo fires it after the transaction has

@@ -17,7 +17,9 @@ import (
 // through pmdoc.Update: one deeper than the depth bound, or a mark nested past what ygo's text
 // writers take, which a server whose bound did not count the map ygo stores a mark as could also
 // have stored. Settlement skips that tree as it does every tree outside the schema: it writes no
-// version, does not fail the live room, and never hands ygo the value to write again.
+// version, does not fail the live room, and never hands ygo the value to write again. Its
+// pending-settlement row and unsettled state stay, because a later repair or restart must still
+// settle the document rather than forget it.
 func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -54,7 +56,7 @@ func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
 
 			state := service.room(artifactID)
 			state.mu.Lock()
-			generation := state.gen
+			generation := state.roomGeneration
 			state.mu.Unlock()
 			service.settleRoom(artifactID, generation)
 
@@ -77,6 +79,12 @@ func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
 			}
 			if state.settleFailures != 0 {
 				t.Fatalf("settlement recorded %d failures for a document outside the schema", state.settleFailures)
+			}
+			if !state.unsettled {
+				t.Fatal("settlement that stopped at ErrDocSchema released the document's unsettled state")
+			}
+			if _, held := service.rooms.Load(artifactID); !held {
+				t.Fatal("settlement that stopped at ErrDocSchema removed the document's state")
 			}
 		})
 	}

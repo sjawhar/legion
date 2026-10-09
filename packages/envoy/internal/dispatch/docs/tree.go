@@ -330,17 +330,24 @@ func (r *renderedReplica) observe(room string, live *crdt.Doc, onChanged func(tr
 }
 
 // keepReplica makes the replica live's update observer keeps, starting from markdown, live's
-// rendering at its load, and lists it for live's reads (readLive) while live is resident. The
-// listing holds live and the replica weakly, and the observer, which live holds, holds the
-// replica, so the replica, a whole copy of live, is collected with live and in the same cycle; the
-// listing goes once live is collected. A reader holding an evicted instance of the room reaches that
-// instance's replica or none, never its successor's.
+// rendering at its load, and lists it for live's reads (readLive) while live is resident
+// (listResident). The listing holds the replica weakly too, and the observer, which live holds,
+// holds the replica, so the replica, a whole copy of live, is collected with live and in the same
+// cycle. A reader holding an evicted instance of the room reaches that instance's replica or none,
+// never its successor's.
 func (s *Service) keepReplica(live *crdt.Doc, markdown *string) *renderedReplica {
 	replica := &renderedReplica{markdown: markdown}
-	key := weak.Make(live)
-	s.replicas.Store(key, weak.Make(replica))
-	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { s.replicas.Delete(key) }, key)
+	listResident(&s.replicas, live, weak.Make(replica))
 	return replica
+}
+
+// listResident lists value under live, a room's resident document, in listing until live is
+// collected: the key holds live weakly, so the listing never keeps an evicted room's document
+// alive, and the entry goes once that document is collected.
+func listResident(listing *sync.Map, live *crdt.Doc, value any) {
+	key := weak.Make(live)
+	listing.Store(key, value)
+	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { listing.Delete(key) }, key)
 }
 
 // readLive runs read against live, a room's resident document, as of one moment: live's replica
