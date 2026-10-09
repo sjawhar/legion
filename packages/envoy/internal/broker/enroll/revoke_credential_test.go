@@ -50,6 +50,37 @@ func mintDecidedCredential(t *testing.T, svc *Service, operator, service *string
 	return cred
 }
 
+// TestRevokeAndDecideAdmitTheSameLogins pins RevokeCredential to record.MayDecide's machine-login
+// rule: for every stored approver (a person's, one stored in another casing, the sentinel), with
+// and without a service, and every login (the approver in any casing, another person, the sentinel,
+// no one), RevokeCredential succeeds exactly when MayDecide admits that login to decide the record,
+// and refuses ErrNotApprover otherwise, so who may revoke a machine login never drifts from who may
+// approve it.
+func TestRevokeAndDecideAdmitTheSameLogins(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	for _, approver := range []string{"ada@example.com", "Ada@Example.com", record.AnyoneApprover} {
+		for _, service := range []*string{nil, str("legion-daemon")} {
+			for _, person := range []string{"ada@example.com", " ADA@example.com ", "bob@example.com", " Anyone ", "  "} {
+				operator := &approver
+				if service != nil {
+					operator = nil
+				}
+				cred := mintDecidedCredential(t, svc, operator, service, "parity-host", approver, "ada@example.com")
+				name := ""
+				if service != nil {
+					name = *service
+				}
+				decides := record.MayDecide(record.KindLauncherCredential, approver, name, person)
+				err := svc.RevokeCredential(ctx, cred.ID.String(), person)
+				if decides && err != nil || !decides && !errors.Is(err, ErrNotApprover) {
+					t.Errorf("approver %q, service %q, login %q: RevokeCredential = %v, but MayDecide = %v", approver, name, person, err, decides)
+				}
+			}
+		}
+	}
+}
+
 // insertLiveGrant writes a granted request and its live grant under enrollmentID directly (grant
 // issuance is requests.Machine's), and returns the grant's id.
 func insertLiveGrant(t *testing.T, svc *Service, enrollmentID uuid.UUID) uuid.UUID {

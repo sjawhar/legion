@@ -550,20 +550,24 @@ func (s *Service) RevokeCredential(ctx context.Context, id, person string) error
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var approvedBy, host string
+	var approver, host string
 	var service *string
 	var revokedAt *time.Time
 	err = tx.QueryRow(ctx, `select r.approver, c.service, c.host, c.revoked_at from launcher_credentials c
 		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where c.id = $1 for no key update of c`, id).Scan(&approvedBy, &service, &host, &revokedAt)
+		where c.id = $1 for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoCredential
 	}
 	if err != nil {
 		return err
 	}
+	var svc string
+	if service != nil {
+		svc = *service
+	}
 	person = record.CanonicalLogin(person)
-	if person == "" || person == record.AnyoneApprover || service == nil && approvedBy != person {
+	if !record.MayDecide(record.KindLauncherCredential, approver, svc, person) {
 		return ErrNotApprover
 	}
 	if revokedAt != nil {
