@@ -13,13 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
-	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
@@ -314,14 +312,7 @@ func TestTheDaemonSaysItsControllerIsNotRegisteredWhileItsLaunchHangs(t *testing
 	envoy, _ := envoyRoleRegistry(t, "ses_controller", false)
 	cfg.EnvoyURL = envoy.URL
 	stalled := stalledLaunches{Runtime: fake.NewRuntime(), started: &atomic.Bool{}, release: make(chan struct{})}
-	o := fakeRuntime(stalled.Runtime, &built{})
-	build := o.runtime
-	o.runtime = func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
-		if _, err := build(ctx, listener, address, apps, st, removable); err != nil {
-			return nil, err
-		}
-		return stalled, nil
-	}
+	o := fakeRuntime(stalled, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	logs := &syncBuffer{}
 	startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
