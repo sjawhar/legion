@@ -192,16 +192,24 @@ func (s *Service) holdOf(live *crdt.Doc) *roomHold {
 // authorCapture is whom a version credits and what its commit takes out of the pending authors:
 // rAuthors, the authors of the R rows it read, and inflight, the unconsumed F credits it read from
 // state. authors is the version's own list, those and the writing transaction's own credits and
-// actor. upload is an upload's capture (uploadCapture): its version lists the uploader alone, and
-// its commit deletes the R rows hold, its room instance's live record, held as of upload, whose
-// changes its replacement holds or removed.
+// actor. upload is set only for an upload's capture (uploadCapture), whose version lists the
+// uploader alone; its commit deletes the R rows whose writing updates the upload's room instance
+// held, since the replacement holds or removed their changes.
 type authorCapture struct {
 	state    *roomState
 	authors  map[string]model.Actor
 	rAuthors []model.Actor
 	inflight []*inflightCredit
-	upload   *heldUpdates
-	hold     *roomHold
+	upload   *uploadHold
+}
+
+// uploadHold is what an upload's commit takes out of its room instance's record of the updates it
+// holds: held, that record as of the upload's last read of the room, whose pending-author rows
+// the commit deletes, and hold, the live record, which drops them once the commit has landed
+// (roomHold.consumed).
+type uploadHold struct {
+	held heldUpdates
+	hold *roomHold
 }
 
 // capturePendingAuthors reads R in tx, which holds the document's advisory lock, and takes whom a
@@ -254,8 +262,7 @@ func uploadCapture(write *liveWrite) authorCapture {
 	state.mu.Lock()
 	inflight := state.unconsumedInflightLocked(write.forkSeq)
 	state.mu.Unlock()
-	held := write.forkHold.snapshot()
-	return authorCapture{state: state, inflight: inflight, upload: &held, hold: write.forkHold}
+	return authorCapture{state: state, inflight: inflight, upload: &uploadHold{held: write.forkHold.snapshot(), hold: write.forkHold}}
 }
 
 // unconsumedInflightLocked is state's F credits no committed version has listed, observed no later
@@ -279,7 +286,7 @@ func (capture authorCapture) consumeLocked() {
 		record.consumed = true
 	}
 	if capture.upload != nil {
-		capture.hold.consumed(*capture.upload)
+		capture.upload.hold.consumed(capture.upload.held)
 	}
 }
 
@@ -287,7 +294,7 @@ func (capture authorCapture) consumeLocked() {
 // the rows of the authors it read, or for an upload the rows whose writing update its room held.
 func deleteCapturedPendingAuthors(ctx context.Context, tx pgx.Tx, room string, capture authorCapture) error {
 	if capture.upload != nil {
-		return deleteHeldPendingAuthors(ctx, tx, room, *capture.upload)
+		return deleteHeldPendingAuthors(ctx, tx, room, capture.upload.held)
 	}
 	return deletePendingAuthors(ctx, tx, room, capture.rAuthors)
 }
@@ -299,27 +306,46 @@ type pendingAuthor struct {
 	writtenThrough persistence.Version
 }
 
-// pendingAuthorsAt is each of authors as recorded by the update stored at version.
-func pendingAuthorsAt(authors map[string]model.Actor, version persistence.Version) []pendingAuthor {
+// pendingAuthorsOf is each of authors with the version of the update whose write recorded it,
+// which writtenThrough names for each author's key. authors is keyed by actorKey, so no author
+// appears twice.
+func pendingAuthorsOf(authors map[string]model.Actor, writtenThrough func(key string) persistence.Version) []pendingAuthor {
 	pending := make([]pendingAuthor, 0, len(authors))
 	for _, actor := range actorSlice(authors) {
-		pending = append(pending, pendingAuthor{actor: actor, writtenThrough: version})
+		pending = append(pending, pendingAuthor{actor: actor, writtenThrough: writtenThrough(actorKey(actor))})
 	}
 	return pending
+}
+
+// pendingAuthorsAt is each of authors as recorded by the update stored at version.
+func pendingAuthorsAt(authors map[string]model.Actor, version persistence.Version) []pendingAuthor {
+	return pendingAuthorsOf(authors, func(string) persistence.Version { return version })
 }
 
 // upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, in one
 // statement, each as recorded by its own update. An author keeps one row per update that recorded
 // it, so an upload that holds one of those updates and not another deletes only the first.
+// authors must name each author at most once per update: one statement cannot write one row twice,
+// so a repeated author and version is refused, naming it, before anything is written.
 func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors []pendingAuthor) error {
 	if len(authors) == 0 {
 		return nil
 	}
+	type row struct {
+		key     string
+		version persistence.Version
+	}
+	seen := make(map[row]struct{}, len(authors))
 	kinds := make([]string, 0, len(authors))
 	ids := make([]string, 0, len(authors))
 	encoded := make([]string, 0, len(authors))
 	versions := make([]int64, 0, len(authors))
 	for _, author := range authors {
+		pair := row{key: actorKey(author.actor), version: author.writtenThrough}
+		if _, repeated := seen[pair]; repeated {
+			return fmt.Errorf("record the document's pending authors: %s/%s at update %d is named twice", author.actor.Kind, author.actor.ID, author.writtenThrough)
+		}
+		seen[pair] = struct{}{}
 		raw, err := json.Marshal(author.actor)
 		if err != nil {
 			return fmt.Errorf("encode the document's pending authors: %w", err)

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -309,10 +310,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if write.actor == nil {
 			continue
 		}
-		pending := make([]pendingAuthor, 0, len(write.credits))
-		for _, author := range actorSlice(write.credits) {
-			pending = append(pending, pendingAuthor{actor: author, writtenThrough: write.creditedBy[actorKey(author)]})
-		}
+		pending := pendingAuthorsOf(write.credits, func(key string) persistence.Version { return write.creditedBy[key] })
 		if err := upsertPendingAuthors(ctx, l.tx, artifactID, pending); err != nil {
 			return err
 		}

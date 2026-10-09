@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -554,6 +555,45 @@ func heldEntries(hold *roomHold) int {
 	hold.mu.Lock()
 	defer hold.mu.Unlock()
 	return len(hold.since)
+}
+
+// upsertPendingAuthors writes one statement, which Postgres refuses when it names one row twice,
+// so it refuses an author named twice at one writing update itself, naming the pair, and writes
+// nothing; the same author at two updates is two rows and is written.
+func TestUpsertPendingAuthorsRefusesAnAuthorNamedTwiceAtOneUpdate(t *testing.T) {
+	service, artifactID := newTestService(t)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	carol := model.Actor{Kind: "user", ID: "carol"}
+	ctx := context.Background()
+	write := func(authors []pendingAuthor) error {
+		t.Helper()
+		tx, err := service.store.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx)
+		if err := upsertPendingAuthors(ctx, tx, artifactID, authors); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return nil
+	}
+	err := write([]pendingAuthor{{actor: carol, writtenThrough: 3}, {actor: bob, writtenThrough: 4}, {actor: bob, writtenThrough: 4}})
+	t.Logf("a repeated pair: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "user/bob at update 4") {
+		t.Fatalf("upsert with bob twice at update 4 = %v, want a refusal naming user/bob at update 4", err)
+	}
+	if owed := pendingAuthorRows(t, service.store, artifactID); len(owed) != 0 {
+		t.Fatalf("pending authors after the refused upsert = %+v, want none", owed)
+	}
+	if err := write([]pendingAuthor{{actor: bob, writtenThrough: 4}, {actor: bob, writtenThrough: 5}}); err != nil {
+		t.Fatalf("upsert bob at two updates: %v", err)
+	}
+	if owed := pendingAuthorRows(t, service.store, artifactID); !slices.Equal(owed, []model.Actor{bob, bob}) {
+		t.Fatalf("pending authors after bob at two updates = %+v, want his two rows", owed)
+	}
 }
 
 // A joined transaction whose writes credit two actors records each one's pending row as written by
