@@ -21,7 +21,7 @@ import (
 // Image is the SeaweedFS image every S3-compatible test container runs. The envoy-go CI job
 // reads this declaration and pulls the image before its first test step, so no test reaches the
 // registry mid-run; keep it a single-line string constant.
-const Image = "chrislusf/seaweedfs:3.97"
+const Image = "mirror.gcr.io/chrislusf/seaweedfs:3.97"
 
 // Start runs an S3-compatible server holding the empty bucket, removed when t ends, points this
 // process's AWS SDK at it for the rest of t (filestest.PointSDKAt), so files.NewS3(ctx, bucket)

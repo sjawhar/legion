@@ -2384,8 +2384,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.exits).toEqual([]);
   });
 
-  // Nobody reads a daemon-launched controller's session, so a claim it cannot complete exits Oh My
-  // Pi and the daemon relaunches it, as a pane's failed boot does.
+  // A daemon-launched controller whose claim cannot complete exits Oh My Pi, and the daemon
+  // relaunches it, as a pane's failed boot does.
   test("a daemon-launched controller whose registration is refused exits", async () => {
     const controller = await launchedController({
       sessionId: "ses_controller_pod",

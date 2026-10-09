@@ -27,13 +27,13 @@ page.
 On the agent's machine, `agent-secrets launcher login` prints a code and the address of Dispatch's
 machine-login page, `/credentials/machine`. Alice opens that page, types the code, and checks the
 record it finds: a machine login for `example-host-build`, with her as its approver. She approves
-it, the page lists it under **Your machine logins**, where **Revoke** would end it and every session
+it, the page lists it under **Machine logins**, where **Revoke** would end it and every session
 it started ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)),
 and the login on the machine returns. `agent-secrets launcher login-status` checks the machine
 login at any time: it prints `issued` while the machine holds one, and says when that login
 expires. The broker does not renew it, so before then a person must approve a new machine login.
 
-![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them Your machine logins, empty until she approves](/legion/media/broker/machine-login.png)
+![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them the machine logins list, empty until she approves](/legion/media/broker/machine-login.png)
 
 ## 2. Start a session
 

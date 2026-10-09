@@ -163,15 +163,15 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
 		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
-		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests pending the caller's own decision (?approver=me only); null without a configured secrets broker.", s.listCredentialPending},
+		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests the caller may decide (?approver=me only): those naming the caller, a shared secret's and a service's machine login, which anyone signed in decides; null without a configured secrets broker.", s.listCredentialPending},
 		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.approveCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/deny", authHuman, "Deny a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.denyCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/machine-lookup", authHuman, "Resolve a pending machine login by its typed confirmation code, returning its facts.", s.lookupMachineCredential},
 		{http.MethodGet, "/api/v1/credential-grants", authHuman, "List credential grants the caller may revoke (?approver=me only).", s.listCredentialGrants},
 		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authHuman, "Revoke a credential grant as the caller, its approver or its enrollment's operator.", s.revokeCredentialGrant},
-		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the machine logins the caller approved that can still reach a secret: the secrets broker's launcher credentials for the caller's own machines and for any service whose login the caller approved, unexpired or expired with a session still running.", s.listMachineLogins},
-		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login the caller approved, expired or not, ending every session it enrolled, a service's pods included; the broker refuses anyone but the person who approved it.", s.revokeMachineLogin},
+		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the machine logins the caller may revoke that can still reach a secret: the secrets broker's launcher credentials for every service's login, whoever approved it, and for the caller's own machines, unexpired or expired with a session still running, each naming who approved it.", s.listMachineLogins},
+		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
 	}
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,

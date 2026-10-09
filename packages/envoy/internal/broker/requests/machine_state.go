@@ -170,7 +170,7 @@ type enrollmentRow struct {
 // for a pod), its service, and the names that person withheld from it (RevokeByApprover's
 // withhold). Its service is its launcher credential's only when it is a pod, that service is one
 // of services, and the pod's verified service account is the one services binds it to: a machine
-// login's service name is the machine's own claim, approved by whoever its login names, so the
+// login's service name is the machine's own claim, which anyone signed in to Dispatch may approve, so the
 // account is what proves the service. Any other session has none. A caller that decides for the
 // session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
@@ -555,7 +555,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
-	login, err = parsed.ApproverLogin(record.KindAgentSecret, login)
+	login, err = parsed.ApproverLogin(record.KindAgentSecret, "", login)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -649,7 +649,7 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 		if d.Outcome == policy.Deny && slices.Contains(requester.Withheld, g.name) {
 			return fmt.Errorf("%w: %s is withheld from this session and the current policy denies it, so no one may approve it now", record.ErrNotApprover, g.name)
 		}
-		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, login) {
+		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, "", login) {
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
 		}
 	}

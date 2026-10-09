@@ -361,7 +361,7 @@ jobs:
         run: bun run typecheck
         working-directory: packages/envoy-client
       - name: Pre-pull the NATS image the credential tests run
-        run: docker pull nats:2.10
+        run: docker pull mirror.gcr.io/library/nats:2.10
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
@@ -517,7 +517,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -654,7 +654,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -768,7 +768,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -815,7 +815,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -951,7 +951,7 @@ jobs:
       # the script's own implicit pull would fail the run for a reason outside it.
       - name: Pull the NATS image the script starts
         run: |
-          nats_image=$(sed -n 's/^docker run .* \(nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
+          nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
           [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
           for attempt in 1 2 3; do
             docker pull "$nats_image" && break

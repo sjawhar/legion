@@ -54,7 +54,8 @@ worker pods.
 A pod gets the service's agent-tier secrets at once when two things hold: a machine login for the
 listed service enrolled it, and its projected token proved that service account. Every other
 session is denied them. Binding the account matters because a machine login names its service
-itself, and whoever its login names approves it, so the service name alone proves nothing. For the
+itself, and anyone signed in to Dispatch approves a service's login, so the service name alone
+proves nothing. For the
 same reason each account is bound to one service: the broker refuses to start, naming both
 services, if `BROKER_SERVICES` binds one account to two of them.
 

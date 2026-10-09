@@ -395,7 +395,7 @@ func TestDenyOpensNoRecord(t *testing.T) {
 // is registered with gets SERVICE_KEY at once, with a grant and no record, and its value is
 // released; once another secret's tags move the policy, the grant still releases it and the same
 // request reuses it, since the session is still the service's. A machine login's service name is
-// the machine's own claim, approved by whoever its login names, so the service account is what
+// the machine's own claim, which anyone signed in to Dispatch may approve, so the service account is what
 // proves the service: a pod under the service's login running as another account, a pod running
 // as the service's account under a login for a service the broker does not register, the
 // operator's own host session, and a pod no service's launcher enrolled are each denied it with no

@@ -42,15 +42,16 @@ func TerminalEventNames() []string {
 // embeds must still be a well-formed, signed proof — checked as of the record's own creation
 // time, not now, since a request object's own ~10-minute exp is long past by the time anything
 // built from it is used again; re-verifying it proves provenance, not freshness — and the record
-// must carry exactly one terminal decision, an approval by the login the record names as its
-// approver.
+// must carry exactly one terminal decision, an approval by a login the record's rule admits: its
+// approver, or, for a service's machine login, any login.
 //
 // store.Store.ChainVerifier builds the one enroll.AuthenticateLauncher and requests.Machine's own
 // chain check each use, by record kind, through these narrow func fields, so this package needs no
 // store access of its own.
 type ChainVerifier struct {
 	// Kind is the kind of record FetchRecord serves (KindAgentSecret or KindLauncherCredential),
-	// which decides who may have approved it (MayDecide).
+	// which, with the service its request object names, decides who may have approved it
+	// (MayDecide).
 	Kind string
 
 	// Audience and Skew re-verify the embedded request object exactly as VerifyRequestObject
@@ -86,7 +87,8 @@ func (c *ChainVerifier) Verify(ctx context.Context, recordID string) (Body, erro
 		}
 		return Body{}, fmt.Errorf("%w: stored body does not parse: %s", ErrChainBroken, err)
 	}
-	if _, err := VerifyRequestObject(body.Request, c.Audience, c.Skew, createdAt); err != nil {
+	obj, err := VerifyRequestObject(body.Request, c.Audience, c.Skew, createdAt)
+	if err != nil {
 		return Body{}, fmt.Errorf("%w: request object: %s", ErrChainBroken, err)
 	}
 	decisions, err := c.FetchDecisions(ctx, recordID)
@@ -100,8 +102,8 @@ func (c *ChainVerifier) Verify(ctx context.Context, recordID string) (Body, erro
 		return Body{}, fmt.Errorf("%w: %d terminal decision events, want exactly one", ErrChainBroken, len(decisions))
 	case decisions[0].Event != "approved":
 		return Body{}, fmt.Errorf("%w: no approved event (decided %s)", ErrChainBroken, decisions[0].Event)
-	case !MayDecide(c.Kind, body.Approver, decisions[0].Login):
-		return Body{}, fmt.Errorf("%w: approved by %q, not the record's approver %q", ErrChainBroken, decisions[0].Login, body.Approver)
+	case !MayDecide(c.Kind, body.Approver, obj.Service(), decisions[0].Login):
+		return Body{}, fmt.Errorf("%w: approved by %q, whom the record's rule does not admit (approver %q)", ErrChainBroken, decisions[0].Login, body.Approver)
 	}
 	return body, nil
 }

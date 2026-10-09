@@ -1641,14 +1641,16 @@ issue's pod (every role container of it alike) and the image probe's.
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address); `operator` is the email of the person who approves this daemon's own machine logins on
-  the Dispatch credential page — there is no launcher-token file and no manual CLI step. The daemon
+  address); `operator` is the email the daemon's machine login names in its request, though anyone
+  signed in to Dispatch approves a service's login on the Dispatch credential page — there is no
+  launcher-token file and no manual CLI step. The daemon
   runs its own login at boot, on a background context, and logs the confirmation code exactly once:
   `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
   <operator>); pod enrollment is held until approved`. The same code and the login's current status
   ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
-  `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
-  approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
+  `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
+  person signed in to Dispatch approves the code there. On expiry or revocation the daemon starts a
+  fresh login and logs a new
   code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
@@ -1684,8 +1686,8 @@ issue's pod (every role container of it alike) and the image probe's.
   key directory is mounted into that container and no other, the broker accepts a renewal on the
   key's proof alone, and `agent-secrets renew`, which the image ships, needs only that URL and the
   key directory. So the enrollment can stay live until the pod is replaced, at the latest when its
-  issue closes, plus one lease (`BROKER_LEASE_SECONDS`). To end it at once, the person who approved
-  the daemon's machine login revokes that login on Dispatch's machine-login page
+  issue closes, plus one lease (`BROKER_LEASE_SECONDS`). To end it at once, anyone signed in to
+  Dispatch revokes the daemon's machine login on Dispatch's machine-login page
   (`/credentials/machine`), which ends every session it enrolled
   (`docs/site/src/content/docs/broker/guides/revoke-a-session.md`, "End a machine's login").
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
@@ -2252,9 +2254,10 @@ every Sandbox of the layout before issue pods, naming it: remove it before enabl
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its
 session with `kubectl -n <namespace> logs legion-<project>-controller -c controller` (its launcher's
-log, which carries the shim's and Oh My Pi's) or its transcript on the volume. Wakes reach
-it as they reach the operator's controller: it subscribes to
-`notifications.legion.<project>.controller` once it holds the role.
+log, which carries the shim's and Oh My Pi's) or its transcript on the volume. A Send from the
+Agents page is answered in the conversation that page shows. Wakes reach it as they reach the
+operator's controller: it subscribes to `notifications.legion.<project>.controller` once it holds
+the role.
 
 **Switching back.** To hand the controller back to a person, set `controller: operator` (or drop
 the key), drop `runtime.kubernetes.resources.controller`, which the daemon refuses at boot unless

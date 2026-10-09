@@ -306,8 +306,9 @@ func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.
 // an agent_secret record naming anyone is decided by any login, never by the sentinel itself or an
 // empty login, and its chain verifies over whichever login approved it; a record naming a person
 // is decided by that person alone, the sentinel included; and a record of any other kind naming
-// anyone (a machine login, which an older binary could open, or a kind not spelled exactly
-// agent_secret) is decided by no login, and a machine login's chain verifies over none.
+// anyone (a person's machine login, which an older binary could open, or a kind not spelled
+// exactly agent_secret) is decided by no login, and a person's machine login's chain verifies over
+// none. Its request object asks for a secret, so it names no service.
 func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
 	key, _ := proof.NewKey()
 	now := time.Now()
@@ -339,7 +340,7 @@ func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
 		{"Agent_Secret", shared, "bob@example.com", ""},
 		{KindLauncherCredential, owned, "Sami@Example.com", "sami@example.com"},
 	} {
-		got, err := c.body.ApproverLogin(c.kind, c.login)
+		got, err := c.body.ApproverLogin(c.kind, "", c.login)
 		if c.want == "" && !errors.Is(err, ErrNotApprover) || c.want != "" && (err != nil || got != c.want) {
 			t.Errorf("ApproverLogin(%s, approver %q, login %q) = %q, %v; want %q", c.kind, c.body.Approver, c.login, got, err, c.want)
 		}
@@ -363,6 +364,78 @@ func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
 		}
 		if _, err := verifier.Verify(context.Background(), shared.ID()); (err == nil) != c.verifies {
 			t.Errorf("Verify(%s record naming anyone, approved by %q) = %v, want verified %v", c.kind, c.decider, err, c.verifies)
+		}
+	}
+}
+
+// machineLoginBody is a machine login's record body naming approver, its request object signed
+// for one launcher_credential detail on host example-host-cluster naming service ("" for a
+// person's machine) and carrying loginHint.
+func machineLoginBody(t *testing.T, approver, service, loginHint string, now time.Time) Body {
+	t.Helper()
+	key, _ := proof.NewKey()
+	compact, err := Sign(key, "https://secrets.test", []AuthorizationDetail{
+		{Type: KindLauncherCredential, Identifier: "example-host-cluster", Service: service},
+	}, "", loginHint, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Body{
+		Request: compact, Approver: approver, Enrollment: Enrollment{Kind: "-", RuntimeID: "-"},
+		LifetimeSeconds: 3600, RulesVersion: "ab12", ExpiresAt: now.Add(15 * time.Minute).UTC().Truncate(time.Second),
+		Code: "ABCD-EFGH",
+	}
+}
+
+// TestAServiceLoginIsDecidedByAnyoneAndAPersonsByThemAlone pins the machine-login half of the
+// approver rule, which keys on the service the signed request names, never on the approver stored
+// beside it: a service's login is decided by any login but the sentinel and an empty one, whether
+// its record names anyone (every one Login opens now), the person an older daemon put in its
+// login_hint, or a person a broker from before this rule stored, and its chain verifies over
+// whichever login approved it; a person's machine login is decided by that person alone, and one
+// naming anyone, which an older binary could open, by no one, its chain verifying over none.
+func TestAServiceLoginIsDecidedByAnyoneAndAPersonsByThemAlone(t *testing.T) {
+	now := time.Now()
+	service := machineLoginBody(t, AnyoneApprover, "legion-daemon", "", now)
+	hinted := machineLoginBody(t, AnyoneApprover, "legion-daemon", "sami@example.com", now)
+	stored := machineLoginBody(t, "sami@example.com", "legion-daemon", "sami@example.com", now)
+	personal := machineLoginBody(t, "sami@example.com", "", "sami@example.com", now)
+	personalAnyone := machineLoginBody(t, AnyoneApprover, "", AnyoneApprover, now)
+	for _, c := range []struct {
+		name  string
+		body  Body
+		login string
+		want  string
+	}{
+		{"a service's login, by a person it names nowhere", service, " Bob@Example.com ", "bob@example.com"},
+		{"a service's login, by the sentinel", service, " ANYONE ", ""},
+		{"a service's login, by no one", service, "  ", ""},
+		{"a service's login an older daemon named a person in, by another", hinted, "bob@example.com", "bob@example.com"},
+		{"a service's login a broker before this rule stored a person on, by another", stored, "bob@example.com", "bob@example.com"},
+		{"a person's machine login, by that person", personal, "Sami@Example.com", "sami@example.com"},
+		{"a person's machine login, by another", personal, "bob@example.com", ""},
+		{"a person's machine login naming anyone, by a person", personalAnyone, "bob@example.com", ""},
+		{"a person's machine login naming anyone, by the sentinel", personalAnyone, AnyoneApprover, ""},
+	} {
+		obj, err := VerifyRequestObject(c.body.Request, "https://secrets.test", time.Minute, now)
+		if err != nil {
+			t.Fatalf("%s: VerifyRequestObject: %v", c.name, err)
+		}
+		got, err := c.body.ApproverLogin(KindLauncherCredential, obj.Service(), c.login)
+		if c.want == "" && !errors.Is(err, ErrNotApprover) || c.want != "" && (err != nil || got != c.want) {
+			t.Errorf("%s: ApproverLogin(login %q) = %q, %v; want %q", c.name, c.login, got, err, c.want)
+		}
+		verifier := &ChainVerifier{
+			Kind: KindLauncherCredential, Audience: "https://secrets.test", Skew: time.Minute,
+			FetchRecord: func(context.Context, string) (string, time.Time, bool, error) {
+				return c.body.Canonical(), now, true, nil
+			},
+			FetchDecisions: func(context.Context, string) ([]TerminalEvent, error) {
+				return []TerminalEvent{{Event: "approved", Login: CanonicalLogin(c.login)}}, nil
+			},
+		}
+		if _, err := verifier.Verify(context.Background(), c.body.ID()); (err == nil) != (c.want != "") {
+			t.Errorf("%s: Verify(approved by %q) = %v, want verified %v", c.name, c.login, err, c.want != "")
 		}
 	}
 }
