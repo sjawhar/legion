@@ -4089,6 +4089,7 @@ describe("the recreated-workspace notice", () => {
             "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
           ),
           display: true,
+          details: { id: expect.any(String) },
         },
         options: { deliverAs: "steer", triggerTurn: false },
       },
@@ -4123,54 +4124,101 @@ describe("the recreated-workspace notice", () => {
     ).toBeUndefined();
   });
 
-  // The daemon's next task is an RPC prompt, and Oh My Pi first recovers a failed last turn: an
-  // empty `length` stop is dropped by moving the branch back to that turn's parent, which takes the
-  // notice saved after it off the branch. before_agent_start runs after that recovery and puts the
-  // notice into the run's messages when the branch no longer holds it; while the branch holds it,
-  // nothing is added. Once the first run starts, nothing is owed. The recovery left the saved copy
-  // in the live context, so from the re-send on each request keeps the first copy alone, and before
-  // it no request is touched.
-  test("a prompt whose recovery dropped the saved notice carries it again, once", async () => {
+  /** The pane's own notice id, its before_agent_start and context handlers, and a context whose
+   * `getBranch()` returns what `branch()` does at each call. */
+  const recoveryPane = async (branch: () => readonly unknown[]) => {
     process.env.LEGION_WORKSPACE_RECREATED = "true";
-    const notice = {
-      type: "custom_message",
-      customType: "legion-workspace-recreated",
-      content: "Your workspace was recreated since your last turn: …",
-      display: true,
-    };
-    let branch: readonly unknown[] = [
-      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-1" }] } },
-      { type: "message", message: { role: "assistant", content: [], stopReason: "length" } },
-      notice,
-    ];
     const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
-    const context = {
-      ...pane.context,
-      sessionManager: { ...pane.context.sessionManager, getBranch: () => branch },
-    };
+    const sent = notices(pane)[0]?.message;
+    const id =
+      sent !== undefined && "details" in sent && typeof sent.details?.id === "string"
+        ? sent.details.id
+        : undefined;
     const beforeAgentStart = pane.handlers.get("before_agent_start");
     const requestOf = pane.handlers.get("context");
-    if (beforeAgentStart === undefined || requestOf === undefined) {
-      throw new Error("before_agent_start or context was not registered");
+    if (id === undefined || beforeAgentStart === undefined || requestOf === undefined) {
+      throw new Error("the pane sent no notice, or registered no before_agent_start or context");
     }
-    const copy = { role: "custom", customType: "legion-workspace-recreated", content: "…" };
-    const task = { role: "user", content: [{ type: "text", text: "TURN-2" }] };
+    const context = {
+      ...pane.context,
+      sessionManager: { ...pane.context.sessionManager, getBranch: branch },
+    };
+    return { pane, id, beforeAgentStart, requestOf, context };
+  };
+  const entry = (id: string) => ({
+    type: "custom_message",
+    customType: "legion-workspace-recreated",
+    content: "Your workspace was recreated since your last turn: …",
+    display: true,
+    details: { id },
+  });
+  const copy = (id: string) => ({
+    role: "custom",
+    customType: "legion-workspace-recreated",
+    content: "…",
+    details: { id },
+  });
+  const task = { role: "user", content: [{ type: "text", text: "TURN-2" }] };
+  const turn = (role: "user" | "assistant", text: string) => ({
+    type: "message",
+    message: { role, content: [{ type: "text", text }] },
+  });
+
+  // The daemon's next task is an RPC prompt, and Oh My Pi first recovers a failed last turn: an
+  // empty `length` stop is dropped by moving the branch back to that turn's parent, which takes the
+  // copy saved after it off the branch. before_agent_start runs after that recovery and puts the
+  // notice into the run's messages when the branch no longer holds this process's copy; while the
+  // branch holds it, nothing is added. Once the first run starts, nothing is owed. The recovery left
+  // the saved copy in the live context, so from the re-send on each request keeps the first copy
+  // alone, and before it no request is touched.
+  test("a prompt whose recovery dropped the saved notice carries it again, once", async () => {
+    let branch: readonly unknown[] = [];
+    const { id, pane, beforeAgentStart, requestOf, context } = await recoveryPane(() => branch);
+    branch = [
+      turn("user", "TURN-1"),
+      { type: "message", message: { role: "assistant", content: [], stopReason: "length" } },
+      entry(id),
+    ];
 
     expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
-    expect(await requestOf({ messages: [copy, task, copy] }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toBeUndefined();
     branch = branch.slice(0, 1);
     expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
       message: {
         customType: "legion-workspace-recreated",
         content: expect.stringContaining("it holds what was pushed to legion/REPO-43"),
         display: true,
+        details: { id },
       },
     });
     await pane.handlers.get("agent_start")?.({}, context);
     expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
-    expect(await requestOf({ messages: [copy, task, copy] }, context)).toEqual({
-      messages: [copy, task],
+    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toEqual({
+      messages: [copy(id), task],
     });
-    expect(await requestOf({ messages: [copy, task] }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy(id), task] }, context)).toBeUndefined();
+  });
+
+  // A session recreated twice carries the earlier recreation's notice in its history. When the
+  // recovery drops this process's copy, that earlier notice is not it: the notice is sent again,
+  // and the request filter leaves the earlier one where the history put it, keeping this process's
+  // first copy too. The same holds when the earlier notice sits after the last good reply, as one
+  // saved by a process lost before its turn's first reply does.
+  test("a notice an earlier recreation saved does not stand in for this process's", async () => {
+    let branch: readonly unknown[] = [];
+    const { id, beforeAgentStart, requestOf, context } = await recoveryPane(() => branch);
+    const earlier = "an-earlier-process";
+    for (const recovered of [
+      [turn("user", "TURN-1"), entry(earlier), turn("user", "X"), turn("assistant", "reply X")],
+      [turn("user", "TURN-1"), turn("assistant", "reply 1"), entry(earlier), turn("user", "X")],
+    ]) {
+      branch = recovered;
+      expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
+        message: expect.objectContaining({ details: { id } }),
+      });
+    }
+    expect(
+      await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
+    ).toEqual({ messages: [copy(earlier), copy(id), task] });
   });
 });

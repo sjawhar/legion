@@ -44,8 +44,9 @@ import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { createLegionTool } from "../src/tools";
 import {
   branchHoldsWorkspaceRecreatedNotice,
-  WORKSPACE_RECREATED_MESSAGE,
+  type WorkspaceRecreatedNotice,
   withoutRepeatedWorkspaceRecreatedNotice,
+  workspaceRecreatedMessage,
   workspaceRecreatedNotice,
 } from "../src/workspace-recreated";
 
@@ -485,8 +486,8 @@ export default function legionExtension(pi: PiApi): void {
   };
 
   // The recreated-workspace notice this process owes its first run: set at session_start below,
-  // and owed until that run starts (agent_start), whatever starts it.
-  let recreatedNotice: string | undefined;
+  // with the id its copies carry, and owed until that run starts (agent_start), whatever starts it.
+  let recreatedNotice: WorkspaceRecreatedNotice | undefined;
 
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
@@ -525,42 +526,41 @@ export default function legionExtension(pi: PiApi): void {
       session.kind === "root-architect" ? session.tree : session.issue
     );
     if (recreatedNotice !== undefined) {
-      pi.sendMessage(
-        { customType: WORKSPACE_RECREATED_MESSAGE, content: recreatedNotice, display: true },
-        { deliverAs: "steer", triggerTurn: false }
-      );
+      pi.sendMessage(workspaceRecreatedMessage(recreatedNotice), {
+        deliverAs: "steer",
+        triggerTurn: false,
+      });
     }
     await claimSession.bootstrap(context);
     registerLegionTool();
     await activateLegionTool();
   });
 
-  // A prompt the daemon sends (an RPC `prompt`) first recovers a failed last turn, and Oh My Pi
-  // recovers an empty `length` stop by moving the branch back to that turn's parent, which takes
-  // the notice saved after it off the branch; before_agent_start runs after that recovery, so it
-  // puts the notice back into the run's messages when the branch no longer holds it, and the run
-  // saves it on the branch. A turn an Envoy delivery starts recovers nothing and has no
-  // before_agent_start: its branch keeps the saved notice.
-  let recreatedNoticeResent = false;
+  // A prompt (the daemon's task as an RPC `prompt`, or a person's direct message pi-envoy
+  // delivers as a user turn) first recovers a failed last turn, and Oh My Pi recovers an empty
+  // `length` stop by moving the branch back to that turn's parent, which takes the copy saved
+  // after it off the branch. before_agent_start runs after that recovery, so it puts the notice
+  // back into the run's messages when the branch no longer holds this process's copy, a notice an
+  // earlier recreation saved not counting, and the run saves it on the branch. An Envoy card,
+  // sent with triggerTurn, starts its turn with neither the recovery nor before_agent_start, so
+  // its branch keeps the saved copy.
+  let resentNoticeId: string | undefined;
   pi.on("before_agent_start", async (_event, context) => {
     if (recreatedNotice === undefined) return undefined;
-    if (branchHoldsWorkspaceRecreatedNotice(context.sessionManager.getBranch?.() ?? [])) {
-      return undefined;
-    }
-    recreatedNoticeResent = true;
-    return {
-      message: { customType: WORKSPACE_RECREATED_MESSAGE, content: recreatedNotice, display: true },
-    };
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    if (branchHoldsWorkspaceRecreatedNotice(branch, recreatedNotice.id)) return undefined;
+    resentNoticeId = recreatedNotice.id;
+    return { message: workspaceRecreatedMessage(recreatedNotice) };
   });
   pi.on("agent_start", async () => {
     recreatedNotice = undefined;
   });
-  // The recovery kept the saved notice in the process's live context, so once it is sent again
+  // The recovery kept the saved copy in the process's live context, so once it is sent again
   // every later request of this process would carry it twice: the first copy, where the history
   // put it, is the one each request keeps.
   pi.on("context", async (event) => {
-    if (!recreatedNoticeResent) return undefined;
-    const messages = withoutRepeatedWorkspaceRecreatedNotice(event.messages);
+    if (resentNoticeId === undefined) return undefined;
+    const messages = withoutRepeatedWorkspaceRecreatedNotice(event.messages, resentNoticeId);
     return messages === undefined ? undefined : { messages };
   });
 
