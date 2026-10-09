@@ -294,3 +294,67 @@ test("the facet column offers each value with its count, sends a pick to the ser
     getDeliveryTimeline.mockRestore();
   }
 });
+
+test("the header names the window and the freshness row the prototype's six sources", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    freshness: { ...emptyTimeline.freshness, last_error: "rate limited" },
+  });
+  try {
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "Delivery timeline" })).toBeDefined();
+    expect(screen.getByText(/^Generated .* · window/)).toBeDefined();
+    // No brush window in the URL: nothing to clear.
+    expect(screen.queryByRole("button", { name: "clear brush window" })).toBeNull();
+    const row = screen.getByRole("status", { name: "Source freshness" });
+    const sources = [...row.querySelectorAll("[data-source]")].map((node) =>
+      node.getAttribute("data-source")
+    );
+    expect(sources).toEqual(["prs", "runs", "ci", "dispatch", "agents", "events"]);
+    expect(within(row).getByText("Deploy runs never checked: rate limited")).toBeDefined();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the list sorts by its headers and a row opens the PR's details", async () => {
+  const shipped: DeliveryPR = {
+    ...listedPR,
+    deploy_run: 500,
+    deployed_at: "2024-06-01T01:40:00Z",
+    deployed_status: "deployed",
+    id: "acme/widgets#2",
+    merged_at: "2024-06-01T00:30:00Z",
+    number: 2,
+    title: "feat: a shipped widget",
+    url: "https://github.com/acme/widgets/pull/2",
+  };
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    components: { "ACME/api": { parent: null, title: "Public API" } },
+    prs: [listedPR, shipped],
+  });
+  try {
+    renderPage();
+    const titles = async () =>
+      (await screen.findAllByRole("row")).slice(1).map((row) => row.cells[3]?.textContent);
+    expect(await titles()).toEqual(["feat: a waiting widget", "feat: a shipped widget"]);
+    fireEvent.click(screen.getByRole("button", { name: /^Merged/ }));
+    expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
+
+    fireEvent.click(screen.getByText("feat: a shipped widget"));
+    const details = await screen.findByRole("complementary", { name: "Details" });
+    expect(within(details).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe(
+      "https://github.com/acme/widgets/pull/2"
+    );
+    expect(within(details).getByText("ACME-1 — Ship widgets")).toBeDefined();
+    expect(within(details).getByText("Public API")).toBeDefined();
+    expect(within(details).getByText("70 min")).toBeDefined();
+    fireEvent.click(within(details).getByRole("button", { name: "Close details" }));
+    expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
