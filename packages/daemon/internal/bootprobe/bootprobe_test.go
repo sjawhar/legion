@@ -139,17 +139,42 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 }
 
 // The OK line is the wire between the image's `legion probe-image` and the daemon's probe
-// Sandbox: the session-storage mark, the agent-models mark, the capabilities mark, the
-// model-fallback mark, then the contract last.
+// Sandbox: the session-storage mark, the extensions mark, the agent-models mark, the capabilities
+// mark, the model-fallback mark, then the contract last.
 func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
-	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved, ModelFallbackOff), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved capabilities=checked model-fallback=off daemon-api-version=3"; got != want {
+	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved, ModelFallbackOff), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved capabilities=checked model-fallback=off daemon-api-version=3"; got != want {
 		t.Errorf("OKLine = %q, want %q", got, want)
 	}
 }
 
-// oldOKLine is the line a CLI that predates the capability check prints: no capabilities mark, no
-// model-fallback mark. The daemon still parses what it does carry.
+// oldOKLine is the line a CLI that predates the discovery-on pod lane and the capability check
+// prints: no extensions mark, no capabilities mark, no model-fallback mark. The daemon still parses
+// what it does carry.
 const oldOKLine = "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=5"
+
+// The daemon reads whether the image's probe ran the pod's lane with extension discovery on from
+// its OK line; a CLI that predates that lane prints no mark, and a token the mark merely begins is
+// not the mark.
+func TestExtensionsDiscoveredReadsTheMarkOnAnOKLine(t *testing.T) {
+	for _, testCase := range []struct {
+		name, output string
+		want         bool
+	}{
+		{"the mark, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOff) + "\n", true},
+		{"the mark on a build-time probe's line", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped, ModelFallbackOn), true},
+		{"a CLI that predates the discovery-on pod lane", oldOKLine, false},
+		{"a CLI that predates the agent-model check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5", false},
+		{"the mark on a line that is not the OK line", "[legion] extensions=discovered agent-models=resolved daemon-api-version=5", false},
+		{"a token the mark merely begins", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered-not agent-models=resolved daemon-api-version=5", false},
+		{"nothing", "", false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := ExtensionsDiscovered(testCase.output); got != testCase.want {
+				t.Fatalf("ExtensionsDiscovered = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
 
 // The daemon reads whether the image's probe resolved the agents' models from its OK line, on the
 // line's current shape and on the shape before the capability marks; a CLI that predates the

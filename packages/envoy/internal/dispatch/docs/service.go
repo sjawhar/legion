@@ -36,6 +36,9 @@ var (
 const maxSettleFailures = 3
 
 const (
+	// maxLiveRooms is how many live rooms - ygo's resident rooms, loaded or loading, whoever
+	// opened them - a document socket may find before it is refused a room of its own
+	// (canOpenRoom).
 	maxLiveRooms       = 1_000
 	maxRoomConnections = 1_000
 	// roomIdleTimeout is how long a room stays resident after its last peer leaves, or after the
@@ -58,15 +61,19 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. Document writes that join an API transaction use AppendUpdateTx, classifying
-// the update as content or not the way the room's update observer classifies a live one.
-// RebuildTx replaces an unreadable history inside the rebuild's transaction, through the same
-// persistence boundary as its preflight load. Head is the version Load would fold up to now, which
-// says whether a state loaded earlier is still the stored one. DocumentStamp names the stored state
-// a read of the document meets now, and LoadDocument is that state decoded once with the stamp it
-// was read under, which a read of a document no room holds caches its rendering by (coldRead).
+// store. AppendUpdateWithCredit is the one way a room's own update reaches the store: it appends
+// the update, classified as content or not, with the browser edit's in-flight credit, which it
+// takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
+// API transaction use AppendUpdateTx, classifying the update the way the room's update observer
+// classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
+// transaction, through the same persistence boundary as its preflight load. Head is the version
+// Load would fold up to now, which says whether a state loaded earlier is still the stored one.
+// DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
+// state decoded once with the stamp it was read under, which a read of a document no room holds
+// caches its rendering by (coldRead).
 type VersionedStore interface {
 	persistence.VersionedPersistence
+	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
@@ -99,9 +106,9 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
-	// afterReadWarm runs once a read that may load its room holds that room - a version's
-	// capture (captureLiveTextAndAuthors) and VerifyMark - and before the read takes anything from
-	// it. Nil outside tests; tests use it to evict the room in that window.
+	// afterReadWarm runs after a version capture or VerifyMark has warmed a room and before the
+	// version takes its document lock and reads it. Nil outside tests; tests use it to evict the
+	// warmed room or edit it in that window.
 	afterReadWarm func(room string)
 	// afterCaptureAuthorsTake runs after a room-backed version capture takes its authors and before
 	// it copies the document. Nil outside tests; tests use it to edit the room in that window.
@@ -110,6 +117,10 @@ type Service struct {
 	// calling transaction's fork up to date with the room, and before it renders the fork. Nil
 	// outside tests; tests use it to edit the room in that window.
 	afterCaptureFork func(room string)
+	// afterForkRead runs once a write's fork has been brought up to date with the room
+	// (forkLive), before the write's operation runs on it. Nil outside tests; tests use it to edit
+	// the room after the fork read it.
+	afterForkRead func(room string)
 	// afterSettleAuthorsTake runs after a settlement has taken its authors and before it copies
 	// the tree it will version. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleAuthorsTake func(room string)
@@ -125,10 +136,9 @@ type Service struct {
 	// edit the room while the version renders.
 	afterSettleVersionRead func(room string)
 	// afterSettleVersionWrite runs once a settlement that is writing a version has written it
-	// (writeVersionTx), remembering its pending-authors capture (rememberPendingVersion), and
-	// before the settlement appends that version's own event. Nil outside tests; tests return an
-	// error from it to force the settlement to abandon in the window its own commit has not yet
-	// released that capture in (abandon, discardPendingVersion, LEGION-503).
+	// (writeVersionTx) and deleted the pending authors it lists, and before the settlement appends
+	// that version's own event. Nil outside tests; tests return an error from it to force the
+	// settlement to abandon after its version write, before its commit.
 	afterSettleVersionWrite func(room string) error
 	// beforeObserveUpdate runs in a room's update observer, which ygo runs once the update's
 	// transaction has released the document, before the observer classifies the update and
@@ -145,6 +155,10 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
+	// afterStateLookup runs when a state lookup (lookUpState) has found a document's state and
+	// before it takes the state's lock. Nil outside tests; tests use it to release the state in
+	// that window.
+	afterStateLookup func(room string)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -188,78 +202,15 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
+	// holds holds, for each resident room document, the durable updates that instance holds
+	// (*roomHold), keyed by a weak pointer to the document (keepHold). loadedHeads passes the head a
+	// room's load read (servicePersistenceAdapter.LoadDoc) to the hook ygo calls next on the same
+	// goroutine (onLoadDocument).
+	holds       sync.Map
+	loadedHeads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads
-}
-
-// pendingAuthor is a pending author of a room's next version: the actor, and seq, the sequence
-// number of the credit that made them pending (roomState.creditSeq) - the latest if they are
-// credited more than once before a version releases them.
-type pendingAuthor struct {
-	actor model.Actor
-	seq   uint64
-}
-
-type roomState struct {
-	mu        sync.Mutex
-	connected map[uint64]model.Actor
-	// pending is the room's pending authors, each entry's own credit sequence number
-	// (creditSeq) marking when it was credited, so a version's release can tell an entry its
-	// own capture took from a newer one credited under the same key since (versionPending,
-	// commitVersion, LEGION-503). creditSeq is atomic so forkLive, which every document write
-	// calls, can read it for forkSeq without taking the state lock the far rarer upload route is
-	// its only consumer of.
-	pending   map[string]pendingAuthor
-	creditSeq atomic.Uint64
-	// askBlocks are the ask blocks the room's document held when its update observer last
-	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
-	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
-	// pendingAskAuthors credits a committed transaction's write or a service mutation with the ask
-	// ids it introduces, registered at the write site before the update can reach any observer
-	// (registerAskAuthors, registerCarriedAskAuthors); observeAskBlocks consumes each entry
-	// into askAuthors the first time it sees the id and never prunes one it has not consumed, so
-	// attribution survives however many updates land before an observer finally renders the id
-	// (LEGION-503).
-	askBlocks         map[string]struct{}
-	askAuthors        map[string]model.Actor
-	pendingAskAuthors map[string]model.Actor
-	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
-	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
-	// runs after an edit's own version was committed would otherwise attribute the block asks
-	// it indexes to nobody.
-	lastActor       *model.Actor
-	pendingVersions map[int]versionPending
-	updateClasses   []documentUpdateClass
-	pendingUpdates  int
-	settle          *time.Timer
-	unrecorded      map[pmdoc.MarkRef]time.Time
-	durableAppends  atomic.Int64
-	gen             uint64
-	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
-	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
-	// meanwhile, which finishing the write arms.
-	liveWriter     *liveWrite
-	settleDeferred bool
-	// settleWarming is set while a settlement loads the room it is about to settle, so that load
-	// arms no second settlement for the document's pending-settlement row (onLoadDocument).
-	settleWarming  bool
-	settleFailures int
-	closed         bool
-	failed         error
-	failedDone     chan struct{}
-}
-
-// creditAuthor makes actor a pending author of the room's next version, for a content change of
-// theirs the room now holds. The caller holds state.mu.
-func (state *roomState) creditAuthor(actor model.Actor) {
-	state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq.Add(1)}
-}
-
-type documentUpdateClass struct {
-	update         []byte
-	contentChanged bool
-	durable        bool
 }
 
 type artifactOwner struct {
@@ -625,6 +576,8 @@ func New(deps Deps) *Service {
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer
+	// ygo calls it once for every room it retires, whichever way: the idle sweep, CloseRoom.
+	srv.OnUnloadDocument = service.releaseUnloadedRoom
 
 	return service
 }
@@ -673,7 +626,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		state := value.(*roomState)
 		s.shutdownRooms.Store(name, struct{}{})
 		state.mu.Lock()
-		loaded = append(loaded, loadedRoom{name: name, generation: state.gen, connected: len(state.connected) > 0})
+		loaded = append(loaded, loadedRoom{name: name, generation: state.roomGeneration, connected: len(state.connected) > 0})
 		state.mu.Unlock()
 		return true
 	})
@@ -839,7 +792,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		state.mu.Lock()
 		// A settlement whose timer already fired reads the generation it was armed with, so
 		// bumping it here ends that settlement before it opens a transaction.
-		state.gen++
+		state.roomGeneration++
 		s.stopSettleTimer(state.settle)
 		state.mu.Unlock()
 		if err := s.evictRoom(room, state); err != nil && firstErr == nil {
@@ -859,9 +812,8 @@ func (s *Service) scheduleSettle(room string) {
 	if s.stopping.Load() || s.quiescing.Load() || s.shuttingDown(room) {
 		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.scheduleSettleLocked(room, state)
 }
 
@@ -882,14 +834,19 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	if !s.addUnlessStopping(&s.settleWG) {
 		return
 	}
-	state.gen++
-	generation := state.gen
+	state.roomGeneration++
+	generation := state.roomGeneration
 	s.stopSettleTimer(state.settle)
 	timerID := s.nextSettleTimer.Add(1)
 	s.registerSettleTimer(timerID)
 	timer := time.AfterFunc(delay, func() {
 		defer s.settleWG.Done()
-		defer s.unregisterSettleTimer(timerID)
+		// An armed timer holds its state (unusedLocked), so the state can go only once the timer
+		// has left the register.
+		defer func() {
+			s.unregisterSettleTimer(timerID)
+			s.releaseIfUnused(room)
+		}()
 		if current, _ := s.rooms.Load(room); current != state {
 			s.scheduleSettle(room)
 			return
@@ -965,7 +922,13 @@ func (s *Service) stopAllSettleTimers() {
 	}
 }
 
+// isSettleTimerArmed is whether timer, a state's settle timer, is registered and not yet fired or
+// stopped. A state that never armed one has none: the register's nil entries are other rooms'
+// timers between their registration and attachSettleTimer.
 func (s *Service) isSettleTimerArmed(timer *time.Timer) bool {
+	if timer == nil {
+		return false
+	}
 	s.timerMu.Lock()
 	defer s.timerMu.Unlock()
 	for _, armed := range s.timers {
@@ -980,9 +943,8 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	if s.isSettleTimerArmed(state.settle) {
 		return
 	}
@@ -993,16 +955,14 @@ func (s *Service) retrySettleSoon(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
 }
 
 func (s *Service) retrySettle(room string, generation uint64, err error) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.retrySettleLocked(room, state, generation, err)
 }
 
@@ -1015,7 +975,7 @@ func (s *Service) retrySettleLocked(room string, state *roomState, generation ui
 	} else {
 		slog.Error("dispatch: settle document", "room", room, "error", err)
 	}
-	if state.gen != generation {
+	if state.roomGeneration != generation {
 		return
 	}
 	state.settleFailures++
@@ -1062,25 +1022,27 @@ func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, e
 	return tree, minted, stamped, err
 }
 
-// settlementCredit is whom a settlement's version credits, taken before the tree it records:
+// settlementVersionCredit is whom a settlement's version credits, taken before the tree it records:
 // capture, its authors in order, and actor, whom its derived events name. state is the room the
 // capture was taken from (consumeAskAuthors). askSources, copied once the settlement holds the
 // tree it reconciles, names who introduced each new ask block in it.
-type settlementCredit struct {
-	capture    versionPending
+type settlementVersionCredit struct {
+	capture    authorCapture
 	state      *roomState
 	authors    []model.Actor
 	actor      model.Actor
 	askSources askBlockSources
 }
 
-// readSettlementTree takes the authors a settlement's version credits before it copies doc. An
-// update observer credits a change only once the room holds it, so every author taken made a change
-// the copy holds; one credited after the take stays pending (commitVersion). Holding state.mu across
-// the copy would block the update observer that credits and broadcasts every peer's keystroke.
-func (s *Service) readSettlementTree(state *roomState, doc *crdt.Doc, room string, afterTake func(room string)) (*pmdoc.Node, settlementCredit, error) {
+// readSettlementTree takes the authors a settlement's version lists before it copies doc: owed,
+// the pending authors the settlement read under the document's advisory lock, and the room's
+// in-flight credits no committed version has listed. An update observer credits a change only
+// once the room holds it, so every in-flight credit taken is for a change the copy holds; one
+// observed after the take stays pending for the next version. Holding state.mu across the copy
+// would block the update observer that credits and broadcasts every peer's keystroke.
+func (s *Service) readSettlementTree(state *roomState, owed map[string]model.Actor, doc *crdt.Doc, room string, afterTake func(room string)) (*pmdoc.Node, settlementVersionCredit, error) {
 	state.mu.Lock()
-	credit := settlementAuthors(state)
+	credit := settlementAuthors(state, owed)
 	state.mu.Unlock()
 	if afterTake != nil {
 		afterTake(room)
@@ -1089,12 +1051,12 @@ func (s *Service) readSettlementTree(state *roomState, doc *crdt.Doc, room strin
 	return tree, credit, err
 }
 
-// settlementAuthors takes state's pending authors, which a settlement's version credits, and names
-// the actor its derived events carry: the latest editor when the version credits them or credits no
+// settlementAuthors takes the authors a settlement's version lists (captureAuthors), and names
+// the actor its derived events carry: the latest editor when the version lists them or lists no
 // one, otherwise SettlementActor. The caller holds state.mu.
-func settlementAuthors(state *roomState) settlementCredit {
-	capture, authors := captureAuthors(state, nil, nil)
-	credit := settlementCredit{capture: capture, state: state, authors: authors}
+func settlementAuthors(state *roomState, owed map[string]model.Actor) settlementVersionCredit {
+	capture := captureAuthors(state, owed, nil, nil)
+	credit := settlementVersionCredit{capture: capture, state: state, authors: actorSlice(capture.authors)}
 	if latest := state.lastActor; latest != nil {
 		if _, found := capture.authors[actorKey(*latest)]; found || len(credit.authors) == 0 {
 			credit.actor = *latest
@@ -1107,7 +1069,7 @@ func settlementAuthors(state *roomState) settlementCredit {
 
 // consumeAskAuthors forgets the recorded author of each block a committed settlement indexed or
 // found indexed: its ask row names the author from then on.
-func (credit settlementCredit) consumeAskAuthors(blockIDs []string) {
+func (credit settlementVersionCredit) consumeAskAuthors(blockIDs []string) {
 	if len(blockIDs) == 0 {
 		return
 	}
@@ -1141,24 +1103,29 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		s.retrySettle(room, generation, err)
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
-		state.mu.Unlock()
+	state := s.lockState(room)
+	if s.stopping.Load() || state.closed || state.failed != nil || state.roomGeneration != generation {
+		s.unlockState(room, state)
 		return
 	}
-	state.mu.Unlock()
+	state.settling++
+	s.unlockState(room, state)
+	defer func() {
+		state.mu.Lock()
+		state.settling--
+		s.unlockState(room, state)
+	}()
 	if s.shuttingDown(room) && s.srv.GetDoc(room) == nil {
 		return
 	}
 	if s.srv.GetDoc(room) == nil {
 		state.mu.Lock()
 		state.settleWarming = true
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		err := s.srv.Apply(parent, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		state.mu.Lock()
 		state.settleWarming = false
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 			retry(fmt.Errorf("warm document for settlement: %w", err))
 			return
@@ -1203,8 +1170,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 	}
 	state.mu.Lock()
-	generation = state.gen
-	state.mu.Unlock()
+	generation = state.roomGeneration
+	s.unlockState(room, state)
 
 	ledger := &Ledger{service: s, settling: true}
 	ctx := store.WithTransactionTracking(withLedger(parent, ledger))
@@ -1255,6 +1222,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 		return
 	}
+	// The pending authors as this settlement's lock holds them: no append or write changes them
+	// until its transaction ends. Its version lists them and deletes them; a settlement that
+	// writes no version leaves them for the next version.
+	owed, err := readPendingAuthors(ctx, tx, room)
+	if err != nil {
+		retry(err)
+		return
+	}
 	// The settlement reads the document three times, and each read has its own name: read is this
 	// one, before the database work; reconciled is the tree the ask blocks are reconciled on, the
 	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
@@ -1268,7 +1243,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// transaction's write, credited at its commit and published after the copy; the supersession
 	// check below then writes no version, since the write still holds its slot or its publish moved
 	// the generation.
-	read, credit, err := s.readSettlementTree(state, doc, room, s.afterSettleAuthorsTake)
+	read, credit, err := s.readSettlementTree(state, owed, doc, room, s.afterSettleAuthorsTake)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1305,20 +1280,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			s.finishSuppressedPersistence(slot, updates[index])
 		}
 	}
-	// rememberedVersion is the version number writeVersionTx remembered a pending-authors capture
-	// under (rememberPendingVersion), once this settlement has written one, so abandon can
-	// discard that capture if nothing commits it: writeVersionTx runs inside the settlement's own
-	// transaction, which this settlement's own tx.Commit, not Ledger.Commit, ends, so nothing else
-	// ever calls discardPendingVersion for it (LEGION-503).
-	var rememberedVersion *model.Version
 	// abandon ends a settlement that cannot finish. What it wrote is in the room and its browsers
 	// and will never reach the store through this settlement, so its slots are discarded and the
 	// room fails, which reloads the document from the store and leaves its settlement to that load.
-	// A settlement that wrote nothing is retried.
+	// A settlement that wrote nothing is retried. Its transaction rolls back, so the authors it read
+	// stay where they were, and it marked no in-flight credit.
 	abandon := func(err error) {
-		if rememberedVersion != nil {
-			s.discardPendingVersion(room, *rememberedVersion)
-		}
 		if len(slots) > 0 {
 			s.discardSuppressedPersistence(room, slots...)
 			s.failRoom(room, err)
@@ -1349,20 +1316,20 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	state.mu.Lock()
 	state.recordStampedAskBlocks(renamed)
 	if s.stopping.Load() || state.closed || state.failed != nil {
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		s.discardSuppressedPersistence(room, slots...)
 		return
 	}
 	// An open live write is not in the room yet, and since this settlement holds the owner row,
 	// the write's transaction has already committed: the cursor this settlement versions against
 	// includes its row. Write no version; finishLiveWrite arms a settlement once it is published.
-	superseded := state.gen != generation
+	superseded := state.roomGeneration != generation
 	if state.liveWriter != nil {
 		state.settleDeferred = true
 		superseded = true
 	}
 	if superseded {
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		if len(slots) == 0 {
 			return
 		}
@@ -1435,18 +1402,18 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// The version is the document as it stands after the repairs, read under its lock, not the
 		// tree settlement reconciled before them: a peer's edit made since is in the room, its
 		// browsers and its stored updates, and a version rendered from the earlier tree would leave
-		// it out (LEGION-479). The authors are taken before this copy, so the version credits no
+		// it out (LEGION-479). The authors are taken before this copy, so the version lists no
 		// author of an edit it lacks. An edit made after the take and before the copy is in this
-		// version but credited after the take; the version's commit leaves its author pending, its
-		// own settlement writes no version, and the next version that holds it credits the author.
-		// The same is true when the copy holds an edit whose update observer had not yet credited
-		// it - ygo runs the observer only once the edit's transaction has released the document
-		// (commitVersion).
-		versioned, credit, err = s.readSettlementTree(state, doc, room, s.afterSettleAuthorsTake)
+		// version but credited after the take; its credit stays pending, and the next version lists
+		// its author. The same is true when the copy holds an edit whose update observer had not yet
+		// credited it - ygo runs the observer only once the edit's transaction has released the
+		// document.
+		versioned, credit, err = s.readSettlementTree(state, owed, doc, room, s.afterSettleAuthorsTake)
 		if err != nil {
 			abandon(err)
 			return
 		}
+
 		if s.afterSettleVersionRead != nil {
 			s.afterSettleVersionRead(room)
 		}
@@ -1468,12 +1435,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// included; the move's own update is appended once this transaction releases the room lock.
 	// Should that append fail, the room fails and reloads without the move's text, which the
 	// version holds, until the browser that made it resends it on reconnecting.
-	if s.stopping.Load() || state.closed || state.failed != nil || (state.gen != generation && len(slots) == 0) {
-		state.mu.Unlock()
+	if s.stopping.Load() || state.closed || state.failed != nil || (state.roomGeneration != generation && len(slots) == 0) {
+		s.unlockState(room, state)
 		s.discardSuppressedPersistence(room, slots...)
 		return
 	}
-	state.mu.Unlock()
+	s.unlockState(room, state)
 
 	published := make([]model.Event, 0, len(reconciliation.events)+1)
 	// Each event that carries a reconciled source's text stamps that source's new mention edges
@@ -1519,7 +1486,6 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		abandon(err)
 		return
 	}
-	var version model.Version
 	if versioning {
 		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, versioned, credit.actor, &versionWrite{
 			authors:          credit.authors,
@@ -1530,8 +1496,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			abandon(writeErr)
 			return
 		}
-		version = result.version
-		rememberedVersion = &version
+		// The version lists the pending authors this settlement read, so its commit deletes them.
+		if err := deleteCapturedPendingAuthors(ctx, tx, room, credit.capture); err != nil {
+			abandon(err)
+			return
+		}
 		if s.afterSettleVersionWrite != nil {
 			if err := s.afterSettleVersionWrite(room); err != nil {
 				abandon(err)
@@ -1560,30 +1529,36 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	// Every update this settlement read is settled once it commits, so the row that left the
-	// settlement to a later load goes with that commit.
+	// settlement to a later load goes with that commit. The pending authors stay unless this
+	// settlement's version listed them (deleted above): a settlement that writes no version lists
+	// no one.
 	if err := clearSettlementPending(ctx, tx, room); err != nil {
 		abandon(err)
 		return
 	}
-	if err := tx.Commit(ctx); err != nil {
+	// The commit marks the in-flight credits the version listed consumed before it releases the
+	// room's state (commitConsuming); a settlement that writes no version takes out none.
+	committed := authorCapture{state: state}
+	if versioning {
+		committed = credit.capture
+	}
+	if err := s.commitConsuming(ctx, tx, []roomCapture{{room: room, capture: committed}}, func(err error) {
+		// This runs before the publish below, the order Ledger.Commit keeps for every other
+		// version write, so a subscriber acting on this version's artifact.version event acts
+		// after it.
+		if err == nil && state.roomGeneration == generation {
+			state.settleFailures = 0
+			state.unsettled = len(state.inflight) > 0
+			if !state.unsettled {
+				state.lastActor = nil
+			}
+		}
+	}); err != nil {
 		abandon(fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
 	credit.consumeAskAuthors(reconciliation.indexedAskBlocks)
 	finishSlots()
-	state.mu.Lock()
-	if state.gen == generation {
-		state.settleFailures = 0
-	}
-	state.mu.Unlock()
-	// This release runs before the publish below, the order Ledger.Commit keeps for every other
-	// version write, so a subscriber acting on this version's artifact.version event acts after
-	// it. Publishing first would let that subscriber's write be credited to these authors again. A
-	// settlement that wrote no version releases nothing: the version it found can hold an edit
-	// whose author was credited only after that version took its authors (commitVersion).
-	if versioning {
-		s.commitVersion(room, version)
-	}
 	for _, event := range published {
 		s.events.Publish(event)
 	}
@@ -1699,14 +1674,10 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		report.Err = fmt.Errorf("recover document: %w", err)
 		return report
 	}
-	state := s.room(artifactID)
-	state.mu.Lock()
 	if s.stopping.Load() {
-		state.mu.Unlock()
 		report.Skipped = "service stopping"
 		return report
 	}
-	state.mu.Unlock()
 
 	backfillCtx := withOwnerVerified(ctx)
 	// The backfill writes the same closure the settlement does, so its row is classified the same
@@ -1742,9 +1713,9 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		return report
 	}
 	// The stamp is in the room, whatever happens to its store write below.
-	state.mu.Lock()
+	state := s.lockState(artifactID)
 	state.recordStampedAskBlocks(renamed)
-	state.mu.Unlock()
+	s.unlockState(artifactID, state)
 	// abandon gives up a stamp that is in the room but will not reach the store through the
 	// backfill: its slot is discarded and the room fails, which reloads the document from the store.
 	abandon := func(err error) BlockIDBackfill {
@@ -1818,9 +1789,12 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// SetIssueClosed refreshes the closed state every room of an issue remembers. Its caller runs
-// it after its own transaction has committed, and it takes that caller's context so the pool
-// can see it: a caller that ever runs it with a transaction still open is refused, not wedged.
+// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes them when
+// the issue closes. A document with no state has no room to tell: its next load reads the issue.
+// Its caller runs it after its own transaction has committed, and it takes that caller's context
+// so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
+// wedged. That context is one caller holding at most one connection, so the rooms are recorded and
+// closed one at a time.
 func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
 	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
 		select id::text from artifacts where issue_key = $1 and kind = 'doc'
@@ -1834,33 +1808,68 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 		return
 	}
 	for _, room := range rooms {
-		state := s.room(room)
-		state.mu.Lock()
-		changed := state.closed != closed
-		state.closed = closed
-		if closed && changed {
-			state.gen++
-			s.stopSettleTimer(state.settle)
+		state := s.lockExistingState(room)
+		changed := true
+		var (
+			lastActor *model.Actor
+			creditSeq uint64
+		)
+		if state != nil {
+			changed = state.closed != closed
+			state.closed = closed
+			if closed && changed {
+				state.roomGeneration++
+				s.stopSettleTimer(state.settle)
+				// Snapshot while the state is locked, then write after unlocking: settlement holds
+				// the document's advisory lock before it takes state.mu, so taking that lock here
+				// while holding the state would invert the lock order. The authors are already in
+				// the document's pending authors or in flight to them; only the latest edit source
+				// lives in the state alone.
+				lastActor, creditSeq = state.lastActor, state.creditSeq.Load()
+			}
+			s.unlockState(room, state)
 		}
-		state.mu.Unlock()
 		if closed && changed {
+			persisted := lastActor == nil
+			if lastActor != nil {
+				if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
+					slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
+				} else {
+					persisted = true
+				}
+			}
+			if persisted {
+				s.lastActorPersisted(room, creditSeq)
+			}
+			// A room still loading has no state yet, and is closed once it has loaded.
 			_ = s.srv.CloseRoom(room, true)
 		}
 	}
+}
+
+// lastActorPersisted forgets a closed document's latest edit source once its pending-settlement
+// row holds it, unless an edit observed since (a later creditSeq) replaced it.
+func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
+	if state.closed && state.creditSeq.Load() == creditSeq {
+		state.lastActor = nil
+		state.unsettled = false
+	}
+	s.unlockState(room, state)
 }
 
 // Evict closes a live room and discards its resident state so the next access reloads the
 // durable document without treating the room as failed. No production code calls it: it exists
 // so tests, including those in package api, can force a room to reload.
 func (s *Service) Evict(_ context.Context, artifactID string) error {
-	value, _ := s.rooms.Load(artifactID)
-	var state *roomState
-	if value != nil {
-		state = value.(*roomState)
-		state.mu.Lock()
-		state.gen++
+	state := s.lockExistingState(artifactID)
+	if state != nil {
+		state.roomGeneration++
 		s.stopSettleTimer(state.settle)
-		state.mu.Unlock()
+		s.unlockState(artifactID, state)
 	}
 	return s.evictRoom(artifactID, state)
 }
@@ -1872,7 +1881,11 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 	// state during the close is re-armed by its own timer (see scheduleSettleAfterLocked).
 	err := s.srv.CloseRoom(room, true)
 	if state != nil {
-		s.rooms.CompareAndDelete(room, state)
+		state.mu.Lock()
+		if !state.released {
+			s.forgetLocked(room, state)
+		}
+		state.mu.Unlock()
 	}
 	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
 		return fmt.Errorf("evict live document: %w", err)
@@ -1881,9 +1894,8 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 }
 
 func (s *Service) failRoom(room string, cause error) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.failRoomLocked(room, state, cause)
 }
 
@@ -1894,7 +1906,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.failed = cause
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
-	state.gen++
+	state.roomGeneration++
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
 	// The failure drops this room's settlement: a queued one is stopped just above, one
@@ -1916,37 +1928,6 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	}()
 }
 
-func (s *Service) roomFailure(room string) error {
-	value, ok := s.rooms.Load(room)
-	if !ok {
-		return nil
-	}
-	return value.(*roomState).failure()
-}
-
-// failure is state's own failure as an ErrServiceUnavailable, or nil while it has not failed.
-// Which state a caller asks is the question: the one registered for the room now, or the one a
-// write holds its slot on, which an eviction has replaced.
-func (state *roomState) failure() error {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.failed == nil {
-		return nil
-	}
-	return fmt.Errorf("%w: %w", ErrServiceUnavailable, state.failed)
-}
-
-func (s *Service) roomFailed(room string) bool {
-	value, ok := s.rooms.Load(room)
-	if !ok {
-		return false
-	}
-	state := value.(*roomState)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.failed != nil
-}
-
 // awaitRoomRecovery waits for a failed room's forced eviction. Its next caller
 // then reloads the persisted document into a new room state. A room without
 // state has nothing to recover, so this lookup must not allocate one.
@@ -1961,15 +1942,13 @@ func (s *Service) roomFailed(room string) bool {
 // A room's own load never calls this: the eviction it would wait for waits for that load
 // (onLoadDocument).
 func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
-	value, ok := s.rooms.Load(room)
-	if !ok {
+	state := s.lockExistingState(room)
+	if state == nil {
 		return nil
 	}
-	state := value.(*roomState)
-	state.mu.Lock()
 	failure := state.failed
 	done := state.failedDone
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	if failure == nil {
 		return nil
 	}
@@ -2003,13 +1982,6 @@ type withoutRecoveryWait struct{}
 // deadline to end the wait.
 func WithoutRecoveryWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, withoutRecoveryWait{}, true)
-}
-
-func (s *Service) roomClosed(room string) bool {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.closed
 }
 
 // queryFrom returns the caller's transaction when it is inside one. A document read made while
@@ -2046,63 +2018,6 @@ func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (
 	return open, nil
 }
 
-func (s *Service) room(name string) *roomState {
-	value, _ := s.rooms.LoadOrStore(name, &roomState{
-		connected:       make(map[uint64]model.Actor),
-		pending:         make(map[string]pendingAuthor),
-		pendingVersions: make(map[int]versionPending),
-		unrecorded:      make(map[pmdoc.MarkRef]time.Time),
-	})
-	return value.(*roomState)
-}
-
-func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	state.updateClasses = append(state.updateClasses, documentUpdateClass{
-		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable,
-	})
-	state.pendingUpdates++
-	if durable {
-		state.durableAppends.Add(1)
-	}
-}
-
-// consumeUpdateClass takes the class the room's update observer recorded for update, wherever it
-// stands among the room's recorded updates. ygo fires a transaction's observers after the
-// transaction has released the document's lock, so two peers' updates reach persistence in the
-// order their read loops hand them on, which need not be the order the room recorded them in.
-func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bool) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	for index, class := range state.updateClasses {
-		if !bytes.Equal(class.update, update) {
-			continue
-		}
-		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
-		state.pendingUpdates--
-		return class.contentChanged, class.durable, true
-	}
-	return true, false, false
-}
-
-func (s *Service) hasPendingUpdates(room string) bool {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.pendingUpdates > 0
-}
-
-func (s *Service) finishDurableAppend(room string) {
-	s.room(room).durableAppends.Add(-1)
-}
-
-func (s *Service) hasDurableAppend(room string) bool {
-	return s.room(room).durableAppends.Load() > 0
-}
-
 // waitForPendingUpdates waits until the room has handed persistence every update its update
 // observer recorded, from every peer and the service alike. It counts the room, not a writer: a
 // peer still writing keeps it waiting for as long as the room stores more slowly than it writes.
@@ -2131,30 +2046,6 @@ func (s *Service) waitForDurableAppends(ctx context.Context, room string) error 
 func (s *Service) shuttingDown(room string) bool {
 	_, ok := s.shutdownRooms.Load(room)
 	return ok
-}
-
-func (s *Service) canOpenRoom(room string) bool {
-	if _, exists := s.rooms.Load(room); exists {
-		return true
-	}
-	count := 0
-	s.rooms.Range(func(_, _ any) bool {
-		count++
-		return count < maxLiveRooms
-	})
-	return count < maxLiveRooms
-}
-
-func (s *Service) canAddConnection() bool {
-	count := 0
-	s.rooms.Range(func(_, value any) bool {
-		state := value.(*roomState)
-		state.mu.Lock()
-		count += len(state.connected)
-		state.mu.Unlock()
-		return count < maxRoomConnections
-	})
-	return count < maxRoomConnections
 }
 
 var _ API = (*Service)(nil)

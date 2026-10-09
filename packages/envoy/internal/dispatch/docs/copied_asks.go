@@ -114,7 +114,7 @@ type copiedSource struct {
 
 // ownerDocuments is the predicate on artifacts d that selects owner's documents, and the value it
 // binds as $3: the issue's documents (artifacts_issue_key), or for a project document the
-// project's other unlinked documents (artifacts_project_documents, migration 0084); an agent
+// project's other unlinked documents (artifacts_project_documents, migration 0085); an agent
 // conversation's artifacts belong to neither.
 func ownerDocuments(owner artifactOwner) (string, string) {
 	if owner.IssueKey != nil {

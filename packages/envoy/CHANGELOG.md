@@ -334,8 +334,25 @@
   copy whose text is changed, or an id no ask of the owner indexes, still opens one, and so do a
   source's copies once its block leaves its document: settlement of the source retracts its ask
   and settles every copy, the first opens one ask, credited to whoever wrote the block into it, and
-  the others name that ask. Migration `0084_artifacts_project_documents` adds the partial index a
+  the others name that ask. Migration `0085_artifacts_project_documents` adds the partial index a
   project document's lookups read (LEGION-651).
+- A document opens in the editor however many documents the process has touched: the 1,000-room
+  cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
+  nothing still holds it. Before, every document opened since a restart kept its state and counted
+  against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
+- A document's pending authors now survive room release, process restart and overlapping Dispatch
+  tasks in `doc_pending_authors` (migration `0084`). A browser update is first an in-flight,
+  room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
+  document lock. A joined write records its authors in R in its content transaction. A version
+  reads R under that lock and may capture F only from its own room; after its transaction commits,
+  it deletes the R rows it listed and consumes the F credits it listed. The scoped rule means a
+  task can list another task's durable R records but never that task's F, while the same task can
+  consume F before its queued append can re-record an author. Each author is consequently pending
+  in F or R, or listed on one committed version, rather than in more than one of them. A settlement
+  that writes no version leaves R intact, and an upload that writes a replacement clears all R and
+  only the F credits present at its last room read. The document room can therefore go idle without
+  retaining author state or losing the authors a later version, ask or event must name
+  (LEGION-513).
 - `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's

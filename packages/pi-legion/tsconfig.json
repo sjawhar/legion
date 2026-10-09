@@ -25,6 +25,7 @@
     "extensions/legion.ts",
     "extensions/legion.test.ts",
     "extensions/legion-phase-stall-omp.test.ts",
+    "extensions/legion-role-tools-omp.test.ts",
     "../pi-shared/src/omp-host.d.ts",
     "scripts/grant-rig/*.ts",
     "scripts/skill-scenarios/*.ts",

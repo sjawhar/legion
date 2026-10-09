@@ -204,7 +204,7 @@ func (s *Service) reconcileAskBlocks(
 	artifactID string,
 	owner artifactOwner,
 	tree *pmdoc.Node,
-	credit settlementCredit,
+	credit settlementVersionCredit,
 	before string,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
