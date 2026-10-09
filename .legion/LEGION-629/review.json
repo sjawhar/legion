@@ -1,66 +1,52 @@
 {
-  "codeHead": "7d98d70e380b24a70068823eaac40d2609a686d2",
-  "completed": "2026-10-09T01:07:51.267854186Z",
+  "codeHead": "7d98d70e380b24a70068823eaac40d2609a686d2 (the last code change); the forward merge 66c26bbc1efd of main@origin 5c956b07 and the implementer's handoff 2484acc98ebf above the round-5 retro head afcdd171",
+  "completed": "2026-10-09T07:42:41.980030993Z",
   "critical": 0,
   "escalatedToArchitect": [
     "Unchanged: round 1's two spec-level consequences (unpinned compaction.remoteEndpoint carrying the session model's apiKey; dev.autoqa defaulting true) await the operator-overlay decision.",
-    "New, informational: the repository-extensions capability row (#1846) cites LEGION-629 as the issue whose live check proves it; LEGION-629 ships no live check (stage4b's new argv assertion is an e2e check, not the report's). Repoint or clear in LEGION-578's remaining live-check work."
+    "New, informational: the repository-extensions capability row (#1846) cites LEGION-629 as the issue whose live check proves it; LEGION-629 ships no live check (stage4b's new argv assertion is an e2e check, not the report's). Repoint or clear in LEGION-578's remaining live-check work.",
+    "Informational, this confirmation: the Legion Envoy and Contracts run 37897994474 at 2484acc9 has its dispatch job in_progress hours after start (every other job success); not in main's required set, so it gates nothing here, but a wedged job on that workflow is worth a look on main."
   ],
   "fastFollow": "Closed by the merge: the Dockerfile header/plugin-install/publish-gate comments and docs/kubernetes.md's quoted OK line. Still open: (1) shim.go:67-69 / worker_shim.go:139 clamp Grace to StopGrace/2 or make the drain deadline-based, and qualify docs/kubernetes.md's containment sentence for stop graces ≤ 6 s; (2) drain_test.go:26 tautology; (3) token-guard the heartbeat at codegraph.go:348-349; (4) drainWarmUp returns early when cfg.WarmCodegraph is nil; (5) image.go:226-228 stale comment; (6) docs/kubernetes.md image-guard sentence for the extensions=discovered refusal, and re-wrap :38; (7) the repository-extensions Ruling (architect); (8) delete the dead Awaits/installed mechanism and TestNoRowAwaitsAPodLaunch, inline imageStatus, narrow legion-api.ts's enum if 8.3.1 has not shipped, else note nothing emits installed on the schema and state.go:52-53; (9) drop the third loads-twice parenthetical at worker.Dockerfile:567; (10) WarmCodegraphIndex identity wrapper, warmLeaseStep as a function field, shared lease test helpers, runCodegraph signalling the direct child.",
   "fingerprint": {
     "approved": {
-      "forkPoint": "41c4d81464b1",
-      "head": "5137c274b19f89b214b7d5c185e1b2297b708291",
-      "sha256": "bba40d2305e7775ab57622f9131f915142d91799941216a84b48b4a1428b5829"
+      "forkPoint": "f1dcadfe1ec4 (main's #1846)",
+      "head": "17150b845a284a00c3b3b4ddfceb44add453925b",
+      "sha256": "ce20b82d123da016fbb5a585bf61ee84f7f3ede47818fd5f8b41d70286744be0"
     },
     "new": {
-      "forkPoint": "f1dcadfe1ec4 (main's #1846)",
-      "head": "ed5df4db3f2de6a31c1f3162af7cddd3adfe02b9",
+      "forkPoint": "5c956b07e0f6 (main's #1857, #1859, #1835 and the v8.4.x releases)",
+      "head": "bc9dbf23a485cb01f47f20ceb858a9a889316086",
       "sha256": "ce20b82d123da016fbb5a585bf61ee84f7f3ede47818fd5f8b41d70286744be0"
     },
     "procedure": "jj diff --from \u003cfork point\u003e --to \u003chead\u003e --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
-    "result": "changed: 2,358 → 2,548 lines; the diff of the two outputs is exactly #1846's reconciliation — bootprobe.OKLine carrying extensions=discovered beside the capabilities and model-fallback marks (extensionsDiscovered now markPattern(extensionsMark)), the capabilities table's codegraph row installed/awaits-LEGION-629 → present with codeGraphAwaits removed and its four tests renamed, probe_image_test.go/imageprobe_test.go/probe_test.go rows, the contracts golden state.json and legion-api.test.ts, Dockerfile and docs text; no line of codegraph.go's lease, shim.go, podsafety, manifest.go agentArgv or bootgate.go's lane differs. So a new round: thermonuclear again, one review."
+    "result": "unchanged: 2,548 lines at both heads, computed in this workspace after jj git fetch; the merge 66c26bbc resolved one AGENTS.md conflict (main's file with this branch's legion worker-shim line) and left the branch's added and removed lines byte-identical. Confirmation, not a round."
   },
   "forgeFacts": {
-    "ci": "Merge head 24f2532c: no runs (superseded). Golden fix 7d98d70e: Tests 37865275948, Worker Image 37865275983, Docs 37865276007, PR Title success (Envoy and Contracts cancelled by the handoff push). Implementer's handoff 1099ab99: Tests 37865930722 (lint, typecheck, test), Worker Image 37865930556, Docs 37865930466, PR Title 37865930553 success; Legion Envoy and Contracts 37865930474 with contracts/pi-legion/pi-envoy/envoy-* jobs success and dispatch/dispatch-memory still running when read (not in the base's required set: read_record shows checksVerdict green at ed5df4db, carried from the code head). The tester's handoff ed5df4db carries skip-checks. The golden-stale negative control: CI run 37864230699 red at the merge head before 7d98d70e regenerated the fixture.",
-    "e2e": "E2E (tester) round 6 at 1099ab99: every acceptance row re-driven — the Worker Image run's gate printing nineteen capability rows with codegraph present and the OK line with extensions=discovered beside #1846's marks at contract 16, the pod argv in the scratch repositories, omp config list under Apply's environment, the shim drive (stop at 8 s releasing the lease in 0.12 s, relaunch repairing to complete in 28.9 s, two shims over a stale lease on v9fs with one builder), the local lane and contracts bun test; implementerProof verified. E2E (implementer) carries the merge's own proof and the golden control.",
-    "threads": "The three round-1 threads are resolved on my Accepted: replies (the merger's legion threads resolve); no thread opened since; no bot thread."
+    "ci": "Required set on main (rules/branches/main): lint, typecheck, test, pr-title. At the code/merge handoff head 2484acc98ebf: Tests 37897994502 (lint, typecheck, test) success, PR Title 37897994609 and 37898834650 and 37900007754 success, Docs 37897994457 success, Worker Image 37897994444 success (its gate printed probe-image: OK … extensions=discovered … capabilities=checked … daemon-api-version=16 per the tester's log read); Legion Envoy and Contracts 37897994474 still in_progress on its dispatch job only (every other job success; not in the required set). The tester's handoff bc9dbf23 carries skip-checks: no runs, the verdict carried from 2484acc9. read_record at my start showed pullRequest.head bc9dbf23 with no checksVerdict yet.",
+    "e2e": "E2E (implementer) at 1687a7c1/ea0bd821 (rows 1a–4c) with the rebase re-check afcdd171 → 2484acc9 recorded (fingerprint unchanged, bare gates); E2E (tester) with the rebase re-check 1099ab99 → 2484acc9 (fingerprint computed independently, equal; CI green at 2484acc9; the image gate as the smoke; local lane green) and round 6's full re-drive at 1099ab99; both lines present in the live body with surfaces, commands, observations, heads and negative controls.",
+    "threads": "gh api graphql: 3 threads, all isResolved, each opened by legion-reviewer and each newest comment my submitted Accepted: (PRRT_kwDORFy7ds6qUkQ6, …RC, …RJ); no thread opened since round 1, no bot thread. PR mergeable true, mergeable_state blocked (awaiting review)."
   },
   "important": 0,
   "issue": "LEGION-629",
-  "keyFindings": [
-    {
-      "description": "codeGraph's doc comment still says 'the row's Awaits says what that still needs, and CheckImage renders it installed'; at this head the row's Awaits is empty and image_test.go:163-165 asserts present. Stale comment in a file the diff falsified without touching.",
-      "file": "packages/daemon/internal/capabilities/image.go:226-228",
-      "severity": "minor"
-    },
-    {
-      "description": "The image-guard section names the agent-models and capabilities requirements with the latter's refusal text but never the extensions=discovered requirement this branch adds (probe.go:517-519), the one that refuses an image built from today's main; the mark appears only inside the quoted OK line at :134.",
-      "file": "docs/kubernetes.md:141-147",
-      "severity": "minor"
-    },
-    {
-      "description": "The repository-extensions live row's Ruling cites dispatch://LEGION-629 as the issue whose live check proves it (rendered 'to be proved by a live check against a running pod (dispatch://LEGION-629)', pinned at image_test.go:156 and deployment_test.go:105, repeated at docs/kubernetes.md:888-890); this PR is LEGION-629 and ships no live check. #1846's citation; whether LEGION-629 was meant to own one is the architect's call — reported.",
-      "file": "packages/daemon/internal/capabilities/capabilities.go:82",
-      "severity": "minor"
-    }
-  ],
-  "kind": "changes round after a conflict-forced merge",
-  "minor": 3,
+  "keyFindings": [],
+  "kind": "confirmation after a conflict-forced merge (conflict round 2): fingerprint unchanged, so round 4's approval is re-stated by SHA — no thermonuclear pass, no thread pass",
+  "minor": 0,
   "notProven": [
     "Carried unchanged: acceptance 2's daemon-launched figures and acceptance 4's 'from the daemon' (stage4a/4b on a devbox against the image 1099ab99 built); live_operator_test.go and stage4b edits blind; the ≤ 6 s stop-grace drain edge and the un-guarded heartbeat (Minor); the 5 s-stop wedge that can take two launches; disabledExtensions vs an explicit root unverified by me; a mixed-version rollout the lease token does not cover.",
-    "This round: the production daemon this pod talks to is an older commit, so legion state --json's codegraph row reading present is proven by the contracts golden and the capabilities tests, not a running daemon of this head (tester's observation)."
+    "This round: the production daemon this pod talks to is an older commit, so legion state --json's codegraph row reading present is proven by the contracts golden and the capabilities tests, not a running daemon of this head (tester's observation).",
+    "This confirmation: nothing new. #1857 is now on main and in this branch (retro removes .legion/\u003cissue\u003e/ before READY; the merger's --ready refuses a head still carrying it): this branch's retro at afcdd171 predates that rule, so the retro after this approval is where the removal lands — its commits (docs/solutions and the .legion removal) are the process artifacts the fingerprint's fileset exempts."
   ],
   "phase": "review",
   "planDepartures": "Unchanged from round 2.",
-  "previousApproval": "b5f598109137213b35e3cd6d12221a3a6c4f4909 (review 5457177028), confirmed at 5137c274b19f89b214b7d5c185e1b2297b708291 (review 5463592759)",
-  "reviewedHead": "ed5df4db3f2de6a31c1f3162af7cddd3adfe02b9",
-  "round": 4,
+  "previousApproval": "17150b845a284a00c3b3b4ddfceb44add453925b (review 5464668416, round 4); before it b5f598109137 (review 5457177028) confirmed at 5137c274b19f (review 5463592759)",
+  "reviewedHead": "bc9dbf23a485cb01f47f20ceb858a9a889316086",
+  "round": 5,
   "schemaVersion": 1,
   "thermonuclear": {
-    "codeQuality": "reconciliation correct; cleanup only: the Awaits/installed mechanism is unreachable across nine files with a test asserting no row uses it (main's #1846 extension point, zeroed here; the enum member installed is release-gated in legion-api.ts); imageStatus in probe_image_test.go an identity wrapper; a third copy of the loads-twice rule in the Dockerfile's publish-gate comment; docs/kubernetes.md:38 left as one 308-char line. Confirms the merge closed round 1-2's fast-follow items: the Dockerfile header, plugin-install step and publish-gate comments now say discovery on and quote the OK line with the mark; docs/kubernetes.md:134 too.",
-    "deepReview": "no blocking defect: OKLine composition and all four mark readers re-derived over nine line shapes (an older CLI's line never accepted; extensions=discovered-not rejected since the mark must be followed by a space or the contract token); judge's refusal order contract → agent-models → extensions → capabilities → NATS with each message true at its position; the codegraph row flip consistent across the Go golden, state.json (byte-identical detail string), legion-api.test.ts and docs; every co-touched file's conflict resolution keeps both sides (probe_image.go runs the load probes then CheckImage and ReadModelFallback; launcherCommand keeps --stop-grace and --warm-codegraph; bootgate.go keeps #1846's structure with the discovery-on lane and loadedTwice). Three Minor doc items (below).",
-    "head": "ed5df4db3f2de6a31c1f3162af7cddd3adfe02b9"
+    "codeQuality": "not re-run (confirmation)",
+    "deepReview": "not re-run (confirmation)",
+    "head": "not re-run: confirmation of an unchanged diff; the pair last ran at ed5df4db3f2de6a31c1f3162af7cddd3adfe02b9 (round 4)"
   },
   "verdict": "approved"
 }
