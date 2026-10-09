@@ -276,7 +276,10 @@ func providerSecretKeys(keys []config.ProviderKey) map[string]string {
 
 // roleRequirements is one role's reservation as a container's requirements: its cpu and memory,
 // each the request and the limit alike, so the pod the role's containers make is Guaranteed and
-// bursts past nothing. The two lists are built apart so neither edit reaches the other.
+// bursts past nothing (the kubelet's QoS reads cpu and memory alone); and its ephemeral storage,
+// the limit on what the container writes to the node's disk and the smaller request the scheduler
+// fits to the node's allocatable disk (the loader holds the request to the limit). The two lists
+// are built apart so neither edit reaches the other.
 func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
 	key := "runtime.kubernetes.resources." + string(role)
 	cpu, err := resource.ParseQuantity(reservation.CPU)
@@ -287,9 +290,17 @@ func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1
 	if err != nil {
 		return corev1.ResourceRequirements{}, fmt.Errorf("%s.memory: %w", key, err)
 	}
+	storage, err := resource.ParseQuantity(reservation.EphemeralStorage)
+	if err != nil {
+		return corev1.ResourceRequirements{}, fmt.Errorf("%s.ephemeral_storage: %w", key, err)
+	}
+	storageRequest, err := resource.ParseQuantity(reservation.EphemeralStorageRequest)
+	if err != nil {
+		return corev1.ResourceRequirements{}, fmt.Errorf("%s.ephemeral_storage_request: %w", key, err)
+	}
 	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu.DeepCopy(), corev1.ResourceMemory: memory.DeepCopy()},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: storageRequest},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu.DeepCopy(), corev1.ResourceMemory: memory.DeepCopy(), corev1.ResourceEphemeralStorage: storage},
 	}, nil
 }
 

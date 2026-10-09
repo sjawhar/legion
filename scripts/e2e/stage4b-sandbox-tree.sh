@@ -150,29 +150,39 @@ tree1_children=2
 # operator shell (controller). preflight refuses, BLOCKED, a pool with room for fewer.
 run_pods_at_once=$((admission_cap + tree1_children))
 # The run's reservations: the cpu and memory every container of a role carries as both its request
-# and its limit (runtime.kubernetes.resources, write_legion_config), which preflight sizes the pool's
-# room by and pod-shape holds every container of every pod to. The defaults are the daemon's,
+# and its limit, and the ephemeral storage it carries as a limit over a smaller request
+# (runtime.kubernetes.resources, write_legion_config), which preflight sizes the pool's room by (cpu
+# and memory) and pod-shape holds every container of every pod to. The defaults are the daemon's,
 # config.DefaultResources() in packages/daemon/internal/config/kubernetes.go, written once here as
 # data. The overrides are this run's, chosen so that an issue pod carries a reservation from each
-# path the loader has — the tester's cpu and memory both overridden, the reviewer's both, the
-# merger's cpu alone with its memory the default, and the architect's, planner's and implementer's
-# the defaults — while the pod's sum (2.95 CPU, 14 GiB) stays within the defaults' 3 CPU and 15 GiB.
-# The controller's reservation is the image probe pod's; the run writes none for it, since only a
-# daemon under `controller: daemon` may name it.
+# path the loader has — the tester's cpu, memory and ephemeral-storage limit overridden, the
+# reviewer's cpu and memory, the merger's cpu alone with its memory the default, and the architect's,
+# planner's and implementer's the defaults, every ephemeral-storage request the default 1Gi — while
+# the pod's sum (2.95 CPU, 14 GiB) stays within the defaults' 3 CPU and 15 GiB. The controller's
+# reservation is the image probe pod's; the run writes none for it, since only a daemon under
+# `controller: daemon` may name it.
 declare -A default_cpu=([architect]=250m [planner]=250m [implementer]=750m [tester]=750m [reviewer]=750m [merger]=250m [controller]=1)
 declare -A default_memory=([architect]=1Gi [planner]=1Gi [implementer]=4Gi [tester]=4Gi [reviewer]=4Gi [merger]=1Gi [controller]=4Gi)
+declare -A default_ephemeral_storage=([architect]=10Gi [planner]=10Gi [implementer]=20Gi [tester]=20Gi [reviewer]=10Gi [merger]=10Gi [controller]=10Gi)
+declare -A default_ephemeral_storage_request=([architect]=1Gi [planner]=1Gi [implementer]=1Gi [tester]=1Gi [reviewer]=1Gi [merger]=1Gi [controller]=1Gi)
 declare -A override_cpu=([tester]=1 [reviewer]=500m [merger]=200m)
 declare -A override_memory=([tester]=5Gi [reviewer]=2Gi)
+declare -A override_ephemeral_storage=([tester]=30Gi)
+declare -A override_ephemeral_storage_request=()
 run_roles="architect planner implementer tester reviewer merger controller"
-# expected_cpu ROLE and expected_memory ROLE are ROLE's reservation: the override where the run sets
+# expected_cpu ROLE, expected_memory ROLE, expected_ephemeral_storage ROLE and
+# expected_ephemeral_storage_request ROLE are ROLE's reservation: the override where the run sets
 # one, the default otherwise, as resolveKubernetes settles the file's block field by field.
 expected_cpu() { printf '%s' "${override_cpu[$1]:-${default_cpu[$1]}}"; }
 expected_memory() { printf '%s' "${override_memory[$1]:-${default_memory[$1]}}"; }
-# run_resources is every role's expected reservation as JSON, {role: {cpu, memory}}: the shape the jq
-# rules take (lib/stage4b-pods.jq reservation_problems; lib/stage4b-room.jq).
+expected_ephemeral_storage() { printf '%s' "${override_ephemeral_storage[$1]:-${default_ephemeral_storage[$1]}}"; }
+expected_ephemeral_storage_request() { printf '%s' "${override_ephemeral_storage_request[$1]:-${default_ephemeral_storage_request[$1]}}"; }
+# run_resources is every role's expected reservation as JSON, {role: {cpu, memory, ephemeral_storage,
+# ephemeral_storage_request}}: the shape the jq rules take (lib/stage4b-pods.jq reservation_problems;
+# lib/stage4b-room.jq, which reads cpu and memory).
 run_resources='{'
 for role in $run_roles; do
-  run_resources+="\"$role\":{\"cpu\":\"$(expected_cpu "$role")\",\"memory\":\"$(expected_memory "$role")\"},"
+  run_resources+="\"$role\":{\"cpu\":\"$(expected_cpu "$role")\",\"memory\":\"$(expected_memory "$role")\",\"ephemeral_storage\":\"$(expected_ephemeral_storage "$role")\",\"ephemeral_storage_request\":\"$(expected_ephemeral_storage_request "$role")\"},"
 done
 run_resources="${run_resources%,}}"
 unset role
@@ -882,33 +892,32 @@ EOF
   render_operator_pod
   sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
   grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+  # The controller's own reservation is resources_block's (controller_cpu set): only `controller:
+  # daemon` is appended, since a second `resources:` key under runtime.kubernetes would be refused.
   if [ -n "$controller_cpu" ]; then
-    cat >>"$work/legion.yaml" <<EOF
-    resources:
-      controller:
-        requests:
-          cpu: "$controller_cpu"
-          memory: 1Gi
-        limits:
-          memory: 2Gi
-controller: daemon
-EOF
+    echo "controller: daemon" >>"$work/legion.yaml"
   fi
 }
 # resources_block prints the run's `runtime.kubernetes.resources` block: one entry per role the run
-# overrides (override_cpu, override_memory), with only the fields it sets, so the daemon fills the
-# rest from config.DefaultResources() and the file exercises both paths. The data is the
+# overrides (override_cpu, override_memory, override_ephemeral_storage,
+# override_ephemeral_storage_request), with only the fields it sets, so the daemon fills the rest
+# from config.DefaultResources() and the file exercises both paths; and, while controller_cpu is set
+# (daemon-controller-liveness, under `controller: daemon`), the controller's entry with that cpu as
+# both request and limit — the reservation's one shape — and 1Gi of memory. The data is the
 # reservations' (run_resources), so the file and the checks cannot drift apart.
 resources_block() {
   local role fields
   echo "    resources:"
   for role in $run_roles; do
-    [ -n "${override_cpu[$role]:-}${override_memory[$role]:-}" ] || continue
+    [ -n "${override_cpu[$role]:-}${override_memory[$role]:-}${override_ephemeral_storage[$role]:-}${override_ephemeral_storage_request[$role]:-}" ] || continue
     fields=
     [ -z "${override_cpu[$role]:-}" ] || fields="cpu: ${override_cpu[$role]}"
     [ -z "${override_memory[$role]:-}" ] || fields="${fields:+$fields, }memory: ${override_memory[$role]}"
+    [ -z "${override_ephemeral_storage[$role]:-}" ] || fields="${fields:+$fields, }ephemeral_storage: ${override_ephemeral_storage[$role]}"
+    [ -z "${override_ephemeral_storage_request[$role]:-}" ] || fields="${fields:+$fields, }ephemeral_storage_request: ${override_ephemeral_storage_request[$role]}"
     echo "      $role: { $fields }"
   done
+  [ -z "$controller_cpu" ] || echo "      controller: { cpu: \"$controller_cpu\", memory: 1Gi }"
 }
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
 # in place of its placeholder.
@@ -1397,9 +1406,10 @@ hog_oomkilled() {
 # or nothing, with its Secrets' values as they are now: gVisor; the operator's ServiceAccount and one
 # projected token; all six fixed role launchers with the route ConfigMap where their profiles read
 # it; the pool; restricted security; every container, the init containers included, reserving cpu
-# and memory as both request and limit, a role container its role's reservation under the run's
-# overrides and defaults (run_resources) and an init container the launching role's, so the pod is
-# Guaranteed, and no affinity (lib/stage4b-pods.jq reservation_problems); every role launcher
+# and memory as both request and limit and ephemeral-storage as a request under its limit, a role
+# container its role's reservation under the run's overrides and defaults (run_resources) and an
+# init container the launching role's, so the pod is Guaranteed and bounded on the node's disk, and
+# no affinity (lib/stage4b-pods.jq reservation_problems); every role launcher
 # dialing the worker stream the daemon served when the pod was created, at advertise_host; no
 # Secret value in a container's environment, command or args; and split provisioning (only
 # workspace-fetch reaches the provisioning credential).
@@ -1444,8 +1454,9 @@ shape_problems() {
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s | role_containers[] | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "a role launcher mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end),
-      # Every container reserves the cpu and memory of its role, request and limit alike; the pod is
-      # Guaranteed and asks nothing of its placement.
+      # Every container reserves the cpu and memory of its role, request and limit alike, and its
+      # ephemeral-storage bound, request under limit; the pod is Guaranteed and asks nothing of its
+      # placement.
       reservation_problems($expected)
   '
 }
@@ -4026,7 +4037,7 @@ leaks_pid=
 jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.json" >/dev/null ||
   fail "Sandbox pods carry a value of their Sandbox's Secret, name a Secret the check never saw, or the pod watch holds unreadable lines: $(jq -c '{leaks, unseen, unreadable}' "$work/secret-leaks.json")"
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
-note "every container of each, the init containers included, reserves its role's cpu and memory as both request and limit under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
+note "every container of each, the init containers included, reserves its role's cpu and memory as both request and limit and its role's ephemeral-storage limit over its request (the node-disk bound) under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
 note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
 # Negative controls: a recorded pod with another runtime class, one whose tester container bursts
 # past its request, one pinned to a node by an affinity, and a pod the watch never recorded. Each

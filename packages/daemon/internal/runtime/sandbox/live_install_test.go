@@ -334,8 +334,8 @@ func (r *liveRig) checkImageProbe() error {
 		return fmt.Errorf("probe pod %s (phase %s): %w", name, pod.Status.Phase, err)
 	}
 	container := pod.Spec.Containers[0]
-	note("operator", "probe pod %s read in phase %s: container %s cpu %s, memory %s, request = limit, the controller's reservation; qosClass %s; no affinity",
-		name, pod.Status.Phase, container.Name, container.Resources.Limits.Cpu().String(), container.Resources.Limits.Memory().String(), pod.Status.QOSClass)
+	note("operator", "probe pod %s read in phase %s: container %s cpu %s, memory %s, request = limit, the controller's reservation, ephemeral-storage %s under a limit of %s; qosClass %s; no affinity",
+		name, pod.Status.Phase, container.Name, container.Resources.Limits.Cpu().String(), container.Resources.Limits.Memory().String(), container.Resources.Requests.StorageEphemeral().String(), container.Resources.Limits.StorageEphemeral().String(), pod.Status.QOSClass)
 	bursting := pod.DeepCopy()
 	doubled := bursting.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
 	doubled.Add(doubled)

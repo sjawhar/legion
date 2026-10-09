@@ -58,10 +58,12 @@
             "resources": {
               "limits": {
                 "cpu": "250m",
+                "ephemeral-storage": "10Gi",
                 "memory": "1Gi"
               },
               "requests": {
                 "cpu": "250m",
+                "ephemeral-storage": "1Gi",
                 "memory": "1Gi"
               }
             },
@@ -138,10 +140,12 @@
             "resources": {
               "limits": {
                 "cpu": "250m",
+                "ephemeral-storage": "10Gi",
                 "memory": "1Gi"
               },
               "requests": {
                 "cpu": "250m",
+                "ephemeral-storage": "1Gi",
                 "memory": "1Gi"
               }
             },
@@ -218,10 +222,12 @@
             "resources": {
               "limits": {
                 "cpu": "750m",
+                "ephemeral-storage": "20Gi",
                 "memory": "4Gi"
               },
               "requests": {
                 "cpu": "750m",
+                "ephemeral-storage": "1Gi",
                 "memory": "4Gi"
               }
             },
@@ -298,10 +304,12 @@
             "resources": {
               "limits": {
                 "cpu": "750m",
+                "ephemeral-storage": "20Gi",
                 "memory": "4Gi"
               },
               "requests": {
                 "cpu": "750m",
+                "ephemeral-storage": "1Gi",
                 "memory": "4Gi"
               }
             },
@@ -378,10 +386,12 @@
             "resources": {
               "limits": {
                 "cpu": "750m",
+                "ephemeral-storage": "10Gi",
                 "memory": "4Gi"
               },
               "requests": {
                 "cpu": "750m",
+                "ephemeral-storage": "1Gi",
                 "memory": "4Gi"
               }
             },
@@ -458,10 +468,12 @@
             "resources": {
               "limits": {
                 "cpu": "250m",
+                "ephemeral-storage": "10Gi",
                 "memory": "1Gi"
               },
               "requests": {
                 "cpu": "250m",
+                "ephemeral-storage": "1Gi",
                 "memory": "1Gi"
               }
             },
@@ -538,10 +550,12 @@
             "resources": {
               "limits": {
                 "cpu": "250m",
+                "ephemeral-storage": "10Gi",
                 "memory": "1Gi"
               },
               "requests": {
                 "cpu": "250m",
+                "ephemeral-storage": "1Gi",
                 "memory": "1Gi"
               }
             },
@@ -616,10 +630,12 @@
             "resources": {
               "limits": {
                 "cpu": "250m",
+                "ephemeral-storage": "10Gi",
                 "memory": "1Gi"
               },
               "requests": {
                 "cpu": "250m",
+                "ephemeral-storage": "1Gi",
                 "memory": "1Gi"
               }
             },

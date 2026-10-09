@@ -708,10 +708,13 @@ runtime:
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
       priority_class: legion
-    resources:                  # optional; a role's reservation, each field both request and limit, so every
-                                # role is covered for the resource-limits capability with or without this block
-      tester: { cpu: 1, memory: 6Gi }      # both fields set
-      reviewer: { memory: 2Gi }            # cpu stays the default, 750m
+    resources:                  # optional; a role's reservation: cpu and memory each both request and limit,
+                                # so every role is covered for the resource-limits capability with or without
+                                # this block, and an ephemeral-storage limit over a small request (the role's
+                                # bound on the node's disk)
+      tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # the disk request stays the default 1Gi
+      reviewer: { memory: 2Gi }            # cpu stays the default, 750m; disk bound the default, 10Gi over 1Gi
+      implementer: { ephemeral_storage_request: 8Gi }   # reserves 8Gi of the node's disk under the 20Gi default
       controller: { cpu: 2, memory: 8Gi }  # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
@@ -727,20 +730,34 @@ capabilities:                   # optional: the deployment capabilities decided 
 ```
 
 Every container of every Legion pod reserves cpu and memory with its request equal to its limit, so
-every pod is `Guaranteed` and bursts past nothing ([Issue sizing](#issue-sizing-one-reservation-per-pod)).
-`runtime.kubernetes.resources.<role>` sets a role's reservation, `cpu`, `memory`, or both; what the
+every pod is `Guaranteed` and bursts past nothing ([Issue sizing](#issue-sizing-one-reservation-per-pod)),
+and carries an ephemeral-storage limit, its bound on the node's disk, over a smaller
+ephemeral-storage request. `runtime.kubernetes.resources.<role>` sets a role's reservation: `cpu`,
+`memory`, `ephemeral_storage` (the limit) and `ephemeral_storage_request`, any of them; what the
 file leaves out, a field or a whole role, takes the daemon's default (`config.DefaultResources()`,
 `packages/daemon/internal/config/kubernetes.go`):
 
-| role | cpu | memory |
-| :--- | :--- | :--- |
-| `implementer`, `tester`, `reviewer` | 750m | 4Gi |
-| `architect`, `planner`, `merger` | 250m | 1Gi |
-| `controller` (`controller: daemon`), and the image probe | 1 | 4Gi |
+| role | cpu | memory | ephemeral-storage (limit / request) |
+| :--- | :--- | :--- | :--- |
+| `implementer`, `tester` | 750m | 4Gi | 20Gi / 1Gi |
+| `reviewer` | 750m | 4Gi | 10Gi / 1Gi |
+| `architect`, `planner`, `merger` | 250m | 1Gi | 10Gi / 1Gi |
+| `controller` (`controller: daemon`), and the image probe | 1 | 4Gi | 10Gi / 1Gi |
 
-At the defaults a six-role issue pod sums to 3 CPU and 15 GiB. `issue_volume` sizes each issue's own
-volume, the clone, the workspace, uv's Pythons and packages, and the roles' sessions on it; the
-controller's pod owns one of the same size, holding its sessions alone.
+At the defaults a six-role issue pod sums to 3 CPU and 15 GiB, its ephemeral-storage limits to 80Gi
+and its requests to 6Gi. `issue_volume` sizes each issue's own volume, the clone, the workspace,
+uv's Pythons and packages, and the roles' sessions on it; the controller's pod owns one of the same
+size, holding its sessions alone. Ephemeral storage is what a role container writes outside every
+volume: its root filesystem, the node's disk — the role's `$HOME`, Oh My Pi's state home with its
+Chromium profiles and logs, the Go and Bun caches a build fills (a role container mounts no `/tmp`;
+its private and state directories and the config home are in-memory `emptyDir`s, whose pages the
+bound does not count). Pods of unrelated trees share a node, so one role filling the node's disk
+would put every pod on it under `DiskPressure`; the limit has the kubelet evict the pod of the
+container that passed it, the offending issue's alone, and the request is what the scheduler fits
+to the node's allocatable ephemeral storage, its root volume. The request is small by default so
+that scheduling binds to almost nothing; an operator
+who knows the root volume raises `ephemeral_storage_request` so the scheduler reserves disk
+([Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
 - `tree_volume`, the tree-volume layout's key: `runtime.kubernetes.tree_volume is now issue_volume:
@@ -756,11 +773,14 @@ controller's pod owns one of the same size, holding its sessions alone.
   drop the key`);
 - the earlier shape inside a role's entry: `runtime.kubernetes.resources.<role>.requests is gone: a
   role's reservation is one cpu and one memory, each both its request and its limit` (`limits`
-  likewise), and `runtime.kubernetes.resources.<role>.ephemeral_storage is gone: a role reserves cpu
-  and memory alone, and its workspace lives on the issue's volume (runtime.kubernetes.issue_volume)`;
-  any other member of a role's entry is an unknown key, and a `cpu`, `memory` or `issue_volume` that
-  is not a positive Kubernetes quantity is refused as such (`… must be a positive Kubernetes quantity
-  (e.g. 20Gi or 500m)`);
+  likewise); any other member of a role's entry but `cpu`, `memory`, `ephemeral_storage` and
+  `ephemeral_storage_request` is an unknown key, and a `cpu`, `memory`, `ephemeral_storage`,
+  `ephemeral_storage_request` or `issue_volume` that is not a positive Kubernetes quantity is
+  refused as such (`… must be a positive Kubernetes quantity (e.g. 20Gi or 500m)`);
+- an ephemeral-storage request past its limit, once both are settled — the file set one side or
+  both, since the defaults never exceed:
+  `runtime.kubernetes.resources.<role>.ephemeral_storage_request <request> exceeds ephemeral_storage
+  <limit>`;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - an image that is not pinned by digest;
 - `session_store: postgres` until Stage 6, since a pod's session lives on the issue's volume, and a
@@ -770,7 +790,8 @@ controller's pod owns one of the same size, holding its sessions alone.
 `tree_volume: 20Gi` is refused naming `issue_volume`; one carrying `resources: {tester: {limits:
 {memory: 8Gi}}}` naming `limits`; one carrying `resources: {small: {cpu: 500m}}` naming the seven
 roles; and a file with no `resources` block passes, as does one with `resources: {tester: {cpu: 2,
-memory: 8Gi}}`, the daemon filling every field the file leaves unset from the defaults.
+memory: 8Gi}}` or `resources: {tester: {ephemeral_storage: 40Gi}}`, the daemon filling every field
+the file leaves unset from the defaults.
 
 Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
@@ -1047,9 +1068,12 @@ through a `subPath`, so a session survives its pod. Each role's Secret holds onl
 launcher token, projected read-only into the role's own container; the issue's `-boot` Secret holds
 the provisioning token, projected into `workspace-fetch` alone. The operator's volumes and mounts
 join every role container's, and the providers Secret's configured keys when there are any, with its
-`NATS_NKEY_SEED` key when the daemon has a NATS nkey seed. Each role's private and state directories,
-`/tmp` and the XDG config home are in-memory, one set per role so no role's launcher or state
-collides with a sibling's. Each role's agent is also told a state home of its own,
+`NATS_NKEY_SEED` key when the daemon has a NATS nkey seed. Each role's private and state directories
+and the XDG config home are in-memory, one set per role so no role's launcher or state collides
+with a sibling's; a role container mounts no `/tmp` (the `tmp` memory volume is `workspace-fetch`'s
+alone, `podkind.go`), so its `/tmp`, its `$HOME` and the state home below are its root filesystem,
+the node's disk, under the role's ephemeral-storage limit. Each role's agent is also told a state
+home of its own,
 `XDG_STATE_HOME=/home/legion/.local/state/<role>` (`roleStateHome`, `manifest.go`), a path on the
 container's own filesystem mounted from no volume, and its shim makes Oh My Pi's profile directory
 under it, `omp/profiles/legion`, before Oh My Pi starts (`podsafety.EnsureStateHome`; Oh My Pi
@@ -1061,10 +1085,11 @@ container, the first role's lock would block every other role's broker, and thei
 would fail (`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's
 own filesystem. `workspace-init`, which runs alone, keeps the plain `/home/legion/.local/state`.
 
-Every container carries a reservation, cpu and memory with request equal to limit: each role
-container its role's (`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init
-containers the reservation of the role whose launch created the pod (`issuePod.initContainers`,
-`podkind.go`). So the pod is `Guaranteed`, and it carries no affinity
+Every container carries a reservation, cpu and memory with request equal to limit, and an
+ephemeral-storage limit over a smaller request: each role container its role's
+(`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init containers the
+reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). So
+the pod is `Guaranteed`, each container is bounded on the node's disk, and it carries no affinity
 ([Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 Every role container is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
@@ -1291,17 +1316,20 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 ### Issue sizing: one reservation per pod
 
 Every container of a Legion pod reserves cpu and memory with its request equal to its limit
-(`roleRequirements`, `internal/daemon/kubernetes.go`): each role container its role's reservation
-(`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none —
-[Configuration](#configuration)), both init containers the reservation of the role whose launch
+(`roleRequirements`, `internal/daemon/kubernetes.go`), and carries an ephemeral-storage limit over a
+smaller ephemeral-storage request (the node-disk bound, below): each role container its role's
+reservation (`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none
+— [Configuration](#configuration)), both init containers the reservation of the role whose launch
 created the pod (`issuePod.initContainers`, `internal/runtime/sandbox/podkind.go`), the controller's
 launcher and init container the controller's, and the image probe's one container the controller's
-too. So every Legion pod is `Guaranteed`, and the pod bursts past its summed reservation nowhere;
-inside it, under gVisor, one role may use what its idle siblings reserved (below). At the defaults
-a six-role issue pod sums to 3 CPU and 15 GiB, the init containers adding nothing: a pod's
-effective request is the larger of its containers' sum and its largest init container, and no one
-role's reservation exceeds the sum of the six. Every role reserved is what the `resource-limits`
-row of [The deployment's capability report](#the-deployments-capability-report) measures, so on a
+too. So every Legion pod is `Guaranteed` — the kubelet's QoS reads cpu and memory alone, so the
+disk bound's request under its limit changes no pod's class — and the pod bursts past its summed
+reservation nowhere; inside it, under gVisor, one role may use what its idle siblings reserved
+(below). At the defaults a six-role issue pod sums to 3 CPU and 15 GiB, the init containers adding
+nothing: a pod's effective request is the larger of its containers' sum and its largest init
+container, and no one role's reservation exceeds the sum of the six. Every role reserved is what
+the `resource-limits` row of
+[The deployment's capability report](#the-deployments-capability-report) measures, so on a
 Kubernetes deployment it is `present` with or without a `resources` block.
 
 The defaults were sized from an issue pod on the production cluster (measured 2026-10-09, under
@@ -1340,6 +1368,24 @@ one launch failure, its relaunch meets the same pool, and the claim fails once i
 run out — no later than its registration deadline. Size the pool's limits for
 `admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum, or keep
 `admission_cap` within what the limits place.
+
+**The node-disk bound.** Pods of unrelated trees share a node, and what a role writes outside every
+volume — its root filesystem: `$HOME`, Oh My Pi's state home with its Chromium profiles and logs,
+the Go and Bun caches a build fills — is the node's disk, the node's allocatable ephemeral storage
+(its root volume; read it with `kubectl get node <n> -o
+jsonpath='{.status.allocatable.ephemeral-storage}'`). That disk must hold the sum of the pods'
+actual disk use, which Σ of their containers' `ephemeral_storage` limits bounds above: a six-role
+issue pod's limits sum to 80Gi at the defaults (20Gi for the implementer and tester, 10Gi for each
+other role), its requests to 6Gi. A container past its own limit has its pod evicted — the
+offending issue's pod alone — rather than the node reaching `DiskPressure`, where the kubelet
+evicts by its own ranking and another tree's pod can go. The request is what the
+scheduler counts against the node's allocatable ephemeral storage; at the default 1Gi it binds
+almost nothing, so a node's disk can be oversubscribed by the pods' limits. In production (read
+2026-10-09) the Legion node class carries one 700Gi gp3 root device, and a node's allocatable
+ephemeral storage is about 629 GiB of it; with CPU and memory placing about two issue pods per node,
+their limits sum to about 160Gi of those 629 GiB, so the bound has room before any request is
+raised. An operator with a known root volume raises `ephemeral_storage_request` toward the role's
+expected use so the scheduler reserves disk and places no pod a full node could not hold.
 
 ### Volume retention
 

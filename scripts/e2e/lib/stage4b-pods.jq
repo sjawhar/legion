@@ -59,27 +59,37 @@ def quantity:
   end;
 
 # reservation_problems($expected) prints each way a pod departs from the run's reservations, or
-# nothing. EXPECTED maps each role to its {cpu, memory}, the run's overrides and defaults settled as
-# the daemon settles them (run_resources). Every container, the init containers included, carries
-# cpu and memory as both request and limit; a container named for a role carries that role's
-# reservation; an init container, which the pod does not name a role for, carries the reservation
-# of one of the pod's roles, the role whose launch created the pod (issuePod.initContainers,
-# internal/runtime/sandbox/podkind.go); the pod is Guaranteed; and it carries no affinity, since a
-# Legion pod asks nothing of its placement beyond the pool.
+# nothing. EXPECTED maps each role to its {cpu, memory, ephemeral_storage, ephemeral_storage_request},
+# the run's overrides and defaults settled as the daemon settles them (run_resources). Every
+# container, the init containers included, carries cpu and memory as both request and limit and
+# ephemeral-storage as a request no greater than its limit (the node-disk bound between pods of
+# unrelated trees, which QoS does not read); a container named for a role carries that role's
+# reservation, all four values; an init container, which the pod does not name a role for, carries
+# the reservation of one of the pod's roles, the role whose launch created the pod
+# (issuePod.initContainers, internal/runtime/sandbox/podkind.go); the pod is Guaranteed; and it
+# carries no affinity, since a Legion pod asks nothing of its placement beyond the pool.
 def reservation_problems($expected):
   .spec as $s
   | [$s.containers[]? | .name | select($expected[.] != null)] as $pod_roles
   | def same($a; $b): ($a | quantity) == ($b | quantity);
+    def carried($req; $lim): "cpu \($req.cpu), memory \($req.memory), ephemeral-storage \($req["ephemeral-storage"]) of \($lim["ephemeral-storage"])";
+    def expected_of($e): "cpu \($e.cpu), memory \($e.memory), ephemeral-storage \($e.ephemeral_storage_request) of \($e.ephemeral_storage)";
+    def matches($e; $req; $lim):
+      same($req.cpu; $e.cpu) and same($req.memory; $e.memory)
+      and same($req["ephemeral-storage"]; $e.ephemeral_storage_request) and same($lim["ephemeral-storage"]; $e.ephemeral_storage);
     ([$s.initContainers[]?, $s.containers[]?] | .[] as $c
       | ($c.resources.requests // {}) as $req | ($c.resources.limits // {}) as $lim
       | if $req.cpu == null or $req.memory == null or $lim.cpu == null or $lim.memory == null
-        then "container \($c.name) reserves \($c.resources // {} | tojson), want cpu and memory as both request and limit"
+           or $req["ephemeral-storage"] == null or $lim["ephemeral-storage"] == null
+        then "container \($c.name) reserves \($c.resources // {} | tojson), want cpu and memory as both request and limit and ephemeral-storage as request and limit"
         elif (same($req.cpu; $lim.cpu) and same($req.memory; $lim.memory)) | not
         then "container \($c.name) requests \($req | tojson) but is limited to \($lim | tojson); a reservation is one value as both"
-        elif $expected[$c.name] != null and ((same($req.cpu; $expected[$c.name].cpu) and same($req.memory; $expected[$c.name].memory)) | not)
-        then "the \($c.name) container reserves cpu \($req.cpu), memory \($req.memory), not the run's cpu \($expected[$c.name].cpu), memory \($expected[$c.name].memory) for its role"
-        elif $expected[$c.name] == null and ([$pod_roles[] | $expected[.] | select(same(.cpu; $req.cpu) and same(.memory; $req.memory))] | length) == 0
-        then "init container \($c.name) reserves cpu \($req.cpu), memory \($req.memory), the reservation of no role of the pod"
+        elif ($req["ephemeral-storage"] | quantity) > ($lim["ephemeral-storage"] | quantity)
+        then "container \($c.name) requests ephemeral-storage \($req["ephemeral-storage"]) past its limit \($lim["ephemeral-storage"]); the request may not exceed the limit"
+        elif $expected[$c.name] != null and (matches($expected[$c.name]; $req; $lim) | not)
+        then "the \($c.name) container reserves \(carried($req; $lim)), not the run's \(expected_of($expected[$c.name])) for its role"
+        elif $expected[$c.name] == null and ([$pod_roles[] | $expected[.] | select(matches(.; $req; $lim))] | length) == 0
+        then "init container \($c.name) reserves \(carried($req; $lim)), the reservation of no role of the pod"
         else empty end),
     (if .status.qosClass != "Guaranteed" then "qosClass \(.status.qosClass // "unset"), want Guaranteed" else empty end),
     (if $s.affinity != null then "affinity \($s.affinity | tojson): a Legion pod asks nothing of its placement beyond the pool" else empty end);

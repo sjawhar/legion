@@ -245,8 +245,8 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 	opts := goldenOptions()
 	sized := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("2Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("40Gi")},
 	}
 	opts.Resources[claim.RoleController] = sized
 	r, err := configure(opts)

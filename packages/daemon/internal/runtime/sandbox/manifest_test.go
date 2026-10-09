@@ -37,14 +37,15 @@ func goldenOptions() Options {
 
 // reservations are the daemon's default reservations (config.DefaultResources) as the daemon
 // translates them for the runtime (internal/daemon/kubernetes.go, roleRequirements): every role,
-// the controller included, its cpu and memory the request and the limit alike.
+// the controller included, its cpu and memory the request and the limit alike, and its ephemeral
+// storage the limit over the smaller request.
 func reservations() map[claim.Role]corev1.ResourceRequirements {
 	translated := map[claim.Role]corev1.ResourceRequirements{}
 	for role, reservation := range config.DefaultResources() {
 		cpu, memory := resource.MustParse(reservation.CPU), resource.MustParse(reservation.Memory)
 		translated[role] = corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory},
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory},
+			Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest)},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage)},
 		}
 	}
 	return translated
@@ -52,10 +53,11 @@ func reservations() map[claim.Role]corev1.ResourceRequirements {
 
 // Every container of every pod the runtime builds reserves cpu and memory and bursts past neither:
 // each has a non-zero request for both, equal to its limit, which is the kubelet's rule for the
-// Guaranteed class — judged over every container of the pod, the init containers included. An
-// issue pod's six launchers each carry their role's reservation and its two init containers the
-// launching role's; the controller's pod carries the controller's on both its containers, and so
-// does the image probe's one, which the daemon hands the controller's.
+// Guaranteed class — judged over every container of the pod, the init containers included — and
+// each is bounded on the node's disk, an ephemeral-storage request under its limit. An issue pod's
+// six launchers each carry their role's reservation and its two init containers the launching
+// role's; the controller's pod carries the controller's on both its containers, and so does the
+// image probe's one, which the daemon hands the controller's.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -96,6 +98,9 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 					if request.Cmp(limit) != 0 {
 						t.Errorf("container %s requests %s %s but is limited to %s; the pod is Guaranteed only when they are equal", c.Name, kind, request.String(), limit.String())
 					}
+				}
+				if request, limit := c.Resources.Requests[corev1.ResourceEphemeralStorage], c.Resources.Limits[corev1.ResourceEphemeralStorage]; request.Sign() <= 0 || request.Cmp(limit) > 0 {
+					t.Errorf("container %s requests ephemeral-storage %s under a limit of %s, want a positive request no greater than the limit", c.Name, request.String(), limit.String())
 				}
 			}
 		})
@@ -702,7 +707,8 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
 // does not choose, and a Resources map that would leave a container unreserved — a role or the
 // controller without an entry, or an entry that is no reservation: a cpu limit its request falls
-// short of, no memory, or a resource the daemon never sizes — each refusal naming the role.
+// short of, no memory, an ephemeral-storage request past its limit or none at all, or a resource
+// the daemon never sizes — each refusal naming the role.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
@@ -733,11 +739,24 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 			},
 			"role merger reserves no memory",
 		},
-		"ephemeral storage": {
+		"ephemeral-storage request past its limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("1Gi")
+				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("40Gi")
 			},
-			"role implementer names ephemeral-storage in its requests",
+			"role implementer requests ephemeral-storage 40Gi past its limit 20Gi",
+		},
+		"ephemeral-storage unset": {
+			func(o *Options) {
+				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceEphemeralStorage)
+				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceEphemeralStorage)
+			},
+			"role merger bounds no ephemeral-storage",
+		},
+		"an extended resource": {
+			func(o *Options) {
+				o.Resources[claim.RoleTester].Limits["nvidia.com/gpu"] = resource.MustParse("1")
+			},
+			"role tester names nvidia.com/gpu in its limits",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

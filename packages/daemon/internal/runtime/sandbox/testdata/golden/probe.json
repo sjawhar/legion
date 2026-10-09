@@ -43,10 +43,12 @@
             "resources": {
               "limits": {
                 "cpu": "1",
+                "ephemeral-storage": "10Gi",
                 "memory": "4Gi"
               },
               "requests": {
                 "cpu": "1",
+                "ephemeral-storage": "1Gi",
                 "memory": "4Gi"
               }
             },

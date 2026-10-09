@@ -341,10 +341,13 @@ func configure(opts Options) (*Runtime, error) {
 
 // checkReservation is why resources' entry for role is not a reservation, or nil when it is one:
 // cpu and memory each requested as a positive quantity equal to its limit, the kubelet's Guaranteed
-// rule for the one container, and no other resource named, since the daemon sizes nothing else
-// (daemon/kubernetes.go, roleRequirements) and an ephemeral-storage or extended resource here would
-// be one no operator configured. A missing role is the first fault: its containers would carry the
-// zero requirements.
+// rule for the one container; ephemeral-storage requested as a positive quantity no greater than
+// its positive limit — QoS reads cpu and memory alone, so the disk bound need not be one value as
+// both: it is the node-disk isolation between pods of unrelated trees sharing a node, a limit the
+// kubelet evicts the offending pod alone for passing, over a request the scheduler fits to the
+// node's allocatable disk; and no other resource named, since the daemon sizes nothing else
+// (daemon/kubernetes.go, roleRequirements) and an extended resource here would be one no operator
+// configured. A missing role is the first fault: its containers would carry the zero requirements.
 func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceRequirements) error {
 	requirements, ok := resources[role]
 	if !ok {
@@ -355,8 +358,8 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 		list corev1.ResourceList
 	}{{"requests", requirements.Requests}, {"limits", requirements.Limits}} {
 		for _, name := range slices.Sorted(maps.Keys(list.list)) {
-			if name != corev1.ResourceCPU && name != corev1.ResourceMemory {
-				return fmt.Errorf("resources: role %s names %s in its %s; a reservation is cpu and memory alone", role, name, list.name)
+			if name != corev1.ResourceCPU && name != corev1.ResourceMemory && name != corev1.ResourceEphemeralStorage {
+				return fmt.Errorf("resources: role %s names %s in its %s; a reservation is cpu, memory and ephemeral-storage alone", role, name, list.name)
 			}
 		}
 	}
@@ -368,6 +371,13 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 		case request.Cmp(limit) != 0:
 			return fmt.Errorf("resources: role %s requests %s %s but is limited to %s; a reservation is one value as both", role, name, request.String(), limit.String())
 		}
+	}
+	request, limit := requirements.Requests[corev1.ResourceEphemeralStorage], requirements.Limits[corev1.ResourceEphemeralStorage]
+	switch {
+	case request.Sign() <= 0 || limit.Sign() <= 0:
+		return fmt.Errorf("resources: role %s bounds no ephemeral-storage (request %s, limit %s); the bound is a positive request under a positive limit", role, request.String(), limit.String())
+	case request.Cmp(limit) > 0:
+		return fmt.Errorf("resources: role %s requests ephemeral-storage %s past its limit %s; the request may not exceed the limit", role, request.String(), limit.String())
 	}
 	return nil
 }

@@ -411,11 +411,12 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 
 // Every role's reservation reaches the runtime's Options as that role's container requirements,
 // its cpu and memory the request and the limit alike — the file's values where it set them, here
-// one role's — so every container the runtime builds from them is Guaranteed; and the image probe
+// one role's — so every container the runtime builds from them is Guaranteed, and its ephemeral
+// storage the limit the file or the default set with the request under it; and the image probe
 // carries the controller's, the one role that runs alone in its pod as the probe does.
 func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", Memory: "6Gi"}
+	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
@@ -430,11 +431,17 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 			continue
 		}
 		want := corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory)},
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory)},
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
+				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
+				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage),
+			},
 		}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s's requirements = %+v, want %+v (request == limit)", role, got, want)
+			t.Errorf("%s's requirements = %+v, want %+v (cpu and memory request == limit; ephemeral-storage request under its limit)", role, got, want)
 		}
 	}
 	probe := imageProbe(cfg, opts, promptrefs.New())

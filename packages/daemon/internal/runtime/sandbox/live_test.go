@@ -125,22 +125,24 @@ const (
 var liveIssueVolume = resource.MustParse("20Gi")
 
 // liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
-// `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's both
-// fields, the reviewer's memory alone (its cpu stays the default). The architect, planner and
-// merger keep config.DefaultResources(), so the root's pod carries a reservation from each path —
-// an override, a default, and one with a field of each — and the `resources` check tells them
-// apart. The stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and
-// 15 GiB to 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod are then checked against.
+// `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
+// and memory, the tester's ephemeral-storage limit beside them, the reviewer's memory alone (its
+// cpu stays the default). The architect, planner and merger keep config.DefaultResources(), so the
+// root's pod carries a reservation from each path — an override, a default, and one with a field
+// of each — and the `resources` check tells them apart, the disk bound's two paths included. The
+// stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and 15 GiB to
+// 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod are then checked against.
 var liveOverrides = map[claim.Role]config.RoleResources{
 	claim.RoleImplementer: {CPU: "500m", Memory: "1Gi"},
-	claim.RoleTester:      {CPU: "500m", Memory: "1Gi"},
+	claim.RoleTester:      {CPU: "500m", Memory: "1Gi", EphemeralStorage: "30Gi"},
 	claim.RoleReviewer:    {Memory: "1Gi"},
 }
 
 // liveResources are the reservations the rig hands the runtime (Options.Resources) and the image
 // probe (the controller's, as the daemon hands it): the daemon's defaults as it translates them
 // (reservations, manifest_test.go) with liveOverrides applied field by field, as resolveKubernetes
-// settles a file's `resources` block. Each is the request and the limit alike.
+// settles a file's `resources` block. Cpu and memory are each the request and the limit alike;
+// the ephemeral-storage limit and request are set apart, as the file sets them.
 func liveResources() map[claim.Role]corev1.ResourceRequirements {
 	resources := reservations()
 	for role, override := range liveOverrides {
@@ -153,20 +155,29 @@ func liveResources() map[claim.Role]corev1.ResourceRequirements {
 			requirements.Requests[name] = quantity
 			requirements.Limits[name] = quantity.DeepCopy()
 		}
+		if override.EphemeralStorage != "" {
+			requirements.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorage)
+		}
+		if override.EphemeralStorageRequest != "" {
+			requirements.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorageRequest)
+		}
 		resources[role] = requirements
 	}
 	return resources
 }
 
 // overridden reports whether role's reservation field name comes from liveOverrides rather than
-// the defaults.
+// the defaults: for ephemeral-storage, whether either side of the bound does.
 func overridden(role claim.Role, name corev1.ResourceName) bool {
 	override, ok := liveOverrides[role]
 	if !ok {
 		return false
 	}
-	if name == corev1.ResourceCPU {
+	switch name {
+	case corev1.ResourceCPU:
 		return override.CPU != ""
+	case corev1.ResourceEphemeralStorage:
+		return override.EphemeralStorage != "" || override.EphemeralStorageRequest != ""
 	}
 	return override.Memory != ""
 }

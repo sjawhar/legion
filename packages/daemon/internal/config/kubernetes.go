@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -41,10 +42,17 @@ type Kubernetes struct {
 	Scheduling Scheduling
 	// Resources are each role's container reservation — the six workflow roles' and the
 	// controller's, whose pod a daemon under `controller: daemon` launches. After load every role is
-	// present with CPU and Memory filled: the file's value where runtime.kubernetes.resources.<role>
-	// sets one, the daemon's default (DefaultResources) otherwise, field by field. Each is both the
-	// container's request and its limit, so every Legion pod is Guaranteed and bursts past
-	// nothing; at the defaults a six-role issue pod sums to 3 CPU and 15 GiB.
+	// present with every field filled: the file's value where runtime.kubernetes.resources.<role>
+	// sets one, the daemon's default (DefaultResources) otherwise, field by field. CPU and Memory
+	// are each both the container's request and its limit, so every Legion pod is Guaranteed and
+	// bursts past nothing; at the defaults a six-role issue pod sums to 3 CPU and 15 GiB.
+	// EphemeralStorage bounds what the container writes to the node's disk — its root filesystem,
+	// which no volume backs: the role's $HOME, Oh My Pi's state home with its Chromium profiles and
+	// logs, the Go and Bun caches — since pods of unrelated trees share a node and one role filling
+	// the node's disk would put every pod on it under DiskPressure; a container past its own limit
+	// has its pod evicted, the offending issue's alone. EphemeralStorageRequest is what the scheduler
+	// fits to the node's allocatable ephemeral storage (its root volume), small by default so that it
+	// binds almost nothing.
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
@@ -63,10 +71,12 @@ type Scheduling struct {
 // Toleration is one `scheduling.tolerations` entry. Value is "" under operator Exists.
 type Toleration struct{ Key, Operator, Value, Effect string }
 
-// RoleResources are one role's reservation: the cpu and memory every container of the role carries
-// as both request and limit, each a Kubernetes quantity. "" is unset only while the file is read;
-// the settled block holds every field (DefaultResources fills what the file leaves out).
-type RoleResources struct{ CPU, Memory string }
+// RoleResources are one role's reservation, each a Kubernetes quantity: the cpu and memory every
+// container of the role carries as both request and limit, and the ephemeral storage it carries as
+// a limit (EphemeralStorage) and as a request (EphemeralStorageRequest, at most the limit). "" is
+// unset only while the file is read; the settled block holds every field (DefaultResources fills
+// what the file leaves out).
+type RoleResources struct{ CPU, Memory, EphemeralStorage, EphemeralStorageRequest string }
 
 // Reserved reports whether the role's pod reserves its CPU and memory and is bounded in both: CPU
 // and Memory each set, each the container's request and its limit. It is the resource-limits
@@ -80,14 +90,20 @@ func (r RoleResources) Reserved() bool {
 // defaultResources is each role's reservation when the file sets none: the roles that build and
 // test a change get the most, the roles that read and write get less, and the controller, which
 // runs alone in its pod, gets a pod of its own size. The image probe pod takes the controller's.
+// The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
+// filesystem: $HOME, the state home, the Go and Bun caches a build fills), 20Gi for the two roles
+// that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it to
+// the node's allocatable ephemeral storage — its root volume, which nobody has sized for these
+// pods — and a small request binds scheduling to almost nothing. An operator who knows the root
+// volume raises the request so the scheduler reserves disk.
 var defaultResources = map[claim.Role]RoleResources{
-	claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi"},
-	claim.RolePlanner:     {CPU: "250m", Memory: "1Gi"},
-	claim.RoleImplementer: {CPU: "750m", Memory: "4Gi"},
-	claim.RoleTester:      {CPU: "750m", Memory: "4Gi"},
-	claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi"},
-	claim.RoleMerger:      {CPU: "250m", Memory: "1Gi"},
-	claim.RoleController:  {CPU: "1", Memory: "4Gi"},
+	claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleImplementer: {CPU: "750m", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleTester:      {CPU: "750m", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 }
 
 // DefaultResources is every role's default reservation, the controller's included, as a fresh map
@@ -639,10 +655,13 @@ func readPodMounts(value *yaml.Node, volumes []corev1.Volume) ([]corev1.VolumeMo
 
 // resolveKubernetes settles `runtime: kubernetes`: the keys outside the block every pod needs, and
 // the block, its kubeconfig resolved against the file's directory and every role's reservation
-// filled — the file's cpu and memory where it set them, the default for each field it left out —
-// so the daemon translates seven complete reservations and never one with a side missing. The
-// file's own block (file.Kubernetes) keeps only what the file set, which resolveControllerLaunch
-// reads to tell a controller the operator sized from one the default sized.
+// filled — the file's cpu, memory, ephemeral storage and its request where it set them, the
+// default for each field it left out — so the daemon translates seven complete reservations and
+// never one with a side missing. A role whose settled ephemeral-storage request exceeds its limit
+// is refused naming both, since the API server would refuse the pod (the file set one of the two,
+// or both: the defaults never exceed). The file's own block (file.Kubernetes) keeps only what the
+// file set, which resolveControllerLaunch reads to tell a controller the operator sized from one
+// the default sized.
 func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	if err := checkKubernetesKeys(file); err != nil {
 		return err
@@ -654,7 +673,18 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	block.Resources = DefaultResources()
 	for role, set := range file.Kubernetes.Resources {
 		settled := block.Resources[role]
-		block.Resources[role] = RoleResources{CPU: cmp.Or(set.CPU, settled.CPU), Memory: cmp.Or(set.Memory, settled.Memory)}
+		block.Resources[role] = RoleResources{
+			CPU: cmp.Or(set.CPU, settled.CPU), Memory: cmp.Or(set.Memory, settled.Memory),
+			EphemeralStorage:        cmp.Or(set.EphemeralStorage, settled.EphemeralStorage),
+			EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, settled.EphemeralStorageRequest),
+		}
+	}
+	for _, role := range append(slices.Clone(claim.Roles), claim.RoleController) {
+		settled := block.Resources[role]
+		request, limit := resource.MustParse(settled.EphemeralStorageRequest), resource.MustParse(settled.EphemeralStorage)
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("%s.resources.%s.ephemeral_storage_request %s exceeds ephemeral_storage %s", kubernetesKey, role, settled.EphemeralStorageRequest, settled.EphemeralStorage)
+		}
 	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
 	return nil
@@ -803,11 +833,12 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 
 // readResources is a mapping of role to that role's reservation, the file's own: each workflow
 // role, and the controller, whose pod a daemon under `controller: daemon` launches
-// (resolveControllerLaunch refuses its key otherwise). A role's entry sets `cpu`, `memory`, both,
-// or neither; what it leaves out is "" here and the default once settled (resolveKubernetes). The
-// keys of the earlier shape are known so that each is refused naming the shape that replaced it: a
-// role's `requests` and `limits` mappings, and `ephemeral_storage` as a direct member of the role's
-// entry, where an operator flattening the earlier shape would put it.
+// (resolveControllerLaunch refuses its key otherwise). A role's entry sets any of `cpu`, `memory`,
+// `ephemeral_storage` (the container's limit on the node's disk) and `ephemeral_storage_request`
+// (what the scheduler reserves of it); what it leaves out is "" here and the default once settled
+// (resolveKubernetes, which also holds the request to the limit). The keys of the earlier shape, a
+// role's `requests` and `limits` mappings, are known so that each is refused naming the shape that
+// replaced it.
 func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	const key = kubernetesKey + ".resources"
 	if value == nil {
@@ -835,7 +866,7 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 		if entry.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("%s must be a mapping of cpu and memory", field)
 		}
-		fields, err := members(entry, field, "cpu", "memory", "requests", "limits", "ephemeral_storage")
+		fields, err := members(entry, field, "cpu", "memory", "ephemeral_storage", "ephemeral_storage_request", "requests", "limits")
 		if err != nil {
 			return nil, err
 		}
@@ -844,14 +875,17 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 				return nil, fmt.Errorf("%s.%s is gone: a role's reservation is one cpu and one memory, each both its request and its limit", field, gone)
 			}
 		}
-		if fields["ephemeral_storage"] != nil {
-			return nil, fmt.Errorf("%s.ephemeral_storage is gone: a role reserves cpu and memory alone, and its workspace lives on the issue's volume (runtime.kubernetes.issue_volume)", field)
-		}
 		var read RoleResources
 		if read.CPU, err = readQuantity(fields["cpu"], field+".cpu"); err != nil {
 			return nil, err
 		}
 		if read.Memory, err = readQuantity(fields["memory"], field+".memory"); err != nil {
+			return nil, err
+		}
+		if read.EphemeralStorage, err = readQuantity(fields["ephemeral_storage"], field+".ephemeral_storage"); err != nil {
+			return nil, err
+		}
+		if read.EphemeralStorageRequest, err = readQuantity(fields["ephemeral_storage_request"], field+".ephemeral_storage_request"); err != nil {
 			return nil, err
 		}
 		if resources == nil {

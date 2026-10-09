@@ -58,7 +58,7 @@ func TestTheControllersPodIsSizedOnlyWhereTheDaemonLaunchesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadForValidation with the controller's resources under controller: daemon: %v", err)
 	}
-	want := RoleResources{CPU: "2", Memory: "8Gi"}
+	want := RoleResources{CPU: "2", Memory: "8Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}
 	if got := cfg.Runtime.Kubernetes.Resources[claim.RoleController]; got != want {
 		t.Errorf("the controller's resources = %+v, want %+v", got, want)
 	}

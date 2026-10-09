@@ -966,6 +966,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 	for _, tc := range []struct{ name, extra, want string }{
 		{"no resources block, no broker: every role at the defaults", "", secretsGap},
 		{"a role with one field set, the other the default", "    resources: {tester: {memory: 12Gi}}\n", secretsGap},
+		{"a role's disk bound set, its request the default", "    resources: {tester: {ephemeral_storage: 40Gi}}\n", secretsGap},
 		{"every role set", everyRole, secretsGap},
 		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
 		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, operator: operator@example.com}\n", ""},

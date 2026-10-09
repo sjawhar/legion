@@ -108,9 +108,11 @@ func (r *liveRig) checkGVisor() error {
 // resources: every container of the root's pod, its init containers included, reserves cpu and
 // memory with the request equal to the limit and equal to what the rig configured for the
 // container's role (liveResources: some roles from liveOverrides, the rest from
-// config.DefaultResources(), and the root pod carries both), so the pod is Guaranteed; and it
-// carries no affinity. The init containers take the reservation of the role whose launch created the
-// pod (issuePod.initContainers): the root's own Spawn at root-ready, which no later launch of the
+// config.DefaultResources(), and the root pod carries both), so the pod is Guaranteed; carries the
+// ephemeral-storage limit and request configured for it, the request under the limit (the tester's
+// limit from liveOverrides, every other role's bound the default); and carries no affinity. The
+// init containers take the reservation of the role whose launch created the pod
+// (issuePod.initContainers): the root's own Spawn at root-ready, which no later launch of the
 // issue replaces. Inside the pod, gVisor sizes the sandbox from the pod's cgroup, which the kubelet
 // sets to the regular containers' summed limits once the init containers are done (the pod's
 // effective request is max(the largest init container, the sum of the containers), and no init
@@ -139,14 +141,14 @@ func (r *liveRig) checkResources() error {
 	var cpuSum, memorySum resource.Quantity
 	overrides, defaults := 0, 0
 	for _, c := range pod.Spec.InitContainers {
-		note("runtime", "init container %s: cpu %s, memory %s, the %s's reservation, request = limit", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), root.role)
+		note("runtime", "init container %s: cpu %s, memory %s, the %s's reservation, request = limit; ephemeral-storage %s under a limit of %s", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), root.role, c.Resources.Requests.StorageEphemeral().String(), c.Resources.Limits.StorageEphemeral().String())
 	}
 	for _, c := range pod.Spec.Containers {
 		role := claim.Role(c.Name)
 		cpuSum.Add(*c.Resources.Limits.Cpu())
 		memorySum.Add(*c.Resources.Limits.Memory())
 		source := []string{}
-		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
 			if overridden(role, resourceName) {
 				overrides++
 				source = append(source, string(resourceName)+" overridden")
@@ -155,7 +157,7 @@ func (r *liveRig) checkResources() error {
 				source = append(source, string(resourceName)+" default")
 			}
 		}
-		note("runtime", "container %s: cpu %s, memory %s, request = limit (%s)", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), strings.Join(source, ", "))
+		note("runtime", "container %s: cpu %s, memory %s, request = limit; ephemeral-storage %s under a limit of %s (%s)", c.Name, c.Resources.Limits.Cpu().String(), c.Resources.Limits.Memory().String(), c.Resources.Requests.StorageEphemeral().String(), c.Resources.Limits.StorageEphemeral().String(), strings.Join(source, ", "))
 	}
 	if overrides == 0 || defaults == 0 {
 		return fmt.Errorf("the root pod's reservations come from %d overrides and %d defaults; the rig must configure both paths (liveOverrides)", overrides, defaults)
@@ -196,9 +198,10 @@ func (r *liveRig) checkResources() error {
 
 // guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity, its
 // qosClass is Guaranteed, and every container — the init containers included — reserves cpu and
-// memory with the request equal to the limit and equal to the reservation configured for it: want's
-// entry for each regular container by name, and init for every init container (nil when the pod has
-// none to hold). A container want does not name is a refusal: nothing a Legion pod runs is
+// memory with the request equal to the limit and equal to the reservation configured for it, and
+// carries the ephemeral-storage request and limit configured for it, the request under the limit:
+// want's entry for each regular container by name, and init for every init container (nil when the
+// pod has none to hold). A container want does not name is a refusal: nothing a Legion pod runs is
 // unreserved.
 func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements, init *corev1.ResourceRequirements) error {
 	if pod.Spec.Affinity != nil {
@@ -220,6 +223,16 @@ func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements,
 			if request.Cmp(reserved) != 0 {
 				return fmt.Errorf("container %s reserves %s %s, not the %s configured for %s", c.Name, resourceName, request.String(), reserved.String(), source)
 			}
+		}
+		request, limit := c.Resources.Requests[corev1.ResourceEphemeralStorage], c.Resources.Limits[corev1.ResourceEphemeralStorage]
+		wantRequest, wantLimit := expected.Requests[corev1.ResourceEphemeralStorage], expected.Limits[corev1.ResourceEphemeralStorage]
+		switch {
+		case request.IsZero() || limit.IsZero():
+			return fmt.Errorf("container %s bounds no ephemeral-storage: requests %v, limits %v", c.Name, c.Resources.Requests, c.Resources.Limits)
+		case request.Cmp(limit) > 0:
+			return fmt.Errorf("container %s requests ephemeral-storage %s past its limit %s", c.Name, request.String(), limit.String())
+		case request.Cmp(wantRequest) != 0 || limit.Cmp(wantLimit) != 0:
+			return fmt.Errorf("container %s bounds ephemeral-storage at %s under a limit of %s, not the %s under %s configured for %s", c.Name, request.String(), limit.String(), wantRequest.String(), wantLimit.String(), source)
 		}
 		return nil
 	}

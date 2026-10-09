@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
-import { defaults } from "./stage4b-reservations";
+import { defaults, type Reservation } from "./stage4b-reservations";
 
 // Stage 4b's reads of a pod's addresses and reservations: the pod shape's --connect rule and its
 // reservation rule (shape_problems, with record_stream and lib/stage4b-pods.jq), and the
@@ -86,10 +86,17 @@ function reserving(name: string, resources: Resources) {
   }
   return object;
 }
-// reservation is a container's RESOURCES with cpu and memory as both request and limit.
-const reservation = (cpu: string, memory: string): Resources => ({
-  requests: { cpu, memory },
-  limits: { cpu, memory },
+// reservation is a container's RESOURCES with cpu and memory as both request and limit, and
+// ephemeral-storage as STORAGE_REQUEST under the limit STORAGE (the implementer's and tester's
+// defaults when omitted).
+const reservation = (
+  cpu: string,
+  memory: string,
+  storage = "20Gi",
+  storageRequest = "1Gi"
+): Resources => ({
+  requests: { cpu, memory, "ephemeral-storage": storageRequest },
+  limits: { cpu, memory, "ephemeral-storage": storage },
 });
 // eachLauncher is the line shape_problems prints for every role launcher, in container order.
 const eachLauncher = (line: (role: string) => string) => roles.map(line);
@@ -108,7 +115,7 @@ interface Run {
   // advertise_host at the port since before the pod was created.
   streams?: Stream[];
   // resources is run_resources, each role's expected reservation; the defaults by default.
-  resources?: Record<string, { cpu: string; memory: string }>;
+  resources?: Record<string, Reservation>;
 }
 // shapeProblemLines runs shape_problems on the pod and returns every line it prints. The golden
 // pod departs from the run's route and audience rules (its route ConfigMap and audience are the
@@ -147,11 +154,15 @@ function connectProblems(object: object, run: Run = {}): string[] {
     (line) => line.includes("launcher dials") || line.includes("launchers dial")
   );
 }
-// reservationProblems is shape_problems' reservation lines alone: a container's reservation, the
-// pod's QoS class, or an affinity.
+// reservationProblems is shape_problems' reservation lines alone: a container's reservation or
+// disk bound, the pod's QoS class, or an affinity.
 function reservationProblems(object: object, run: Run = {}): string[] {
   return shapeProblemLines(object, run).filter(
-    (line) => line.includes("reserv") || line.includes("qosClass") || line.includes("affinity")
+    (line) =>
+      line.includes("reserv") ||
+      line.includes("ephemeral-storage") ||
+      line.includes("qosClass") ||
+      line.includes("affinity")
   );
 }
 
@@ -266,24 +277,25 @@ describe("the pod shape's reservation rule", () => {
   });
 
   test("the run's overrides are what a role container is held to, each field on its own", () => {
-    // The run overrides the tester's cpu and memory and the merger's cpu alone; the golden pod
-    // carries the defaults, so those two containers depart and the others pass.
+    // The run overrides the tester's cpu, memory and ephemeral-storage limit and the merger's cpu
+    // alone; the golden pod carries the defaults, so those two containers depart and the others
+    // pass.
     const overrides = {
       ...defaults,
-      tester: { cpu: "1", memory: "5Gi" },
-      merger: { cpu: "200m", memory: "1Gi" },
+      tester: { ...defaults.tester, cpu: "1", memory: "5Gi", ephemeral_storage: "30Gi" },
+      merger: { ...defaults.merger, cpu: "200m" },
     };
     expect(reservationProblems(pod(), { resources: overrides })).toEqual([
-      "the tester container reserves cpu 750m, memory 4Gi, not the run's cpu 1, memory 5Gi for its role",
-      "the merger container reserves cpu 250m, memory 1Gi, not the run's cpu 200m, memory 1Gi for its role",
+      "the tester container reserves cpu 750m, memory 4Gi, ephemeral-storage 1Gi of 20Gi, not the run's cpu 1, memory 5Gi, ephemeral-storage 1Gi of 30Gi for its role",
+      "the merger container reserves cpu 250m, memory 1Gi, ephemeral-storage 1Gi of 10Gi, not the run's cpu 200m, memory 1Gi, ephemeral-storage 1Gi of 10Gi for its role",
     ]);
-    const overridden = reserving("tester", reservation("1000m", "5120Mi"));
+    const overridden = reserving("tester", reservation("1000m", "5120Mi", "30720Mi", "1024Mi"));
     overridden.spec.containers = overridden.spec.containers.map((container: Container) =>
       container.name === "merger"
-        ? { ...container, resources: reservation("200m", "1Gi") }
+        ? { ...container, resources: reservation("200m", "1Gi", "10Gi") }
         : container
     );
-    // Quantities compare as amounts: 1000m is 1 and 5120Mi is 5Gi.
+    // Quantities compare as amounts: 1000m is 1, 5120Mi is 5Gi, 30720Mi is 30Gi and 1024Mi is 1Gi.
     expect(reservationProblems(overridden, { resources: overrides })).toEqual([]);
   });
 
@@ -291,35 +303,71 @@ describe("the pod shape's reservation rule", () => {
     expect(
       reservationProblems(
         reserving("tester", {
-          requests: { cpu: "750m", memory: "3Gi" },
-          limits: { cpu: "1", memory: "3Gi" },
+          requests: { cpu: "750m", memory: "3Gi", "ephemeral-storage": "1Gi" },
+          limits: { cpu: "1", memory: "3Gi", "ephemeral-storage": "20Gi" },
         })
       )
     ).toEqual([
-      'container tester requests {"cpu":"750m","memory":"3Gi"} but is limited to {"cpu":"1","memory":"3Gi"}; a reservation is one value as both',
+      'container tester requests {"cpu":"750m","memory":"3Gi","ephemeral-storage":"1Gi"} but is limited to {"cpu":"1","memory":"3Gi","ephemeral-storage":"20Gi"}; a reservation is one value as both',
     ]);
   });
 
-  test("a container reserving no cpu or memory departs", () => {
+  test("a container whose ephemeral-storage request exceeds its limit departs, naming both", () => {
+    // The disk bound is a request under a limit, not one value as both: a request past the limit
+    // is what the API server refuses, and a request below it at the run's values passes.
     expect(
-      reservationProblems(reserving("merger", { limits: { cpu: "250m", memory: "1Gi" } }))
+      reservationProblems(reserving("implementer", reservation("750m", "4Gi", "20Gi", "21Gi")))
     ).toEqual([
-      'container merger reserves {"limits":{"cpu":"250m","memory":"1Gi"}}, want cpu and memory as both request and limit',
+      "container implementer requests ephemeral-storage 21Gi past its limit 20Gi; the request may not exceed the limit",
+    ]);
+    expect(
+      reservationProblems(reserving("implementer", reservation("750m", "4Gi", "20Gi", "1Gi")))
+    ).toEqual([]);
+    // A request under the limit at other than the run's values is held to the run's.
+    expect(
+      reservationProblems(reserving("implementer", reservation("750m", "4Gi", "20Gi", "2Gi")))
+    ).toEqual([
+      "the implementer container reserves cpu 750m, memory 4Gi, ephemeral-storage 2Gi of 20Gi, not the run's cpu 750m, memory 4Gi, ephemeral-storage 1Gi of 20Gi for its role",
+    ]);
+  });
+
+  test("a container reserving no cpu, memory or ephemeral-storage departs", () => {
+    expect(
+      reservationProblems(
+        reserving("merger", { limits: { cpu: "250m", memory: "1Gi", "ephemeral-storage": "10Gi" } })
+      )
+    ).toEqual([
+      'container merger reserves {"limits":{"cpu":"250m","memory":"1Gi","ephemeral-storage":"10Gi"}}, want cpu and memory as both request and limit and ephemeral-storage as request and limit',
+    ]);
+    expect(
+      reservationProblems(
+        reserving("merger", {
+          requests: { cpu: "250m", memory: "1Gi" },
+          limits: { cpu: "250m", memory: "1Gi" },
+        })
+      )
+    ).toEqual([
+      'container merger reserves {"requests":{"cpu":"250m","memory":"1Gi"},"limits":{"cpu":"250m","memory":"1Gi"}}, want cpu and memory as both request and limit and ephemeral-storage as request and limit',
     ]);
     expect(reservationProblems(reserving("workspace-init", {}))).toEqual([
-      "container workspace-init reserves {}, want cpu and memory as both request and limit",
+      "container workspace-init reserves {}, want cpu and memory as both request and limit and ephemeral-storage as request and limit",
     ]);
   });
 
   test("an init container carries the reservation of a role of the pod, whichever launch created it", () => {
     // The golden pod's init containers carry the architect's, the launching role's; a child's pod,
     // created by its planner's launch, carries the planner's, and one created by a relaunch of the
-    // tester the tester's. A reservation no role of the pod has departs.
+    // tester the tester's. A reservation no role of the pod has departs, the disk bound included.
     expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "4Gi")))).toEqual(
       []
     );
     expect(reservationProblems(reserving("workspace-fetch", reservation("2", "1Gi")))).toEqual([
-      "init container workspace-fetch reserves cpu 2, memory 1Gi, the reservation of no role of the pod",
+      "init container workspace-fetch reserves cpu 2, memory 1Gi, ephemeral-storage 1Gi of 20Gi, the reservation of no role of the pod",
+    ]);
+    expect(
+      reservationProblems(reserving("workspace-fetch", reservation("750m", "4Gi", "30Gi")))
+    ).toEqual([
+      "init container workspace-fetch reserves cpu 750m, memory 4Gi, ephemeral-storage 1Gi of 30Gi, the reservation of no role of the pod",
     ]);
   });
 
