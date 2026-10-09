@@ -178,15 +178,11 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       { grantId: "grant-208", summary: "done", verdict: "", ready: false },
       "handoff-complete.json",
     ],
+    // The request names no pull request: the daemon resolves on the issue's recorded one.
     [
       "threadsResolve",
       "/legion/v1/threads/resolve",
-      {
-        grantId: "grant-208",
-        repo: "acme/widgets",
-        number: 42,
-        threads: ["PRRT_kwDOLx1Qf85B2c7a", "PRRT_kwDOLx1Qf85B2c7b"],
-      },
+      { grantId: "grant-208", threads: ["PRRT_kwDOLx1Qf85B2c7a", "PRRT_kwDOLx1Qf85B2c7b"] },
       "threads-resolve.json",
     ],
     [

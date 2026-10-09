@@ -61,7 +61,7 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   rerun_child: ["issue"],
   read_record: ["issue"],
   handoff_complete: ["summary", "verdict", "ready"],
-  resolve_threads: ["repo", "threads"],
+  resolve_threads: ["threads"],
   read_state: [],
   set_status: ["issue", "status"],
 };
@@ -104,10 +104,6 @@ function toolSchema(pi: PiApi): unknown {
     summary: z.string().optional(),
     verdict: z.enum(["pass", "fail"]).optional(),
     ready: z.boolean().optional(),
-    repo: z
-      .string()
-      .describe("resolve_threads: the pull request's repository, owner/name")
-      .optional(),
     threads: z
       .array(z.string())
       .describe("resolve_threads: the GraphQL node id of each review thread to resolve")
@@ -187,7 +183,7 @@ export function createLegionTool(deps: {
       "HANDOFF_INVALID (the fields it names), HANDOFF_NOT_NEW (nothing pushed since your last completion), READY_HEAD_CARRIES_HANDOFFS or " +
       "READY_CHECKS_NOT_GREEN; fix what it names, push, and complete again, since a refused completion changed nothing. " +
       "resolve_threads (the reviewer alone) has the daemon resolve, as the pull request author's App, the review threads you name by GraphQL node id " +
-      "(`threads`, one or more you have replied on) on your issue's recorded pull request in `repo` (owner/name); the implementer resolves its own " +
+      "(`threads`, one or more you have replied on) on your issue's recorded pull request, which the daemon knows; the implementer resolves its own " +
       "threads with gh. The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
       "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.",
     defaultInactive: true,
@@ -260,17 +256,8 @@ export function createLegionTool(deps: {
                 "resolve_threads requires threads: the GraphQL node id of each review thread to resolve, at least one, none empty"
               );
             }
-            const repo = requiredString(parameters, operation, "repo");
-            const { pullRequest } = recordFrom(await client.state(), active.issue);
-            if (pullRequest === undefined) {
-              throw new Error(
-                `${active.issue} has no pull request recorded, so there is no pull request whose threads to resolve; the daemon records it once the implementer opens one`
-              );
-            }
             const grantId = await grantFor(client, active);
-            return jsonSuccess(
-              await client.threadsResolve({ grantId, repo, number: pullRequest.number, threads })
-            );
+            return jsonSuccess(await client.threadsResolve({ grantId, threads }));
           }
           case "register_gate": {
             const version = parameters.version;

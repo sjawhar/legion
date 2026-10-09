@@ -80,13 +80,14 @@ package api
 // `set_status`). No `worker-bin` directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX`
 // puts the `legion` launcher directory first alone. `HandoffCompleteRequest` loses `commit` and
 // `HandoffCompleteResponse` gains `note`: the daemon reads the issue branch's head and the handoff
-// file on GitHub itself at completion. `ThreadsResolveRequest` gains `threads`, the node ids of
-// the review threads to resolve (at least one; an id that is no thread of the issue's pull request
-// is `THREAD_NOT_ON_PULL_REQUEST` before any write), and the response answers `{thread, resolved,
-// reason}` per id, losing its `withheld` count. A plugin or image built before 17 would shim gh
-// over a token file it never reads, mint a grant before every command and post a `commit`, against
-// a daemon on 17 that serves none of that, so the boot gate and `legion probe-image` refuse the
-// mixed pair. (This branch first took 16; LEGION-578 landed at 16 first, and pi-legion 8.4.1
-// declares it without the token file, so a daemon at 16 would pass the gate against it.
+// file on GitHub itself at completion. `ThreadsResolveRequest` is `{grantId, threads}`: the pull
+// request is the issue's recorded one (an issue with none is `NO_PULL_REQUEST`), and `threads` the
+// node ids of the review threads to resolve (at least one; an id that is no thread of that pull
+// request is `THREAD_NOT_ON_PULL_REQUEST` before any write); the response answers `{thread,
+// resolved, reason}` per id, losing its `withheld` count. A plugin or image built before 17 would
+// shim gh over a token file it never reads, mint a grant before every command and post a `commit`,
+// against a daemon on 17 that serves none of that, so the boot gate and `legion probe-image`
+// refuse the mixed pair. (This branch first took 16; LEGION-578 landed at 16 first, and pi-legion
+// 8.4.1 declares it without the token file, so a daemon at 16 would pass the gate against it.
 // Renumbered, as the same note says.)
 const DaemonAPIVersion = 17

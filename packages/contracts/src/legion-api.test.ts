@@ -102,8 +102,8 @@ test("a thread's outcome names its thread and whether it is resolved, its reason
   expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(false);
 });
 
-test("a resolve request names at least one thread, none empty", () => {
-  const request = { grantId: "grant-208", repo: "acme/widgets", number: 42 };
+test("a resolve request names at least one thread, none empty, and no pull request", () => {
+  const request = { grantId: "grant-208" };
   expect(
     LegionThreadsResolveRequest.safeParse({ ...request, threads: ["PRRT_kwDOLx1Qf85B2c7a"] })
       .success
@@ -111,6 +111,14 @@ test("a resolve request names at least one thread, none empty", () => {
   for (const threads of [undefined, [], [""], ["PRRT_kwDOLx1Qf85B2c7a", ""]]) {
     expect(LegionThreadsResolveRequest.safeParse({ ...request, threads }).success).toBe(false);
   }
+  expect(
+    LegionThreadsResolveRequest.safeParse({
+      ...request,
+      repo: "acme/widgets",
+      number: 42,
+      threads: ["PRRT_kwDOLx1Qf85B2c7a"],
+    }).success
+  ).toBe(false);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {
@@ -174,12 +182,7 @@ test("every workflow request has a strict schema", () => {
     [
       "threads resolve",
       LegionThreadsResolveRequest,
-      {
-        grantId: "grant-208",
-        repo: "acme/widgets",
-        number: 42,
-        threads: ["PRRT_kwDOLx1Qf85B2c7a"],
-      },
+      { grantId: "grant-208", threads: ["PRRT_kwDOLx1Qf85B2c7a"] },
     ],
     [
       "handoff complete",

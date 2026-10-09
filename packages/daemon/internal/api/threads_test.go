@@ -91,7 +91,8 @@ func newThreadsGitHub(t *testing.T, threads ...reviewThread) *threadsGitHub {
 }
 
 // newThreadsHarness serves the daemon's routes over a real Postgres holding LEGION-208's pull
-// request acme/widgets#42 and LEGION-209's #43, with github as GitHub's GraphQL, and logs to log.
+// request acme/widgets#42 and LEGION-209, which has no pull request recorded, with github as
+// GitHub's GraphQL, and logs to log.
 func newThreadsHarness(t *testing.T, github *threadsGitHub, log *bytes.Buffer) *harness {
 	t.Helper()
 	h := newHarness(t)
@@ -102,26 +103,23 @@ func newThreadsHarness(t *testing.T, github *threadsGitHub, log *bytes.Buffer) *
 	}).Handler
 	records := record.NewStore()
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-		for number, key := range map[int]string{42: "LEGION-208", 43: "LEGION-209"} {
+		for _, key := range []string{"LEGION-208", "LEGION-209"} {
 			if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Tree: key, Project: testProject, Title: key,
 				Phase: phase.Reviewing, Status: "needs_review", Generation: 1}); err != nil {
 				return err
 			}
-			if err := records.PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: key,
-				Repo: "acme/widgets", Number: number, Branch: "legion/" + key, HeadSHA: "head"}); err != nil {
-				return err
-			}
 		}
-		return nil
+		return records.PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208",
+			Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	}); err != nil {
-		t.Fatalf("seed the pull requests: %v", err)
+		t.Fatalf("seed the pull request: %v", err)
 	}
 	return h
 }
 
-// resolveRequest is the reviewer's request naming threads on LEGION-208's pull request.
+// resolveRequest is a reviewer's request naming threads on its issue's recorded pull request.
 func resolveRequest(grant string, threads ...string) ThreadsResolveRequest {
-	return ThreadsResolveRequest{GrantID: grant, Repo: "acme/widgets", Number: 42, Threads: threads}
+	return ThreadsResolveRequest{GrantID: grant, Threads: threads}
 }
 
 // The reviewer cannot resolve a thread on the implementer's pull request, so the daemon does it for
@@ -190,9 +188,9 @@ func TestTheDaemonRefusesAThreadThatIsNotOnThePullRequestBeforeAnyWrite(t *testi
 		body string
 		code string
 	}{
-		{"no threads", `{"grantId":%q,"repo":"acme/widgets","number":42}`, "MISSING_FIELD"},
-		{"an empty list", `{"grantId":%q,"repo":"acme/widgets","number":42,"threads":[]}`, "MISSING_FIELD"},
-		{"an empty id", `{"grantId":%q,"repo":"acme/widgets","number":42,"threads":["ours",""]}`, "INVALID_THREAD"},
+		{"no threads", `{"grantId":%q}`, "MISSING_FIELD"},
+		{"an empty list", `{"grantId":%q,"threads":[]}`, "MISSING_FIELD"},
+		{"an empty id", `{"grantId":%q,"threads":["ours",""]}`, "INVALID_THREAD"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := len(github.bearers)
@@ -231,28 +229,33 @@ func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T)
 	}
 }
 
-// Only the reviewer's grant has the daemon resolve, and only on its own issue's pull request: any
-// other role's grant, and a reviewer naming another issue's pull request, are refused before GitHub
-// is called, so no role borrows the implement App through the route.
+// Only the reviewer's grant has the daemon resolve, and only on its own issue's recorded pull
+// request: any other role's grant is refused, and a reviewer whose issue has no pull request
+// recorded has nothing to resolve threads on, both before GitHub is called, so no role borrows the
+// implement App through the route.
 func TestTheDaemonResolvesThreadsOnlyForTheReviewerOnItsOwnPullRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
+		issue  string
 		role   claim.Role
-		number int
+		status int
 		code   string
 	}{
-		{"the implementer's grant", claim.RoleImplementer, 42, "REVIEWER_REQUIRED"},
-		{"the tester's grant, which acts as the review App too", claim.RoleTester, 42, "REVIEWER_REQUIRED"},
-		{"the reviewer naming another issue's pull request", claim.RoleReviewer, 43, "PULL_REQUEST_NOT_THE_ISSUES"},
+		{"the implementer's grant", "LEGION-208", claim.RoleImplementer, http.StatusForbidden, "REVIEWER_REQUIRED"},
+		{"the tester's grant, which acts as the review App too", "LEGION-208", claim.RoleTester, http.StatusForbidden, "REVIEWER_REQUIRED"},
+		{"the reviewer of an issue with no pull request recorded", "LEGION-209", claim.RoleReviewer, http.StatusConflict, "NO_PULL_REQUEST"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			github := newThreadsGitHub(t, reviewThread{"bot-finding", false})
 			var log bytes.Buffer
 			h := newThreadsHarness(t, github, &log)
-			worker := newLiveClaim(t, h, "LEGION-208", tc.role)
-			assertFailure(t, h.request(http.MethodPost, "/legion/v1/threads/resolve",
-				ThreadsResolveRequest{GrantID: worker.grant(t), Repo: "acme/widgets", Number: tc.number, Threads: []string{"bot-finding"}}, nil),
-				http.StatusForbidden, tc.code)
+			worker := newLiveClaim(t, h, tc.issue, tc.role)
+			recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", resolveRequest(worker.grant(t), "bot-finding"), nil)
+			body := recorder.Body.String()
+			assertFailure(t, recorder, tc.status, tc.code)
+			if tc.code == "NO_PULL_REQUEST" && !strings.Contains(body, "LEGION-209 has no pull request recorded; nothing to resolve threads on") {
+				t.Fatalf("refusal %s, want it to name the issue and that there is nothing to resolve threads on", body)
+			}
 			if len(github.bearers) != 0 {
 				t.Fatalf("GitHub was called %d times, want none", len(github.bearers))
 			}

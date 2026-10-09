@@ -349,13 +349,11 @@ export const LegionGrantResponse = z.strictObject({
 });
 export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
-/** `api.ThreadsResolveRequest`, the reviewer's `resolve_threads`: its grant, the pull request it
- * names, which must be its issue's, and the GraphQL node ids of the review threads to resolve, at
- * least one. */
+/** `api.ThreadsResolveRequest`, the reviewer's `resolve_threads`: its grant and the GraphQL node
+ * ids of the review threads to resolve, at least one. The pull request is the one the daemon
+ * records for the grant's issue; the request names none. */
 export const LegionThreadsResolveRequest = z.strictObject({
   grantId: nonEmptyString,
-  repo: nonEmptyString,
-  number: z.number().int().positive(),
   threads: z.array(nonEmptyString).min(1),
 });
 /** `reviewthreads.Outcome`: one named thread after the run — its node id, whether GitHub holds it
