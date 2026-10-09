@@ -1576,12 +1576,12 @@ issue's pod (every role container of it alike) and the image probe's.
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address); `operator` is the email the daemon's machine login names in its request, though anyone
-  signed in to Dispatch approves a service's login on the Dispatch credential page — there is no
-  launcher-token file and no manual CLI step. The daemon
-  runs its own login at boot, on a background context, and logs the confirmation code exactly once:
-  `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
-  <operator>); pod enrollment is held until approved`. The same code and the login's current status
+  address). The block names no approver: the daemon's login is the `legion-daemon` service's, which
+  anyone signed in to Dispatch approves on the Dispatch credential page, and a file that still sets
+  `operator` is refused at load naming the key — there is no launcher-token file and no manual CLI
+  step. The daemon runs its own login at boot, on a background context, and logs the confirmation
+  code exactly once: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential
+  page, where anyone signed in may approve it; pod enrollment is held until approved`. The same code and the login's current status
   ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
   person signed in to Dispatch approves the code there. On expiry or revocation the daemon starts a

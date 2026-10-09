@@ -358,10 +358,14 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
-- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
-  <operator>); pod enrollment is held until approved`.** With `runtime.kubernetes.agent_secrets`
-  set, the daemon logs in to the [Secrets Broker](/legion/broker/) at boot and waits for the
-  `operator` to approve the code on Dispatch's credential page; pods are not enrolled until then.
+- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page, where
+  anyone signed in may approve it; pod enrollment is held until approved`.** With
+  `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
+  at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
+  pods are not enrolled until then.
+- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login names
+  no approver now, since anyone signed in approves a service's login. Delete the `operator` key from
+  `legion.yaml`.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin

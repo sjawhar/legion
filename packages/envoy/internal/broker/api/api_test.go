@@ -1166,7 +1166,7 @@ func TestAServiceLoginAndAPersonsNeverShareARateLimitBucket(t *testing.T) {
 		{"a service's login naming a person", testApprover, "legion-daemon", http.StatusAccepted},
 		{"a person's machine login naming the service bucket's bare key", "service", "", http.StatusAccepted},
 		{"a person's machine login naming a service's bare name", "other-service", "", http.StatusAccepted},
-		{"a person's machine login naming a service bucket's prefixed key", "service:other-service", "", http.StatusAccepted},
+		{"a person's machine login whose login_hint is spelled like a service-prefixed key", "service:other-service", "", http.StatusAccepted},
 		{"the person the service's login named", testApprover, "", http.StatusAccepted},
 		{"another service's login, under a name nobody registered", "", "other-service", http.StatusTooManyRequests},
 	} {

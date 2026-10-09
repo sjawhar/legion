@@ -386,12 +386,14 @@ all read it, so a request one of them counts is one the section lists.
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
 a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
 own line uses), lifetime, requested/expiry timestamps, policy
-version, approver - the broker's `anyone`, a shared secret's, reads "Anyone signed in to
-Dispatch" - then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
-pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,
-null without one) is what tells the requests of two roles in one pod apart, since they share the
-pod's kind and runtime id. A request waiting on `anyone` is in every signed-in person's pending
-list, since the broker lists it for every approver, and any of them decides it the same way.
+version, approver - the broker's `anyone`, which a shared secret's request and a service's machine
+login name, reads "Anyone signed in to Dispatch" - then the agent's reason) and
+`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
+The broker's `enrollment.slot` (`implementer-g3`, null without one) is what tells the requests of
+two roles in one pod apart, since they share the pod's kind and runtime id. A record waiting on
+`anyone` is in every signed-in person's pending list, since the broker lists it for every approver,
+and any of them decides it the same way; a person's own machine login is decided by that person
+alone.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
@@ -405,7 +407,8 @@ decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
-and the broker refuses anyone but the record's approver with `403 NOT_APPROVER`, surfaced verbatim.
+and the broker refuses anyone the record's rule does not admit (its approver, or anyone signed in
+for a record naming `anyone`) with `403 NOT_APPROVER`, surfaced verbatim.
 Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
 recorded decision and no buttons, on the record page and on the machine page alike, whether the
 machine page looked the login up already decided or decided it itself; every broker error
