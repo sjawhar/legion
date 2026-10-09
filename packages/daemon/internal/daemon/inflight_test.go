@@ -1,12 +1,17 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +22,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	workershim "github.com/sjawhar/legion/daemon/internal/shim"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -608,4 +615,152 @@ func TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain(t *testin
 	}
 	neededNoBudget(t, stopLog)
 	quietStop(t, stopLog)
+}
+
+// runShim runs the real `legion worker-shim` for a launch whose boot token is bootToken against the
+// worker stream at address, wrapping a stand-in for Oh My Pi that writes one agent_start frame once
+// the file at say exists and then waits to be stopped. It returns the shim's log.
+func runShim(t *testing.T, address, bootToken, say string) *syncBuffer {
+	t.Helper()
+	network, path, err := workershim.ParseAddress(address)
+	if err != nil {
+		t.Fatalf("parse the worker stream address %s: %v", address, err)
+	}
+	log := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		_, _ = workershim.Run(ctx, workershim.Config{
+			Network: network, Address: path, BootToken: bootToken,
+			Argv: []string{"/bin/sh", "-c", `while [ ! -e "$LEGION_TEST_SAY" ]; do sleep 0.02; done
+printf '{"type":"agent_start"}\n'
+exec sleep 600`},
+			Env: append(os.Environ(), "LEGION_TEST_SAY="+say),
+			Log: log,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-ended
+	})
+	return log
+}
+
+// awaitLog waits up to bound for log to hold want, failing the test with what it does hold.
+func awaitLog(t *testing.T, log *syncBuffer, want string, bound time.Duration, why string) {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	for !strings.Contains(log.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: no %q within %s; the log holds:\n%s", why, want, bound, log)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A shim whose claim no API route is deciding loses its connection the moment the daemon's stop
+// begins, while a route's suspension holds the API's drain open, and no hello of its is answered
+// until the daemon has gone. What its agent says meanwhile waits in the shim's backlog and is the
+// first thing the next daemon reads: a connection held open through the drain would hand it to a
+// daemon that no longer acts on it, and a late refusal lost that way leaves a task retired unread.
+// The claim the route is deciding keeps its connection, which carries its process's shutdown frame
+// (LEGION-650).
+func TestAFrameAShimWritesDuringTheDrainWaitsInItsBacklogForTheNextDaemon(t *testing.T) {
+	cfg := testConfig(t)
+	rt := &exitingSuspend{Runtime: fake.NewRuntime(), stopping: make(chan claim.Token, 4), exit: make(chan struct{})}
+	rec := &built{}
+	logs := &syncBuffer{}
+	d := startDaemonLogging(t, cfg, fakeRuntime(rt, rec), slog.New(slog.NewJSONHandler(logs, nil)))
+	suspended := d.spawn(api.SpawnRequest{Tree: "LEGION-9", Issue: "LEGION-9", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt.Runtime, suspended)
+	decided := dialShim(t, rec.address, lastLaunch(t, rt.Runtime, suspended).BootToken)
+	other := d.spawn(api.SpawnRequest{Tree: "LEGION-10", Issue: "LEGION-10", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."})
+	otherToken := lastLaunch(t, rt.Runtime, other).BootToken
+	say := filepath.Join(t.TempDir(), "say")
+	shimLog := runShim(t, rec.address, otherToken, say)
+	awaitLog(t, shimLog, "[worker-shim] spawned", 10*time.Second, "the shim never spawned its agent")
+	testwait.Eventually(t, "the other claim's shim to connect", func() bool {
+		return d.claim(other).State == string(supervise.StateShimConnected)
+	})
+	answered := operatorRequest(d, http.MethodPost, "/legion/v1/operator/claims/"+string(suspended)+"/suspend", nil)
+	select {
+	case <-rt.stopping:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the operator's suspension never reached the runtime; log:\n%s", logs)
+	}
+
+	d.stopped = true
+	d.transport.CloseIdleConnections()
+	mark := len(logs.String())
+	d.cancel()
+	testwait.Eventually(t, "the daemon to say it is stopping", func() bool {
+		return strings.Contains(logs.String()[mark:], `"msg":"legion daemon stopping"`)
+	})
+	// Well inside the drain (8 s): the connection goes at the halt, not when the drain ends.
+	awaitLog(t, shimLog, "closed (", 3*time.Second, "the daemon kept the connection of a claim no route is deciding open through the drain")
+	if err := decided.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decided.lines.ReadBytes('\n'); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("the connection of the claim a route is suspending ended in the drain (%v); its shutdown frame goes over it", err)
+	}
+	if err := os.WriteFile(say, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	awaitLog(t, shimLog, "\nagent_start\n", 5*time.Second, "the agent's frame never reached the shim")
+	close(rt.exit)
+	select {
+	case err := <-d.done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(stopBound(stopBudget)):
+		t.Fatalf("run had not returned %s after its context was cancelled; it logged:\n%s", stopBound(stopBudget), logs.String()[mark:])
+	}
+	if status := <-answered; status != http.StatusOK {
+		t.Errorf("the operator's suspension was answered %d, want 200", status)
+	}
+	quietStop(t, logs.String()[mark:])
+
+	// The next daemon, standing on the same socket: the shim's hello, then its backlog.
+	next, err := net.Listen("unix", strings.TrimPrefix(rec.address, "unix://"))
+	if err != nil {
+		t.Fatalf("listen where the next daemon would: %v", err)
+	}
+	t.Cleanup(func() { next.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := next.Accept(); err == nil {
+			accepted <- conn
+		}
+	}()
+	var conn net.Conn
+	select {
+	case conn = <-accepted:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the shim never redialled the next daemon; its log:\n%s", shimLog)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	lines := bufio.NewReader(conn)
+	line, err := lines.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read the shim's hello: %v", err)
+	}
+	if frame, err := shimwire.Decode(line); err != nil || frame.(shimwire.Hello2).BootToken != otherToken {
+		t.Fatalf("the shim said %q to the next daemon, want its hello", line)
+	}
+	if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
+		t.Fatal(err)
+	}
+	line, err = lines.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("the shim sent the next daemon nothing after its ack (%v): the frame its agent wrote in the drain was not kept; its log:\n%s", err, shimLog)
+	}
+	if frame, err := shimwire.Decode(line); err != nil || frame.FrameType() != shimwire.TypeAgentStart {
+		t.Fatalf("the shim's first frame to the next daemon is %q, want the agent_start its agent wrote in the drain", line)
+	}
 }

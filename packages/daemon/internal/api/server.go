@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -62,6 +63,9 @@ type Options struct {
 	// start gets the drain to finish, so an operator's suspension whose process is already exiting
 	// is recorded. Nil is never.
 	Drained context.Context
+	// Decisions is where the routes record the claims whose decisions they are running, for the
+	// daemon's stop to read (RouteDecisions). Nil is a set nothing reads.
+	Decisions *RouteDecisions
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -127,10 +131,11 @@ type server struct {
 	records       record.Store
 	dispatch      dispatch.Client
 	claimReady    func(c supervise.Claim)
-	// stopping and drained are Options.Stopping and Options.Drained.
-	stopping context.Context
-	drained  context.Context
-	log      *slog.Logger
+	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
+	stopping  context.Context
+	drained   context.Context
+	decisions *RouteDecisions
+	log       *slog.Logger
 	// loginsWarned is when the daemon last logged that it could not read a Legion App's login
 	// (legionAppLogins), which it does at most once a minute.
 	loginsWarnedMu sync.Mutex
@@ -169,6 +174,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
+		decisions:          opts.Decisions,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
@@ -184,6 +190,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if s.drained == nil {
 		s.drained = context.Background()
+	}
+	if s.decisions == nil {
+		s.decisions = NewRouteDecisions()
 	}
 
 	mux := http.NewServeMux()
@@ -234,16 +243,58 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 }
 
-// decision is the context a route runs a machine's decision on. It outlives the request, so a
-// caller that hangs up mid-request does not leave a registration or a stop half done, and it ends
-// once the daemon's stop has drained the API (Options.Drained). The caller calls the returned
-// function once the decision is made.
-func (s *server) decision(r *http.Request) (context.Context, context.CancelFunc) {
+// decision is the context a route runs a decision of the claims tokens names on. It outlives the
+// request, so a caller that hangs up mid-request does not leave a registration or a stop half
+// done, and it ends once the daemon's stop has drained the API (Options.Drained). Until the
+// caller calls the returned function, which it does once the decision is made, the claims are
+// recorded as decided by a route (RouteDecisions).
+func (s *server) decision(r *http.Request, tokens ...claim.Token) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 	stop := context.AfterFunc(s.drained, cancel)
+	ended := s.decisions.begin(tokens)
 	return ctx, func() {
+		ended()
 		stop()
 		cancel()
+	}
+}
+
+// RouteDecisions is the claims whose decisions an API route is running now (server.decision).
+// The daemon's stop keeps the worker stream connections of these claims open through the API's
+// drain and closes every other one: a route's suspension or stop sends its process the shutdown
+// frame over that connection.
+type RouteDecisions struct {
+	mu     sync.Mutex
+	claims map[claim.Token]int
+}
+
+// NewRouteDecisions is a set no route has recorded a claim in yet.
+func NewRouteDecisions() *RouteDecisions {
+	return &RouteDecisions{claims: map[claim.Token]int{}}
+}
+
+// Holds is whether a route is running a decision of token's claim now.
+func (d *RouteDecisions) Holds(token claim.Token) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.claims[token] > 0
+}
+
+// begin records tokens as decided by a route until the returned function runs.
+func (d *RouteDecisions) begin(tokens []claim.Token) func() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, token := range tokens {
+		d.claims[token]++
+	}
+	return func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for _, token := range tokens {
+			if d.claims[token]--; d.claims[token] == 0 {
+				delete(d.claims, token)
+			}
+		}
 	}
 }
 

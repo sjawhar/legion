@@ -83,7 +83,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	secret := rand.Text()
 	// The decision is the machine's and runs to its end, or to the daemon's stop: a caller that hangs
 	// up mid-request does not get to leave a registration half-recorded.
-	ctx, decided := s.decision(r)
+	ctx, decided := s.decision(r, launch.Claim)
 	defer decided()
 	err = m.Handle(ctx, supervise.RequestRegister{
 		Claim:          launch.Claim,
@@ -123,7 +123,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	ctx, decided := s.decision(r)
+	ctx, decided := s.decision(r, req.ClaimToken)
 	defer decided()
 	err := m.Handle(ctx, supervise.RequestReady{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID,
@@ -153,7 +153,7 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	ctx, decided := s.decision(r)
+	ctx, decided := s.decision(r, req.ClaimToken)
 	defer decided()
 	err := m.Handle(ctx, supervise.RequestExit{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID, Reason: req.Reason,

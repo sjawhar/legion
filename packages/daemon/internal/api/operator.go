@@ -180,7 +180,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		s.operatorFailure(w, "spawn", token, err)
 		return
 	}
-	ctx, decided := s.decision(r)
+	ctx, decided := s.decision(r, token)
 	defer decided()
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
 		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
@@ -232,7 +232,7 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			return
 		}
 		status := http.StatusOK
-		ctx, decided := s.decision(r)
+		ctx, decided := s.decision(r, token)
 		defer decided()
 		if err := m.Handle(ctx, ev); errors.Is(err, supervise.ErrSuspendHeld) {
 			status = http.StatusAccepted
@@ -291,7 +291,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := root.Claim()
-	ctx, decided := s.decision(r)
+	ctx, decided := s.decision(r, token)
 	defer decided()
 	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
 		s.operatorFailure(w, "close", token, err)
@@ -309,20 +309,25 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but the daemon could not read the tree's other claims to stop them", c.Tree, token)))
 		return
 	}
-	var unstopped []string
+	var others []claim.Token
 	for _, other := range claims {
-		if other.Tree != c.Tree || other.Token == token || other.State == supervise.StateRetired {
-			continue
+		if other.Tree == c.Tree && other.Token != token && other.State != supervise.StateRetired {
+			others = append(others, other.Token)
 		}
-		m, ok := s.supervisor.Machine(other.Token)
+	}
+	// The tree's other claims are this route's decisions too from here (RouteDecisions).
+	defer s.decisions.begin(others)()
+	var unstopped []string
+	for _, other := range others {
+		m, ok := s.supervisor.Machine(other)
 		if !ok {
-			s.log.Error("api: a claim of a tree the operator closed has no machine to stop", "claim", other.Token)
-			unstopped = append(unstopped, fmt.Sprintf("%s (the daemon supervises no machine for it, so legion claims stop cannot reach it until the daemon restarts)", other.Token))
+			s.log.Error("api: a claim of a tree the operator closed has no machine to stop", "claim", other)
+			unstopped = append(unstopped, fmt.Sprintf("%s (the daemon supervises no machine for it, so legion claims stop cannot reach it until the daemon restarts)", other))
 			continue
 		}
-		if err := m.Handle(ctx, supervise.RequestStop{Claim: other.Token}); err != nil {
-			s.logFailure("api: stop a claim of a tree the operator closed", "claim", other.Token, "error", err)
-			unstopped = append(unstopped, fmt.Sprintf("%s (%v)", other.Token, err))
+		if err := m.Handle(ctx, supervise.RequestStop{Claim: other}); err != nil {
+			s.logFailure("api: stop a claim of a tree the operator closed", "claim", other, "error", err)
+			unstopped = append(unstopped, fmt.Sprintf("%s (%v)", other, err))
 		}
 	}
 	if len(unstopped) > 0 {
