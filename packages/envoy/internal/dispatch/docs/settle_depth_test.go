@@ -13,48 +13,76 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// A crafted client can write an over-deep tree through the room's CRDT without passing through
-// pmdoc.Update. Settlement skips that tree as it does every tree outside the schema: it writes no
-// version and does not fail the live room.
-func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
+// A crafted client can write a tree outside the schema through the room's CRDT without passing
+// through pmdoc.Update: one deeper than the depth bound, or a mark nested past what ygo's text
+// writers take, which a server whose bound did not count the map ygo stores a mark as could also
+// have stored. Settlement skips that tree as it does every tree outside the schema: it writes no
+// version, does not fail the live room, and never hands ygo the value to write again.
+func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		write func(t *testing.T, doc *crdt.Doc, transact func(func(*crdt.Transaction))) error
+	}{
+		{"a tree over the depth bound", func(t *testing.T, doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+			fragment := doc.GetXmlFragment(fragmentName)
+			transact(func(txn *crdt.Transaction) {
+				docstest.WriteDeepChain(txn, fragment, pmdoc.MaxTreeDepth+1, "a")
+			})
+			return nil
+		}},
+		{"a mark nested past the bound", func(t *testing.T, doc *crdt.Doc, _ func(func(*crdt.Transaction))) error {
+			var nested any = "x"
+			for range 100 {
+				nested = []any{nested}
+			}
+			peer := crdt.New()
+			if err := crdt.ApplyUpdateV1(peer, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+				return err
+			}
+			return crdt.ApplyUpdateV1(doc, docstest.NestedLinkUpdate(t, peer, nested), "peer")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
 
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		fragment := doc.GetXmlFragment(fragmentName)
-		transact(func(txn *crdt.Transaction) {
-			docstest.WriteDeepChain(txn, fragment, pmdoc.MaxTreeDepth+1, "a")
+			// An update applied straight to the room, as a peer's is, goes through no transact of
+			// Apply's, which then reports no changes of its own.
+			var writeErr error
+			if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				writeErr = test.write(t, doc, transact)
+			}); (err != nil && !errors.Is(err, websocket.ErrNoChanges)) || writeErr != nil {
+				t.Fatalf("write crafted CRDT tree: %v %v", err, writeErr)
+			}
+
+			state := service.room(artifactID)
+			state.mu.Lock()
+			generation := state.gen
+			state.mu.Unlock()
+			service.settleRoom(artifactID, generation)
+
+			var versions int
+			if err := service.store.Pool.QueryRow(context.Background(), `
+				select count(*) from artifact_versions where artifact_id = $1
+			`, artifactID).Scan(&versions); err != nil {
+				t.Fatalf("count document versions: %v", err)
+			}
+			if versions != 1 {
+				t.Fatalf("settlement wrote %d versions for a document outside the schema, want 1", versions)
+			}
+			if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
+				t.Fatalf("read the document: %v, want ErrDocSchema", err)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if state.failed != nil {
+				t.Fatalf("settlement failed the live room: %v", state.failed)
+			}
+			if state.settleFailures != 0 {
+				t.Fatalf("settlement recorded %d failures for a document outside the schema", state.settleFailures)
+			}
 		})
-	}); err != nil {
-		t.Fatalf("write crafted CRDT tree: %v", err)
-	}
-
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
-
-	var versions int
-	if err := service.store.Pool.QueryRow(context.Background(), `
-		select count(*) from artifact_versions where artifact_id = $1
-	`, artifactID).Scan(&versions); err != nil {
-		t.Fatalf("count document versions: %v", err)
-	}
-	if versions != 1 {
-		t.Fatalf("settlement wrote %d versions for an over-deep document, want 1", versions)
-	}
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
-		t.Fatalf("read over-deep document: %v, want ErrDocSchema", err)
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.failed != nil {
-		t.Fatalf("settlement failed the live room: %v", state.failed)
-	}
-	if state.settleFailures != 0 {
-		t.Fatalf("settlement recorded %d failures for an over-deep document", state.settleFailures)
 	}
 }
 
