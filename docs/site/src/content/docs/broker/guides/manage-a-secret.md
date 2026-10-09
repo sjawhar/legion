@@ -100,8 +100,7 @@ terminal until `fg` gives it back, then discards the entry in the same way. SIGT
 while it waits there ends it at once by that signal, leaving the terminal to your shell. If the
 shell that ran it exits first, it exits 2, naming the command that pipes the value in, and leaves
 the terminal untouched.
-A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry. The macOS
-stop/resume path has not been verified on a macOS machine.
+A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry.
 
 **A command started with `&` waits for `fg`.** It shows no prompt and reads nothing while your
 shell holds the terminal. `fg` brings it forward, the label appears, and the value reads hidden.
@@ -111,7 +110,11 @@ forward, for example because it was started from a subshell that has since exite
 nothing and exits 2, naming the command that pipes the value in.
 
 The hidden prompt is available on Linux and macOS for amd64 and arm64. Builds for other targets
-refuse an interactive value with exit 2, naming the command that pipes the value in.
+refuse an interactive value with exit 2, naming the command that pipes the value in. On macOS,
+the stop and resume path, the discard of unread input at Ctrl-Z, and the two checks behind the
+refusal of a command started with `&` (an orphaned process group, and a shell that has exited)
+have not been run on a macOS machine. They are built and checked for macOS, and read from its
+kernel source, but not exercised.
 
 ## Which sign-in may do what
 
