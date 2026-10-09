@@ -509,6 +509,40 @@ func ListRuns(ctx context.Context, pool *store.Pool, repo string, kind DeliveryR
 	return runs, rows.Err()
 }
 
+// ListRunsStartedIn lists every run of kind on repo with started_at in [from, to), oldest start
+// first, narrowed to one head branch when branch is non-empty and to one GitHub event when event
+// is non-empty (a null head_branch or event never matches a non-empty filter: it is a row the
+// backfill has not rewritten yet). The measures' deploy population is ("main", ""), the
+// Pipeline's deploy cards ("main", "push"), PR checks ("", "pull_request"): the prototype's
+// `withinWindow(run.started_at)`, `branch=main` and `event=pull_request` listings. Bounded by
+// maxRunsPerWindow, as ListRuns is.
+//
+// delivery_runs does not store head_branch or event yet, so branch and event narrow nothing until
+// the migration that adds them (LEGION-567 slice 2, Task 2b) adds their two predicates here; the
+// signature is final, so no caller changes when it does.
+func ListRunsStartedIn(ctx context.Context, pool *store.Pool, repo string, kind DeliveryRunKind, branch, event string, from, to time.Time) ([]DeliveryRun, error) {
+	rows, err := pool.Query(ctx, `
+		select `+RunColumns+`
+		from delivery_runs
+		where repo = $1 and kind = $2 and started_at >= $3 and started_at < $4
+		order by started_at
+		limit $5
+	`, repo, string(kind), from, to, maxRunsPerWindow)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := []DeliveryRun{}
+	for rows.Next() {
+		run, err := ScanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 // maxPullRequestsPerWindow bounds ListPullRequestsInWindow: a window a caller (the API, a future
 // script) opens too wide should fail loudly against this limit rather than return an unbounded
 // result set that could exhaust memory -- 28 days of this population is on the order of a few
