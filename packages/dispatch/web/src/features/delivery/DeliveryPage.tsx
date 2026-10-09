@@ -371,6 +371,7 @@ export function DeliveryPage(): ReactNode {
                   )}
                 </div>
                 <DrillDown
+                  components={data.components}
                   onClose={() => setSelection(null)}
                   prs={data.prs}
                   runs={data.runs}
