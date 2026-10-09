@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -326,7 +327,7 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	connected := model.Actor{Kind: "user", ID: "alice"}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	service.recordActor(artifactID, connected)
+	service.recordActor(t, artifactID, connected)
 	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", actor)
 	version := namedResult.Version
 	if err != nil {
@@ -338,11 +339,8 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	if len(version.Authors) != 2 || version.Authors[0] != actor || version.Authors[1] != connected {
 		t.Fatalf("named version authors = %#v, want %v and %v", version.Authors, actor, connected)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if len(state.pending) != 0 {
-		t.Fatalf("pending authors after named version = %#v, want empty", state.pending)
+	if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after named version = %#v, want empty", pending)
 	}
 }
 func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
@@ -404,12 +402,8 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	pending := len(state.pending)
-	state.mu.Unlock()
-	if pending != 0 {
-		t.Fatalf("pending authors after committed snapshot = %d, want 0", pending)
+	if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after committed snapshot = %v, want none", pending)
 	}
 
 	tx, err = service.store.Pool.Begin(context.Background())
@@ -424,11 +418,8 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named version transaction: %v", err)
 	}
-	state.mu.Lock()
-	pending = len(state.pending)
-	state.mu.Unlock()
-	if pending != 0 {
-		t.Fatalf("pending authors after committed named version = %d, want 0", pending)
+	if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after committed named version = %v, want none", pending)
 	}
 }
 
@@ -458,11 +449,7 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	_, retained := state.pending[actorKey(second)]
-	state.mu.Unlock()
-	if !retained {
+	if !slices.Contains(pendingAuthors(t, service, artifactID), second) {
 		t.Fatal("committed snapshot cleared author from later edit")
 	}
 
@@ -479,10 +466,7 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named transaction: %v", err)
 	}
-	state.mu.Lock()
-	_, retained = state.pending[actorKey(second)]
-	state.mu.Unlock()
-	if !retained {
+	if !slices.Contains(pendingAuthors(t, service, artifactID), second) {
 		t.Fatal("committed named version cleared author from later edit")
 	}
 }

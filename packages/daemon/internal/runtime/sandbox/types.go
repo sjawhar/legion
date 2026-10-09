@@ -126,7 +126,7 @@ type Options struct {
 	// launch expects the tree volume to hold a session.
 	SessionDSNKey string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
-	// (`--no-extensions --extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
+	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled

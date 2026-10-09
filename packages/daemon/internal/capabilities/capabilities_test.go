@@ -72,25 +72,16 @@ func TestWithheldRowsCiteALegionRuling(t *testing.T) {
 	}
 }
 
-// Exactly the codegraph row awaits a pod launch: its tooling is in the image, but a pod's agent is
-// launched `--no-extensions` and never loads the profile's plugin, so the row names the issue that
-// turns that on (dispatch://LEGION-629) rather than reading present. The sentence is an image
-// row's alone: a live, deployment or withheld row has nothing in the image to await a launch for.
-func TestOnlyTheCodeGraphRowAwaitsAPodLaunch(t *testing.T) {
-	var awaiting []Name
+// No row awaits a pod launch. The field exists for an image row whose tooling the image carries but
+// a pod's agent cannot use yet, and CodeGraph was the one such row — a pod's agent was launched
+// `--no-extensions` and never loaded the profile's plugin — until LEGION-629 turned extension
+// discovery on in the pod's launch, so the row reads present like every other image row. Were a
+// row to await again, the sentence is an image row's alone: a live, deployment or withheld row has
+// nothing in the image to await a launch for.
+func TestNoRowAwaitsAPodLaunch(t *testing.T) {
 	for _, row := range Table {
-		if row.Awaits == "" {
-			continue
+		if row.Awaits != "" {
+			t.Errorf("row %s awaits %q, want no row to await a pod launch", row.Name, row.Awaits)
 		}
-		awaiting = append(awaiting, row.Name)
-		if row.Site != SiteImage {
-			t.Errorf("row %s awaits %q at site %s, want only an image row to await a launch", row.Name, row.Awaits, row.Site)
-		}
-		if !strings.Contains(row.Awaits, "dispatch://LEGION-629") {
-			t.Errorf("row %s awaits %q, want it to name dispatch://LEGION-629", row.Name, row.Awaits)
-		}
-	}
-	if want := []Name{CodeGraph}; !slices.Equal(awaiting, want) {
-		t.Errorf("rows awaiting a launch = %v, want %v", awaiting, want)
 	}
 }

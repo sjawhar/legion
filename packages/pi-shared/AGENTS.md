@@ -7,10 +7,12 @@ host types, and the modules both entries use. Each plugin's `bun build` inlines 
 bundle, as it inlines `@legion/contracts` and `@legion/envoy-client`; only `@oh-my-pi/*` stays
 external. Nothing here imports either plugin's source, and neither plugin's shipped code imports
 the other's: that rule covers every non-test `.ts` under each plugin's `extensions/` and `src/`
-(`test/cross-imports.ts`, below) and never a test, so the two cross-entry tests
-`packages/pi-legion/extensions/legion-role-claim.test.ts` and
-`packages/pi-legion/extensions/legion-phase-stall-omp.test.ts` may load
-`packages/pi-envoy/extensions/envoy.ts` by relative path.
+(`test/cross-imports.ts`, below) and never a test:
+`packages/pi-legion/extensions/legion-role-claim.test.ts` loads
+`packages/pi-envoy/extensions/envoy.ts` by relative path, and the harness's Legion pane runner
+(`runLegionPane`, below) names both plugin entries by path for the Oh My Pi child it spawns —
+paths, not imports — which the two Legion omp tests (`legion-phase-stall-omp.test.ts`,
+`legion-role-tools-omp.test.ts`) run through.
 
 ## The interface (`src/interface.ts`)
 
@@ -60,8 +62,16 @@ stays the one listener slot it is, written only by the paths that establish a Le
 `*-omp.test.ts`; `test/omp-natives.ts` shares one natives cache per binary with the Go tests;
 `test/host-registry.ts` is the `AgentRegistry` stand-in every plugin suite's mock spreads in.
 `spawnRpc` takes **absolute** extension paths — this module lives in another package than its
-callers, so `import.meta.dir` here is not the caller's — and callers pass
-`path.join(import.meta.dir, "envoy.ts")`.
+callers, so `import.meta.dir` here is not the caller's — and pi-envoy's `dispatch-first-omp.test.ts`
+passes `path.join(import.meta.dir, "envoy.ts")`. `runLegionPane` runs one Legion pane on the real
+binary: a stand-in for the daemon's claim routes (`claims/register` answered from
+`contracts/fixtures/daemon-api/register.json`, `claims/ready`, `grants`) and the Envoy listener, a
+model gateway answering scripted replies and the run-end self-check, a stand-in `legion` on PATH
+that logs its arguments and the grant it read, and both plugin entries by path. `name` keys every
+fixture string a case asserts (`<name>-grant-<n>`, `legion-<name>-<issue>-<role>`); `answer` is
+tried before the runner's routes, `prepare` runs before the profile and the spawn, and `quietMs`
+settles on gateway silence instead of the terminal `agent_end`. The pane it returns reads back as
+`turns`, `selfChecks`, `toolResults`, `legionLog` and `transcriptEntries`.
 
 ## Where to look
 

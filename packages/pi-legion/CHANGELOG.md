@@ -21,6 +21,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker` skill says what a shell `legion handoff complete` and a `task` subagent's bash
+  can do since LEGION-630 removed the role gate, and how the phase-stall reminder then behaves
+  (LEGION-634): a shell completion, should one run, completes the phase at the daemon and is not
+  refused, but only the `legion` tool's `handoff_complete` closes the extension's phase stall, so
+  the reminder recurs at each settle after an Envoy delivery until a tool `handoff_complete`
+  succeeds, and a completion made on it is refused (`HANDOFF_NOT_CURRENT_PHASE` or
+  `HANDOFF_ALREADY_RECORDED`); a subagent has every host tool but the `legion` tool and mints no
+  grant, so a `legion` command from its bash is the parent's — today on the parent's last per-call
+  grant, within its 60 seconds, which LEGION-631 replaces with the role's mounted token file.
+  `legion.daemonApiVersion` is unchanged.
 - A `dispatch` command's quoted here-document is data on its stdin: the operation-log pane rule
   reads only the command's head line, so a message body that names `jj abandon` is not refused,
   and the command mints no grant, since the CLI authenticates with the pane's Dispatch token. The
