@@ -184,6 +184,40 @@ func TestPromptReadsOneTypedLineWithEchoOff(t *testing.T) {
 	}
 }
 
+// TestPromptClearsIEXTENWhileItReads: the prompt's mode clears IEXTEN, under which macOS's terminal
+// acts on Ctrl-V and Ctrl-O whatever ICANON and ISIG say (bsd/kern/tty.c, ttyinput), so a pasted
+// Ctrl-V would vanish from the value and Ctrl-O would toggle output discard. The restore puts it
+// back. Linux reads IEXTEN only in canonical mode, so this checks the mode itself.
+func TestPromptClearsIEXTENWhileItReads(t *testing.T) {
+	controller, terminal := openPTY(t)
+	if lflag(t, terminal)&unix.IEXTEN == 0 {
+		t.Fatal("a fresh pseudo-terminal has IEXTEN off; the test needs it on")
+	}
+	answer := make(chan promptRead, 1)
+	go func() {
+		line, err := readHidden(terminal, nil, nil)
+		answer <- promptRead{line, err}
+	}()
+	awaitEchoOff(t, terminal)
+	if flags := lflag(t, terminal); flags&unix.IEXTEN != 0 {
+		t.Fatalf("lflag while the prompt reads = %#x, want IEXTEN off", flags)
+	}
+	if _, err := controller.Write([]byte("value\r")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-answer:
+		if got.err != nil || string(got.line) != "value" {
+			t.Fatalf("readHidden = %q, %v; want %q", got.line, got.err, "value")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader did not return within 2s")
+	}
+	if lflag(t, terminal)&unix.IEXTEN == 0 {
+		t.Fatal("IEXTEN is off after the prompt returned")
+	}
+}
+
 // TestPromptCtrlDEndsTheValue: Ctrl-D ends the read, with nothing typed (an empty value) and after
 // typing (the value typed).
 func TestPromptCtrlDEndsTheValue(t *testing.T) {
