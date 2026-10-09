@@ -193,6 +193,9 @@ pair_session=
 # The completed idle planner probe spends only the former, by deleting each replacement before it
 # registers (supervise/budgets.go).
 launch_failure_limit=3
+# hold_rearm_limit is how many ends of one hold loop may land after their task's turn had ended
+# (hold_end_charged); each of them is given a new task and ended again, and one more fails the loop.
+hold_rearm_limit=2
 # Set while done cleans the smoke main (clean_smoke_main), so the verdict can tell that failure apart.
 smoke_main_cleaning=
 
@@ -1063,6 +1066,54 @@ relaunch_ends() {
           elif ($ends | last | .charged) then "expect: deaths with work outstanding ran out"
           else "expect: launch failures ran out" end )
   ' --args "$@"
+}
+# A hold loop (the controller checkpoint's on tree 3, deaths-with-work's on tree 4) ends a worker's
+# launch once its agent is ready or in a turn with its task outstanding, and counts on the daemon
+# charging that death as one with work outstanding (supervise/budgets.go, chargeDeath). An end takes
+# the driver seconds (end_claim_process), and on a loaded machine a short turn can finish inside
+# them: the turn's end retires its task and restarts the death count (supervise/delivery.go, settle
+# and retirePending), so the process dies holding no task, the daemon charges nothing, and its
+# relaunch boots with no task, which nothing would send it again.
+#
+# death_charge CLAIM INCARNATION prints how the daemon charged the death of CLAIM's process
+# INCARNATION: `charged N`, N its count of deaths with work outstanding then, which died
+# (supervise/machine.go) logs after the death and before any relaunch, or `uncharged`. It exits
+# non-zero when the daemon log has no death of that process.
+death_charge() {
+  jq -R -s -r -e --arg c "$1" --arg i "$2" '
+    [split("\n")[] | fromjson? | select(type == "object" and .claim == $c)] as $lines
+    | [range($lines | length) | select($lines[.].msg == "supervise: process died" and $lines[.].incarnation == $i)] as $deaths
+    | select($deaths != [])
+    | $deaths[0] as $d
+    | ([range($d + 1; $lines | length) | select($lines[.].msg == "supervise: launched")] | first // ($lines | length)) as $next
+    | [$lines[($d + 1):$next][] | select(.msg == "supervise: the agent died with work outstanding") | .deaths] as $charged
+    | if $charged == [] then "uncharged" else "charged \($charged[0])" end
+  ' "$daemon_log"
+}
+# hold_end_charged CLAIM judges the end the driver took of CLAIM's process ended_incarnation, once
+# the claim has moved on (claim_restarted_or_held). It returns 0 when the daemon charged the death.
+# Otherwise the end missed its task's turn and counts toward no hold: it counts the miss in
+# hold_misses, which each hold loop starts at 0, fails once more than hold_rearm_limit ends have
+# missed, gives CLAIM a new task, and returns 1. The task goes through the daemon (legion claims
+# deliver), since a Dispatch message (send_agent) sets no delivery of the daemon's and a death in
+# the turn it starts would be charged nothing either. It asks for the reading the deployment
+# instructions give a phase worker's first message, so its turn lasts about as long as that one's.
+hold_end_charged() {
+  local claim=$1 charge out
+  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read skill://legion-worker, your phase's handoffs with the legion tool's handoff_read, and the issue with dispatch_read, then reply WAITING and wait for the targeted message. Change nothing."
+  charge=$(death_charge "$claim" "$ended_incarnation") ||
+    fail "the daemon log has no death of $claim's process $ended_incarnation, which the proof ended"
+  if [ "$charge" != uncharged ]; then
+    note "the daemon charged the death of $ended_incarnation as one with work outstanding, ${charge#charged } of $launch_failure_limit"
+    return 0
+  fi
+  hold_misses=$((hold_misses + 1))
+  [ "$hold_misses" -le "$hold_rearm_limit" ] ||
+    fail "$hold_misses ends of $claim came after their task's turn had ended, the last its process $ended_incarnation, so the daemon charged no death for them; $hold_rearm_limit new tasks did not put an end inside a turn"
+  out=$(claims_cli deliver --claim "$claim" --task "$task" 2>&1) ||
+    fail "legion claims deliver could not give $claim a new task after the end of $ended_incarnation missed its turn: $out"
+  note "the end of $ended_incarnation came after its task's turn had ended, so the daemon charged no death and its relaunch has no task (miss $hold_misses of at most $hold_rearm_limit); gave $claim a new task with legion claims deliver"
+  return 1
 }
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
 # a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`)
@@ -3098,13 +3149,18 @@ on_tree "$tree3" wait_for_worker "$tree3" planner
 # tree is admitted, so an end of it or of a relaunch leaves no task outstanding, and a relaunch that
 # reaches ready restarts the launch count. So the hold is driven on tree 3's implementer, whose task
 # is fresh: the planner is told to plan, and each implementer launch is killed once its agent is
-# ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
-# either budget.
+# ready or in a turn with its task outstanding. Every such death that lands inside the task's turn
+# is charged; one that lands after the turn had ended is given a new task and killed again
+# (hold_end_charged), and counts toward no hold. The check below accepts either budget.
 send_agent "$tree3" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree3" wait_for_phase "$tree3" implementing "$plan_seconds"
 on_tree "$tree3" wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
+hold_misses=0
+# Each miss costs up to launch_failure_limit ends, the charged ends its turn's end wiped out and the
+# miss itself, and the hold takes launch_failure_limit more.
+hold_kills=$(((hold_rearm_limit + 1) * launch_failure_limit))
 # held_ready_with_work: tree 3's implementer claim names a process none of the ends took, its agent
 # is ready or in a turn, and its task is outstanding, as `legion claims` shows it. It runs in this
 # shell: the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax
@@ -3117,7 +3173,7 @@ held_ready_with_work() {
     jq -e '(.state | IN("ready", "working", "idle")) and .pending != null' <<<"$claim" >/dev/null
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
-  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended implementer launches"
+  [ "$kills" -lt "$hold_kills" ] || fail "$tree3 was not held after $kills ended implementer launches, $hold_misses of them after their task's turn"
   on_tree "$tree3" until_true 600 "$tree3's implementer ready with its task outstanding" held_ready_with_work
   state=$(claim_view "$tree3" implementer | jq -r '.state // "none"')
   end_claim_process "$tree3" implementer kill
@@ -3125,8 +3181,9 @@ until issue_phase "$tree3" held >/dev/null 2>&1; do
   kills=$((kills + 1))
   note "ended implementer launch $kills of $tree3 (process $ended_incarnation in pod $ended_pod_uid), its claim $state with its task outstanding"
   on_tree "$tree3" until_true 600 "$tree3 to be held or its implementer relaunched" claim_restarted_or_held "$tree3" implementer "$ended_incarnation"
+  hold_end_charged "$(claim_token "$tree3" implementer)" || true
 done
-note "$tree3 is held after $kills ended implementer launches"
+note "$tree3 is held after $kills ended implementer launches, $hold_misses of them after their task's turn"
 # The hold is one of the implementer claim's own supervise budgets, launches or deaths with work
 # outstanding, and no other path that also holds an issue (a prompt budget, the architect's
 # escalation).
@@ -3442,10 +3499,16 @@ claim_json() { claim_by_token "$(claim_token "$1" "$2")"; }
 # in_turn ISSUE ROLE: the claim's agent is running the turn of its task.
 in_turn() { claim_json "$1" "$2" | jq -e '.state == "working" and .pending != null' >/dev/null; }
 # (a) One launcher-container kill mid-turn: the role process is relaunched in the same issue pod,
-# sent its task again, and told the turn was interrupted.
-on_tree "$tree4" until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
-end_claim_process "$tree4" planner kill
-planner_killed=$ended_incarnation
+# sent its task again, and told the turn was interrupted. A kill that lands after the turn had ended
+# is given a new task and killed again (hold_end_charged).
+planner_killed=
+hold_misses=0
+until [ -n "$planner_killed" ]; do
+  on_tree "$tree4" until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
+  end_claim_process "$tree4" planner kill
+  on_tree "$tree4" until_true 600 "$tree4's planner to be relaunched" claim_restarted_or_held "$tree4" planner "$ended_incarnation"
+  if hold_end_charged "$(claim_token "$tree4" planner)"; then planner_killed=$ended_incarnation; fi
+done
 note "killed $tree4's planner mid-turn (process $planner_killed in pod $ended_pod_uid)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
@@ -3453,7 +3516,9 @@ on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, tol
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree4" wait_for_phase "$tree4" implementing "$plan_seconds"
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
-# (b) Kills after each ready, the task outstanding, until the claim fails.
+# (b) Kills after each ready, the task outstanding, until the claim fails. A kill that lands after
+# the task's turn had ended is given a new task and killed again (hold_end_charged): only an unbroken
+# run of launch_failure_limit charged deaths holds the claim, and a miss restarts the run.
 on_tree "$tree4" wait_for_worker "$tree4" implementer
 implementer4=$(claim_token "$tree4" implementer)
 # ready_with_work: the implementer's claim names a process no kill took, its agent is ready or in a
@@ -3467,16 +3532,21 @@ ready_with_work() {
 }
 work_killed=" "
 work_kills=0
+work_streak=0
+hold_misses=0
 until issue_phase "$tree4" held >/dev/null 2>&1; do
-  [ "$work_kills" -lt 5 ] || fail "$tree4 was not held after $work_kills implementer deaths with its task outstanding"
+  [ "$work_streak" -lt "$launch_failure_limit" ] ||
+    fail "$tree4 was not held after $work_streak charged implementer deaths in a row, launch_failure_limit ($launch_failure_limit)"
   on_tree "$tree4" until_true 600 "$tree4's implementer ready with its task outstanding" ready_with_work
   end_claim_process "$tree4" implementer kill
   work_killed="$work_killed$ended_incarnation "
   work_kills=$((work_kills + 1))
   note "killed $tree4's implementer with its task outstanding, $work_kills (process $ended_incarnation in pod $ended_pod_uid)"
   on_tree "$tree4" until_true 600 "$tree4 to be held or its implementer relaunched" claim_restarted_or_held "$tree4" implementer "$ended_incarnation"
+  if hold_end_charged "$implementer4"; then work_streak=$((work_streak + 1)); else work_streak=0; fi
 done
-[ "$work_kills" = "$launch_failure_limit" ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit ($launch_failure_limit)"
+[ "$work_streak" = "$launch_failure_limit" ] ||
+  fail "$tree4 was held after $work_streak charged implementer deaths in a row, want launch_failure_limit ($launch_failure_limit)"
 claim=$(claim_json "$tree4" implementer) || fail "legion claims shows no claim $implementer4"
 jq -e --argjson n "$launch_failure_limit" '.state == "failed" and .budgets.deaths == $n' <<<"$claim" >/dev/null ||
   fail "$implementer4 reads $(jq -c '{state, budgets}' <<<"$claim"), want failed with budgets.deaths $launch_failure_limit"
@@ -3487,7 +3557,7 @@ failed_at=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 
 sleep 30
 relaunched=$(log_lines "supervise: launched" | jq -s --arg c "$implementer4" --arg at "$failed_at" '[.[] | select(.claim == $c and .time > $at)] | length')
 [ "$relaunched" = 0 ] || fail "the daemon launched $implementer4 $relaunched times after failing it"
-note "$tree4 is held after $work_kills implementer deaths with its task outstanding: $implementer4 failed because $why, budgets $(jq -c .budgets <<<"$claim"), and nothing relaunched it"
+note "$tree4 is held after $work_streak implementer deaths in a row with its task outstanding ($work_kills kills, $hold_misses after their task's turn): $implementer4 failed because $why, budgets $(jq -c .budgets <<<"$claim"), and nothing relaunched it"
 take_out "$tree4"
 pass
 
