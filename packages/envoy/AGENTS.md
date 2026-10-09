@@ -37,6 +37,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
+| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves it as `GET /api/v1/delivery/measures` over the timeline's facet pipeline (`filteredDeliveryPullRequests`); `delivery/reconcile.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
