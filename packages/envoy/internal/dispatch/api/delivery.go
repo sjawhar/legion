@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // defaultDeliveryWindow is the timeline's default when the caller passes neither from nor to: the
@@ -120,39 +122,71 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pool := s.deps.Store.Pool
 
-	prs, err := delivery.ListPullRequestsInWindow(ctx, pool, from, to)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	// Four independent reads, side by side. They never shared a transaction (each is its own
+	// statement on the pool, so each already read its own snapshot), so running them at once
+	// loses no consistency they had. Each takes one connection under a hold mark of its own
+	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
+	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
+	var (
+		prs              []delivery.DeliveryPullRequest
+		waitingPRs       []delivery.WaitingPullRequest
+		applyRuns        []delivery.DeliveryRun
+		jobsByRun        map[int64][]delivery.DeliveryRunJob
+		unfetchableCount int
+	)
+	reads, readsCtx := errgroup.WithContext(ctx)
+	read := func(fn func(ctx context.Context) error) error {
+		readCtx, err := store.ForConcurrentRead(readsCtx)
+		if err != nil {
+			return err
+		}
+		reads.Go(func() error { return fn(readCtx) })
+		return nil
 	}
-	// The deploy repository's pull requests still waiting at `from`, so the waiting line starts
-	// the window at their count rather than at zero.
-	waitingPRs, err := delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.ProductionJobName, from)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	for _, fn := range []func(ctx context.Context) error{
+		func(ctx context.Context) (err error) {
+			prs, err = delivery.ListPullRequestsInWindow(ctx, pool, from, to)
+			return err
+		},
+		// The deploy repository's pull requests still waiting at `from`, so the waiting line
+		// starts the window at their count rather than at zero.
+		func(ctx context.Context) (err error) {
+			waitingPRs, err = delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.ProductionJobName, from)
+			return err
+		},
+		// Every deploy run with a head commit at or after `from`: the containment algorithm
+		// needs every apply from there forward, unbounded past `to`, since a PR merged just
+		// before `to` may first ship after it -- bounding this query to [from, to) would wrongly
+		// read such a PR as "waiting". The displayed runs[] list is filtered to [from, to)
+		// separately, below.
+		func(ctx context.Context) error {
+			runs, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, from)
+			if err != nil {
+				return err
+			}
+			runIDs := make([]int64, len(runs))
+			for i, run := range runs {
+				runIDs[i] = run.RunID
+			}
+			jobs, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
+			if err != nil {
+				return err
+			}
+			applyRuns, jobsByRun = runs, jobs
+			return nil
+		},
+		func(ctx context.Context) (err error) {
+			unfetchableCount, err = delivery.CountUnfetchablePullRequests(ctx, pool)
+			return err
+		},
+	} {
+		if err := read(fn); err != nil {
+			_ = reads.Wait()
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
-
-	// Every deploy run with a head commit at or after `from`: the containment algorithm needs
-	// every apply from there forward, unbounded past `to`, since a PR merged just before `to` may
-	// first ship after it -- bounding this query to [from, to) would wrongly read such a PR as
-	// "waiting". The displayed runs[] list is filtered to [from, to) separately, below.
-	applyRuns, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, from)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	runIDs := make([]int64, len(applyRuns))
-	for i, run := range applyRuns {
-		runIDs[i] = run.RunID
-	}
-	jobsByRun, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	unfetchableCount, err := delivery.CountUnfetchablePullRequests(ctx, pool)
-	if err != nil {
+	if err := reads.Wait(); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

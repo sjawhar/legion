@@ -2,6 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
+import { pressFinger } from "./touch";
 import { asUser } from "./users";
 
 const FIXTURE_WINDOW = "from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
@@ -13,18 +14,20 @@ const FIXTURE_WINDOW = "from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00
 const DEPLOY_500 = { series: "Deploys", x: 0.15, at: "2024-06-01T01:40:00Z" };
 const FAILURE_501 = { series: "Pipeline failures", x: 0.85, at: "2024-06-01T12:20:00Z" };
 
-/** The page position of a run's shape, from ECharts' own coordinate conversion: the chart draws
+/** The page position of a chart point, from ECharts' own coordinate conversion: the chart draws
  *  on a canvas, so a deploy dot or a failure triangle has no element to click. The page loads the
  *  echarts chunk once; importing the same URL here hands back that module, whose
- *  `getInstanceByDom` finds the chart the page made. Null until the chart has painted the run. */
+ *  `getInstanceByDom` finds the chart the page made. `x` and `at` name the point; without them it
+ *  is the series' first data point (a merge dot's x carries a per-PR jitter). Null until the
+ *  chart has painted the series. */
 async function shapePosition(
   page: Page,
-  shape: { series: string; x: number; at: string }
+  shape: { series: string; x?: number; at?: string }
 ): Promise<{ x: number; y: number } | null> {
   return page.evaluate(async ({ series, x, at }) => {
     interface Chart {
       convertToPixel: (finder: { seriesName: string }, value: number[]) => number[];
-      getOption: () => { series?: { name?: string; data?: unknown[] }[] };
+      getOption: () => { series?: { name?: string; data?: { value?: number[] }[] }[] };
     }
     const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
     if (host === null) return null;
@@ -43,8 +46,10 @@ async function shapePosition(
     }
     if (chart === undefined) return null;
     const painted = chart.getOption().series?.find((candidate) => candidate.name === series);
-    if ((painted?.data?.length ?? 0) === 0) return null;
-    const [px, py] = chart.convertToPixel({ seriesName: series }, [x, Date.parse(at)]);
+    const first = painted?.data?.[0]?.value;
+    if (first === undefined) return null;
+    const value = x !== undefined && at !== undefined ? [x, Date.parse(at)] : first;
+    const [px, py] = chart.convertToPixel({ seriesName: series }, value);
     if (px === undefined || py === undefined) return null;
     const rect = host.getBoundingClientRect();
     return { x: rect.left + px, y: rect.top + py };
@@ -313,6 +318,46 @@ test("dragging the zoom slider zooms without setting a brush window", async ({ b
   await expect(page.getByRole("button", { name: "clear brush window" })).toHaveCount(0);
   await expect(page).not.toHaveURL(/[?&](ws|we)=/);
   await expect(page.getByText("2 PRs in current filter/window")).toBeVisible();
+  await context.close();
+});
+
+test("on a phone a finger dragged along the chart sets a brush window and moves nothing else", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "a finger drag exercises the phone project");
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await openTimeline(page);
+
+  // A real touch through Chromium's Input.dispatchTouchEvent (touch.ts), not page.mouse, which
+  // the other rows use on this project too. The finger lands on #1's merge dot, so its first
+  // contact shows that dot's tooltip, and drags from there along the time axis.
+  const box = await page.getByTestId("delivery-chart").boundingBox();
+  if (box === null) throw new Error("no chart");
+  const dot = await shapePosition(page, { series: "PR merges" });
+  if (dot === null) throw new Error("no merge dot painted");
+  const layout = () =>
+    page.evaluate(() => ({
+      scrollY: Math.round(window.scrollY),
+      width: document.documentElement.scrollWidth,
+    }));
+  const before = await layout();
+  const finger = await pressFinger(page, dot);
+  await expect(page.getByText("acme/widgets#1: feat: a shipped widget")).toBeVisible();
+  // The tooltip stays inside the chart: ECharts paints it inside the chart's host, and before the
+  // host's wrapper clipped it, its first frame stood past the viewport's right edge, widening the
+  // page to 462 px and jumping it upward under the finger.
+  expect(await layout()).toEqual(before);
+  // Up the time axis (later times) from the dot, which sits near the chart's foot.
+  await finger.moveTo({ x: dot.x, y: Math.max(box.y + 20, dot.y - box.height * 0.4) }, 8);
+  await expect(page.getByTestId("delivery-brush-band")).toBeVisible();
+  // The chart claims the finger (touch-action: none): the page does not scroll under it.
+  expect(await layout()).toEqual(before);
+  await finger.lift();
+
+  await expect(page).toHaveURL(/[?&]ws=.*[?&]we=/);
+  await expect(page.getByRole("button", { name: "clear brush window" })).toBeVisible();
   await context.close();
 });
 

@@ -1016,10 +1016,13 @@ than through a transaction, so `withRoomLock` marks its context with `store.Hold
 for as long as it holds that connection and the room's advisory lock, and `Query` marks the
 caller for as long as its rows are open, so a cursor counts as the held connection it is. A
 refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the
-log; the error itself is returned every time. `store/pool_test.go` and
-`api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
-concurrent anchored writes, and two settlements queued behind one held write on a
-four-connection pool.
+log; the error itself is returned every time. A caller that runs independent reads side by side
+gives each its own mark with `store.ForConcurrentRead`, which refuses a caller already holding a
+connection: on one shared mark, one read's open cursor would refuse the others, and each read
+still takes one connection only (the delivery timeline's four reads do this). `store/pool_test.go`
+and `api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
+concurrent reads each holding one connection, concurrent anchored writes, and two settlements
+queued behind one held write on a four-connection pool.
 
 **Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
 (16), so neither the task's CPU allotment nor the DSN another repository's URL builder writes
