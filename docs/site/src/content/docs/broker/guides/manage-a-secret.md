@@ -90,10 +90,11 @@ Ctrl-C also stops a shell's `;` list. On Unix, core dumps are disabled before th
 stay disabled for the rest of the process. On other platforms, crash-dump policy is OS-managed.
 
 **Ctrl-Z discards the entry.** The CLI discards what it holds of the value and whatever the
-terminal holds unread, including anything typed after Ctrl-Z, so none of it reaches your shell,
-and it refuses the entry rather than storing a partial secret. After `fg`, input stays hidden only
-while the remainder is discarded: press Enter, then run the command shown in the message and type
-the whole value again.
+terminal holds unread when it stops, which is everything that arrived with Ctrl-Z or before it, so
+none of that reaches your shell, and it refuses the entry rather than storing a partial secret.
+Keys typed after the stop has taken effect go to your shell, which then holds the terminal. After
+`fg`, input stays hidden only while the remainder is discarded: press Enter, then run the command
+shown in the message and type the whole value again.
 The command exits 2 and stores nothing. After `bg`, the reader waits without touching the
 terminal until `fg` gives it back, then discards the entry in the same way. SIGTERM or SIGHUP
 while it waits there ends it at once by that signal, leaving the terminal to your shell. If the

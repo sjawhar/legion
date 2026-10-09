@@ -476,9 +476,10 @@ func (t *promptTerminal) raise(sig syscall.Signal) error {
 }
 
 // flushInput discards what the terminal holds unread while this process's group holds it, as the
-// kernel's own handling of a signal key would: what was typed after Ctrl-Z would otherwise reach
-// the shell once the stop gives it the terminal. From the background a flush would stop the job
-// (tty_check_change), so it is skipped there.
+// kernel's own handling of a signal key would: what arrived with or before Ctrl-Z would otherwise
+// reach the shell once the stop gives it the terminal. Keys typed after the stop has taken effect
+// go to the shell. From the background a flush would stop the job (tty_check_change), so it is
+// skipped there.
 func (t *promptTerminal) flushInput() {
 	if held, err := t.holdsTerminal(); err == nil && held {
 		_ = discardInput(t.fd)

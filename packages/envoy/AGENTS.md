@@ -2111,7 +2111,8 @@ watcher event and also times the quiet window. Reads never block. IXON is cleare
 Ctrl-Q reach the reader and are refused as control bytes rather than suspending the prompt's
 output or vanishing from a paste. Before each caught stop the watcher discards what the terminal
 holds unread (`discardInput`: TCFLSH on Linux, TIOCFLUSH on Darwin) while the prompt's group
-holds it, so unread secret bytes never reach the shell at a stop. The kernel reports no
+holds it, so unread secret bytes never reach the shell at a stop; keys typed after the stop has
+taken effect go to the shell, which holds the terminal then. The kernel reports no
 count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
 stays hidden only to discard the remaining line, then exits 2 and names the command to run again
 with the whole value. No partial value is returned or stored. An interactive shell restores its
