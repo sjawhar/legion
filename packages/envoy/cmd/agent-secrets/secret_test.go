@@ -630,6 +630,27 @@ func TestSecretAPromptThatNeverHoldsTheTerminalShowsNoLabel(t *testing.T) {
 	}
 }
 
+// TestSecretAPromptThatCannotRunNamesThePipeCommand: a prompt no shell can bring to the
+// foreground, and a platform with no prompt, are usage errors naming the command that pipes the
+// value in, and write nothing.
+func TestSecretAPromptThatCannotRunNamesThePipeCommand(t *testing.T) {
+	for _, refusal := range []error{errNoForeground, errNoValuePrompt} {
+		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		useTerminal(t)
+		readHidden = func(int, func(), func()) ([]byte, error) { return nil, refusal }
+		_, stderr, code := runSecret("set", "HELD_KEY", "--profile", "work")
+		want := refusal.Error() + "; pipe the value in: agent-secrets secret set HELD_KEY --profile work < FILE"
+		if code != exitUsageError || !strings.Contains(stderr, want) || strings.Contains(stderr, "Value for") {
+			t.Fatalf("%v: exit %d, stderr %q; want %d naming %q and no label", refusal, code, stderr, exitUsageError, want)
+		}
+		if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", refusal, v)
+		}
+	}
+}
+
 // TestSecretAnEmptyValueAtATerminalIsAUsageError: Enter alone or Ctrl-D with nothing typed, which
 // the real reader answers as an empty line (TestPromptCtrlDEndsTheValue), is a usage error that
 // writes nothing.
