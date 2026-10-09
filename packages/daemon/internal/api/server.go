@@ -315,9 +315,10 @@ func (s *server) logFailure(msg string, args ...any) {
 // claim's worker stream connection, which the stop closes for every claim no route holds. The
 // caller asks only after it has recorded its claims (decision, RouteDecisions.begin), so a request
 // recorded too late for the stop to keep its connections always finds the stop begun; closeTree's
-// second record, after the root's close, is the one exception, and says why. Only a request the
-// server accepted before the stop began reaches this: the stop shuts the server down, closing its
-// listener, right after it begins (the daemon's serve).
+// second record, after the root's close, is the one exception, and says why. A request reaches
+// this once the stop has begun only if the server accepted it before the stop began, or while the
+// halt waits on the supervisor's lock before the daemon's serve shuts the server down, which closes
+// its listener.
 func (s *server) stopped(w http.ResponseWriter, request string) bool {
 	if s.stopping.Err() == nil {
 		return false
