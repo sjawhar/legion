@@ -1379,7 +1379,7 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 }
 
 // A closed issue's document stays readable: GET /blocks reads it as GET /text does
-// (readTree), rather than asking the room, whose inject gate refuses a closed issue, and
+// (readDocument), rather than asking the room, whose inject gate refuses a closed issue, and
 // failing the room over that refusal.
 func TestAClosedIssuesDocumentReadsItsBlocksWithoutFailingItsRoom(t *testing.T) {
 	database := storetest.Open(t)
@@ -2484,6 +2484,8 @@ func waitForDatabaseLock(t *testing.T, database *store.Store) {
 	t.Fatal("settlement did not wait on the document lock")
 }
 
+// failingOnceVersionedStore fails the first load of the stored document, of either kind: a room's
+// (Load) or a cold read's (LoadDocument).
 type failingOnceVersionedStore struct {
 	VersionedStore
 	loads atomic.Int32
@@ -2496,6 +2498,15 @@ func (s *failingOnceVersionedStore) Load(ctx context.Context, room string) (pers
 	return s.VersionedStore.Load(ctx, room)
 }
 
+func (s *failingOnceVersionedStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.loads.Add(1) == 1 {
+		return LoadedDocument{}, errors.New("transient load failure")
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
+}
+
+// failingVersionedStore fails the store with loadErr, every read of it included, or loads every
+// document as loadUpdate, one stored state at version 1, or fails appends with appendErr.
 type failingVersionedStore struct {
 	VersionedStore
 	loadErr        error
@@ -2515,6 +2526,36 @@ func (s failingVersionedStore) Load(ctx context.Context, room string) (persisten
 		return persistence.LoadResult{Update: s.loadUpdate, Version: 1}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s failingVersionedStore) DocumentStamp(ctx context.Context, room string) (DocumentStamp, error) {
+	if s.respectContext && ctx.Err() != nil {
+		return DocumentStamp{}, ctx.Err()
+	}
+	if s.loadErr != nil {
+		return DocumentStamp{}, s.loadErr
+	}
+	if s.loadUpdate != nil {
+		return DocumentStamp{Version: 1}, nil
+	}
+	return s.VersionedStore.DocumentStamp(ctx, room)
+}
+
+func (s failingVersionedStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.respectContext && ctx.Err() != nil {
+		return LoadedDocument{}, ctx.Err()
+	}
+	if s.loadErr != nil {
+		return LoadedDocument{}, s.loadErr
+	}
+	if s.loadUpdate != nil {
+		doc := newDocumentCopy()
+		if err := crdt.ApplyUpdateV1(doc, s.loadUpdate, nil); err != nil {
+			return LoadedDocument{}, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+		}
+		return LoadedDocument{Doc: doc, Stamp: DocumentStamp{Version: 1}}, nil
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
 }
 
 func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {

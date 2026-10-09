@@ -68,12 +68,17 @@ type Deps struct {
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
 // transaction, through the same persistence boundary as its preflight load. Head is the version
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
+// DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
+// state decoded once with the stamp it was read under, which a read of a document no room holds
+// caches its rendering by (coldRead).
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
+	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
+	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -197,6 +202,9 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
+	// reads holds the renderings of the documents cold reads served, each under the stored state
+	// it was rendered from (coldRead).
+	reads *documentReads
 }
 
 type artifactOwner struct {
@@ -520,6 +528,7 @@ func New(deps Deps) *Service {
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
+		reads:             newDocumentReads(documentReadBudget),
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)

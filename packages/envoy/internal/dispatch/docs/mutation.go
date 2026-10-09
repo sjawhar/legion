@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -436,11 +437,16 @@ func (s *Service) refuseDroppedAskBlocks(ctx context.Context, artifactID string,
 	return fmt.Errorf("replacement removes open ask blocks %s", strings.Join(blockIDs, ", "))
 }
 
-// Text returns the rendered document the caller sees (readTree).
+// Text returns the rendered document the caller sees (readDocument).
 func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
-	tree, err := s.readTree(ctx, artifactID)
-	if err != nil || tree == nil {
+	read, tree, err := s.readDocument(ctx, artifactID)
+	switch {
+	case err != nil:
 		return "", err
+	case read != nil:
+		return read.markdown, nil
+	case tree == nil:
+		return "", nil
 	}
 	return documentMarkdown(tree)
 }
@@ -448,39 +454,60 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 // TextWithToken returns canonical markdown and a token over its full Proof tree,
 // including inline marks that canonical Markdown does not render.
 func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string, string, error) {
-	tree, err := s.readTree(ctx, artifactID)
-	if err != nil || tree == nil {
+	read, tree, err := s.readDocument(ctx, artifactID)
+	switch {
+	case err != nil:
 		return "", "", err
+	case read != nil:
+		return read.markdown, read.token, nil
+	case tree == nil:
+		return "", "", nil
 	}
 	return renderTokenTree(tree)
 }
 
-// readTree returns the tree of the document the caller sees without loading or writing its room,
-// so it also reads a closed issue's document: the calling transaction's fork's when it has one
-// (joinRead), else the resident room's, as of one moment (liveTree), else the persisted
-// document's. A document with no persisted state has no tree, and no error.
-func (s *Service) readTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
-	tree, _, err := s.loadTree(ctx, artifactID)
-	return tree, err
+// readDocument is the document the caller sees, read without loading or writing its room, so it
+// also reads a closed issue's document: the tree of the calling transaction's fork or of the
+// resident room (heldTree), else the rendering of the stored document (coldRead), or the stored
+// document's tree where the rendering does not take it. A document with no stored state has
+// neither, and no error.
+func (s *Service) readDocument(ctx context.Context, artifactID string) (*documentRead, *pmdoc.Node, error) {
+	tree, held, err := s.heldTree(ctx, artifactID)
+	if err != nil || held {
+		return nil, tree, err
+	}
+	return s.coldRead(ctx, artifactID)
 }
 
-// loadTree is readTree with the durable state it decoded the document from, nil when it read a
-// fork or the resident room. A durable history that does not decode is ErrDocumentUnloadable and
-// fails the room, as ygo's own load of it would.
-func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *persistence.LoadResult, error) {
+// heldTree is the tree of the document where this server holds it, once a failed room's recovery
+// is done: the calling transaction's fork's when it has one (joinRead), else the resident room's,
+// as of one moment (liveTree). held is false where neither holds it.
+func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.Node, held bool, err error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
-		return nil, nil, err
+		return nil, false, err
 	}
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
-		return nil, nil, err
+		return nil, false, err
 	}
 	if fork != nil {
 		tree, err := treeOf(fork)
-		return tree, nil, err
+		return tree, true, err
 	}
 	if live := s.srv.GetDoc(artifactID); live != nil {
 		tree, err := s.liveTree(artifactID, live)
+		return tree, true, err
+	}
+	return nil, false, nil
+}
+
+// loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
+// document decoded), with the durable state it decoded the document from, nil when this server
+// holds the document. A durable history that does not decode is ErrDocumentUnloadable and fails
+// the room, as ygo's own load of it would.
+func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *persistence.LoadResult, error) {
+	tree, held, err := s.heldTree(ctx, artifactID)
+	if err != nil || held {
 		return tree, nil, err
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
@@ -501,7 +528,7 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
-	tree, err := treeOf(doc)
+	tree, err = treeOf(doc)
 	return tree, &loaded, err
 }
 
@@ -523,13 +550,25 @@ func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.Artifa
 	return blocks, err
 }
 
-// TextWithBlocks renders the document the caller sees (readTree) once and returns its
-// canonical markdown beside the blocks whose byte ranges index into it.
+// TextWithBlocks renders the document the caller sees (readDocument) once and returns its
+// canonical markdown beside the blocks whose byte ranges index into it. The blocks are the
+// caller's own: it may write into them (References).
 func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error) {
-	tree, err := s.readTree(ctx, artifactID)
-	if err != nil || tree == nil {
+	read, tree, err := s.readDocument(ctx, artifactID)
+	switch {
+	case err != nil:
 		return "", nil, err
+	case read != nil:
+		return read.markdown, slices.Clone(read.blocks), nil
+	case tree == nil:
+		return "", nil, nil
 	}
+	return documentBlocks(tree)
+}
+
+// documentBlocks renders tree once into its canonical markdown and the blocks whose byte ranges
+// index into it, each with its token and, for a table, the blocks it holds.
+func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
 		return "", nil, documentSchemaError(err)
@@ -557,12 +596,19 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 }
 
 // BlockPath is where the block carrying blockID stands in the document the caller sees
-// (readTree): pmdoc.ErrTargetNotFound when no block carries it, a document with no state
+// (readDocument): pmdoc.ErrTargetNotFound when no block carries it, a document with no state
 // included.
 func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error) {
-	tree, err := s.readTree(ctx, artifactID)
+	read, tree, err := s.readDocument(ctx, artifactID)
 	if err != nil {
 		return model.BlockPath{}, err
+	}
+	if read != nil {
+		path, ok := read.paths[blockID]
+		if !ok {
+			return model.BlockPath{}, fmt.Errorf("%w: block %q", pmdoc.ErrTargetNotFound, blockID)
+		}
+		return modelBlockPath(path), nil
 	}
 	if tree == nil {
 		return model.BlockPath{}, fmt.Errorf("%w: block %q", pmdoc.ErrTargetNotFound, blockID)
@@ -571,6 +617,13 @@ func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (mo
 	if err != nil {
 		return model.BlockPath{}, err
 	}
+	return modelBlockPath(path), nil
+}
+
+// modelBlockPath is path as the API carries it, in entries of its own. Its table position's row,
+// column, header and cells are shared with path, which BlockPaths shares across a table's paths and
+// the read cache across every read of one stored head (documentRead); nothing writes them.
+func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 	out := model.BlockPath{ID: path.ID, Type: path.Type, Path: make([]model.BlockPathEntry, len(path.Path))}
 	for index, entry := range path.Path {
 		out.Path[index] = model.BlockPathEntry(entry)
@@ -579,7 +632,7 @@ func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (mo
 		table := model.TablePosition(*path.Table)
 		out.Table = &table
 	}
-	return out, nil
+	return out
 }
 
 // SnapshotVersion returns the current immutable version, adding an unnamed

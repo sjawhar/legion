@@ -15,10 +15,13 @@ import (
 )
 
 // ControllerStartMessage is the controller's first prompt at every start: `legion controller start`
-// passes it to the operator's Oh My Pi at launch, and the daemon delivers it to its own controller
-// (`controller: daemon`) each time that controller reports ready, so every start and restart runs
-// the skill's start procedure with nothing typed, where the plugin alone would leave the session
-// idle until a wake.
+// carries it to the operator's Oh My Pi as LEGION_CONTROLLER_START_MESSAGE, which the
+// pi-legion extension sends as the session's first user turn once its claim succeeds, before
+// it opens the live Envoy subscription a wake could arrive on (LEGION-392 found that Oh My Pi's own
+// positional-argument first message can lose that race); and the daemon delivers it to its own
+// controller (`controller: daemon`) each time that controller reports ready. So every start and
+// restart runs the skill's start procedure with nothing typed, where the plugin alone would leave
+// the session idle until a wake.
 const ControllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
 
 // The waits before a failed or retired controller is retried: the first (plan.controllerRetry,

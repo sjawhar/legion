@@ -48,6 +48,12 @@ func ValidSlot(slot string) bool {
 	return slotPattern.MatchString(slot)
 }
 
+// ValidService reports whether service may name a service: lowercase letters, digits and hyphens,
+// at most 64, the form a machine login's launcher_credential detail names its service in.
+func ValidService(service string) bool {
+	return servicePattern.MatchString(service)
+}
+
 // CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
 // record created before people were named by email keeps the GitHub login it was decided under).
 // Every login comparison in the module goes through this form on both sides.
@@ -194,7 +200,7 @@ func validateDetails(details []AuthorizationDetail) error {
 	if len(d.Identifier) > 253 || !hostnamePattern.MatchString(d.Identifier) {
 		return errors.New("launcher_credential identifier is not a valid hostname")
 	}
-	if d.Service != "" && !servicePattern.MatchString(d.Service) {
+	if d.Service != "" && !ValidService(d.Service) {
 		return errors.New("launcher_credential service does not match [a-z0-9-]{1,64}")
 	}
 	return nil

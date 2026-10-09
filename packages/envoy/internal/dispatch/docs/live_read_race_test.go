@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // rules is count horizontal rules in a row, a block a walk of the live tree meets no lock at,
@@ -230,6 +232,105 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
 		time.Sleep(500 * time.Millisecond)
 	})
+}
+
+// Cold reads never open a room. Another task can still append while they run, advancing the
+// stored stamp under cached hits and shared folds. The reader service must stay roomless and each
+// read must observe one complete stored state.
+func TestColdReadsRunBesideStoredWrites(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	versioned := NewPgVersioned(database)
+	reader := newReadCacheService(t, database, versioned)
+	seedServiceText(t, reader, artifactID, "# Heading\n\nwrite 0\n")
+	headingID := firstBlockID(t, reader, artifactID)
+	if reader.srv.GetDoc(artifactID) != nil {
+		t.Fatal("seeding and the first cold read made the reader's room resident")
+	}
+
+	loaded, err := versioned.Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load writer state: %v", err)
+	}
+	writer := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(writer, loaded.Update, nil); err != nil {
+		t.Fatalf("open writer state: %v", err)
+	}
+	texts := paragraphTexts(writer)
+	if len(texts) == 0 {
+		t.Fatal("writer document has no paragraph")
+	}
+
+	const writes = 20
+	var readCount atomic.Int64
+	errs := make(chan error, writes*4)
+	for write := 1; write <= writes; write++ {
+		before := writer.StateVector()
+		text := texts[0]
+		previous := text.ToString()
+		value := fmt.Sprintf("write %d", write)
+		writer.Transact(func(txn *crdt.Transaction) {
+			text.Delete(txn, 0, len(previous))
+			text.Insert(txn, 0, value, nil)
+		})
+		update := crdt.EncodeStateAsUpdateV1(writer, before)
+		appended := make(chan error, 1)
+		go func() {
+			_, err := versioned.AppendUpdate(context.Background(), artifactID, update)
+			appended <- err
+		}()
+
+		var readers sync.WaitGroup
+		for range 4 {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				markdown, _, err := reader.TextWithToken(context.Background(), artifactID)
+				if err == nil && !strings.HasPrefix(markdown, "# Heading\n\nwrite ") {
+					err = fmt.Errorf("text = %q, want one complete written state", markdown)
+				}
+				if err == nil {
+					blocks, blockErr := reader.Blocks(context.Background(), artifactID)
+					if blockErr != nil {
+						err = blockErr
+					} else if len(blocks) == 0 || blocks[0].ID != headingID {
+						err = fmt.Errorf("blocks = %#v, want heading %q", blocks, headingID)
+					} else {
+						// The slice a reader owns must not race another reader's cached entry.
+						blocks[0].References.Comments++
+						_, err = reader.BlockPath(context.Background(), artifactID, headingID)
+					}
+				}
+				if err == nil {
+					_, err = reader.Text(context.Background(), artifactID)
+				}
+				if err != nil {
+					errs <- err
+					return
+				}
+				readCount.Add(1)
+			}()
+		}
+		readers.Wait()
+		if err := <-appended; err != nil {
+			t.Fatalf("append write %d: %v", write, err)
+		}
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("cold read beside stored write: %v", err)
+	default:
+	}
+	if got := readCount.Load(); got == 0 {
+		t.Fatal("cold readers completed no reads")
+	}
+	if reader.srv.GetDoc(artifactID) != nil {
+		t.Fatal("cold readers loaded the document room")
+	}
+	want := fmt.Sprintf("# Heading\n\nwrite %d\n", writes)
+	if text, err := reader.Text(context.Background(), artifactID); err != nil || text != want {
+		t.Fatalf("final cold read = %q (%v), want %q", text, err, want)
+	}
 }
 
 // overlapping runs read until overlapsWanted runs have met a peer's update. A peer that keeps

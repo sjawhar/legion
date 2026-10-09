@@ -2,7 +2,7 @@ package workflow
 
 import (
 	"context"
-	"slices"
+	"reflect"
 	"testing"
 	"time"
 
@@ -40,8 +40,95 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 		t.Fatalf("root phase = %s held from %v, want planning and not held", gotPhase, heldFrom)
 	}
 	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
+	}
+}
+
+// A role that finished its phase stays live until its issue closes, so its claim can fail while
+// another role works the phase, or while the phase is held for another role's failure. The
+// architect is told in a worker-died naming the role and saying the phase is not its, and the
+// issue's phase stands: nothing is held for a role that holds no phase, and the controller is not
+// told of a phase that is not stalled. A lingering tree and a child that left the workflow tell
+// nobody, since their claims were suspended. A child's sub-architect works no phase and nothing in
+// the workflow starts it, so its failure holds nothing and tells nobody: the child's notices go to
+// the architect above it, and the operator who started it relaunches it.
+func TestAFinishedRolesFailedClaimIsNoticedAndHoldsNothing(t *testing.T) {
+	root := "LEGION-208"
+	until := time.Date(2026, 9, 26, 13, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		root      record.Issue
+		child     record.Issue
+		role      claim.Role
+		wantPhase phase.Phase
+		want      []record.OutboxPayload
+	}{
+		{
+			name:  "the planner while the implementer works",
+			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"},
+			role:  claim.RolePlanner, wantPhase: phase.Implementing,
+			want: []record.OutboxPayload{record.Notice{Kind: "worker-died", Role: claim.RolePlanner, Phase: phase.Implementing,
+				Reason: "the planner does not work LEGION-209's phase implementing; nothing is held"}},
+		},
+		{
+			name:  "the merger while the issue awaits its merge",
+			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"},
+			role:  claim.RoleMerger, wantPhase: phase.AwaitingMerge,
+			want: []record.OutboxPayload{record.Notice{Kind: "worker-died", Role: claim.RoleMerger, Phase: phase.AwaitingMerge,
+				Reason: "the merger does not work LEGION-209's phase awaiting_merge; nothing is held"}},
+		},
+		{
+			name: "the tester while the implementer's phase is held",
+			root: record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing},
+				Generation: 1, Status: "in_progress", Rank: "V"},
+			role: claim.RoleTester, wantPhase: phase.Held,
+			want: []record.OutboxPayload{record.Notice{Kind: "worker-died", Role: claim.RoleTester, Phase: phase.Held,
+				Reason: "the tester does not work LEGION-209's phase implementing; nothing is held"}},
+		},
+		{
+			name:  "the planner of a lingering tree",
+			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"},
+			role:  claim.RolePlanner, wantPhase: phase.Implementing,
+		},
+		{
+			name:  "the tester of a child that left the workflow",
+			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "V"},
+			role:  claim.RoleTester, wantPhase: phase.Done,
+		},
+		{
+			name:  "a child's sub-architect while the child's implementer works",
+			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"},
+			role:  claim.RoleArchitect, wantPhase: phase.Implementing,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			ctx := context.Background()
+			seedIssue(t, pool, tc.root)
+			seedIssue(t, pool, tc.child)
+
+			if _, err := intake.ApplyFact(ctx, pool, "supervise", "finished-role-failed", intake.ClaimFailed{Issue: "LEGION-209", Role: tc.role}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+				t.Fatalf("ApplyFact the %s's failed claim: %v", tc.role, err)
+			}
+			var gotPhase phase.Phase
+			var heldFrom *string
+			if err := pool.QueryRow(ctx, "select phase, held_from from issues where key = $1", "LEGION-209").Scan(&gotPhase, &heldFrom); err != nil {
+				t.Fatalf("read the child: %v", err)
+			}
+			if wantHeld := tc.child.Hold != nil; gotPhase != tc.wantPhase || (heldFrom != nil) != wantHeld {
+				t.Fatalf("after the %s's failure the child is in %s held from %v, want %s held %t", tc.role, gotPhase, heldFrom, tc.wantPhase, wantHeld)
+			}
+			if got := noticeRows(t, pool); !sameNotices(got, tc.want) {
+				t.Fatalf("notice rows = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -59,7 +146,7 @@ func TestAnEscalationIsRecordedOnTheHoldForAControllerThatStartsLater(t *testing
 		t.Fatalf("after the escalation the state reads phase %s hold reason %q, want held and escalated", got, reason)
 	}
 	escalated := record.Notice{Kind: "held", Phase: phase.Planning, Reason: "escalated"}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{escalated, record.ControllerNotice(escalated)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{escalated, record.ControllerNotice(escalated)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "architect", "retry", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
@@ -153,7 +240,7 @@ func TestALingeringTreesFailedClaimHoldsNothingAndItsArchitectsIsStillTold(t *te
 		t.Fatalf("ApplyFact the architect's failed claim: %v", err)
 	}
 	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Done}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 }
@@ -197,6 +284,12 @@ func projectedHold(t *testing.T, pool *pgxpool.Pool, key string) (phase.Phase, s
 		t.Fatalf("project the state: %v", err)
 	}
 	return state.Issues[key].Phase, state.Issues[key].HoldReason
+}
+
+// sameNotices compares two notice-row lists as slices.Equal would — an empty list equals a nil
+// want — through reflect.DeepEqual, since record.Notice holds a slice and is not comparable.
+func sameNotices(got, want []record.OutboxPayload) bool {
+	return len(got) == 0 && len(want) == 0 || reflect.DeepEqual(got, want)
 }
 
 // noticeRows is every notice and controller notice row's payload, oldest first.

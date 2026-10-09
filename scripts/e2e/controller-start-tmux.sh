@@ -143,8 +143,9 @@ want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-legion/package
 note "plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, daemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
 # their roles and the default one model, served by a static-key provider that listens nowhere: the
-# controller's one model turn, the start message `legion controller start` opens it with, fails
-# against it, no check reads its answer, and no credential the machine carries decides the gate.
+# controller's one model turn, which the pi-legion extension starts from
+# LEGION_CONTROLLER_START_MESSAGE once its claim succeeds, fails against it, no check reads its
+# answer, and no credential the machine carries decides the gate.
 mkdir -p "$profile_agent"
 cat >"$profile_agent/models.yml" <<'EOF'
 providers:
@@ -189,7 +190,13 @@ EOF
 # ---- --check-config --------------------------------------------------------------------------------
 begin check-config-passes
 out=$(legion start --check-config --config "$work/legion.yaml")
-[ "$out" = "Config OK: project=$project" ] || fail "got $out"
+[ "$(head -1 <<<"$out")" = "Config OK: project=$project" ] || fail "got $out"
+# After the OK line, one line per deployment capability the file alone leaves open, in boot's words
+# (LEGION-578): under tmux the secrets and resource-limits rows, each ending with the legion.yaml
+# line that records a decision. A report, so the exit stayed 0.
+want_gaps='capability secrets is open: the tmux runtime enrolls no process with the secrets broker; to record a decision, add to legion.yaml: capabilities.decided.secrets: "<reason>"
+capability resource-limits is open: the tmux runtime sets no requests or limits on a pane; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: "<reason>"'
+[ "$(tail -n +2 <<<"$out")" = "$want_gaps" ] || fail "the lines after the OK line are not the two open gaps: $out"
 note "$out"
 pass
 

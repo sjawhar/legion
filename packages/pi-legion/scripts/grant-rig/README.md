@@ -209,8 +209,8 @@ with `$RIG/state/worker-bin` in which worker-bin occurs once.
 
 Expected: `H=1/1 G=1 T=0 file=own-mint` on every record-grant call, A–G all PASS, every
 redemption 200, `legion …` commands `exit=0`, one parent instance plus one per `task` spawn. The
-prompt never asks for `legion handoff complete`: the extension refuses it in a phase worker's
-shell, where the `legion` tool's `handoff_complete` ends the phase.
+prompt never asks for `legion handoff complete`: a phase ends through the `legion` tool's
+`handoff_complete`.
 
 ## Cleanup
 

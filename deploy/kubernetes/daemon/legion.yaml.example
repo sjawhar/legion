@@ -60,6 +60,17 @@ runtime:
     tree_volume: 20Gi
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
+    resources:                         # each role's CPU and memory requests and limits: a pod reserves
+                                       # what it requests and never bursts past its limit. The figures are
+                                       # examples sized for the 4-vCPU node a tree runs on
+                                       # (docs/kubernetes.md, "Tree sizing"); a role absent here reserves
+                                       # nothing, which the daemon reports as the resource-limits gap
+      architect: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
+      planner: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
+      implementer: { requests: { cpu: 1, memory: 2Gi }, limits: { cpu: 4, memory: 6Gi } }
+      tester: { requests: { cpu: 2, memory: 4Gi }, limits: { cpu: 4, memory: 12Gi } }
+      reviewer: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
+      merger: { requests: { cpu: 500m, memory: 1Gi }, limits: { cpu: 2, memory: 3Gi } }
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
       env:
         PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
@@ -78,3 +89,13 @@ runtime:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
+
+# The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
+# capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets
+# broker (runtime.kubernetes.agent_secrets), model fallback (retry.modelFallback in the operator's
+# overlay, read by the image probe) and every role's resources above. A gap never stops the daemon;
+# it is yours to close, or to decide here, by name and with the reason, which the report then
+# shows in the gap's place. This example configures no broker, so it decides that one.
+capabilities:
+  decided:
+    secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"

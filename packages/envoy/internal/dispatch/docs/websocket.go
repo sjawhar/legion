@@ -212,8 +212,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
 	// until it is replaced from markdown. The server decides it here, for every client at once, by
-	// the read and the rendering `/text` answers with (readTree), so a socket is refused exactly
-	// when that read is ErrDocOutsideSchema.
+	// the same stored document and rendering `/text` answers with (readDocument), so a socket is
+	// refused exactly when that read is ErrDocOutsideSchema.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
 		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {

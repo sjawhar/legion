@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"sync"
 	"time"
 
@@ -82,6 +81,16 @@ func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Versio
 		return 0, err
 	}
 	return p.head(ctx, rooms, room)
+}
+
+// DocumentStamp is the room's DocumentStamp now, read through the pool that owns loads, as Head
+// reads the head.
+func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentStamp, error) {
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return DocumentStamp{}, err
+	}
+	return readDocumentStamp(ctx, rooms, room)
 }
 
 // AppendUpdate validates and stores one incremental V1 update as content.
@@ -253,11 +262,7 @@ func (p *PgVersioned) ListVersions(ctx context.Context, room string) ([]persiste
 		select version, created_at
 		from doc_updates
 		where artifact_id = $1
-		  and version <= coalesce(
-			(select ceiling from doc_checkpoints where artifact_id = $1),
-			(select max(version) from doc_updates where artifact_id = $1),
-			0
-		  )
+		  and version <= `+headVersion+`
 		order by version desc
 	`, room)
 	if err != nil {
@@ -291,11 +296,7 @@ func (p *PgVersioned) GetUpdate(ctx context.Context, room string, version persis
 		from doc_updates
 		where artifact_id = $1
 		  and version = $2
-		  and version <= coalesce(
-			(select ceiling from doc_checkpoints where artifact_id = $1),
-			(select max(version) from doc_updates where artifact_id = $1),
-			0
-		  )
+		  and version <= `+headVersion+`
 	`, room, int64(version)).Scan(&update, &updatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, persistence.VersionMeta{}, false, nil
@@ -612,184 +613,22 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	})
 }
 
+// headVersion is the SQL expression for the version a room's stored history stands at, for the room
+// $1 names: a prune's checkpoint ceiling while one stands, otherwise the greatest stored version, 0
+// for none. Every query that reads the head builds on it (head, readDocumentStamp, ListVersions,
+// GetUpdate), so what counts as the head cannot change for one of them and not the others.
+const headVersion = `coalesce(
+	(select ceiling from doc_checkpoints where artifact_id = $1),
+	(select max(version) from doc_updates where artifact_id = $1),
+	0
+)`
+
 func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persistence.Version, error) {
 	var version int64
-	if err := q.QueryRow(ctx, `
-		select coalesce(
-			(select ceiling from doc_checkpoints where artifact_id = $1),
-			(select max(version) from doc_updates where artifact_id = $1),
-			0
-		)
-	`, room).Scan(&version); err != nil {
+	if err := q.QueryRow(ctx, `select `+headVersion, room).Scan(&version); err != nil {
 		return 0, fmt.Errorf("read document head: %w", err)
 	}
 	return persistence.Version(version), nil
-}
-
-// stateThrough returns the state the room's stored updates through version make, as one V1
-// update. It applies them one at a time, oldest first, to one document that collects garbage, and
-// encodes that document, so a deleted item keeps its id and length but none of its content, and
-// what it holds at once is that document and the one update being applied, however much the
-// stored updates inserted and later deleted. Nothing reads deleted content back from the store:
-// every document built from it - a room ygo's server loads, a read, a fork, a validation - is a
-// crdt.New, which collects an item's content in the transaction that deletes it, the transaction
-// that applies a load included.
-//
-// A document parks an update whose dependencies have not arrived, and a delete of an item it does
-// not hold, and its encoding carries neither, so when the document parked anything stateThrough
-// merges the encoding with each stored update's structs past the document's state vector and with
-// every stored update's deletes, for a room that loads the state to park them again.
-//
-// The state is kept only when it reads back as the document that made it: decoded into a fresh
-// document, it must make the same state vector. That catches a re-encoding that renumbers or drops
-// a client's clocks, as at ygo v1.49.6-sami.3, whose decoder integrated the items after a skipped
-// clock range and so encoded them at lower clocks; v1.50.1-sami.2's decoder parks them instead. It
-// does not catch a re-encoding that keeps every clock and moves text, such as a lost right origin:
-// TestACompactedDocumentKeepsItsOrderThroughLaterUpdates guards that on each ygo bump. A state that
-// reads back otherwise, or a log the fold's document cannot apply (one parking more than ygo's
-// pending queue holds), is not used: stateThrough returns the stored updates merged whole, as they
-// were read before it folded them, and Compact, which calls foldThrough itself, leaves them as
-// stored. The merge of a log the fold cannot apply is what a load of it decodes and refuses
-// (ErrDocumentUnloadable), which offers its rebuild.
-//
-// A log of one update is returned as stored: compaction leaves the state as one update, and a
-// document's first update deletes nothing an earlier one inserted.
-func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
-	state, misread, err := foldThrough(ctx, tx, room, version)
-	if err != nil {
-		return nil, err
-	}
-	if misread == nil {
-		return state, nil
-	}
-	slog.Warn(misreadWarning+"; serving them merged",
-		"room", room, "version", int64(version), "error", misread)
-	var updates [][]byte
-	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-		updates = append(updates, update)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	merged, err := crdt.MergeUpdatesV1(updates...)
-	if err != nil {
-		return nil, fmt.Errorf("merge document updates: %w", err)
-	}
-	return merged, nil
-}
-
-// errUnfoldable marks a stored update the fold's document could not apply.
-var errUnfoldable = errors.New("apply a stored document update")
-
-// foldThrough is the fold stateThrough and Compact share: the state, or misread naming why the
-// stored updates through version do not fold into a state that reads back as them - an update the
-// fold's document could not apply, or a state that reads back otherwise.
-func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, misread error, err error) {
-	var doc *crdt.Doc
-	apply := func(update []byte) error {
-		if doc == nil {
-			doc = newDocumentCopy()
-		}
-		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
-			return fmt.Errorf("%w: %w", errUnfoldable, err)
-		}
-		return nil
-	}
-	var first []byte
-	seen := 0
-	err = eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-		seen++
-		switch seen {
-		case 1:
-			first = update
-			return nil
-		case 2:
-			if err := apply(first); err != nil {
-				return err
-			}
-			first = nil
-		}
-		return apply(update)
-	})
-	switch {
-	case errors.Is(err, errUnfoldable):
-		return nil, err, nil
-	case err != nil:
-		return nil, nil, err
-	case seen <= 1:
-		return first, nil, nil
-	}
-	state = crdt.EncodeStateAsUpdateV1(doc, nil)
-	made := doc.StateVector()
-	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
-		parts := [][]byte{state}
-		if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-			rest, err := crdt.DiffUpdateV1(update, made)
-			if err != nil {
-				return fmt.Errorf("read parked document update: %w", err)
-			}
-			parts = append(parts, rest)
-			return nil
-		}); err != nil {
-			return nil, nil, err
-		}
-		if state, err = crdt.MergeUpdatesV1(parts...); err != nil {
-			return nil, nil, fmt.Errorf("keep parked document updates: %w", err)
-		}
-	}
-	doc = nil
-	return state, readsBackOtherwise(state, made), nil
-}
-
-// readsBackOtherwise names how state, decoded into a fresh document, differs from the state vector
-// made, the state vector of the document that encoded it, or returns nil when it does not.
-func readsBackOtherwise(state []byte, made crdt.StateVector) error {
-	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
-		return fmt.Errorf("decode the folded state: %w", err)
-	}
-	read := doc.StateVector()
-	if maps.Equal(made, read) {
-		return nil
-	}
-	for client, clock := range made {
-		if read[client] != clock {
-			return fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, read[client], clock)
-		}
-	}
-	for client, clock := range read {
-		if made[client] != clock {
-			return fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, clock, made[client])
-		}
-	}
-	return nil
-}
-
-// eachUpdateThrough calls use with each of the room's stored updates through version, oldest first,
-// reading one row at a time.
-func eachUpdateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, use func([]byte) error) error {
-	rows, err := tx.Query(ctx, `
-		select update from doc_updates
-		where artifact_id = $1 and version <= $2
-		order by version asc
-	`, room, int64(version))
-	if err != nil {
-		return fmt.Errorf("read document updates: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var update []byte
-		if err := rows.Scan(&update); err != nil {
-			return fmt.Errorf("scan document update: %w", err)
-		}
-		if err := use(update); err != nil {
-			return err
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read document updates: %w", err)
-	}
-	return nil
 }
 
 func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) error {

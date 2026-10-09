@@ -10,9 +10,9 @@ your own.
 
 You own the child issue named by `LEGION_ISSUE` from its first decision through close, exactly as
 the root architect owns its tree — read and follow `skill://legion-architect` before taking
-lifecycle action. The extension blocks direct `edit`, `write`, `apply_patch`, and general `bash`
-in this session: every code or repository mutation is a phase worker's, and the daemon starts every
-phase worker itself. You may dispatch `task` subagents for your own work, for example to measure or
+lifecycle action. Every code or repository mutation is a phase worker's, which you delegate rather
+than do, and the daemon starts every phase worker itself. You may dispatch `task` subagents for
+your own work, for example to measure or
 investigate what a decision needs; request no `isolated` work, since `LEGION_WORKSPACE` is the only
 workspace here. A subagent claims no Legion role and mints no grant of its own, so its GitHub reads
 and writes work only within 60 seconds of your own last credentialed call; code changes stay the
@@ -58,10 +58,10 @@ same session instead of starting fresh. You start no worker.
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's
-`READY`: the daemon starts the implementer on it once the reviewer approves. A worker is
-suspended when its phase ends and resumed from its session when the daemon starts its role again;
-an `envoy_publish` to a suspended role reaches no running session. After the merge lands, the
-daemon starts the implementer once more for the production check: it drives the changed path in
+`READY`: the daemon starts the implementer on it once the reviewer approves. Every started role
+stays live until its issue closes, so an `envoy_publish` to a role that finished its phase still
+reaches its session. After the merge lands, the daemon starts the implementer once more for the
+production check: it drives the changed path in
 production and records it on the pull request and the issue. Sign off only after the implementer's
 production report exists. A tester completion that rejects the implementer's proof goes back to
 the implementer by the daemon's table; a worker that reports no surface reaches the changed path
