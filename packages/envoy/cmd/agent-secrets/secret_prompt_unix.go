@@ -27,8 +27,9 @@ import (
 const pasteGapDeciseconds = 2
 
 // maxPasteDrain bounds how long the reader goes on reading, and so discarding, input that keeps
-// arriving after the line.
-const maxPasteDrain = 10 * time.Second
+// arriving after the line, and how long it waits for an open bracketed paste's closing mark. Tests
+// shorten it.
+var maxPasteDrain = 10 * time.Second
 
 // The bracketed-paste sequences (xterm's mode 2004): the reader turns the mode on while it reads,
 // and a terminal that supports it then sends each paste between pasteStart and pasteEnd.
@@ -130,7 +131,18 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 		return v != 0 && v != 0xff && c == v
 	}}
 	buf := make([]byte, 512)
+	var pasteSince time.Time // when the open paste began; zero outside one
 	for {
+		tty.wait = -1
+		if r.inPaste {
+			if pasteSince.IsZero() {
+				pasteSince = time.Now()
+			}
+			tty.wait = int((time.Until(pasteSince.Add(maxPasteDrain)) + time.Millisecond - 1).Milliseconds())
+			tty.wait = max(0, tty.wait)
+		} else {
+			pasteSince = time.Time{}
+		}
 		n, err := tty.read(buf)
 		if err != nil {
 			return nil, err
@@ -142,6 +154,11 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			tty.stopped = false
 		}
 		if n == 0 {
+			if r.inPaste && time.Since(pasteSince) >= maxPasteDrain {
+				// The paste's closing mark never came, so the signal keys pressed since were
+				// pasted text: give the paste up rather than read it forever.
+				return nil, errPasteCutShort
+			}
 			switch {
 			case r.err != nil:
 				return nil, r.err
@@ -546,7 +563,8 @@ func (r *promptReader) key(c byte) (promptKey, bool) {
 // feed takes one read's bytes and reports whether the read is over: the line ended outside a paste,
 // or a paste in which it ended has closed. A signal key outside a paste ends the read there and
 // answers its signal; the bytes after it are discarded. Inside a paste it is pasted text, a
-// control byte refused like any other.
+// control byte refused like any other. A signal key in the rest of the read in which the line or
+// its paste ends still sends its signal, as it would in a read of its own.
 func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 	b = append(r.pending, b...)
 	r.pending = nil
@@ -562,7 +580,7 @@ func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 				r.inPaste = false
 				i += len(pasteEnd) - 1
 				if r.ended {
-					return true, 0
+					return true, r.keyIn(b[i+1:])
 				}
 				continue
 			}
@@ -593,7 +611,7 @@ func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 				continue
 			}
 			r.more = r.more || !onlyLineEndings(b[i+1:])
-			return true, 0
+			return true, r.keyIn(b[i+1:])
 		case !r.inPaste && (r.special(c, unix.VERASE) || c == 0x7f || c == '\b'):
 			if len(r.line) > 0 {
 				_, size := utf8.DecodeLastRune(r.line)
@@ -615,6 +633,20 @@ func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 		}
 	}
 	return false, 0
+}
+
+// keyIn answers the signal of the first signal key in b, the rest of a read after the line, outside
+// a paste that begins there; 0 if there is none.
+func (r *promptReader) keyIn(b []byte) syscall.Signal {
+	for i, c := range b {
+		if bytes.HasPrefix(b[i:], pasteStart) {
+			return 0
+		}
+		if k, ok := r.key(c); ok && k.sig != 0 {
+			return k.sig
+		}
+	}
+	return 0
 }
 
 // eraseWord removes trailing blanks, then the preceding word, by rune as canonical terminal

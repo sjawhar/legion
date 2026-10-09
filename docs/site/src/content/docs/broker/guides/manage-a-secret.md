@@ -66,8 +66,9 @@ it from the next request. Secrets Manager refuses a name that is already taken, 
 scheduled for deletion: [restore](#delete-and-restore) that one instead.
 
 The prompt takes one line. A bracketed paste of more than one line, such as a key, is read through
-its closing mark and refused (exit 2), even when its writes arrive slowly. Most terminal emulators
-and tmux support bracketed paste.
+its closing mark and refused (exit 2), even when its writes arrive slowly. A paste whose closing
+mark has not come 10 seconds after it began is given up, and the command exits 1, storing
+nothing. Most terminal emulators and tmux support bracketed paste.
 
 Without brackets the CLI drains input until 200 ms of quiet after the line, for at most
 10 seconds. **That is a bounded drain, not a guarantee about an entire paste:** bytes arriving

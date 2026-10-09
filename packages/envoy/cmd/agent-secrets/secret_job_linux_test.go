@@ -217,6 +217,13 @@ func TestPromptJobHelper(t *testing.T) {
 		return
 	}
 	fmt.Printf("HELPER_PID=%d\nHELPER_READY\n", os.Getpid())
+	if bound := os.Getenv("AGENT_SECRETS_JOB_PASTE_BOUND"); bound != "" {
+		d, err := time.ParseDuration(bound)
+		if err != nil {
+			t.Fatal(err)
+		}
+		maxPasteDrain = d
+	}
 	reference := os.Getenv("AGENT_SECRETS_JOB_REFERENCE")
 	if reference == "" {
 		// Started in the foreground: bash has already handed it the terminal.
@@ -635,6 +642,56 @@ func TestPromptJobPasteAfterTheLineDrainsThroughItsEnd(t *testing.T) {
 			s.noShellValue("pastelate", "PASTE_$((", "PASTE_5")
 		})
 	}
+}
+
+// A paste whose closing mark never comes, as from a terminal that sends only the start mark, is
+// given up once maxPasteDrain has passed since it began: the prompt ends, refusing the entry,
+// though the signal keys pressed meanwhile are pasted text. The helper shortens the bound.
+func TestPromptJobPasteThatNeverEndsIsGivenUp(t *testing.T) {
+	for _, key := range []string{"\x03", "\x1c", "\x1a"} {
+		t.Run(fmt.Sprintf("%x", key), func(t *testing.T) {
+			s := newPromptShell(t)
+			s.env = "AGENT_SECRETS_JOB_PASTE_BOUND=1s "
+			s.start(false, false)
+			s.send("\x1b[200~pasteopen" + key)
+			s.wait("RETURNED read the value at the terminal: " + errPasteCutShort.Error())
+			s.noShellValue("pasteopen")
+		})
+	}
+}
+
+// A signal key that follows a paste's closing mark in the same read is a keypress: it acts as it
+// would in a read of its own, so the pasted value is not stored. Ctrl-C and Ctrl-\ end the
+// process by their signals; Ctrl-Z stops it, and after fg the entry is refused.
+func TestPromptJobKeyAfterAPasteInOneWriteActs(t *testing.T) {
+	paste := "\x1b[200~pastevalue\r\x1b[201~"
+	for _, tc := range []struct{ key, status string }{{"\x03", "130"}, {"\x1c", "131"}} {
+		t.Run(fmt.Sprintf("%x", tc.key), func(t *testing.T) {
+			s := newPromptShell(t)
+			s.start(false, false)
+			s.send(paste + tc.key)
+			s.wait("PROMPT$ ")
+			s.send("echo STATUS_$?\r")
+			s.wait("STATUS_" + tc.status)
+			if strings.Contains(s.out.String(), "RETURNED") {
+				t.Fatalf("want the process ended by its signal (status %s), not a returned value: %q", tc.status, s.out.String())
+			}
+		})
+	}
+	t.Run("1a", func(t *testing.T) {
+		s := newPromptShell(t)
+		s.start(false, false)
+		s.send(paste + "\x1a")
+		s.wait("Stopped")
+		s.wait("PROMPT$ ")
+		s.out.Reset()
+		s.send("fg\r")
+		s.wait("Nothing was stored. Press Enter")
+		s.send("\r")
+		s.wait("RETURNED nothing was stored:")
+		s.wait("MATCH=false EMPTY=true")
+		s.noShellValue("pastevalue")
+	})
 }
 
 // A prompt started with & whose shell then exits has no shell to bring it forward, though the
