@@ -190,15 +190,22 @@ type promptTerminal struct {
 	applied         bool // whether t.current and bracketed paste are already in effect
 }
 
-// apply is a no-op once the terminal already carries t.current and bracketed paste: one resume
-// can reach here more than once (the watcher's event, and an EINTR on whichever other blocked
-// syscall the same resume woke), and neither termios nor paste mode is touched by a stop or a
-// resume by themselves, so repeating the ioctl and the paste-on write would only be redundant,
-// and visibly so over a real terminal. signal clears applied the moment it records a new stop,
-// so the next genuine resume still reapplies.
+// apply puts the reader's mode and bracketed paste in effect. One resume can reach here more than
+// once (the watcher's event, and an EINTR on whichever other blocked syscall the same resume
+// woke), so once applied it rereads the mode, a read that never stops the process, and reapplies
+// only when the mode differs, rather than repeat a paste-on write that shows over a real terminal.
+// A caught stop clears applied (signal); a stop no handler sees (SIGSTOP from another process)
+// lets the shell put its own mode back, echo on, while the job is stopped, and only the reread
+// shows that.
 func (t *promptTerminal) apply() error {
 	if t.applied {
-		return nil
+		now, err := unix.IoctlGetTermios(t.fd, ioctlGetTermios)
+		if err != nil {
+			return err
+		}
+		if sameMode(now, t.current) {
+			return nil
+		}
 	}
 	for {
 		err := unix.IoctlSetTermios(t.fd, ioctlSetTermios, t.current)
@@ -217,6 +224,13 @@ func (t *promptTerminal) apply() error {
 	_, _ = unix.Write(t.fd, bracketedPasteOn)
 	t.applied = true
 	return nil
+}
+
+// sameMode reports whether a and b set the same input, output and local modes and control
+// characters. The control modes and speeds are left out: they are the line's hardware settings,
+// which neither the prompt nor a shell changes, and which a driver may adjust as it applies them.
+func sameMode(a, b *unix.Termios) bool {
+	return a.Iflag == b.Iflag && a.Oflag == b.Oflag && a.Lflag == b.Lflag && a.Cc == b.Cc
 }
 
 // restoreTerminal puts the terminal back to saved, once the signal watcher has joined. A

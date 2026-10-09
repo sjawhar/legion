@@ -242,13 +242,18 @@ func TestPromptJobHelper(t *testing.T) {
 		fmt.Println("PROMPT_STARTING")
 	}
 	real := readTerminal
-	quiet := false
+	quiet, readSome := false, false
 	readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
 		if timeout >= 0 && !quiet {
 			quiet = true
 			fmt.Println("QUIET_READY")
 		}
-		return real(fd, wake, buf, timeout)
+		n, err := real(fd, wake, buf, timeout)
+		if n > 0 && !readSome {
+			readSome = true
+			fmt.Println("READ_SOME")
+		}
+		return n, err
 	}
 	label := &labelCheck{}
 	value, err := readSecretValue("DEMO_KEY", "agent-secrets secret set DEMO_KEY", label)
@@ -556,6 +561,41 @@ func TestPromptJobShellGoneRefuses(t *testing.T) {
 	if strings.Contains(s.out.String(), "Value for") {
 		t.Fatalf("a prompt whose shell had gone showed its label: %q", s.out.String())
 	}
+}
+
+// A stop no handler sees (SIGSTOP from another process) lets the shell put its own mode back,
+// echo on, while the job is stopped. After fg the prompt puts its own mode back before it reads
+// again, so the rest of the value stays hidden.
+func TestPromptJobExternalStopKeepsTheValueHidden(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, false)
+	s.send("head")
+	// The prompt must have read the bytes first: the shell would read any still queued.
+	s.wait("READ_SOME")
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		queued, err := unix.IoctlGetInt(s.terminal, unix.TIOCINQ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if queued == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the prompt left %d bytes unread", queued)
+		}
+	}
+	if err := syscall.Kill(s.pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	s.wait("Stopped")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("fg\r")
+	// The prompt's mode is back once it turns bracketed paste on again.
+	s.wait("\x1b[?2004h")
+	s.send("tail\r")
+	s.wait("RETURNED <nil> MATCH=true")
+	s.noShellValue("head", "tail")
 }
 
 func TestPromptHangupRestoresAndAbortCannotDumpTheValue(t *testing.T) {
