@@ -62,6 +62,9 @@ function Facet({
 }): ReactNode {
   if (values.length === 0 && selected.length === 0) return null;
   const options = [...new Set([...selected, ...values])];
+  const state =
+    selected.length === 0 ? `Any ${label.toLowerCase()}` : `${selected.length} selected`;
+  const countOf = (value: string) => counts[value] ?? 0;
   return (
     <div>
       <span className={facetLabelClass}>{label}</span>
@@ -71,17 +74,16 @@ function Facet({
         onChange={onChange}
         onOpenChange={onOpenChange}
         open={open}
-        optionDetail={(value) => String(counts[value] ?? 0)}
+        optionDetail={(value) => String(countOf(value))}
+        optionDetailLabel={(value) => `${countOf(value)} PR${countOf(value) === 1 ? "" : "s"}`}
         optionLabel={valueLabel}
         options={options}
         searchLabel={`Search ${label.toLowerCase()}\u2026`}
         selected={selected}
-        triggerAriaLabel={label}
+        triggerAriaLabel={`${label}: ${state}`}
         triggerClassName={triggerClass}
       >
-        <span className="truncate">
-          {selected.length === 0 ? `Any ${label.toLowerCase()}` : `${selected.length} selected`}
-        </span>
+        <span className="truncate">{state}</span>
       </MultiSelect>
     </div>
   );
@@ -106,11 +108,28 @@ export function FacetPanel({
     const counts = countsOf(key);
     return Object.keys(counts).sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
   };
+  // How many sub-components each component has in the window's projects: selecting a parent
+  // selects them too (the server expands it), and the prototype lists components flat, so the
+  // option says so.
+  const subComponents = new Map<string, number>();
+  for (const component of Object.values(data.components)) {
+    const seen = new Set<string>();
+    for (let parent = component.parent; parent !== null && !seen.has(parent); ) {
+      seen.add(parent);
+      subComponents.set(parent, (subComponents.get(parent) ?? 0) + 1);
+      parent = data.components[parent]?.parent ?? null;
+    }
+  }
   const valueLabel = (key: FacetKey, value: string): string => {
     const placeholder = PLACEHOLDER_LABELS[value];
     if (placeholder !== undefined) return placeholder;
     if (key === "issue") return `${value} \u2014 ${data.issue_titles[value] ?? ""}`;
-    if (key === "component") return data.components[value]?.title ?? value;
+    if (key === "component") {
+      const title = data.components[value]?.title ?? value;
+      const children = subComponents.get(value) ?? 0;
+      if (children === 0) return title;
+      return `${title} (includes ${children} sub-component${children === 1 ? "" : "s"})`;
+    }
     return value;
   };
   const facetProps = (key: FacetKey) => ({

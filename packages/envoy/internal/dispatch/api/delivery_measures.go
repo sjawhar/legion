@@ -53,7 +53,7 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pool := s.deps.Store.Pool
 
-	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query)
+	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -36,6 +36,12 @@ test("stale: the three reconciled sources go red past three missed passes (15 mi
   expect(rows.dispatch?.red).toBe(false);
 });
 
+test("the stale boundary: 899 s since the last pass is current, 901 s is red", () => {
+  const at = (seconds: number) => new Date(NOW - seconds * 1000).toISOString();
+  expect(byName({ ...healthy, last_reconcile_at: at(899) }).prs?.red).toBe(false);
+  expect(byName({ ...healthy, last_reconcile_at: at(901) }).prs?.red).toBe(true);
+});
+
 test("failing: a named last_error shows on each reconciled source, however recent the last pass", () => {
   const rows = byName({
     ...healthy,

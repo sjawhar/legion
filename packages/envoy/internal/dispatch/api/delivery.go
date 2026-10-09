@@ -44,6 +44,13 @@ const (
 	deliveryNoSession   = "__no_session__"
 )
 
+// The rework facet's two values, as the page names them (features/delivery/lib/facets.ts's
+// ReworkFacet): a pull request that adds value, and one that reworks earlier work.
+const (
+	deliveryReworkValue  = "value"
+	deliveryReworkRework = "rework"
+)
+
 // deliveryPrioritySelection reads a priority selection as the page writes it (P0-P3) or as a
 // person types it (p0, or the bare digit the issue routes store).
 var deliveryPrioritySelection = regexp.MustCompile(`^[pP]?([0-3])$`)
@@ -110,7 +117,15 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	population, err := s.filteredDeliveryPullRequests(r.Context(), settings, from, to, query)
+	ctx := r.Context()
+	// The deploy repository's pull requests still waiting at `from`, so the waiting line starts
+	// the window at their count rather than at zero.
+	waitingPRs, err := delivery.ListPullRequestsWaitingAt(ctx, s.deps.Store.Pool, settings.DeployRepo, settings.ProductionJobName, from)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, waitingPRs)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -126,6 +141,15 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 		if row.matches(population.selection, "") {
 			prViews = append(prViews, row.view)
+		}
+	}
+
+	// The pull requests still waiting at `from`, under the same facets and search, so the
+	// waiting line starts the window at their count rather than at zero.
+	waitingViews := make([]delivery.DeliveryWaitingPRView, 0, len(population.waiting))
+	for _, waiting := range population.waiting {
+		if waiting.row.matches(population.selection, "") {
+			waitingViews = append(waitingViews, waiting.view)
 		}
 	}
 
@@ -151,7 +175,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	freshness, err := s.deliveryFreshness(r.Context(), settings)
+	freshness, err := s.deliveryFreshness(ctx, settings)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -160,6 +184,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, delivery.DeliveryTimelineResponse{
 		Window:      delivery.DeliveryWindowView{From: from, To: to},
 		PRs:         prViews,
+		Waiting:     waitingViews,
 		Runs:        runViews,
 		FacetCounts: deliveryFacetCounts(population.rows, population.selection),
 		ColorCounts: deliveryColorCounts(population.rows),
@@ -171,8 +196,9 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 
 // deliveryPopulation is one window's population pull requests, each with its view and its facet
 // values, and what the timeline reads beside them: the request's search and facet selection, the
-// deploy runs whose applies decided each pull request's deploy, those runs' jobs, and the labels
-// of every component and issue the window's pull requests name.
+// pull requests still waiting at the window's start, the deploy runs whose applies decided each
+// pull request's deploy, those runs' jobs, and the labels of every component and issue the
+// window's pull requests name.
 type deliveryPopulation struct {
 	// rows is every population pull request merged in [from, to), before the facets, in merge
 	// order: the timeline counts facets and colours over it and sizes each deploy by it, and the
@@ -180,17 +206,28 @@ type deliveryPopulation struct {
 	// timeline's prs[] shows and the measures' pull-request figures count.
 	rows        []deliveryRow
 	selection   deliverySelection
+	waiting     []deliveryWaitingRow
 	applyRuns   []delivery.DeliveryRun
 	jobsByRun   map[int64][]delivery.DeliveryRunJob
 	components  map[string]delivery.DeliveryComponentView
 	issueTitles map[string]string
 }
 
+// deliveryWaitingRow is one pull request still waiting at the window's start: its facet values, so
+// the timeline's waiting line counts it under the same facets and search, and its waiting view.
+type deliveryWaitingRow struct {
+	row  deliveryRow
+	view delivery.DeliveryWaitingPRView
+}
+
 // filteredDeliveryPullRequests reads the population pull requests merged in [from, to), derives
-// each one's deploy from the deploy runs listed from `from` by head commit, joins its issue's facts
-// and its sessions' titles, and parses the request's search and facets. The timeline and the
-// measures both call it, so a pull request the timeline shows is exactly one the measures count.
-func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values) (deliveryPopulation, error) {
+// each one's deploy from the deploy runs on main listed from `from` by head commit, joins its
+// issue's facts and its sessions' titles, and parses the request's search and facets. waiting is
+// the pull requests still waiting at `from` (ListPullRequestsWaitingAt), resolved through the
+// same issue and session lookups so the timeline's waiting line filters them alike; the measures
+// pass none. The timeline and the measures both call it, so a pull request the timeline shows is
+// exactly one the measures count.
+func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, waiting []delivery.WaitingPullRequest) (deliveryPopulation, error) {
 	pool := s.deps.Store.Pool
 	prs, err := delivery.ListPullRequestsInWindow(ctx, pool, from, to)
 	if err != nil {
@@ -218,11 +255,17 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 
 	sessionIDs := []string{}
 	issueKeys := []string{}
-	for _, pr := range prs {
+	collect := func(pr delivery.DeliveryPullRequest) {
 		sessionIDs = append(sessionIDs, pr.Sessions...)
 		if pr.IssueKey != nil {
 			issueKeys = append(issueKeys, *pr.IssueKey)
 		}
+	}
+	for _, pr := range prs {
+		collect(pr)
+	}
+	for _, pr := range waiting {
+		collect(pr.DeliveryPullRequest)
 	}
 	titles, err := delivery.ResolveSessionTitles(ctx, pool, sessionIDs)
 	if err != nil {
@@ -245,15 +288,14 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		return deliveryPopulation{}, err
 	}
 
-	rows := make([]deliveryRow, 0, len(prs))
-	for _, pr := range prs {
-		apply := delivery.ContainingRun(pr, settings.DeployRepo, applies)
+	// viewOf is a pull request as the timeline shows it, shipped by deployRun at deployedAt.
+	viewOf := func(pr delivery.DeliveryPullRequest, status delivery.DeployedStatus, deployRun *int64, deployedAt *time.Time) delivery.DeliveryPRView {
 		view := delivery.DeliveryPRView{
 			ID: pr.Repo + "#" + strconv.Itoa(pr.Number), Repo: pr.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
 			Author: pr.Author, CreatedAt: pr.CreatedAt, MergedAt: pr.MergedAt, FirstCommitAt: pr.FirstCommitAt,
 			Additions: pr.Additions, Deletions: pr.Deletions, Partial: pr.Partial, Rework: pr.Rework,
 			Issue: pr.IssueKey, Components: []string{}, Sessions: pr.Sessions,
-			DeployedStatus:    delivery.ComputeDeployedStatus(pr, settings.DeployRepo, apply),
+			DeployRun: deployRun, DeployedAt: deployedAt, DeployedStatus: status,
 			UnfetchableReason: pr.UnfetchableReason,
 		}
 		if pr.IssueKey != nil {
@@ -270,17 +312,37 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 			agent := delivery.DisplayAgent(pr.Sessions[0], titles)
 			view.ParentAgent = &agent
 		}
+		return view
+	}
+
+	rows := make([]deliveryRow, 0, len(prs))
+	for _, pr := range prs {
+		apply := delivery.ContainingRun(pr, settings.DeployRepo, applies)
+		var deployRun *int64
+		var deployedAt *time.Time
 		if apply != nil {
 			runID, completedAt := apply.RunID, apply.CompletedAt
-			view.DeployRun = &runID
-			view.DeployedAt = &completedAt
+			deployRun, deployedAt = &runID, &completedAt
 		}
-		rows = append(rows, newDeliveryRow(view))
+		rows = append(rows, newDeliveryRow(viewOf(pr, delivery.ComputeDeployedStatus(pr, settings.DeployRepo, apply), deployRun, deployedAt)))
+	}
+
+	waitingRows := make([]deliveryWaitingRow, 0, len(waiting))
+	for _, pr := range waiting {
+		status := delivery.DeployedStatusWaiting
+		if pr.DeployRun != nil {
+			status = delivery.DeployedStatusDeployed
+		}
+		waitingRows = append(waitingRows, deliveryWaitingRow{
+			row:  newDeliveryRow(viewOf(pr.DeliveryPullRequest, status, pr.DeployRun, pr.DeployedAt)),
+			view: delivery.DeliveryWaitingPRView{MergedAt: *pr.MergedAt, DeployedAt: pr.DeployedAt},
+		})
 	}
 
 	return deliveryPopulation{
 		rows:        rows,
 		selection:   parseDeliverySelection(query, components),
+		waiting:     waitingRows,
 		applyRuns:   applyRuns,
 		jobsByRun:   jobsByRun,
 		components:  components,
@@ -461,13 +523,17 @@ type deliveryRow struct {
 	search string
 }
 
+// newDeliveryRow reads a view's facet values. Every colour-by facet (deliveryColorFacets) gets at
+// least one value, a placeholder when the pull request has none, since deliveryColorCounts colours
+// a row by its first. session gets no placeholder: parent_agent's __no_session__ already filters
+// the pull requests no session wrote.
 func newDeliveryRow(view delivery.DeliveryPRView) deliveryRow {
 	values := map[string][]string{
 		"repo":     {view.Repo},
 		"session":  view.Sessions,
 		"issue":    {},
 		"author":   {view.Author},
-		"rework":   {"value"},
+		"rework":   {deliveryReworkValue},
 		"deployed": {string(view.DeployedStatus)},
 	}
 	if view.ParentAgent != nil {
@@ -476,7 +542,7 @@ func newDeliveryRow(view delivery.DeliveryPRView) deliveryRow {
 		values["parent_agent"] = []string{deliveryNoSession}
 	}
 	if view.Rework {
-		values["rework"] = []string{"rework"}
+		values["rework"] = []string{deliveryReworkRework}
 	}
 	switch {
 	case view.Issue == nil:
@@ -588,7 +654,9 @@ func deliveryFacetCounts(rows []deliveryRow, selection deliverySelection) map[st
 }
 
 // deliveryColorCounts counts every row, with no facet or search applied, by the value it is
-// coloured by under each colour-by facet: its first value there.
+// coloured by under each colour-by facet: its first value there. newDeliveryRow gives every
+// colour-by facet at least one value (TestNewDeliveryRowGivesEveryColourFacetAValue holds it), so
+// the index never misses.
 func deliveryColorCounts(rows []deliveryRow) map[string]map[string]int {
 	counts := make(map[string]map[string]int, len(deliveryColorFacets))
 	for _, facet := range deliveryColorFacets {

@@ -93,6 +93,7 @@ export type {
   DeliveryTargets,
   DeliveryTimelineResponse,
   DeliveryUnownedIssue,
+  DeliveryWaitingPR,
   DispatchEvent,
   DispatchUser,
   DocEditOp,

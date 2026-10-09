@@ -2510,9 +2510,9 @@ export interface DeliveryRunProduction {
   readonly completed_at: string | null;
 }
 
-/** One `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a production deploy (`production`
- *  succeeded; sized by `prs`) and/or a pipeline failure (`failed_jobs`, `root_failing_job`, or a
- *  failed `production`). */
+/** One run of the deploy workflow on `GET /api/v1/delivery/timeline` (the server returns deploy
+ *  runs only): a production deploy (`production` succeeded; sized by `prs`) and/or a pipeline
+ *  failure (`failed_jobs`, `root_failing_job`, or a failed `production`). */
 export interface DeliveryRun {
   readonly id: number;
   readonly url: string;
@@ -2554,22 +2554,32 @@ export interface DeliveryComponent {
   readonly parent: string | null;
 }
 
+/** One pull request of the deploy repository that merged before the timeline's window and had
+ *  not shipped by its start, matching the request's facets and search: the waiting-to-deploy line
+ *  starts the window counting it, and stops when it ships (`deployed_at`, null while it waits). */
+export interface DeliveryWaitingPR {
+  readonly merged_at: string;
+  readonly deployed_at: string | null;
+}
+
 /**
  * `GET /api/v1/delivery/timeline?from&to&q&<facets>`: merges, deploys, pipeline failures and
- * waiting-to-deploy PRs within `[from, to)`, the search and the given facets. `runs` holds
- * `kind: "deploy"` runs only. `facet_counts` counts, per facet, the window's pull requests by that
- * facet's values with the search and every other facet applied and its own selection ignored, so
- * picking a value never zeroes its own count; `color_counts` counts them by each colour-by facet's
- * value with nothing applied, so a value keeps its colour while facets change. A pull request with
- * no issue counts under `__no_issue__` for priority and component, an issue without either under
- * `__no_priority__` / `__no_component__`, and a pull request naming no session under
- * `__no_session__` for parent agent; each placeholder also selects. `components` names every
- * component of the projects the window's issues belong to, `issue_titles` every issue its pull
- * requests name.
+ * waiting-to-deploy PRs within `[from, to)`, the search and the given facets. `runs` holds the
+ * deploy workflow's runs only. `waiting` holds the pull requests that merged before `from` and had
+ * not shipped by then, under the same search and facets. `facet_counts` counts, per facet, the
+ * window's pull requests by that facet's values with the search and every other facet applied and
+ * its own selection ignored, so picking a value never zeroes its own count; `color_counts` counts
+ * them by each colour-by facet's value with nothing applied, so a value keeps its colour while
+ * facets change. A pull request with no issue counts under `__no_issue__` for priority and
+ * component, an issue without either under `__no_priority__` / `__no_component__`, and a pull
+ * request naming no session under `__no_session__` for parent agent; each placeholder also
+ * selects. `components` names every component of the projects the window's issues belong to,
+ * `issue_titles` every issue its pull requests name.
  */
 export interface DeliveryTimelineResponse {
   readonly window: { readonly from: string; readonly to: string };
   readonly prs: readonly DeliveryPR[];
+  readonly waiting: readonly DeliveryWaitingPR[];
   readonly runs: readonly DeliveryRun[];
   readonly facet_counts: Readonly<Record<DeliveryFacet, Readonly<Record<string, number>>>>;
   readonly color_counts: Readonly<Record<DeliveryColorFacet, Readonly<Record<string, number>>>>;

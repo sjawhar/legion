@@ -133,7 +133,6 @@ export type ToolSpec = {
     schema: SchemaApi<Element>
   ) => ToolArgumentsShape;
   readonly operation: EnvoyToolOperation;
-  readonly requiresSubscriptionCapability: boolean;
 };
 
 export const envoyToolSpecs = [
@@ -144,7 +143,6 @@ export const envoyToolSpecs = [
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
     }),
     operation: EnvoyToolOperation.subscribe,
-    requiresSubscriptionCapability: true,
   },
   {
     name: "envoy_unsubscribe",
@@ -152,7 +150,6 @@ export const envoyToolSpecs = [
       "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted.",
     arguments: (schema) => ({ topics: schema.array(schema.string()).optional() }),
     operation: EnvoyToolOperation.unsubscribe,
-    requiresSubscriptionCapability: true,
   },
   {
     name: "envoy_list",
@@ -160,14 +157,12 @@ export const envoyToolSpecs = [
       "List the current Envoy topic subscriptions for this session so you can confirm the exact topic shapes that are active.",
     arguments: () => ({}),
     operation: EnvoyToolOperation.listInterests,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_inbox",
     description: "List this Pi session's 50 most recent rendered Envoy deliveries, newest first.",
     arguments: () => ({}),
     operation: EnvoyToolOperation.inbox,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_send",
@@ -179,14 +174,12 @@ export const envoyToolSpecs = [
       ...messageArguments(schema),
     }),
     operation: EnvoyToolOperation.send,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_publish",
     description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_role_set",
@@ -194,14 +187,12 @@ export const envoyToolSpecs = [
       "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session.",
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.setRole,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_role_get",
     description: "Get the live holder of a named Envoy role.",
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.getRole,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_whoami",
@@ -209,7 +200,6 @@ export const envoyToolSpecs = [
       "Returns this session's Envoy identity: session ID, machine ID, port, and directory. session_id is the address a reply reaches. Where a host runs a task subagent inside its parent's process, such a subagent registers no Envoy session of its own, so its session_id is the parent session that spawned it and the result says so.",
     arguments: () => ({}),
     operation: EnvoyToolOperation.whoami,
-    requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_sessions",
@@ -221,7 +211,6 @@ export const envoyToolSpecs = [
       title: schema.string().optional(),
     }),
     operation: EnvoyToolOperation.listSessions,
-    requiresSubscriptionCapability: false,
   },
 ] as const satisfies readonly ToolSpec[];
 
@@ -256,7 +245,7 @@ export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
   }
   const parsed = schema.safeParse(parameters, { reportInput: true });
   if (!parsed.success) {
-    throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema));
+    throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema, spec.name));
   }
   return parsed.data as ToolArgumentsByOperation[Operation];
 }

@@ -617,7 +617,7 @@ func owedStamp(t *testing.T, service *Service, artifactID string) uint64 {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return state.gen
+	return state.roomGeneration
 }
 
 // requireNextSettlementStamps runs the room's next settlement and requires it to leave no

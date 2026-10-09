@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useRef } from "react";
 import { Link } from "react-router-dom";
 
 import { deliveryRunQuery } from "../../api/queries";
@@ -21,7 +21,8 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
-import { NO_SESSION, PLACEHOLDER_LABELS } from "./lib/facets";
+import { useDialog } from "../shell/useDialog";
+import { NO_COMPONENT, NO_ISSUE, NO_PRIORITY, NO_SESSION, PLACEHOLDER_LABELS } from "./lib/facets";
 import { leadTimeMinutes } from "./lib/prList";
 import type { TimelineSelection } from "./Timeline";
 
@@ -44,11 +45,11 @@ function PRDetail({
   components: Readonly<Record<string, DeliveryComponent>>;
 }): ReactNode {
   const leadTime = leadTimeMinutes(pr);
-  let componentText = "No issue";
+  let componentText = PLACEHOLDER_LABELS[NO_ISSUE];
   if (pr.issue !== null) {
     componentText =
       pr.components.length === 0
-        ? "No component"
+        ? PLACEHOLDER_LABELS[NO_COMPONENT]
         : pr.components.map((id) => components[id]?.title ?? id).join(", ");
   }
   return (
@@ -81,7 +82,11 @@ function PRDetail({
           )}
         </dd>
         <dt className={textMutedOnSurface}>Priority</dt>
-        <dd>{pr.issue === null ? "No issue" : (pr.priority ?? "No priority")}</dd>
+        <dd>
+          {pr.issue === null
+            ? PLACEHOLDER_LABELS[NO_ISSUE]
+            : (pr.priority ?? PLACEHOLDER_LABELS[NO_PRIORITY])}
+        </dd>
         <dt className={textMutedOnSurface}>Components</dt>
         <dd>{componentText}</dd>
         <dt className={textMutedOnSurface}>Parent agent(s)</dt>
@@ -188,7 +193,9 @@ function FailureDetail({ run }: { run: DeliveryRun }): ReactNode {
 }
 
 /** The timeline and the list's shared drill-down: a PR, a deploy, or a pipeline failure, in a
- *  full-height panel at the right edge with a close button. */
+ *  full-height panel at the right edge with a close button. It is a dialog (`useDialog`): focus
+ *  starts on the close button and stays inside, Escape closes it, and closing hands focus back to
+ *  whatever opened it. */
 export function DrillDown({
   prs,
   runs,
@@ -202,6 +209,12 @@ export function DrillDown({
   selection: TimelineSelection | null;
   onClose: () => void;
 }): ReactNode {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const dialog = useDialog<HTMLElement>({
+    initialFocusRef: closeButtonRef,
+    onClose,
+    open: selection !== null,
+  });
   if (selection === null) return null;
 
   let body: ReactNode;
@@ -223,12 +236,16 @@ export function DrillDown({
   return (
     <aside
       aria-label="Details"
+      aria-modal="true"
       className={`fixed top-0 right-0 z-30 h-full w-96 max-w-full overflow-y-auto border-l p-4 shadow-xl ${borderStrong} ${surfaceBg}`}
+      ref={dialog.containerRef}
+      role="dialog"
     >
       <button
         aria-label="Close details"
         className={`float-right ${dismissButtonText}`}
         onClick={onClose}
+        ref={closeButtonRef}
         type="button"
       >
         ✕

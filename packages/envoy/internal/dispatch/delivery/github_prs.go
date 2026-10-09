@@ -99,23 +99,10 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 	if err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("mint installation token for %s/%s PR #%d: %w", owner, repo, number, err)
 	}
-
-	pullPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	body, status, header, err := readGitHubPage(ctx, client, token, pullPath)
+	payload, err := fetchPullRequestPayload(ctx, client, token, owner, repo, number)
 	if err != nil {
-		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
+		return FetchedPullRequest{}, err
 	}
-	if status == http.StatusNotFound || status == http.StatusGone {
-		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w (status %d)", owner, repo, number, ErrPullRequestNotFound, status)
-	}
-	if err := githubapp.CheckResponse(status, header, body); err != nil {
-		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
-	}
-	var payload pullRequestPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return FetchedPullRequest{}, fmt.Errorf("decode %s/%s PR #%d: %w", owner, repo, number, err)
-	}
-
 	commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=1", url.PathEscape(owner), url.PathEscape(repo), number)
 	commitsBody, commitsStatus, commitsHeader, err := readGitHubPage(ctx, client, token, commitsPath)
 	if err != nil {
@@ -152,6 +139,52 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 		Body:           payload.Body,
 		HeadRef:        payload.Head.Ref,
 		FirstCommitAt:  &firstCommitAt,
+	}, nil
+}
+
+// fetchPullRequestPayload is GET /repos/{owner}/{repo}/pulls/{number} under token, through
+// readGitHubPage's bounded retry: a 404 or 410 is ErrPullRequestNotFound, any other failure is
+// wrapped naming the pull request.
+func fetchPullRequestPayload(ctx context.Context, client *githubapp.Client, token, owner, repo string, number int) (pullRequestPayload, error) {
+	pullPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number)
+	body, status, header, err := readGitHubPage(ctx, client, token, pullPath)
+	if err != nil {
+		return pullRequestPayload{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
+	}
+	if status == http.StatusNotFound || status == http.StatusGone {
+		return pullRequestPayload{}, fmt.Errorf("fetch %s/%s PR #%d: %w (status %d)", owner, repo, number, ErrPullRequestNotFound, status)
+	}
+	if err := githubapp.CheckResponse(status, header, body); err != nil {
+		return pullRequestPayload{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
+	}
+	var payload pullRequestPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return pullRequestPayload{}, fmt.Errorf("decode %s/%s PR #%d: %w", owner, repo, number, err)
+	}
+	return payload, nil
+}
+
+// fetchAttributionFacts reads what the issue attribution needs of a pull request already stored
+// complete, and nothing else: the pull request (its title, body and head branch) and then its
+// commits' messages, one page of 100 at a time. A complete row already holds every other fact
+// FetchPullRequest reads, its first commit's time included, so the backfill makes one call plus
+// one per commits page rather than FetchPullRequest's two plus fetchCommitMessages' pages.
+func fetchAttributionFacts(ctx context.Context, client *githubapp.Client, owner, repo, repoFull string, number int) (attributionFacts, error) {
+	token, err := client.RepositoryToken(ctx, owner, repo)
+	if err != nil {
+		return attributionFacts{}, fmt.Errorf("mint installation token for %s PR #%d: %w", repoFull, number, err)
+	}
+	payload, err := fetchPullRequestPayload(ctx, client, token, owner, repo, number)
+	if err != nil {
+		return attributionFacts{}, err
+	}
+	messages, err := fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
+	if err != nil {
+		return attributionFacts{}, err
+	}
+	return attributionFacts{
+		Repo: repoFull, URL: payload.HTMLURL, Title: payload.Title, Body: payload.Body,
+		HeadRef: payload.Head.Ref, CommitMessages: messages,
 	}, nil
 }
 

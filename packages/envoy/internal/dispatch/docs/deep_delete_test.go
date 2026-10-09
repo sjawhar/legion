@@ -38,7 +38,7 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)
 
-		peer := connectPeer(t, httpServer.URL, artifactID)
+		peer := connectPeer(t, httpServer.URL, artifactID, "alice")
 		// The peer writes on the room's document, as a browser does once the room has sent it, so
 		// the chain's root always lands beside the seeded paragraph.
 		waitForPeerDocument(t, peer, "before\n")

@@ -7,7 +7,7 @@ import (
 
 // deliveryRunBranchEventVersion is the migration that adds delivery_runs.head_branch and event,
 // their started-at index, and delivery_reconcile_progress.began_at (LEGION-567 slice 2).
-const deliveryRunBranchEventVersion = 85
+const deliveryRunBranchEventVersion = 86
 
 // TestMigrationAddsBranchAndEventColumns runs the shipped migration files, never a constant copy
 // of them: a database at the version before, holding one stored run, migrates to this one and

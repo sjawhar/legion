@@ -64,4 +64,12 @@ package api
 // 15 first, and pi-legion 8.3.0 declares it without `capabilities`, so a daemon at 15 would pass
 // the gate against a plugin whose strict reader refuses its state. Renumbered, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md says.)
-const DaemonAPIVersion = 16
+//
+// 17: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// its shell, which the Envoy plugin puts on the pane's PATH, rather than the `dispatch_*` tools it
+// no longer registers: a daemon and a plugin from either side of that change would hand agents
+// instructions for a surface they lack. (This branch first took 16; LEGION-578 landed at 16
+// first, and pi-legion 8.4.0 declares it beside a pi-envoy 8.4.0 that still registers the native
+// tools and puts no `dispatch` on the PATH, so a daemon at 16 would pass the gate against panes
+// that lack the command its prompts name. Renumbered, as the same note says.)
+const DaemonAPIVersion = 17

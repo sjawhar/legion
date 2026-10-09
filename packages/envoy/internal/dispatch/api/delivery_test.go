@@ -179,6 +179,95 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 	}
 }
 
+// TestGetDeliveryTimelineAnswersThePullRequestsStillWaitingAtFrom: waiting[] holds the deploy
+// repository's pull requests that merged before the window and had not shipped by its start, with
+// when they shipped afterwards, under the request's facets. One a deploy shipped before `from` is
+// not there, nor is one of another repository, nor one merged inside the window. The run that
+// ships a waiter after `from` has its head commit before `from`, so the window's own runs (heads
+// at or after `from`) do not hold it.
+func TestGetDeliveryTimelineAnswersThePullRequestsStillWaitingAtFrom(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	pool := database.Pool
+	ctx := t.Context()
+	if _, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
+		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+		ProductionJobName: "release / release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		PopulationAuthors: []string{"octocat", "hubot"},
+	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	from := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := from.Add(d); return &v }
+	day := 24 * time.Hour
+	for _, pr := range []delivery.DeliveryPullRequest{
+		{Repo: "acme/widgets", Number: 11, Title: "feat: shipped before", Author: "octocat", MergedAt: at(-3 * day)},
+		{Repo: "acme/widgets", Number: 10, Title: "feat: still waiting", Author: "octocat", MergedAt: at(-2 * day)},
+		{Repo: "acme/widgets", Number: 12, Title: "feat: ships later", Author: "hubot", MergedAt: at(-1 * day)},
+		{Repo: "acme/other", Number: 13, Title: "feat: elsewhere", Author: "octocat", MergedAt: at(-1 * day)},
+		{Repo: "acme/widgets", Number: 15, Title: "feat: never ships", Author: "octocat", MergedAt: at(-6 * time.Hour)},
+		{Repo: "acme/widgets", Number: 14, Title: "feat: in window", Author: "octocat", MergedAt: at(time.Hour)},
+	} {
+		pr.URL = "https://github.com/" + pr.Repo + "/pull/" + strconv.Itoa(pr.Number)
+		pr.CreatedAt = pr.MergedAt
+		if err := delivery.UpsertPullRequest(ctx, pool, pr); err != nil {
+			t.Fatalf("seed PR %s#%d: %v", pr.Repo, pr.Number, err)
+		}
+	}
+	runSuccess := delivery.DeliveryRunConclusionSuccess
+	jobSuccess := delivery.DeliveryJobConclusionSuccess
+	for _, run := range []struct {
+		id         int64
+		head, done *time.Time
+	}{
+		{id: 200, head: at(-2*day - 12*time.Hour), done: at(-2*day - 11*time.Hour)}, // ships #11 before from
+		{id: 201, head: at(-12 * time.Hour), done: at(2 * time.Hour)},               // ships #10 and #12 after from
+	} {
+		if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
+			Repo: "acme/widgets", RunID: run.id, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + strconv.FormatInt(run.id, 10),
+			HeadCommitAt: *run.head, StartedAt: *run.head, CompletedAt: run.done, Conclusion: &runSuccess,
+			URL: "https://github.com/acme/widgets/actions/runs/" + strconv.FormatInt(run.id, 10), HeadBranch: new("main"), Event: new("push"),
+		}); err != nil {
+			t.Fatalf("seed run %d: %v", run.id, err)
+		}
+		if err := delivery.UpsertRunJobs(ctx, pool, "acme/widgets", run.id, []delivery.DeliveryRunJob{
+			{Repo: "acme/widgets", RunID: run.id, Name: "release / release", StartedAt: run.head, CompletedAt: run.done, Conclusion: &jobSuccess},
+		}); err != nil {
+			t.Fatalf("seed run %d's job: %v", run.id, err)
+		}
+	}
+
+	window := "from=" + from.Format(time.RFC3339) + "&to=" + from.Add(day).Format(time.RFC3339)
+	body := getDeliveryTimeline(t, handler, window)
+	want := []delivery.DeliveryWaitingPRView{
+		{MergedAt: *at(-2 * day), DeployedAt: at(2 * time.Hour)},
+		{MergedAt: *at(-1 * day), DeployedAt: at(2 * time.Hour)},
+		{MergedAt: *at(-6 * time.Hour)},
+	}
+	if !waitingEqual(body.Waiting, want) {
+		t.Fatalf("waiting = %+v, want #10 and #12 shipped by run 201 after from, then #15 never shipped", body.Waiting)
+	}
+
+	// A facet narrows waiting[] as it narrows prs[].
+	octocat := getDeliveryTimeline(t, handler, window+"&author=octocat")
+	if !waitingEqual(octocat.Waiting, []delivery.DeliveryWaitingPRView{want[0], want[2]}) {
+		t.Fatalf("author=octocat waiting = %+v, want #10 and #15", octocat.Waiting)
+	}
+}
+
+func waitingEqual(got, want []delivery.DeliveryWaitingPRView) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if !got[i].MergedAt.Equal(want[i].MergedAt) || (got[i].DeployedAt == nil) != (want[i].DeployedAt == nil) ||
+			(got[i].DeployedAt != nil && !got[i].DeployedAt.Equal(*want[i].DeployedAt)) {
+			return false
+		}
+	}
+	return true
+}
+
 // seedDeliveryIssueFacts seeds what the timeline joins a pull request's issue against: project
 // ACME, its component tree (platform > api, and docs), ACME-1 (P0, attached to api), its child
 // ACME-2 (P2, attaching nothing of its own, so it inherits api), and ACME-3 (no priority, attached
@@ -441,5 +530,20 @@ func TestGetDeliveryTimelineSurfacesReconcileErrorOnFreshness(t *testing.T) {
 	}
 	if body.Freshness.LastError == nil || *body.Freshness.LastError != "the installation lacks Actions: read on acme/widgets" {
 		t.Fatalf("freshness.last_error = %v, want the recorded permission failure by name", body.Freshness.LastError)
+	}
+}
+
+// TestNewDeliveryRowGivesEveryColourFacetAValue: deliveryColorCounts colours a row by its first
+// value under each colour-by facet, so newDeliveryRow must give each of them one, a placeholder
+// where the pull request has none (no issue, no session).
+func TestNewDeliveryRowGivesEveryColourFacetAValue(t *testing.T) {
+	bare := newDeliveryRow(delivery.DeliveryPRView{Repo: "acme/widgets", Author: "octocat", Components: []string{}})
+	for _, facet := range deliveryColorFacets {
+		if len(bare.values[facet]) == 0 {
+			t.Fatalf("a pull request with no issue and no session has no %s value: %v", facet, bare.values)
+		}
+	}
+	if got := bare.values["rework"]; len(got) != 1 || got[0] != deliveryReworkValue {
+		t.Fatalf("rework = %v, want [%s] for a pull request that is not rework", got, deliveryReworkValue)
 	}
 }

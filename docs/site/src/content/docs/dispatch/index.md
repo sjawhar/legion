@@ -10,7 +10,7 @@ Dispatch is a shared workspace where people and coding agents track work togethe
 work is an issue. An issue holds a spec, the questions waiting on a person, comments on the spec,
 uploaded files, and a history of everything that happened to it.
 
-Agents write to Dispatch through `dispatch_*` tools. People read and answer in the web app. Both
+Agents write to Dispatch through the `dispatch` command in their shell. People read and answer in the web app. Both
 see the same issues, in the same state, as they change. Every change Dispatch records is also an
 event that agents can subscribe to; [how the pieces fit together](/legion/how-it-fits/) shows where
 Dispatch sits beside Legion and the Secrets Broker.

@@ -5,28 +5,25 @@ import type { DeliveryComponent, DeliveryPR, DeliveryRun } from "../../api/types
 import { borderDefault, brushBand, surfaceBg, textMutedOnCanvas } from "../../theme/classes";
 import { useMediaQuery } from "../shell/useDialog";
 import { type ColorFacet, colorKeyFor, PLACEHOLDER_COLOR } from "./lib/colorScale";
-import { type Filters, PLACEHOLDER_LABELS, shortRepoLabel } from "./lib/facets";
-import { waitingSeries } from "./lib/waiting";
+import type { Filters } from "./lib/facets";
+import {
+  brushWindow,
+  foldLanes,
+  LEFT_AXIS_WIDTH,
+  MIN_LANE_WIDTH_PX,
+  OTHER_LANE,
+  RIGHT_SLIDER_WIDTH,
+} from "./lib/lanes";
+import { type WaitingMerge, waitingSeries } from "./lib/waiting";
 
 // echarts is loaded only here, dynamically, so it ships with the /delivery route's own chunk and
 // never the app shell — no other module in this feature imports it.
 
-// Layout constants shared between the echarts grid and the plain-HTML lane header row above it,
-// so lane columns line up exactly between the two. Wide enough for hour-level axis labels
-// ("Sep 26 18:00") once zoomed in.
-const LEFT_AXIS_WIDTH = 80;
-const RIGHT_SLIDER_WIDTH = 44;
 const GLOBAL_DEPLOY_X = 0.15;
 const GLOBAL_FAILURE_X = 0.85;
 const GLOBAL_WAITING_X0 = 0.15;
 const GLOBAL_WAITING_X1 = 0.85;
 const INITIAL_VISIBLE_MS = 5 * 86_400_000; // ~5 days on first paint
-
-// Real-value lanes are sized to the chart's current width at MIN_LANE_WIDTH_PX per lane; past
-// that budget the smallest ones fold into one "Other" lane rather than squeezing every lane below
-// a readable width. Placeholder lanes ("No issue" etc., see lib/facets.ts) and "Other" always sort
-// after every real value, so the biggest groups shown are never a placeholder.
-const MIN_LANE_WIDTH_PX = 76;
 
 // The chart draws on a canvas, so its colours are values, not Tailwind classes: the prototype's
 // own dark palette, and its light counterpart for a light colour scheme.
@@ -45,6 +42,9 @@ export type TimelineSelection =
 
 interface Props {
   prs: readonly DeliveryPR[];
+  /** Every merge the waiting line counts, whatever the brush: the server's `waiting` and the
+   *  read window's tracked merges (`waitingSeries`). */
+  waiting: readonly WaitingMerge[];
   runs: readonly DeliveryRun[];
   window: { start: string; end: string };
   colorBy: ColorFacet;
@@ -54,12 +54,6 @@ interface Props {
   components: Readonly<Record<string, DeliveryComponent>>;
   onSelect: (selection: TimelineSelection) => void;
   onBrush: (range: { start: string; end: string }) => void;
-}
-
-interface Lane {
-  key: string; // colorKeyFor() value, "__other__" for the folded lane, or "__merges__" when lanes are off
-  label: string;
-  count: number;
 }
 
 /** A point the chart was handed, as a click or the tooltip reads it back: what it is, its id, and
@@ -95,6 +89,7 @@ function jitterFor(id: string): number {
  *  through time and Ctrl+wheel zooms; dragging up or down sets a brush window. */
 export function Timeline({
   prs,
+  waiting,
   runs,
   window: timeWindow,
   colorBy,
@@ -131,64 +126,10 @@ export function Timeline({
   const onBrushRef = useRef(onBrush);
   onBrushRef.current = onBrush;
 
-  const laneList: Lane[] = useMemo(() => {
-    if (!lanes) return [{ key: "__merges__", label: "Merges", count: prs.length }];
-    const counts = new Map<string, number>();
-    for (const pr of prs) {
-      const key = colorKeyFor(pr, colorBy);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    const allKeys = Array.from(counts.keys());
-    const laneLabel = (key: string): string => {
-      const placeholder = PLACEHOLDER_LABELS[key];
-      if (placeholder !== undefined) return placeholder;
-      if (colorBy === "component") return components[key]?.title ?? key;
-      if (colorBy === "repo") return shortRepoLabel(allKeys, key);
-      return key;
-    };
-    // Priority lanes read in priority order (P0 first); every other facet's lanes go busiest first.
-    const byPriorityThenCount = (a: [string, number], b: [string, number]) =>
-      colorBy === "priority" ? a[0].localeCompare(b[0]) : b[1] - a[1];
-    const realEntries = Array.from(counts.entries())
-      .filter(([key]) => !(key in PLACEHOLDER_LABELS))
-      .sort(byPriorityThenCount);
-    const placeholderEntries = Array.from(counts.entries())
-      .filter(([key]) => key in PLACEHOLDER_LABELS)
-      .sort((a, b) => b[1] - a[1]);
-
-    // A facet with values selected in its own filter shows exactly those values -- no folding
-    // into "Other" (the point of slicing by a facet is to see the slice, not a summary of it).
-    const skipFold = filters[colorBy].length > 0;
-
-    // Real-value lane count sizes to the chart's current width instead of a fixed cap, reserving
-    // one slot for the "Deploys/fails" global column and one per placeholder lane (always shown,
-    // always last).
-    const available = Math.max(
-      0,
-      containerWidth - LEFT_AXIS_WIDTH - RIGHT_SLIDER_WIDTH - MIN_LANE_WIDTH_PX
-    );
-    const totalBudget = Math.max(1, Math.floor(available / MIN_LANE_WIDTH_PX));
-    const budgetForReal = Math.max(1, totalBudget - placeholderEntries.length);
-
-    let shownReal = realEntries;
-    let otherEntry: [string, number] | null = null;
-    if (!skipFold && realEntries.length > budgetForReal) {
-      shownReal = realEntries.slice(0, Math.max(1, budgetForReal - 1));
-      const folded = realEntries.slice(shownReal.length);
-      otherEntry = ["__other__", folded.reduce((sum, [, c]) => sum + c, 0)];
-    }
-
-    const result: Lane[] = shownReal.map(([key, count]) => ({
-      key,
-      label: laneLabel(key),
-      count,
-    }));
-    if (otherEntry) result.push({ key: otherEntry[0], label: "Other", count: otherEntry[1] });
-    for (const [key, count] of placeholderEntries) {
-      result.push({ key, label: laneLabel(key), count });
-    }
-    return result;
-  }, [prs, colorBy, lanes, filters, containerWidth, components]);
+  const laneList = useMemo(
+    () => foldLanes(prs, { colorBy, lanes, filters, width: containerWidth, components }),
+    [prs, colorBy, lanes, filters, containerWidth, components]
+  );
 
   // Maps every original colorKeyFor() value (including ones folded into "Other") to the lane it's
   // actually drawn in — merges keep their own color regardless, only their x-position groups by
@@ -198,7 +139,7 @@ export function Timeline({
     const shownKeys = new Set(laneList.map((lane) => lane.key));
     for (const pr of prs) {
       const key = colorKeyFor(pr, colorBy);
-      map.set(key, shownKeys.has(key) ? key : "__other__");
+      map.set(key, shownKeys.has(key) ? key : OTHER_LANE);
     }
     return map;
   }, [prs, colorBy, laneList]);
@@ -222,11 +163,7 @@ export function Timeline({
   );
   const maxDeployPRs = Math.max(1, ...deploys.map((run) => run.prs.length));
 
-  const trackedPrs = useMemo(() => prs.filter((pr) => pr.deployed_status !== "not_tracked"), [prs]);
-  const waitingPoints = useMemo(
-    () => waitingSeries(trackedPrs, timeWindow),
-    [trackedPrs, timeWindow]
-  );
+  const waitingPoints = useMemo(() => waitingSeries(waiting, timeWindow), [waiting, timeWindow]);
   const maxWaiting = Math.max(1, ...waitingPoints.map((point) => point.count));
 
   // ECharts instance lifecycle: init once, resize on container changes, and dispose on unmount.
@@ -317,15 +254,13 @@ export function Timeline({
         dragStart = null;
         setDragBand(null);
         if (start === null || Math.abs(event.offsetY - start.y) < 4) return; // a click
-        const t0 = instance.convertFromPixel({ yAxisIndex: 0 }, start.y);
-        const t1 = instance.convertFromPixel({ yAxisIndex: 0 }, event.offsetY);
-        if (typeof t0 !== "number" || typeof t1 !== "number") return;
-        if (Number.isNaN(t0) || Number.isNaN(t1)) return;
+        const range = brushWindow(
+          instance.convertFromPixel({ yAxisIndex: 0 }, start.y),
+          instance.convertFromPixel({ yAxisIndex: 0 }, event.offsetY)
+        );
+        if (range === null) return;
         justBrushedRef.current = true;
-        onBrushRef.current({
-          start: new Date(Math.min(t0, t1)).toISOString(),
-          end: new Date(Math.max(t0, t1)).toISOString(),
-        });
+        onBrushRef.current(range);
       };
       // A drag released outside the chart never reaches zrender's mouseup: cancel it.
       const onWindowMouseUp = (): void => {
@@ -575,9 +510,11 @@ export function Timeline({
       </div>
       <div className="relative min-h-0 w-full flex-1">
         <div
+          aria-label={`Delivery timeline, ${new Date(windowStartMs).toLocaleString()} to ${new Date(windowEndMs).toLocaleString()}: ${deploys.length} production deploys, ${failures.length} pipeline failures, ${prs.length} merged pull requests, ${waitingPoints[0]?.count ?? 0} waiting to deploy at the start. The List view holds the same pull requests as a table, each deployed one linking its deploy.`}
           className={`absolute inset-0 touch-none rounded-b-lg ${surfaceBg}`}
           data-testid="delivery-chart"
           ref={containerRef}
+          role="img"
         />
         {dragBand === null ? null : (
           <div

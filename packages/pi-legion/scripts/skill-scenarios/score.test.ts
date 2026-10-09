@@ -133,8 +133,8 @@ measured("measure-before-ask-head-3", "Only a few name an owner, so emailing the
   "Detach all",
 ]);
 
-// The shapes a real Oh My Pi transcript carries: a tool's result is a `toolResult` message, and a
-// Dispatch tool is an `xd://` device the agent reaches with `write`, never a tool of its own name.
+// The shapes a real Oh My Pi transcript carries: a tool's result is a `toolResult` message, and an
+// agent reaches Dispatch by running the `dispatch` command in `bash`, never a tool of its own name.
 /** A tool's result, answering the call `toolCallId` names. */
 const result = (toolCallId: string, text: string) => ({
   type: "message",
@@ -146,12 +146,11 @@ const toolCall = (id: string, tool: string, args: object) => ({
   message: { role: "assistant", content: [{ type: "toolCall", id, name: tool, arguments: args }] },
 });
 const brainstormed = { "out.txt": "exit=0\n", "brainstorm.json": '{"issue":"TODO-3","asks":[]}\n' };
-// Dispatch's answer when it creates the issue, as `dispatch_issue` writes it.
+// Dispatch's answer when it creates the issue, as `dispatch issue` prints it.
 const created = "Created TODO-3: Due dates (not subscribed to TODO-3)";
 const createIssue = [
-  toolCall("call-2", "write", {
-    path: "xd://dispatch_issue",
-    content: '{"project":"TODO","title":"Due dates"}',
+  toolCall("call-2", "bash", {
+    command: "dispatch issue --project TODO --title 'Due dates'",
   }),
   result("call-2", created),
 ];
@@ -169,18 +168,18 @@ run("brainstorm-head-2", brainstormed, [
   ),
   ...createIssue,
 ]);
-// Created the issue from inside an `eval` cell: no top-level `dispatch_issue` call, and Dispatch's
-// answer sits mid-line in the cell's display.
+// Created the issue from inside an `eval` cell: no top-level `dispatch issue` command, and
+// Dispatch's answer sits mid-line in the cell's display.
 run("brainstorm-head-3", brainstormed, [
   ...header,
   turn[0],
   toolCall("call-3", "eval", {
     language: "js",
-    code: 'await tool.write({ path: "xd://dispatch_issue", content: "{}" })',
+    code: 'await $`dispatch issue --project TODO --title "Due dates"`',
   }),
   result("call-3", `display[1]:\n{\n  "text": "${created}",\n  "details": {}\n}`),
 ]);
-// Called `dispatch_issue`, and Dispatch refused it as a duplicate: no issue of its own.
+// Ran `dispatch issue`, and Dispatch refused it as a duplicate: no issue of its own.
 run("brainstorm-head-4", brainstormed, [
   ...header,
   turn[0],
@@ -234,8 +233,8 @@ test("a brainstorm run leaks when a tool's result carries the token, not only it
 });
 
 test("a brainstorm run created its issue when Dispatch answered Created, whatever wrapped the call", () => {
-  // From inside an `eval` cell, with no top-level `dispatch_issue` call.
+  // From inside an `eval` cell, with no top-level `dispatch issue` command.
   expect(out).toMatch(/brainstorm-head-3\tpass=true\t.*surface=spec .*leak=false /);
-  // Called `dispatch_issue`, but Dispatch refused it as a duplicate.
+  // Ran `dispatch issue`, but Dispatch refused it as a duplicate.
   expect(out).toMatch(/brainstorm-head-4\tpass=false\t.*surface=neither /);
 });
