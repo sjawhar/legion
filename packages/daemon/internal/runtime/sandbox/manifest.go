@@ -584,6 +584,16 @@ func (r *Runtime) providersKeys() []string {
 	return keys
 }
 
+// sessionDSNPointer is OMP_SESSION_SQL_DSN_FILE naming the mounted session database URL, none
+// without one: in the image probe's container it is what keeps `legion probe-image`, which reads
+// the providers directory as the shim does, from exporting the URL into Oh My Pi's environment.
+func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
+	if r.sessionDSNKey == "" {
+		return nil
+	}
+	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: ProvidersDir + "/" + sessionDSNFile}}
+}
+
 // providersPointers are the `<NAME>_FILE` pointer of each providers secret to its file in the
 // providers mount, in the worker's container and the image probe's alike: set by the runtime for
 // every pod that mounts the Secret, whatever a spec carries, so the shim never exports the secret.

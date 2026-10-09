@@ -27,7 +27,7 @@ func runSessions(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	return runSubcommand(ctx, "sessions", sessionsCommands, args, stdout, stderr)
 }
 
-const sessionsImportUsage = "usage: legion sessions import --dsn-file <file> --claims <file|-> ([--tree <KEY>] [--tree-volume <dir>] | --mark-lost --daemon-dsn-file <file>)"
+const sessionsImportUsage = "usage: legion sessions import --dsn-file <file> --claims <file|-> ([--tree <KEY> | --claim <token>] [--tree-volume <dir>] | --mark-lost --daemon-dsn-file <file>)"
 
 // importedClaim is what `legion sessions import` reads of one claim `legion claims list --json`
 // prints: its token, tree and recorded session file. Every other member is the daemon's and
@@ -66,7 +66,8 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 	dsnFile := flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)")
 	claimsFile := flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)")
 	tree := flags.String("tree", "", "copy the sessions of this tree's claims alone")
-	treeVolume := flags.String("tree-volume", "", "read each session from the tree volume mounted here rather than at its recorded path")
+	claimToken := flags.String("claim", "", "copy this claim's session alone (the daemon-launched controller's, which belongs to no tree)")
+	treeVolume := flags.String("tree-volume", "", "read each session from the volume mounted here (a tree's, or the controller's) rather than at its recorded path")
 	markLost := flags.Bool("mark-lost", false, "copy nothing; mark each claim whose session the table lacks lost in the daemon's database")
 	daemonDSNFile := flags.String("daemon-dsn-file", "", "with --mark-lost, file holding the stopped daemon's own postgres_dsn")
 	if code, ok := parseFlags(flags, args); !ok {
@@ -89,8 +90,10 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 		return usage("--mark-lost needs --daemon-dsn-file, the database whose claims it marks")
 	case !*markLost && *daemonDSNFile != "":
 		return usage("--daemon-dsn-file is read only with --mark-lost")
-	case *markLost && (*tree != "" || *treeVolume != ""):
-		return usage("--mark-lost copies nothing, so it takes neither --tree nor --tree-volume")
+	case *markLost && (*tree != "" || *claimToken != "" || *treeVolume != ""):
+		return usage("--mark-lost copies nothing, so it takes none of --tree, --claim and --tree-volume")
+	case *tree != "" && *claimToken != "":
+		return usage("--tree and --claim each select the claims to copy; give one")
 	}
 	claims, err := readImportedClaims(*claimsFile)
 	if err != nil {
@@ -107,11 +110,16 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 		return markLostSessions(ctx, conn, claims, *daemonDSNFile, stdout, stderr)
 	}
 
+	selected := func(c importedClaim) bool {
+		return (*tree == "" || c.Tree == *tree) && (*claimToken == "" || c.Token == *claimToken)
+	}
 	counts := map[string]int{}
+	matched := 0
 	for _, c := range claims {
-		if *tree != "" && c.Tree != *tree {
+		if !selected(c) {
 			continue
 		}
+		matched++
 		if c.SessionFile == "" {
 			fmt.Fprintf(stdout, "%s recorded no session: nothing to copy\n", c.Token)
 			counts["nothing recorded"]++
@@ -122,7 +130,7 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 		switch {
 		case errors.As(err, &conflict):
 			fmt.Fprintf(stdout, "%s refused %s: %v\n", c.Token, c.SessionFile, err)
-			counts["failed"]++
+			counts["refused"]++
 		case err != nil:
 			fmt.Fprintf(stdout, "%s failed %s: %v\n", c.Token, c.SessionFile, err)
 			counts["failed"]++
@@ -134,6 +142,10 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 			counts["copied before"]++
 		}
 	}
+	if matched == 0 && (*tree != "" || *claimToken != "") {
+		fmt.Fprintf(stderr, "legion sessions import: the claims list %s has no claim of %s\n", *claimsFile, strings.TrimSpace(*tree+" "+*claimToken))
+		return 1
+	}
 	missing, err := missingSessions(ctx, conn, claims)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
@@ -142,17 +154,17 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 	missingHere := 0
 	for _, c := range missing {
 		fmt.Fprintf(stdout, "%s missing %s: the session table holds no such session (tree %s)\n", c.Token, c.SessionFile, c.Tree)
-		if *tree == "" || c.Tree == *tree {
+		if selected(c) {
 			missingHere++
 		}
 	}
 	counts["missing"] = len(missing)
 	var summary []string
-	for _, outcome := range []string{"copied", "copied before", "nothing recorded", "failed", "missing"} {
+	for _, outcome := range []string{"copied", "copied before", "nothing recorded", "failed", "refused", "missing"} {
 		summary = append(summary, fmt.Sprintf("%s %d", outcome, counts[outcome]))
 	}
 	fmt.Fprintf(stdout, "legion sessions import: %s\n", strings.Join(summary, ", "))
-	if counts["failed"] > 0 || missingHere > 0 {
+	if counts["failed"] > 0 || counts["refused"] > 0 || missingHere > 0 {
 		return 1
 	}
 	return 0

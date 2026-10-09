@@ -405,9 +405,19 @@ reason a child issue re-admitted as a root of its own keeps its roles' sessions 
 (`Machine.Retree`, which drops them only under a runtime that keeps sessions on the tree's volume,
 `SessionsOnVolume`).
 
-The variables are a generation's, but the URL file's mount is the pod's: a pod created before
-`postgres` was turned on has no such file, and Oh My Pi refuses to start on it. Turn the setting on
-or off only with no pod running, after the copy below.
+The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
+volume projects another session store than a pod created now would — one created before
+`postgres` was turned on, or after it was turned off — holds a move (`movedSessionStore`,
+`internal/runtime/sandbox/addresses.go`): the next relaunch of any of its roles replaces the pod,
+as it does a pod that dials a moved worker stream. The image probe's container is told
+`OMP_SESSION_SQL_DSN_FILE` too, so `legion probe-image`, which reads the providers directory as
+the shim does, never exports the URL into Oh My Pi's environment.
+
+A resumed session also restores the model it last used, and since Oh My Pi 18.8.3 `--mode rpc`
+refuses to resume one whose model the profile no longer has (`Could not restore model
+<provider>/<model>`, exit 1). Sessions now outlive their volumes, so keep the pods' model route
+(`runtime.kubernetes.pod`, `provider_keys`) unchanged across the switch below, or every resumed
+agent fails its launch until the route offers its model again.
 
 ### Copying file sessions before turning it on
 
@@ -449,7 +459,8 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
    or `refused` (the table already holds that session with other content, which it leaves as it
    is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded
    session the table does not hold, then a count of each. It exits 1 on any `failed` or `refused`,
-   or a `missing` of the tree it was asked to copy; another tree's `missing` is reported only.
+   on a `missing` of the claims it was asked to copy (another tree's is reported only), and when
+   `--tree` or `--claim` selects no claim of the list, which is a mistyped key.
 4. **Copy every tree again.** Each run must print only `copied before` or `recorded no session`
    for its tree's claims, and the last one `missing 0`. A `copied` here means a session changed
    after step 3: a writer was still running, so go back to step 1. A `refused` means the table
@@ -458,6 +469,10 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
    only when an agent wrote it. To copy the file over a row that is not newer, delete that row
    and its parts (`DELETE FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM
    omp_session_files WHERE path = '<path>'`) and run the import again.
+   **The daemon-launched controller** (`controller: daemon`) belongs to no tree: copy its session
+   from its own volume, `tree-legion-<project token>-controller` in the earlier release, mounted at
+   `/legion`, with `--claim legion-<project token>-controller --tree-volume /legion` in place of
+   `--tree`.
 5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
    tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
    under SQL storage, where a file store starts it fresh. With the daemon still stopped, mark each

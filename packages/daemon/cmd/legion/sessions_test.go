@@ -107,7 +107,7 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 		"legion-legion-legion-1-tester copied " + tester + " (50 bytes, sha256 ",
 		"legion-legion-legion-1-reviewer missing " + lost + ": the session table holds no such session (tree LEGION-1)\n",
 		"legion-legion-legion-2-architect missing " + other + ": the session table holds no such session (tree LEGION-2)\n",
-		"legion sessions import: copied 2, copied before 0, nothing recorded 1, failed 1, missing 2\n",
+		"legion sessions import: copied 2, copied before 0, nothing recorded 1, failed 1, refused 0, missing 2\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("first import printed\n%s\nwant a line containing %q", out, want)
@@ -123,14 +123,28 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	r.write(lost, "{\"type\":\"session\",\"id\":\"0003\"}\n")
 	code, out, _ = r.run("--tree", "LEGION-1")
 	if code != 0 || !strings.Contains(out, "legion-legion-legion-1-architect copied before "+architect+" (identical, 31 bytes") ||
-		!strings.Contains(out, "legion sessions import: copied 1, copied before 2, nothing recorded 1, failed 0, missing 1\n") {
+		!strings.Contains(out, "legion sessions import: copied 1, copied before 2, nothing recorded 1, failed 0, refused 0, missing 1\n") {
 		t.Fatalf("second import = %d:\n%s\nwant the two copied before, the found one copied, the other tree's still missing, exit 0", code, out)
 	}
 
 	r.write(architect, "{\"type\":\"session\",\"id\":\"0001\"}\n{\"type\":\"message\",\"written\":\"after the copy\"}\n")
 	code, out, _ = r.run("--tree", "LEGION-1")
-	if code != 1 || !strings.Contains(out, "legion-legion-legion-1-architect refused "+architect+": the session table already holds "+architect+" with other content") {
-		t.Fatalf("import of a changed file = %d:\n%s\nwant the architect refused", code, out)
+	if code != 1 || !strings.Contains(out, "legion-legion-legion-1-architect refused "+architect+": the session table already holds "+architect+" with other content") ||
+		!strings.Contains(out, "failed 0, refused 1, missing 1\n") {
+		t.Fatalf("import of a changed file = %d:\n%s\nwant the architect refused and counted as refused", code, out)
+	}
+
+	// The daemon-launched controller belongs to no tree: --claim selects it, read from its own volume.
+	r.write(other, "{\"type\":\"session\",\"id\":\"0004\"}\n")
+	if code, out, _ := r.run("--claim", "legion-legion-legion-2-architect"); code != 0 ||
+		!strings.Contains(out, "legion-legion-legion-2-architect copied "+other) || strings.Contains(out, "legion-legion-legion-1-tester copied") {
+		t.Fatalf("import of one claim = %d:\n%s\nwant that claim alone copied, exit 0", code, out)
+	}
+	// A selection no claim matches is a mistyped key, never a clean copy.
+	for _, selection := range [][]string{{"--tree", "ACME-404"}, {"--claim", "legion-acme-acme-404-architect"}} {
+		if code, _, errb := r.run(selection...); code != 1 || !strings.Contains(errb, "has no claim of "+selection[1]) {
+			t.Errorf("import of %v = %d, %q; want exit 1 naming it", selection, code, errb)
+		}
 	}
 	if held, _ := r.held(architect); held != "{\"type\":\"session\",\"id\":\"0001\"}\n" {
 		t.Errorf("after the refusal the table holds %q for the architect, want what it held", held)

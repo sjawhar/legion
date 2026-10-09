@@ -566,7 +566,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
-		Env:             slices.Concat(r.operatorEnv(), r.providersPointers()),
+		Env:             slices.Concat(r.operatorEnv(), r.providersPointers(), r.sessionDSNPointer()),
 		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),
