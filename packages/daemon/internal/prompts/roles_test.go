@@ -90,11 +90,12 @@ func TestEveryRoleHasItsPartAndTheMergerHasNoCore(t *testing.T) {
 
 func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	const (
-		readSource = "read the code that already does the nearest thing"
-		noDefer    = "Nothing needed for correctness is deferred"
-		fastChecks = "run the repository's fast local checks"
-		redTest    = "the test itself is not theirs to change"
-		dontModify = "make the tester's red test pass; do not modify it"
+		readSource       = "read the code that already does the nearest thing"
+		noDefer          = "Nothing needed for correctness is deferred"
+		fastChecks       = "run the repository's fast local checks"
+		testerRunsTheApp = "read CI for everything static"
+		redTest          = "the test itself is not theirs to change"
+		dontModify       = "make the tester's red test pass; do not modify it"
 	)
 	contains := func(file, needle string, want bool) {
 		t.Helper()
@@ -112,9 +113,12 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 	contains("core/oracle.md", readSource, true)
 	contains("core/oracle.md", noDefer, false)
-	for _, role := range []string{"implementer", "tester"} {
-		contains("core/"+role+".md", fastChecks, true)
-	}
+	// The implementer runs the repository's fast local checks before a push; the tester runs the
+	// application and reads CI for the static lanes (dispatch://LEGION-631), so the rule to rerun
+	// them is the implementer's alone.
+	contains("core/implementer.md", fastChecks, true)
+	contains("core/tester.md", fastChecks, false)
+	contains("core/tester.md", testerRunsTheApp, true)
 	contains("core/tester.md", redTest, true)
 	contains("core/implementer.md", dontModify, true)
 	for _, role := range []string{"planner", "reviewer", "oracle"} {
@@ -122,6 +126,7 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 	for _, role := range []string{"planner", "implementer", "reviewer", "oracle"} {
 		contains("core/"+role+".md", redTest, false)
+		contains("core/"+role+".md", testerRunsTheApp, false)
 	}
 }
 

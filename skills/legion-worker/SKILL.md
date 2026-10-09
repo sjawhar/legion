@@ -284,6 +284,10 @@ never one. **Before you write or edit any line of the PR body or any `proof` arr
 `skill://legion-worker/references/pr-body.md`**: the template (the sole definition of the CI
 line), the full definition of a proof, what the tester verifies, and the simplify pass.
 
+- **The tester runs the application, not CI again.** It drives the changed surface for real and
+  tries to break it, judges whether the implementer's tests would catch what it broke, records what
+  it ran and saw, and must read CI for everything static — lint, types and the unit suites are
+  CI's work, rerun by no tester: `skill://legion-worker/references/pr-body.md`.
 - **Review threads** are answered and resolved one by one, never in bulk, and never one you have
   not read: one disposition reply per thread, then that thread's own resolution by the
   implementer, the pull request's author — its `gh api graphql` mutation after every push that

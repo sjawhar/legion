@@ -74,7 +74,7 @@ comes back, with everything it knew, the next time its role is needed.
 | --- | --- | --- | --- |
 | `planning` | planner | Writes the implementation plan into its handoff and the issue's document. | review App |
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
-| `testing` | tester | Exercises the change against the issue's acceptance criteria and reports `pass` or `fail`. | review App |
+| `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Checks the approved head and the required checks and workflows, then sends `READY`. | implement App |

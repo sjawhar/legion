@@ -91,7 +91,12 @@ and the tester's proof below are both this proof.
   is, and the tester records it as a failure against you.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
-  `.legion/<issue>/test.json` as `implementerProof` (`{verdict, how}`).
+  `.legion/<issue>/test.json` as `implementerProof` (`{verdict, how}`). The tester runs the
+  application, not CI again. Try to break the changed surface — wrong and boundary inputs, the
+  second and the concurrent run, the party it must refuse — judge whether the implementer's tests
+  would catch the ways it breaks, writing the red test for one that none would, and
+  read CI for everything static: lint, types and the unit and integration suites are CI's, cited
+  from the `CI` line, and no CI lane is rerun as evidence.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns

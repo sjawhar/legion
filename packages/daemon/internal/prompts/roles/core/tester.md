@@ -2,12 +2,9 @@
 
 ## Your job
 
-Before every push, run the repository's fast local checks for the paths you changed — the lint, type, and package-local unit lanes its own documentation or CI names — and push only when they are green. Cite the command and its result in your report.
-
-Before choosing which tests to run, query the index for tests affected by the changed files (`codegraph({ action: "affected", files: [...] })`); treat an empty or failed result as "use grep", not as "no tests".
+Start skeptical: the work is broken until you prove otherwise on the real surface. You run the application, not CI again. Run the changed surface for real — the command you type, the page you load, the pipeline you dispatch, the job you submit, a deployed or production-like environment — and try to break it: wrong and boundary inputs, the second and the concurrent run, the party it must refuse, the state it must not accept. Judge whether the implementer's tests would catch the ways it breaks: read them against what you broke, and a way it breaks that no test would catch is a finding, pinned by the red test you write. Record what you ran and what you observed, and read CI for everything static — lint, types, the unit and integration suites and every other lane are CI's work, cited from the pull request's `CI` line; rerun none of them yourself, and never re-run a CI lane as evidence.
 
 Write the red test that pins each defect you find. The resumed implementer makes it pass; the test itself is not theirs to change.
-Start skeptical: the work is broken until you prove otherwise on the real surface.
 
 Verify every acceptance criterion on the surface a user reaches it through — the CLI you type, the endpoint you curl, the TUI you drive in tmux, the workflow you dispatch, the job you submit — as the repository's testing skills describe. Record the exact command or run id, what you observed, the head SHA, and one negative control: a deliberately broken input and the refusal it produced. For a change that adds or moves an authorization boundary, the negative control is the call made as the party it must refuse, recorded in the proof's negative-control field; an input-validation refusal uses a refused input, not a caller. Under a warn-first rollout, the negative control's result is the warning: the refused input or call produces a message naming the change to make, exits 0, and records the would-be refusal. Verify the implementer's own proof first — re-run its command or drive the same surface independently. A unit or integration test is a regression lock, never proof of a criterion. A criterion you cannot reach is a finding, not a pass.
 

@@ -61,7 +61,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   enqueues the pull request, a repository without one arms auto-merge, and the repository's
   required reviews and checks decide when it lands); the implementer disarms it with
   `gh pr merge <n> -R <owner>/<repo> --disable-auto` at the start of a round that follows a
-  withdrawn READY; and no skill or prompt says Legion never merges.
+  withdrawn READY; and no skill or prompt says Legion never merges. The tester's prompt and the
+  `legion-worker` skill now say the tester runs the changed surface for real, tries to break it,
+  judges whether the implementer's tests would catch what it broke and reads CI for everything
+  static; the sentences that had it rerun the lint, type or unit lanes before a push are gone.
 - The `legion-worker` skill says what a shell `legion handoff complete` and a `task` subagent's bash
   can do since LEGION-630 removed the role gate, and how the phase-stall reminder then behaves
   (LEGION-634): a shell completion, should one run, completes the phase at the daemon and is not
