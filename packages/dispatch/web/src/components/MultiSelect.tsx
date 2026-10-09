@@ -56,6 +56,8 @@ export interface MultiSelectProps {
   readonly options: readonly string[];
   /** Row text for a value; the search matches this text. Defaults to the value itself. */
   readonly optionLabel?: (value: string) => string;
+  /** Muted text at the end of a value's row, such as how many items carry it. */
+  readonly optionDetail?: (value: string) => string;
   readonly searchLabel: string;
   readonly selected: readonly string[];
   readonly triggerAriaLabel?: string;
@@ -81,6 +83,7 @@ export function MultiSelect({
   onQueryChange,
   open,
   options,
+  optionDetail,
   optionLabel = (value) => value,
   searchLabel,
   selected,
@@ -286,6 +289,11 @@ export function MultiSelect({
                       <TruncatedText className="min-w-0 flex-1" title={label}>
                         {label}
                       </TruncatedText>
+                      {optionDetail === undefined ? null : (
+                        <span className={`shrink-0 text-xs tabular-nums ${textMutedOnSurface}`}>
+                          {optionDetail(option)}
+                        </span>
+                      )}
                     </button>
                   );
                 })}

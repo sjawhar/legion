@@ -705,6 +705,16 @@ export const newDividerLine = "bg-sky-200 dark:bg-sky-900";
  * contrast check applies; the link accent, so it reads as the page's one accent colour. */
 export const progressBarFill = "bg-sky-600 dark:bg-sky-400";
 
+/** A two-state switch's track (the delivery timeline's Swimlanes): the link accent while on, the
+ * strong border's shades while off, and a fixed white thumb. Decorative fills - the switch's own
+ * label and `aria-checked` carry its state - so no contrast check applies. */
+export const switchOnBg = "bg-sky-600 dark:bg-sky-500";
+export const switchOffBg = "bg-slate-300 dark:bg-slate-700";
+export const switchThumbBg = "bg-white";
+/** The delivery timeline's brush: a translucent accent band between two accent rules while a drag
+ * selects a window, fixed in both schemes and purely decorative. */
+export const brushBand = "border-sky-400/70 bg-sky-400/15";
+
 // ---------------------------------------------------------------------------------------------
 // Sizing-agnostic composites the components import directly
 // ---------------------------------------------------------------------------------------------
