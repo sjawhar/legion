@@ -1431,9 +1431,9 @@ EOF
   note "pushed the repository-configuration fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD))"
 }
 # assistant_said ISSUE ROLE TEXT: one of the claim's assistant turns carries TEXT, in its reply text
-# or in a tool call's arguments: an agent answers a Dispatch message with dispatch_message, so the
-# answer is a call's body. The instruction that asks for TEXT is a delivered message, not an
-# assistant turn, so a plain search of the session would match it.
+# or in a tool call's arguments: an agent answers a Dispatch message with a `dispatch message`
+# command, so the answer is in a bash call's command. The instruction that asks for TEXT is a
+# delivered message, not an assistant turn, so a plain search of the session would match it.
 assistant_said() {
   local text
   text=$(claim_session_text "$1" "$2") || return 1
@@ -2055,7 +2055,7 @@ The controller's daily report is the one controller action that waits for no tar
 Post it as \`skill://legion-controller\`'s "Daily report" says, on the first turn a \`tick on $project\`
 wake starts after your start turn has ended: never in your start turn, where a tick that arrives
 while that turn still runs does not count, and once in this run. Its issue is titled
-\`$report_title\`: find it with \`dispatch_search\`, and when there is none, create it once with
+\`$report_title\`: find it with \`dispatch search\`, and when there is none, create it once with
 that title and park it in icebox, as the skill says for the default report issue.
 EOF
 write_legion_config
@@ -3224,23 +3224,22 @@ until_true 300 "the controller's report message on $report" report_posted
 # marks idleness. The anchor is the tick itself: some tick delivery before the report's call whose
 # last preceding message entry is an assistant message with stopReason `stop`, a turn that had
 # genuinely finished. A start turn that ends in an unretried error fails the check. The report's
-# call is the controller's first call that posts a dispatch_message on the report issue, by any of
-# the three ways Oh My Pi gives the model to call the tool (lib/omp-tool-calls.jq's calls): the
-# dispatch_message tool itself, a write to its xd://dispatch_message device, or eval code that calls
-# tool.dispatch_message(...).
-# Only the assistant's own calls count, so a tool result that quotes the tool's name (a skill
-# file) or a message on another issue is not the report's call.
-# report_after_tick succeeds when the report's call came on such a turn, and otherwise prints why.
+# call is the controller's first call that runs `dispatch message --issue <report>` through bash, by
+# any of the ways Oh My Pi gives the model to call bash (lib/omp-tool-calls.jq's runs_dispatch): the
+# bash tool itself, a write to its xd://bash device, eval code calling tool.bash(...), or eval code
+# calling the generic tool.write(...) naming xd://bash, where a string literal is the command.
+# Only the assistant's own calls count, so a tool result that quotes the command (a skill file) or a
+# message on another issue is not the report's call.
+# report_after_tick succeeds at the first session whose report call came on such a turn, and
+# otherwise prints why.
 report_after_tick() {
-  local file verdicts=
+  local file verdict verdicts=
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    verdicts+=$(jq -R -s -r -L "$root/scripts/e2e/lib" --arg tick "summary: tick on $project" --arg report "$report" 'include "omp-tool-calls";
-      def names_report: test("(^|[^0-9A-Za-z-])" + $report + "($|[^0-9])");
+    verdict=$(jq -R -s -r -L "$root/scripts/e2e/lib" --arg tick "summary: tick on $project" --arg report "$report" 'include "omp-tool-calls";
       def posts_report:
-        any(.message.content[]? | select(calls("dispatch_message"));
-          if .name == "eval" then (.arguments.code? // "") | tostring | names_report
-          else call_arguments.issue? == $report end);
+        any(.message.content[]? | select(runs_dispatch("message"));
+          bash_command | test("--issue(=|\\s+)\\\\?[\u0027\"]?" + $report + "($|[^0-9])"));
       [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
       | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
       | ([$msgs[] | select(.m.message.role == "assistant" and (.m | posts_report)) | .i] | first) as $call
@@ -3250,11 +3249,12 @@ report_after_tick() {
             | $before != null and $before.m.message.role == "assistant" and $before.m.message.stopReason == "stop"))
         then "tick" else "busy" end
     ' "$file")
+    [ "$verdict" = tick ] && return 0
+    verdicts+=$verdict
   done
   case $verdicts in
-  *tick*) return 0 ;;
   *busy*) echo "the controller's first report message was not posted on a turn a tick started while it was idle" ;;
-  *) echo "no session of the controller holds a call posting a dispatch_message on $report: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message" ;;
+  *) echo "no session of the controller holds a call running dispatch message --issue $report: the bash tool, a write to xd://bash, or eval code calling tool.bash or tool.write whose string literal runs it" ;;
   esac
   return 1
 }

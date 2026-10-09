@@ -136,12 +136,12 @@ when a worker comes back after a restart, or a memory disagrees with a file, the
 wins. The merger writes none.
 
 Each tree writes only under its own directory, so trees running at the same time never touch the
-same file, and one tree's merge never leaves another tree's pull request conflicting over a
-handoff (GitHub runs no checks on a conflicting pull request). Before any role of a new issue
-starts, the daemon creates its branch from the default branch with all of `.legion/` removed, and
-that removal rides along in the tree's own merge. After a merge, the default branch therefore
-holds that tree's handoff directory and those of trees merged after its branch was cut, and no
-operator removes them by hand.
+same file. Handoffs belong to the issue branch, not the default branch: nothing on the default
+branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` from the head a
+human merges, and the merger's `READY` is refused while that head still carries it. The merge
+therefore brings no handoff onto the default branch, and no later branch starts with one. The
+removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
+round; the handoffs stay on the issue branch below it, where a worker still reads them.
 
 ## Review signalling
 
@@ -180,9 +180,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
   refuses is logged with the repository and the HTTP status.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
-- Two limits stop a loop: after `review_round_cap` review rounds (three by default), or once
+- Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
-  the issue and hands the decision to the architect.
+  the issue and tells the architect; neither stops a worker. Every move back to an earlier phase
+  counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
+  daemon's own move when CI turns red or the head starts conflicting with its base.
 
 ## READY and the human merge
 

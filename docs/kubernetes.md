@@ -112,7 +112,9 @@ measured. This change moves no deadline.
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion` with
 `pi-envoy` beside it, the two at one plugin interface version and without the pre-split package
 (`packages/daemon/internal/daemon/bootgate.go`). The image build's final step runs `legion version`,
-requiring the commit the workflow built, then `legion probe-image`: the same two probes, run by the
+requiring the commit the workflow built, and the plugin's `dispatch` shim
+(`/opt/legion/pi-envoy/bin/dispatch --help`, which needs its bundled `dist/dispatch.js` and the
+image's Bun), then `legion probe-image`: the same two probes, run by the
 daemon's own code, plus a third only the image runs — the session-storage probe, which prints
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the Legion plugin held to
 the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface held to the one the

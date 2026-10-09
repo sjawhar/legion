@@ -376,11 +376,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 		t.Fatalf("ApplyFact review: %v", err)
 	}
 	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "notice"})
-	var rounds int
-	if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&rounds); err != nil {
-		t.Fatalf("read implementer rounds: %v", err)
-	}
-	if rounds != 3 {
+	if rounds := implementerRounds(t, pool); rounds != 3 {
 		t.Fatalf("implementer rounds = %d, want 3", rounds)
 	}
 }
@@ -753,6 +749,8 @@ func fixtureStatus(current phase.Phase) string {
 
 // Every backward edge applies through intake, and the worker that asked for it is not stopped: its
 // assignment ends with the move, and the start of the phase it moved to delivers the next one.
+// Every move a backward row serves applies, and counts the implementer one round, as every move
+// back to an earlier phase does.
 func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 	for _, from := range []phase.Phase{phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.ProductionCheck} {
 		for _, to := range requiredBackwardTargets(from) {
@@ -764,12 +762,8 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				if _, err := intake.ApplyFact(context.Background(), pool, "api", string(from)+"-"+string(to), intake.BackwardMove{Issue: "LEGION-208", Requester: role, To: to, Reason: "correct"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact backward: %v", err)
 				}
-				var got string
-				if err := pool.QueryRow(t.Context(), "select phase from issues where key = $1", "LEGION-208").Scan(&got); err != nil {
-					t.Fatalf("read phase: %v", err)
-				}
-				if got != string(to) {
-					t.Fatalf("phase = %q, want %q", got, to)
+				if got, rounds := issuePhase(t, pool), implementerRounds(t, pool); got != to || rounds != 1 {
+					t.Fatalf("phase = %q, rounds %d; want %q and one round", got, rounds, to)
 				}
 				if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
 					t.Fatalf("the move back from %s to %s suspended %v, want the requesting %s left running", from, to, suspended, role)
@@ -779,6 +773,40 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A backward move no backward row serves is refused, and nothing moves or is counted: to
+// awaiting_merge, which no worker holds; to the phase the issue is already in or a later one; out
+// of awaiting_merge, where no worker holds a phase; by a role that does not run the phase; or to no
+// phase at all, which the row lookup would otherwise take to match any row.
+func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		from      phase.Phase
+		requester claim.Role
+		to        phase.Phase
+	}{
+		{"production_check to awaiting_merge", phase.ProductionCheck, claim.RoleImplementer, phase.AwaitingMerge},
+		{"implementing to implementing", phase.Implementing, claim.RoleImplementer, phase.Implementing},
+		{"testing to a later phase", phase.Testing, claim.RoleTester, phase.Reviewing},
+		{"out of awaiting_merge", phase.AwaitingMerge, claim.RoleImplementer, phase.Implementing},
+		{"by a role that does not run the phase", phase.Testing, claim.RoleReviewer, phase.Implementing},
+		{"to no phase", phase.Testing, claim.RoleTester, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: tc.from, Generation: 1, Status: fixtureStatus(tc.from), Rank: "U"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			result, err := intake.ApplyFact(context.Background(), pool, "api", "backward", intake.BackwardMove{Issue: "LEGION-208", Requester: tc.requester, To: tc.to, Reason: "probe"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
+			if err != nil || refusalCode(result) != "BACKWARD_REFUSED" {
+				t.Fatalf("the move = %+v, %v; want BACKWARD_REFUSED", result.Refusal, err)
+			}
+			if got, rounds := issuePhase(t, pool), implementerRounds(t, pool); got != tc.from || rounds != 0 {
+				t.Fatalf("phase = %q, rounds %d; want %q and no round", got, rounds, tc.from)
+			}
+			assertOutboxKinds(t, pool, []string{})
+		})
 	}
 }
 
