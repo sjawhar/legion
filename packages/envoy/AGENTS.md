@@ -384,15 +384,15 @@ latest version number, or `null` when it has none (the live markdown beside it a
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
-`GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
-the tree `readTree` serves): its path of `{type, id, index}` from the top-level block
-down, and for a table block, row or cell a `table` naming the table's id, the row's child index
-(0 is the header row), the cell's child index in its row (the indexes `delete_row` and
-`delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
-the cell and the row's cells as their opening words. The header is found where the renderer
-writes the cell (`tableGrid`, laid out on a span budget of its own through the anchored row), so
-in a table with colspans or rowspans it is the column the cell is drawn in, not the header row's
-child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
+`GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (the document read's tree,
+or a rendering cached under the stored head when no fork or room holds it): its path of
+`{type, id, index}` from the top-level block down, and for a table block, row or cell a `table`
+naming the table's id, the row's child index (0 is the header row), the cell's child index in its
+row (the indexes `delete_row` and `delete_column` take, so a spanning cell counts once), the text
+of the header cell drawn above the cell and the row's cells as their opening words. The header is
+found where the renderer writes the cell (`tableGrid`, which lays the whole table out on one span
+budget), so in a table with colspans or rowspans it is the column the cell is drawn in, not the
+header row's child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`
 same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
 time and never stored or carried on lists and events; a block the live document no longer holds
 leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
@@ -420,15 +420,33 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
 
+A read whose caller holds no transaction fork and whose server holds no resident room reads the
+stored document through a rendering cache. The cache is keyed by `doc_updates`' stored head
+(version plus the head row's transaction id), so an append, prune and re-append, rebuild, delete
+or compaction cannot serve an older rendering; every cold read checks that head, which it reads
+with the same SQL as the store's own head (`headVersion`). Its entry carries the canonical
+markdown, document token, block ranges/tokens and block paths, is immutable after construction,
+and is bounded by a weighted LRU of 256 MiB (`documentReadBudget`). An entry's weight counts every
+string and slice it holds, and a table's cells, header texts and row and column ordinals once
+however many paths share them; `TestADocumentReadWeighsAboutTheHeapItHolds` holds it within
+0.97-1.25x of the heap an entry holds. A read hands out a copy of the blocks and of a path's
+entries, which callers write, and shares a table's descendant ids and a path's table position with
+every later read of that head, which no caller writes (`documentRead`). Concurrent misses of one
+head share one bounded document fold, while a request that ends leaves that fold running for the
+other callers. A document outside the schema stores no rendering and keeps the tree/error behavior
+each read had before. Websocket admission still uses `loadTree`, because it needs the raw stored
+update to preload the room.
+
 A read of a resident room outside a write never walks the live tree. It reads the room as of one
 moment under its document lock (`readLive`): the replica the room's update observer keeps
 (`renderedReplica`, below), brought up to date under that lock with what the room gained since, or a
 copy taken under the lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no
 replica - no update has reached it since it loaded - or another holds the replica or the observer
 waits for it.
-`GET /text`, `GET /blocks`, the block route and the document websocket's admission check
-(`loadTree`), a read outside any transaction (`docTree`), a published write's loss check
-(`recordPublishedLoss`), a version's capture (`captureLiveTextAndAuthors`) and settlement's reads of
+`GET /text`, `GET /blocks` and the block route use this resident tree through `heldTree`; the
+document websocket's admission check (`loadTree`), a read outside any transaction (`docTree`), a
+published write's loss check (`recordPublishedLoss`), a version's capture
+(`captureLiveTextAndAuthors`) and settlement's reads of
 the room (`settleRoomWithin`'s first read and its version's, and the block-id backfill's read,
 through `liveTree`) read it so, so a torn read is never versioned as the document; a repair reads
 the tree inside the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
