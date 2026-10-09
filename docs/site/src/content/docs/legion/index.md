@@ -15,7 +15,7 @@ that writes the change and opens a pull request, a tester, a reviewer and a merg
 [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session in a Kubernetes pod of its own.
 
 When the change is tested, reviewed and approved, the merger posts `READY` on the Dispatch issue
-and a person merges the pull request under the repository's own branch protection. The implementer
+and submits the pull request for merge under the repository's own branch protection. The implementer
 then drives the merged change in production and records what it saw,
 and only then does the architect close the issue. Every step leaves a record you can read: the spec
 and the questions in Dispatch, the code and the reviews on GitHub, and each phase's handoff on the
@@ -37,7 +37,7 @@ flowchart LR
     reviewer -. changes requested .-> implementer
   end
   merger --> ready["READY on<br/>the issue"]
-  ready --> merge["A person merges<br/>the pull request"]
+  ready --> merge["The merger submits the merge;<br/>the repository's rules land it"]
   merge --> production["Production check<br/>(the implementer)"]
   production --> done["The architect<br/>closes the issue"]
 ```

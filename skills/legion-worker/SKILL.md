@@ -88,7 +88,7 @@ implementer's own proof on a production-like surface at the head that merges, an
 head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`,
 `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
 implementer's production check after the merge
-(`skill://legion-worker/references/merge-gate.md#after-the-human-merge`).
+(`skill://legion-worker/references/merge-gate.md#after-the-merge`).
 
 ## Asking another role
 
@@ -299,10 +299,13 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
-  → retro → the merger's READY → the human merge → the implementer's production check. A person
-  merges after READY under the repository's branch-protection and code-owner rules. The reviewer's
-  submissions, retro's commit, the merger's READY, and the production check follow
-  `skill://legion-worker/references/merge-gate.md`.
+  → retro → the merger's READY → the merge → the implementer's production check. On READY's
+  acceptance the merger submits the pull request with
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, and the
+  repository's required reviews and checks decide when it lands
+  (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
+  the merger's READY and its submission, the implementer's disarming of a withdrawn READY, and the
+  production check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 
@@ -361,7 +364,7 @@ Such a refusal records nothing, so the corrected call at the same commit is appl
 may carry a `note` (READY published on an already-merged pull request, or a base requiring no
 check).
 
-Retro's last commit removes `.legion/<issue>/` from the head a human merges (`skill://legion-retro`);
+Retro's last commit removes `.legion/<issue>/` from the head that merges (`skill://legion-retro`);
 a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff
 again, since `handoff_complete` reports the commit carrying the file. Retro, the merger and the
 post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report

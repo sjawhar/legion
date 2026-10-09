@@ -30,8 +30,8 @@ retrospective's durable output.
    `jj diff --from <approved-sha> --to <tip-sha> --summary` in READY, and sends the READY packet
    with its completion, which refuses a head that still carries `.legion/<issue>/`; the daemon
    posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
-   configured. A human merges under the repository's GitHub branch-protection and CODEOWNERS
-   requirements; GitHub's merge queue participates only when the repository enables it.
+   configured. On READY's acceptance the merger submits the merge, and it lands under the
+   repository's rules: its required reviews and checks, and its merge queue when it enables one.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
    and records it on the PR and the issue: the agent that developed it is responsible for testing
    in production. The architect's sign-off waits for that record.

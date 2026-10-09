@@ -49,7 +49,7 @@ one a worker escalated, is a decision block you write in the root spec; after ap
 version closes the gate, so request approval again once the answer is folded in. A to-do only a
 human can do is a `dispatch ask`.
 
-The merge is not the close: after a human merges a pull request, the daemon starts the implementer
+The merge is not the close: after a pull request merges, the daemon starts the implementer
 on the production check, and you sign off only once its record exists on the pull request and the
 issue. A tester completion that rejects the implementer's proof goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets a child issue in

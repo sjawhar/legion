@@ -55,7 +55,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   under a controller grant minted with its registration secret), in place of running
   `legion state` and `legion status` from bash. The client's strict parse needs this release beside
   a daemon at 18; the daemon's boot gate and `legion probe-image` refuse any earlier contract (the
-  8.6.0 release declares 17 and still mints a grant before every command; 8.4.1 declares 16).
+  8.6.0 release declares 17 and still mints a grant before every command; 8.4.1 declares 16). The
+  merger submits the merge itself the moment READY is accepted, with
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a merge queue
+  enqueues the pull request, a repository without one arms auto-merge, and the repository's
+  required reviews and checks decide when it lands); the implementer disarms it with
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` at the start of a round that follows a
+  withdrawn READY; and no skill or prompt says Legion never merges.
 - The `legion-worker` skill says what a shell `legion handoff complete` and a `task` subagent's bash
   can do since LEGION-630 removed the role gate, and how the phase-stall reminder then behaves
   (LEGION-634): a shell completion, should one run, completes the phase at the daemon and is not

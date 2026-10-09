@@ -1,13 +1,13 @@
 # The merge gate: review, retro, READY, and the production check
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
-approval, the implementer recording the production check, or the merger building READY. Every
-path it cites is in sjawhar/legion.
+approval, the implementer disarming a withdrawn READY or recording the production check, or the
+merger building READY and submitting the merge. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head →
-retro → the merger's READY → the human merge → the implementer's production check. The approved
+retro → the merger's READY → the merge → the implementer's production check. The approved
 head carries the issue's handoffs, `.legion/<issue>/`; retro's last commit removes them from the
-head a human merges (dispatch://LEGION-605), since a squash merge commits that head merged into
+head that merges (dispatch://LEGION-605), since a squash merge commits that head merged into
 the default branch and nothing there reads a handoff, and READY refuses a head that still
 carries them. After the approval, only retro's commits leave it standing on their own: those that
 change only `docs/solutions/`, and that removal (*Retro*, below). A conflict-forced merge goes back
@@ -111,12 +111,32 @@ review posted without a completion leaves the issue in reviewing until you finis
   the issue, publishes it to the project's merge queue role when one is set, and says on the issue
   when that role has no live holder; the answer's `note` says when READY was published on a pull
   request a person already merged, whose head can no longer change, or on a base that requires no
-  check, which the packet itself also says. A person merges after READY under the repository's
-  branch-protection and code-owner rules.
+  check, which the packet itself also says.
+- **The merger submits the merge the moment READY is accepted.** In the same turn, before anything
+  else, it runs `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with
+  its pane's plain `gh`: `<n>` the pull request number, `<head>` the full sha of the current head
+  READY named. A repository with a merge queue enqueues the pull request; one without arms
+  auto-merge; one whose rules are already satisfied merges at once. `--match-head-commit` has
+  GitHub refuse the request when the head has moved since READY read it. The repository's required
+  reviews and checks decide when it lands: the merger makes no merge by hand and bypasses no
+  rule. It then tells the architect with `envoy_publish` to its encoded role token what the
+  command answered — enqueued, auto-merge enabled, or merged — and the head. On any READY refusal
+  it submits nothing, since an armed request would merge through the gate the refusal names; a
+  READY the design gate refused is submitted later, on the architect's word, once the gate opens,
+  and that turn runs only `gh`. A `gh pr merge` GitHub refuses is reported to the architect with
+  its message; a person can still merge after READY. The packet's second line records the step,
+  `Merge: submitted on acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
+- **A withdrawn READY is disarmed by the implementer.** When READY is withdrawn (the head's CI
+  turned red, or it conflicts with its base, after READY, which sends the issue back to
+  `implementing`), a merge queue drops the pull request on the red check, but auto-merge stays
+  enabled across pushes, and `--match-head-commit` was checked only when it was enabled. So the
+  implementer, at the start of that implementing round, runs
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` before any push; where a queue held the pull
+  request, that dequeues it.
 
-## After the human merge
+## After the merge
 
-- **After a human merges, the implementer verifies in production.**
+- **After the merge, the implementer verifies in production.**
   The daemon starts the implementer again once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
   drives the changed path in production through the user's own access path, and records the

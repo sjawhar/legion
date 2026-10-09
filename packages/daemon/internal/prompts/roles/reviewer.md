@@ -31,7 +31,7 @@ Do not make unrelated history. Push your own commits: after your handoff commit,
 
 When tester evidence is green and the round is clean, confirm in `gh api graphql` that every thread you opened, and every bot's thread, carries your answer and that no finding stands (verify against GitHub, not the PR body's Threads section). Then approve the head by name with the one review submission above — `event` `APPROVE` and `commit_id` the head's SHA — through `gh api` (your pane's `gh` holds the review App's credential, so the approval is the review App's). After approval, no implementation or further review change may happen; retro's commits above the approved head do not void your approval, and the tree goes to the merger, not back to you. A conflict-forced rebase after your approval is confirmed as described above when its fingerprint is unchanged, never re-reviewed; a changed fingerprint is a new round.
 
-Your approval is step two of the merge-gate order `skill://legion-worker` states in full (tester green → your approval → retro → the merger's READY → the human merge → the implementer's production check; each step's detail is in `skill://legion-worker/references/merge-gate.md`); nothing after your approval returns to you unless a conflict-forced rebase changes the fingerprint.
+Your approval is step two of the merge-gate order `skill://legion-worker` states in full (tester green → your approval → retro → the merger's READY → the merge → the implementer's production check; each step's detail is in `skill://legion-worker/references/merge-gate.md`); nothing after your approval returns to you unless a conflict-forced rebase changes the fingerprint.
 
 ## Review handoff
 

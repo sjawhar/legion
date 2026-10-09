@@ -1,9 +1,11 @@
 package prompts
 
 import (
+	"embed"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -207,6 +209,26 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 	for agent, files := range agents {
 		if _, err := os.Stat(filepath.Join("..", "..", "..", "pi-legion", "agents", agent+".md")); err != nil {
 			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
+		}
+	}
+}
+
+// The merger submits the merge itself once READY is accepted (dispatch://LEGION-631), and Legion
+// enforces no GitHub restriction the repository itself does not: a part that says Legion never
+// merges, shared or the Go daemon's, contradicts the merger's own step. The phrases, in any case,
+// are a pattern rather than spelled out, so a grep for them over this directory finds only prompt
+// text.
+func TestNoPartSaysLegionNeverMerges(t *testing.T) {
+	saysLegionNeverMerges := regexp.MustCompile(`(?i)never merg(es)|merg(e|es) nothing`)
+	for dir, parts := range map[string]embed.FS{"roles": roleParts, "go": goParts} {
+		err := eachPart(parts, dir, func(name string, body []byte) error {
+			if phrase := saysLegionNeverMerges.Find(body); phrase != nil {
+				t.Errorf("%s/%s says %q", dir, name, phrase)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("read the %s parts: %v", dir, err)
 		}
 	}
 }

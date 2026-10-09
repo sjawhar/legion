@@ -13,7 +13,8 @@ section can use the words without stopping to explain them.
 - **The Legion daemon** is one process an operator runs with `legion start`. It reads Dispatch's
   issue events and GitHub's pull request, review and CI events, decides which phase each issue is
   in, and starts and stops the agents that do the work. It keeps its own record in Postgres, so a
-  restart picks up where it left off. It never writes code and never merges.
+  restart picks up where it left off. It never writes code; the merge is the merger agent's request
+  under the repository's rules.
 - **Agents** are [Oh My Pi](https://github.com/sjawhar/oh-my-pi) sessions. Under the Kubernetes
   runtime every agent the daemon starts runs in a pod of its own, from one published worker image,
   and talks to the daemon over a connection the pod dials back.
@@ -137,8 +138,8 @@ wins. The merger writes none.
 
 Each tree writes only under its own directory, so trees running at the same time never touch the
 same file. Handoffs belong to the issue branch, not the default branch: nothing on the default
-branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` from the head a
-human merges, and the merger's `READY` is refused while that head still carries it. The merge
+branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` from the head that
+merges, and the merger's `READY` is refused while that head still carries it. The merge
 therefore brings no handoff onto the default branch, and no later branch starts with one. The
 removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
 round; the handoffs stay on the issue branch below it, where a worker still reads them.
@@ -186,7 +187,7 @@ Legion uses GitHub's own review mechanisms rather than labels:
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
   daemon's own move when CI turns red or the head starts conflicting with its base.
 
-## READY and the human merge
+## READY and the merge
 
 When the reviewer has approved and retro is done, the merger checks that the pull request's head is
 the approved one (plus only retro's notes), that every check the base branch requires has passed,
@@ -198,10 +199,14 @@ READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pul
 ```
 
 followed by the pull request's outcome and its known risks. A project can also name a merge-queue
-role (`merge_queue_role`) that gets the same packet. When the head's own CI turns red while the
-issue awaits its merge, the daemon posts on the issue, and tells that role, that the `READY` is
-withdrawn, naming the red checks. A person merges under the repository's own branch protection and
-code-owner rules, which Legion neither reads nor changes.
+role (`merge_queue_role`) that gets the same packet. The moment the daemon accepts READY, the
+merger submits the pull request with
+`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`: a repository with a
+merge queue enqueues it, one without arms auto-merge, and the repository's own required reviews and
+checks decide when it merges — rules Legion neither reads nor changes. When the head's own CI turns
+red while the issue awaits its merge, the daemon posts on the issue, and tells that role, that the
+`READY` is withdrawn, naming the red checks, and the implementer disarms the submission with
+`gh pr merge <n> -R <owner>/<repo> --disable-auto` before it pushes again.
 
 ## The production check
 

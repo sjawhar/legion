@@ -16,8 +16,8 @@ separate coordinator to finish necessary work.
   (pattern `^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-41`).
 - The daemon starts every Legion role itself and sequences each issue's phases from its fixed
   workflow table: planner, implementer, tester, reviewer, retro (the implementer again), merger,
-  and, after a human merges, the implementer's production check. One role works an issue at a
-  time, and the handoff or event that ends its phase is what starts the next; you start,
+  and, after the pull request merges, the implementer's production check. One role works an
+  issue at a time, and the handoff or event that ends its phase is what starts the next; you start,
   re-assign and order no worker. Message a known phase worker with `envoy_publish` to
   `notifications.role.` followed by its encoded role token. Phase workers escalate lifecycle,
   product, scope, design, and cross-phase decisions the same way: `envoy_publish` to your own
@@ -267,12 +267,18 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    <tip-sha> --summary`, quoted in READY) and sends the READY packet with its completion, which
    refuses a head that still carries `.legion/<issue>/`; the daemon posts
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the Dispatch
-   issue and publishes it to the project's merge queue role when one is set. A human merges under the repository's
-   GitHub branch-protection and CODEOWNERS rules. If the merger reports a failed verification,
+   issue and publishes it to the project's merge queue role when one is set. The moment the daemon
+   accepts READY, the merger submits the pull request with
+   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` and tells you what
+   the command answered; the repository's required reviews and checks decide when it lands, and
+   Legion neither reads nor writes those rules. A READY the design gate refused is submitted later:
+   the merger submits nothing on a refusal, so once that spec version is approved and the daemon
+   posts the packet, tell the merger to submit it. If the merger reports a failed verification,
    treat it like `pr-blocked`: the merger holds the phase, so tell it to move the issue back with
    `request_backward_move`, naming what failed; never bypass. A READY refused because the head
    still carries `.legion/<issue>/` goes back to `retro`, so the implementer's retro removes it.
-5. a human merges; the daemon then starts the **implementer** once more, on the production check.
+5. the merge lands under the repository's rules; the daemon then starts the **implementer** once
+   more, on the production check.
    It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Sign off only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
