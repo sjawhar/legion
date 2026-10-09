@@ -820,7 +820,10 @@ primary_issue() {
 
   begin ordinary-human-squash-merge
   # This is intentionally the devbox's ordinary gh as the proof human (the dotfiles shim, acting as the
-  # sjawhar-agent App). Legion's Apps are neither invoked nor able to merge. The smoke main is held
+  # sjawhar-agent App). Legion's Apps are neither invoked nor able to merge. merge_when_clean reads the
+  # pull request's state first and merges by hand only when the merger armed nothing: under this
+  # branch's merger prompt the merger submits the merge itself on its READY, so a pull request already
+  # merged, enqueued or auto-merge armed is the expected read here. The smoke main is held
   # from here until smoke-main-clean has emptied it (hold_smoke_main), on an open descriptor: start
   # no background child before release_smoke_main, or it inherits the descriptor and holds the smoke
   # main past this run's window.
@@ -842,7 +845,7 @@ primary_issue() {
   wait_for_phase "$root_issue" "done"
   until_true 60 "the daemon's done status on the Dispatch board" dispatch_status_is "$root_issue" "done"
   until_true 120 "the lingering tree's architect to be suspended" tree_suspended "$root_issue"
-  note "ordinary gh squash-merged $repo#$pr_number; the daemon resumed production_check, the implementer's completion reached the architect, and its sign-off closed the issue; the tree lingers with its architect suspended"
+  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit; the daemon resumed production_check, the implementer's completion reached the architect, and its sign-off closed the issue; the tree lingers with its architect suspended"
   pass
 
   begin smoke-main-clean

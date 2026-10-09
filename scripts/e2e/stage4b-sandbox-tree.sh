@@ -3904,7 +3904,7 @@ smoke_main_cleaning=1
 clean_smoke_main
 release_smoke_main
 smoke_main_cleaning=
-note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
+note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit; the production check and the sign-off closed $tree1"
 # The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
 # session kept for a re-admission to resume.
 tree1_roles_suspended() {
