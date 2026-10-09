@@ -630,57 +630,6 @@ func TestFramesFromADroppedConnectionReplayInOrderAfterTheNextAck(t *testing.T) 
 	clock.idle(t)
 }
 
-// A shim whose launcher said its agent resumed in a workspace recreated since its session was last
-// written says so in every hello until Oh My Pi starts a turn: in the first, and in a redial before
-// that turn, so a daemon restarted in between still tells the agent; and no more in a redial after
-// it, so a restarted daemon does not tell the agent twice. A shim told nothing never says it.
-func TestTheHelloSaysTheWorkspaceWasRecreatedUntilTheAgentsFirstTurn(t *testing.T) {
-	recreated := func(t *testing.T, p *peer) bool {
-		t.Helper()
-		hello, ok := p.next(t).(shimwire.Hello2)
-		if !ok || hello.BootToken != bootToken {
-			t.Fatalf("the shim's first frame was %#v, want hello2 with boot token %q", hello, bootToken)
-		}
-		return hello.WorkspaceRecreated
-	}
-	path := socketPath(t)
-	daemon := listen(t, path)
-	cfg := config(t, path, newOMP(t))
-	cfg.WorkspaceRecreated = true
-	sh := run(t, cfg, newClock())
-	p := daemon.accept(t)
-	if !recreated(t, p) {
-		t.Fatal("the first hello did not say the workspace was recreated")
-	}
-	p.send(t, shimwire.HelloAck{})
-	p.expectRaw(t, "fake_ready")
-
-	_ = p.conn.Close()
-	sh.log.await(t, "reconnecting", 1)
-	p = daemon.accept(t)
-	if !recreated(t, p) {
-		t.Fatal("the redial before the agent's first turn did not say the workspace was recreated")
-	}
-	p.send(t, shimwire.HelloAck{})
-	p.send(t, shimwire.Prompt{ID: "r1", DeliveryID: "d1", Message: "the task"})
-	p.expect(t, shimwire.Response{ID: "r1", Command: shimwire.TypePrompt, Success: true})
-	p.expect(t, shimwire.AgentStart{})
-	p.expect(t, shimwire.AgentEnd{})
-
-	_ = p.conn.Close()
-	sh.log.await(t, "reconnecting", 2)
-	if recreated(t, daemon.accept(t)) {
-		t.Error("the redial after the agent's first turn still said the workspace was recreated")
-	}
-
-	other := socketPath(t)
-	plain := listen(t, other)
-	run(t, config(t, other, newOMP(t)), newClock())
-	if recreated(t, plain.accept(t)) {
-		t.Error("a shim told nothing said the workspace was recreated")
-	}
-}
-
 // The daemon's `shutdown` is the shim's to act on, never OMP's to read: the child is sent
 // SIGTERM, and killed if it is still running when the grace runs out. The shim's own SIGTERM —
 // the pane or the pod being stopped — ends the child the same way. The bridge keeps working

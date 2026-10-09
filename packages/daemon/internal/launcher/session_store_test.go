@@ -110,3 +110,46 @@ func TestAResumeUnderSQLStorageIsToldWhetherItsWorkspaceWasRecreatedSinceTheTabl
 		t.Errorf("a resume in a workspace recreated after the table's last write was told %q, want true", got)
 	}
 }
+
+// A session database that cannot be reached for a moment does not fail the launch: the lookup is
+// asked again after each backoff wait, reading the URL file afresh, until the table answers. One
+// that stays unreachable past resumeLookupTimeout refuses the start, naming how often it asked.
+func TestAResumeUnderSQLStorageWaitsOutAnUnreachableSessionDatabase(t *testing.T) {
+	dsn, dsnFile := testpg.DSNFile(t, "legion_launcher_retry_test")
+	sessionFile := filepath.Join(t.TempDir(), "sessions", "2026-10-08T12-00-00-000Z_0003.jsonl")
+	conn, err := ompsessions.Connect(context.Background(), dsnFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if _, err := ompsessions.Import(context.Background(), conn, sessionFile, []byte("{}\n"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	saved := resumeLookupBackoff
+	resumeLookupBackoff = []time.Duration{100 * time.Millisecond}
+	t.Cleanup(func() { resumeLookupBackoff = saved })
+	unreachable := "postgres://legion:unused@127.0.0.1:1/none?sslmode=disable&connect_timeout=1\n"
+	if err := os.WriteFile(dsnFile, []byte(unreachable), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{ompsessions.StorageVariable + "=" + ompsessions.SQLStorage, ompsessions.DSNFileVariable + "=" + dsnFile}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = os.WriteFile(dsnFile, []byte(dsn+"\n"), 0o600)
+	}()
+	if _, err := sessionWritten(env, sessionFile); err != nil {
+		t.Fatalf("a lookup whose database came back during the backoff = %v, want the session found", err)
+	}
+
+	if err := os.WriteFile(dsnFile, []byte(unreachable), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctxTimeout := time.Now()
+	_, err = sessionWritten(env, sessionFile)
+	if err == nil || !strings.Contains(err.Error(), "resume session "+sessionFile) || !strings.Contains(err.Error(), "attempts in "+resumeLookupTimeout.String()) {
+		t.Fatalf("a lookup whose database never came back = %v, want the refusal naming the session and the attempts", err)
+	}
+	if waited := time.Since(ctxTimeout); waited < resumeLookupTimeout-time.Second {
+		t.Fatalf("the lookup gave up after %s, want it to keep asking for %s", waited, resumeLookupTimeout)
+	}
+}

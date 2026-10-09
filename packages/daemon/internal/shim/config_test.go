@@ -55,28 +55,6 @@ func TestParseAddressAcceptsTheListenersTwoFamiliesOnly(t *testing.T) {
 	}
 }
 
-// The launcher's word on a recreated workspace is a boolean: unset, as in a tmux pane no launcher
-// starts, is false, and anything that is not a boolean is refused naming the variable, before the
-// shim dials anything.
-func TestReadWorkspaceRecreatedIsTheLaunchersBoolean(t *testing.T) {
-	lookup := func(env map[string]string) func(string) (string, bool) {
-		return func(name string) (string, bool) { value, ok := env[name]; return value, ok }
-	}
-	for env, want := range map[string]bool{"": false, "true": true, "false": false} {
-		vars := map[string]string{}
-		if env != "" {
-			vars["LEGION_WORKSPACE_RECREATED"] = env
-		}
-		if got, err := shim.ReadWorkspaceRecreated(lookup(vars)); err != nil || got != want {
-			t.Errorf("ReadWorkspaceRecreated with %q = %t, %v; want %t", env, got, err, want)
-		}
-	}
-	if _, err := shim.ReadWorkspaceRecreated(lookup(map[string]string{"LEGION_WORKSPACE_RECREATED": "maybe"})); err == nil ||
-		!strings.Contains(err.Error(), "LEGION_WORKSPACE_RECREATED") {
-		t.Errorf("ReadWorkspaceRecreated of a non-boolean = %v, want a refusal naming the variable", err)
-	}
-}
-
 func TestReadBootTokenRefusesAnUnreadableOrBlankFile(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "token")

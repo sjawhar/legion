@@ -23,13 +23,10 @@ import (
 type RuntimeObservation struct{ Observation runtime.Observation }
 
 // StreamHello is the shim connecting with this claim's boot token, resolved to its generation.
-// WorkspaceRecreated is the shim's word that its agent resumed a session in a workspace recreated
-// since the session was last written and has had no turn since (Machine.workspaceRecreated).
 type StreamHello struct {
-	Claim              claim.Token
-	Generation         uint64
-	AgentSecrets       *AgentSecretsIdentity
-	WorkspaceRecreated bool
+	Claim        claim.Token
+	Generation   uint64
+	AgentSecrets *AgentSecretsIdentity
 }
 
 // StreamTurnStart is the agent's turn starting. Oh My Pi's own agent_start carries no delivery id;
@@ -786,8 +783,7 @@ func agentBusy(reason string) bool {
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
-// an earlier daemon). Any other turn is a foreign one, and confirms nothing. Either way Handle has
-// already ended a recreated workspace's notice, which no turn after the hello carries.
+// an earlier daemon). Any other turn is a foreign one, and confirms nothing.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking

@@ -27,6 +27,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
+// WorkspaceRecreatedVariable is how a role launcher tells the generation it starts whether that
+// generation resumes a session in a workspace recreated since the session was last written: "true"
+// or "false", set on every generation, so no value from the container's environment reaches the
+// child. The Legion plugin tells the agent so on its process's first turn (pi-legion,
+// src/workspace-recreated.ts).
+const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
+
 // Config is the role-private launcher configuration. Token is read from the role-private
 // projected Secret before Run is called. PrivateDir is the role container's own memory-backed
 // directory, which no other container mounts: each generation's credentials live in a fresh
@@ -250,13 +257,13 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	recreated := false
 	if command.ResumeFile != "" {
 		var err error
-		if recreated, err = resumable(env, command.ResumeFile); err != nil {
+		if recreated, err = resumable(env, command.ResumeFile, m.cfg.Stderr); err != nil {
 			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
 		}
 	}
-	env = mergeEnv(env, []string{shimwire.WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
+	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
 	dir, err := m.writeFiles(command)
 	if err != nil {
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
@@ -398,8 +405,12 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 	return dir, nil
 }
 
-// resumeLookupTimeout bounds the session table lookup a resume's start waits on.
+// resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included.
 const resumeLookupTimeout = 30 * time.Second
+
+// resumeLookupBackoff is the wait before each retry of a session table lookup that could not reach
+// the database, doubling up to its last value until resumeLookupTimeout; a test shortens it.
+var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
 // resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
@@ -411,8 +422,9 @@ const resumeLookupTimeout = 30 * time.Second
 // session was last written: provisioning recorded its creation later than that write
 // (workspace.Created), so the agent's last turns ran in a workspace that is gone and this one holds
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
-// was not.
-func resumable(env []string, file string) (recreated bool, err error) {
+// was not. A record that cannot be read, which an init container killed mid-write can leave, only
+// decides that notice: it is written to log and taken as no record, and the resume goes ahead.
+func resumable(env []string, file string, log io.Writer) (recreated bool, err error) {
 	written, err := sessionWritten(env, file)
 	if err != nil {
 		return false, err
@@ -423,13 +435,19 @@ func resumable(env []string, file string) (recreated bool, err error) {
 	}
 	created, ok, err := workspace.Created(dir)
 	if err != nil {
-		return false, fmt.Errorf("resume session %s: %v", file, err)
+		if log != nil {
+			fmt.Fprintf(log, "legion launcher: resume session %s: %v; the workspace is taken as not recreated\n", file, err)
+		}
+		return false, nil
 	}
 	return ok && written.Before(created), nil
 }
 
 // sessionWritten is when the session a resume names was last written, from where the child's Oh My
-// Pi keeps it (resumable), refusing a session nothing holds.
+// Pi keeps it (resumable), refusing a session nothing holds. A session table it cannot reach is
+// asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read
+// afresh each time, as a database that is briefly unreachable must not fail the launch; a session
+// the table answers it does not hold, or a URL file that is missing or empty, is refused at once.
 func sessionWritten(env []string, file string) (time.Time, error) {
 	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
 		info, err := os.Stat(file)
@@ -444,30 +462,44 @@ func sessionWritten(env []string, file string) (time.Time, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
 	defer cancel()
+	for attempt := 0; ; attempt++ {
+		if _, err := ompsessions.ReadDSN(dsnFile); err != nil {
+			return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+		}
+		written, found, err := lookupWritten(ctx, dsnFile, file)
+		switch {
+		case err == nil && found:
+			return written, nil
+		case err == nil:
+			return time.Time{}, fmt.Errorf("resume session %s: the session table holds no such session", file)
+		}
+		wait := resumeLookupBackoff[min(attempt, len(resumeLookupBackoff)-1)]
+		select {
+		case <-ctx.Done():
+			return time.Time{}, fmt.Errorf("resume session %s: %v (after %d attempts in %s)", file, err, attempt+1, resumeLookupTimeout)
+		case <-time.After(wait):
+		}
+	}
+}
+
+// lookupWritten is one session table lookup of file through the URL dsnFile holds.
+func lookupWritten(ctx context.Context, dsnFile, file string) (time.Time, bool, error) {
 	conn, err := ompsessions.Connect(ctx, dsnFile)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+		return time.Time{}, false, err
 	}
 	defer conn.Close(context.Background())
-	written, found, err := ompsessions.Written(ctx, conn, file)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
-	}
-	if !found {
-		return time.Time{}, fmt.Errorf("resume session %s: the session table holds no such session", file)
-	}
-	return written, nil
+	return ompsessions.Written(ctx, conn, file)
 }
 
 // envValue is name's value in env, the last entry naming it, "" when none does.
 func envValue(env []string, name string) string {
-	value := ""
-	for _, entry := range env {
-		if found, rest, ok := strings.Cut(entry, "="); ok && found == name {
-			value = rest
+	for i := len(env) - 1; i >= 0; i-- {
+		if value, ok := strings.CutPrefix(env[i], name+"="); ok {
+			return value
 		}
 	}
-	return value
+	return ""
 }
 
 func mergeEnv(base, updates []string) []string {

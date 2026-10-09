@@ -982,7 +982,6 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 		want supervise.Event
 	}{
 		{stream.Hello{Claim: token, Generation: 3}, supervise.StreamHello{Claim: token, Generation: 3}},
-		{stream.Hello{Claim: token, Generation: 4, WorkspaceRecreated: true}, supervise.StreamHello{Claim: token, Generation: 4, WorkspaceRecreated: true}},
 		{stream.TurnStart{Claim: token, DeliveryID: "d1"}, supervise.StreamTurnStart{Claim: token, DeliveryID: "d1"}},
 		{stream.TurnEnd{Claim: token}, supervise.StreamTurnEnd{Claim: token}},
 		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."},

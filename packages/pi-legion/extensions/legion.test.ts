@@ -159,6 +159,7 @@ const environmentKeys = [
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
   "LEGION_GRANT_FILE",
+  "LEGION_WORKSPACE_RECREATED",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
@@ -3981,5 +3982,52 @@ describe("a Legion session's title", () => {
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
       title: "Legion controller · OMP",
     });
+  });
+});
+
+describe("the recreated-workspace notice", () => {
+  const firstTurnRequest = [
+    { role: "compactionSummary", summary: "earlier" },
+    { role: "user", content: [{ type: "text", text: "the task" }], timestamp: 1 },
+  ];
+  /** What the pane's `context` handler makes of a request, the request's messages when nothing. */
+  const requestOf = async (pane: ClaimPane): Promise<readonly unknown[]> => {
+    const handler = pane.handlers.get("context");
+    if (handler === undefined) throw new Error("context was not registered");
+    const result = (await handler({ messages: firstTurnRequest }, pane.context)) as
+      | { readonly messages: readonly unknown[] }
+      | undefined;
+    return result?.messages ?? firstTurnRequest;
+  };
+  const endTurn = async (pane: ClaimPane): Promise<void> => {
+    await pane.handlers.get("agent_end")?.({ messages: [] }, pane.context);
+  };
+
+  // A pane whose role launcher said its workspace was recreated tells the agent so in every
+  // request of its first turn, whatever started that turn, right after the compaction summaries,
+  // naming the issue's branch; the turn's end ends it, so no later turn carries it.
+  test("the first turn alone carries it when LEGION_WORKSPACE_RECREATED is true", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    for (const request of [await requestOf(pane), await requestOf(pane)]) {
+      expect(request).toHaveLength(3);
+      expect(request[0]).toEqual(firstTurnRequest[0]);
+      expect(request[1]).toMatchObject({ role: "user" });
+      expect(JSON.stringify(request[1])).toContain(
+        "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
+      );
+      expect(request[2]).toEqual(firstTurnRequest[1]);
+    }
+    await endTurn(pane);
+    expect(await requestOf(pane)).toEqual(firstTurnRequest);
+  });
+
+  test("no turn carries it when LEGION_WORKSPACE_RECREATED is false or unset", async () => {
+    for (const value of ["false", undefined]) {
+      if (value === undefined) delete process.env.LEGION_WORKSPACE_RECREATED;
+      else process.env.LEGION_WORKSPACE_RECREATED = value;
+      const pane = await bootPane({ role: "implementer", sessionId: `ses_recreated_${value}` });
+      expect(await requestOf(pane)).toEqual(firstTurnRequest);
+    }
   });
 });

@@ -1,112 +1,91 @@
 #!/usr/bin/env bash
-# Runs `legion sessions import` in one-off pods of the worker image, each mounting a volume of the
-# earlier release at /legion and the session database's URL key: steps 3 and 4 of docs/kubernetes.md
-# "Copying file sessions before turning it on". Run it with the daemon scaled to 0 and no pod of any
-# tree running, since a volume attaches to one node at a time. Each pod runs under gVisor as the
-# image's user and is scheduled as the pods of the Sandbox whose volume it reads were: that Sandbox's
-# pod template's node selector, tolerations, priority class and service account. It prints the
-# import's lines and is deleted; the script exits 1 when any import did.
+# Runs `legion sessions import` in one-off pods of the worker image, one per tree, each mounting the
+# tree's volume as legion-v10.0.0 left it at /legion and the session database's URL key: steps 3 and
+# 4 of docs/kubernetes.md "Copying file sessions before turning it on". It copies only from
+# legion-v10.0.0, whose every role runs in a Sandbox of its own: a project whose Sandboxes are issue
+# pods (legion-v10.1.0 and later) is refused by name, as that runbook has no copy path for them.
+# Run it with the daemon scaled to 0: it refuses while any pod of the project runs, since a pod
+# still running is a writer the copy would miss, and a volume attaches to one node at a time.
 #
-# usage: scripts/sessions-import-pods.sh [--claim <token> --pvc <name>] <claims.json> <namespace> <worker image@sha256> <project> <url secret> <url key> [<kubectl args>…]
-#   --claim, --pvc copy the one claim <token> from the volume <name> instead of every tree, scheduled
-#                  as the claim's own Sandbox is: a claim that belongs to no tree
+# Each tree's volume and root Sandbox are found by legion-v10.0.0's own labels (legion.dev/project,
+# legion.dev/role=architect, legion.dev/tree and legion.dev/issue: `labels` in
+# internal/runtime/sandbox/manifest.go at that tag, which its Sandboxes and their volume claim
+# templates carry), and each pod is scheduled as that root Sandbox's pods were: its pod template's
+# node selector, tolerations, priority class and service account. Each pod runs under gVisor as the
+# image's user, prints the import's lines, and is deleted; the script exits 1 when any import did.
+#
+# usage: scripts/sessions-import-pods.sh <claims.json> <namespace> <worker image@sha256> <project> <url secret> <url key> [<kubectl args>…]
 #   <claims.json>  what `legion claims list --json` printed before the daemon stopped
-#   <project>      legion.yaml's project; tree T's volume is the earlier release's
-#                  tree-<root Sandbox>, the root Sandbox being the claim legion-<project token>-<t>-architect's
-#                  (docs/kubernetes.md, "Upgrading a deployment with running trees"), the project
-#                  token lowercased with every non-alphanumeric removed
+#   <project>      legion.yaml's project; its token is lowercased with every non-alphanumeric removed
 #   <url secret>   the Secret holding the session database's postgres:// URL, <url key> its key
 #                  (the providers Secret and session_dsn_secret, as runtime.kubernetes names them)
 #   <kubectl args> passed to every kubectl call, e.g. --context <restricted context>
 set -euo pipefail
 
 usage() {
-  sed -n '10,20p' "$0" >&2
+  sed -n '17,22p' "$0" >&2
   exit 2
 }
 
-# sandbox_name is the earlier release's SandboxName of a claim token (dnsName in
-# internal/runtime/sandbox/names.go at legion-v10.0.0): lowercased, every character outside
-# [a-z0-9-] a dash, dash runs collapsed and dashes at either end trimmed, and past 63 characters its
-# first 54, a dash and the first 8 hex of the token's sha256.
-sandbox_name() {
-  local slug
-  slug=$(tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/[^a-z0-9-]/-/g; s/-+/-/g; s/^-//; s/-$//')
-  if ((${#slug} > 63)); then
-    slug="${slug:0:54}-$(printf '%s' "$1" | sha256sum | cut -c1-8)"
-  fi
-  printf '%s\n' "$slug"
-}
-
-claim='' pvc=''
-while (($#)); do
-  case $1 in
-  --claim)
-    (($# >= 2)) || usage
-    claim=$2
-    shift 2
-    ;;
-  --pvc)
-    (($# >= 2)) || usage
-    pvc=$2
-    shift 2
-    ;;
-  *) break ;;
-  esac
-done
-if [[ -n $claim$pvc && (-z $claim || -z $pvc) ]]; then
-  echo "sessions-import-pods: --claim and --pvc are given together" >&2
-  exit 2
-fi
 (($# >= 6)) || usage
 claims=$1 namespace=$2 image=$3 project=$4 secret=$5 key=$6
 shift 6
 kubectl=(kubectl -n "$namespace" "$@")
 [[ $image == *@sha256:* ]] || { echo "sessions-import-pods: image $image is not pinned by digest" >&2; exit 2; }
 token=$(tr -cd '[:alnum:]' <<<"$project" | tr '[:upper:]' '[:lower:]')
+selector="legion.dev/project=$token"
 
-# runs is one line per pod: its name, the Sandbox whose pods it is scheduled as, the volume it
-# mounts, and the import's selection flag and value.
-runs=()
-if [[ -n $claim ]]; then
-  jq -e --arg c "$claim" 'any(.claims[]; .token == $c)' "$claims" >/dev/null ||
-    { echo "sessions-import-pods: $claims names no claim $claim" >&2; exit 2; }
-  runs+=("legion-sessions-import-claim $(sandbox_name "$claim") $pvc --claim $claim")
-else
-  trees=$(jq -r '.claims[] | select(.sessionFile != "" and .tree != "") | .tree' "$claims" | sort -u)
-  while read -r untreed; do
-    [[ -n $untreed ]] && echo "sessions-import-pods: $untreed records a session and belongs to no tree; copy it with --claim $untreed --pvc <its volume>, or mark it lost" >&2
-  done < <(jq -r '.claims[] | select(.sessionFile != "" and .tree == "") | .token' "$claims")
-  [[ -n $trees ]] || { echo "sessions-import-pods: $claims records no session of any tree" >&2; exit 0; }
-  for tree in $trees; do
-    lower=$(tr '[:upper:]' '[:lower:]' <<<"$tree")
-    root=$(sandbox_name "legion-$token-$lower-architect")
-    runs+=("legion-sessions-import-$lower $root tree-$root --tree $tree")
-  done
+# The release: legion-v10.0.0 labels every Sandbox with its role; an issue pod of a later release
+# carries an issue label and no role.
+issue_pods=$("${kubectl[@]}" get sandboxes -l "$selector,legion.dev/issue,!legion.dev/role,!legion.dev/probe" -o name)
+if [[ -n $issue_pods ]]; then
+  echo "sessions-import-pods: project $token runs issue pods ($(wc -l <<<"$issue_pods") Sandboxes with an issue label and no role, e.g. ${issue_pods%%$'\n'*}), so it is on legion-v10.1.0 or later; this script copies only from legion-v10.0.0's per-claim Sandboxes (docs/kubernetes.md \"Copying file sessions before turning it on\")" >&2
+  exit 2
+fi
+running=$("${kubectl[@]}" get pods -l "$selector,!legion.dev/sessions-import" --field-selector=status.phase=Running -o name)
+if [[ -n $running ]]; then
+  echo "sessions-import-pods: $(wc -l <<<"$running") pod(s) of project $token are running, e.g. ${running%%$'\n'*}: a running agent writes its session after the copy; suspend every claim and scale the daemon to 0 first (step 1 and 2)" >&2
+  exit 2
 fi
 
+trees=$(jq -r '.claims[] | select(.sessionFile != "" and .tree != "") | .tree' "$claims" | sort -u)
+while read -r untreed; do
+  [[ -n $untreed ]] && echo "sessions-import-pods: $untreed records a session and belongs to no tree; step 5 marks it lost" >&2
+done < <(jq -r '.claims[] | select(.sessionFile != "" and .tree == "") | .token' "$claims")
+[[ -n $trees ]] || { echo "sessions-import-pods: $claims records no session of any tree" >&2; exit 0; }
+
 configmap=legion-sessions-import-claims
-"${kubectl[@]}" create configmap "$configmap" --from-file=claims.json="$claims" --dry-run=client -o yaml | "${kubectl[@]}" apply -f - >/dev/null
+"${kubectl[@]}" delete configmap "$configmap" --ignore-not-found >/dev/null
+"${kubectl[@]}" create configmap "$configmap" --from-file=claims.json="$claims" >/dev/null
 trap '"${kubectl[@]}" delete configmap "$configmap" --ignore-not-found >/dev/null' EXIT
 
 failed=0
-for run in "${runs[@]}"; do
-  read -r pod sandbox volume flag selected <<<"$run"
-  if ! "${kubectl[@]}" get pvc "$volume" >/dev/null 2>&1; then
-    echo "sessions-import-pods: $selected has no volume $volume: its sessions can only be marked lost (--mark-lost)" >&2
+for tree in $trees; do
+  if ((${#tree} > 63)); then
+    echo "sessions-import-pods: tree $tree is past a label value's 63 characters, which legion-v10.0.0 hashed; copy it by hand" >&2
     failed=1
     continue
   fi
-  # The scheduling the earlier release gave the Sandbox's pods, which a cluster's admission may
+  root="$selector,legion.dev/role=architect,legion.dev/tree=$tree,legion.dev/issue=$tree"
+  volume=$("${kubectl[@]}" get pvc -l "$root" -o jsonpath='{.items[*].metadata.name}')
+  if [[ -z $volume || $volume == *" "* ]]; then
+    echo "sessions-import-pods: tree $tree has ${volume:-no} volume labelled $root, want one: its sessions can only be marked lost (step 5)" >&2
+    failed=1
+    continue
+  fi
+  # The scheduling legion-v10.0.0 gave the root Sandbox's pods, which a cluster's admission may
   # require of every pod on the Legion pool: an absent field is the API's default.
-  if ! scheduling=$("${kubectl[@]}" get sandboxes "$sandbox" -o json | jq -ce '.spec.podTemplate.spec |
+  scheduling=$("${kubectl[@]}" get sandboxes -l "$root" -o json | jq -ce 'if (.items | length) == 1 then .items[0].spec.podTemplate.spec |
     {nodeSelector: (.nodeSelector // {}), tolerations: (.tolerations // []),
-     priorityClassName: (.priorityClassName // ""), serviceAccountName: (.serviceAccountName // "")}'); then
-    echo "sessions-import-pods: $selected has no Sandbox $sandbox to schedule its import as; copy it by hand" >&2
+     priorityClassName: (.priorityClassName // ""), serviceAccountName: (.serviceAccountName // "")} else empty end') || {
+    echo "sessions-import-pods: tree $tree has no one root Sandbox labelled $root to schedule its import as; copy it by hand" >&2
     failed=1
     continue
-  fi
-  "${kubectl[@]}" apply -f - >/dev/null <<EOF
+  }
+  pod="legion-sessions-import-$(tr '[:upper:]' '[:lower:]' <<<"$tree")"
+  # A pod a run interrupted before its delete would report its own output as this run's.
+  "${kubectl[@]}" delete pod "$pod" --ignore-not-found --wait >/dev/null
+  "${kubectl[@]}" create -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -129,19 +108,25 @@ spec:
   containers:
     - name: import
       image: "$image"
-      args: [sessions, import, --dsn-file, /var/run/legion/sessions/OMP_SESSION_SQL_DSN, --claims, /var/run/legion/claims/claims.json, "$flag", "$selected", --tree-volume, /legion]
+      args: [sessions, import, --dsn-file, /var/run/legion/sessions/OMP_SESSION_SQL_DSN, --claims, /var/run/legion/claims/claims.json, --tree, "$tree", --tree-volume, /legion]
       volumeMounts:
         - {name: tree, mountPath: /legion, readOnly: true}
         - {name: url, mountPath: /var/run/legion/sessions, readOnly: true}
         - {name: claims, mountPath: /var/run/legion/claims, readOnly: true}
       securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
 EOF
-  "${kubectl[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=15m "pod/$pod" >/dev/null 2>&1 ||
-    "${kubectl[@]}" wait --for=jsonpath='{.status.phase}'=Failed --timeout=10s "pod/$pod" >/dev/null 2>&1 || true
-  echo "== $selected ($volume)"
+  # Waits for the pod to end, Succeeded or Failed, for up to 15 minutes, so a pod that fails is
+  # reported at once.
+  deadline=$((SECONDS + 900))
+  while :; do
+    phase=$("${kubectl[@]}" get pod "$pod" -o jsonpath='{.status.phase}')
+    [[ $phase == Succeeded || $phase == Failed ]] && break
+    ((SECONDS < deadline)) || break
+    sleep 5
+  done
+  echo "== $tree ($volume)"
   "${kubectl[@]}" logs "$pod" || true
-  phase=$("${kubectl[@]}" get pod "$pod" -o jsonpath='{.status.phase}')
-  [[ $phase == Succeeded ]] || { echo "sessions-import-pods: $selected's import pod ended $phase" >&2; failed=1; }
+  [[ $phase == Succeeded ]] || { echo "sessions-import-pods: tree $tree's import pod ended ${phase:-without a phase}" >&2; failed=1; }
   "${kubectl[@]}" delete pod "$pod" --wait >/dev/null
 done
 exit "$failed"

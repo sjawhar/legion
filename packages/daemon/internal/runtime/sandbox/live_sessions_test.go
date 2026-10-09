@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
-	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // liveSessionsSecretKey is the providers Secret's key the script writes the scratch database's URL
@@ -29,9 +29,9 @@ const liveSessionsSecretKey = "stage4a_sessions"
 // the role is resumed from that path: a resume of a path the table lacks is refused by the role's
 // launcher, naming the table, before any child runs; the resume from the copied path registers,
 // though the volume holds no such file, since the launcher looked the session up in the table
-// through the pod's URL file; and its shim's hello, and the agent's environment, say the workspace
-// was recreated since the session was last written, which the daemon tells the agent ahead of its
-// next task.
+// through the pod's URL file; and the agent's environment says the workspace was recreated since the
+// session was last written (launcher.WorkspaceRecreatedVariable), which the Legion plugin tells the
+// agent on its first turn, where the fresh generation's said it was not.
 func (r *liveRig) checkPostgresResume() error {
 	c := r.claim("sessions")
 	if r.sessionStore == "" {
@@ -53,13 +53,13 @@ func (r *liveRig) checkPostgresResume() error {
 	if err != nil {
 		return err
 	}
-	if fresh.recreated {
-		return fmt.Errorf("the fresh generation %d's hello said its workspace was recreated, want a fresh agent told nothing", fresh.gen)
-	}
-	note("harness", "hello registered %s at generation %d (fresh, workspace not recreated) in pod uid %s", c.token, fresh.gen, c.loc.Sandbox.PodUID)
+	note("harness", "hello registered %s at generation %d (fresh) in pod uid %s", c.token, fresh.gen, c.loc.Sandbox.PodUID)
 	agent, err := r.agentEnviron(c)
 	if err != nil {
 		return err
+	}
+	if got := agent[launcher.WorkspaceRecreatedVariable]; got != "false" {
+		return fmt.Errorf("the fresh agent has %s=%q, want false", launcher.WorkspaceRecreatedVariable, got)
 	}
 	if agent[ompsessions.StorageVariable] != ompsessions.SQLStorage || agent[ompsessions.DSNFileVariable] != ProvidersDir+"/"+sessionDSNFile {
 		return fmt.Errorf("the agent has %s=%q and %s=%q, want %s and %s", ompsessions.StorageVariable, agent[ompsessions.StorageVariable],
@@ -111,18 +111,16 @@ func (r *liveRig) checkPostgresResume() error {
 	if resumed.hash != tokenHash(c.bootToken) {
 		return fmt.Errorf("the registration's token hash %s is not generation %d's", short(resumed.hash), c.gen)
 	}
-	if !resumed.recreated {
-		return fmt.Errorf("the resumed generation %d's hello did not say its workspace was recreated since its session was last written at %s", resumed.gen, written.UTC().Format(time.RFC3339))
-	}
-	note("harness", "hello registered %s at generation %d, resumed from the table in pod uid %s, saying its workspace was recreated since the session was last written", c.token, resumed.gen, loc.Sandbox.PodUID)
+	note("harness", "hello registered %s at generation %d, resumed from the table in pod uid %s", c.token, resumed.gen, loc.Sandbox.PodUID)
 	agent, err = r.agentEnviron(c)
 	if err != nil {
 		return err
 	}
-	if agent[shimwire.WorkspaceRecreatedVariable] != "true" {
-		return fmt.Errorf("the resumed agent has %s=%q, want true", shimwire.WorkspaceRecreatedVariable, agent[shimwire.WorkspaceRecreatedVariable])
+	if agent[launcher.WorkspaceRecreatedVariable] != "true" {
+		return fmt.Errorf("the resumed agent has %s=%q, want true: its workspace was created after the session was last written at %s",
+			launcher.WorkspaceRecreatedVariable, agent[launcher.WorkspaceRecreatedVariable], written.UTC().Format(time.RFC3339))
 	}
-	note("operator", "the resumed agent's environment: %s=true", shimwire.WorkspaceRecreatedVariable)
+	note("operator", "the resumed agent's environment: %s=true", launcher.WorkspaceRecreatedVariable)
 	return nil
 }
 

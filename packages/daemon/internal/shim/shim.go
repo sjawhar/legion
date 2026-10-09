@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -78,12 +77,6 @@ type Config struct {
 	// AgentSecrets is the pod's enrollment with the secrets broker (agentsecrets.go); nil on a
 	// tmux pane, which is never enrolled.
 	AgentSecrets *AgentSecrets
-	// WorkspaceRecreated is the launcher's word that this agent resumes a session in a workspace
-	// recreated since the session was last written (shimwire.WorkspaceRecreatedVariable). Every
-	// hello carries it until Oh My Pi starts a turn: the daemon's notice goes ahead of the agent's
-	// next task, and a hello after a turn, such as a redial to a restarted daemon, has nothing left
-	// to tell.
-	WorkspaceRecreated bool
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -99,7 +92,6 @@ type Config struct {
 // the child, never the child's.
 func Run(ctx context.Context, cfg Config) (int, error) {
 	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, childExited: make(chan struct{})}
-	s.recreated.Store(cfg.WorkspaceRecreated)
 	if s.clock == nil {
 		s.clock = realClock{}
 	}
@@ -144,8 +136,6 @@ type shim struct {
 	childExited chan struct{}
 	thumbprint  string // agent-secrets keygen's thumbprint, generated once per shim
 	renewing    bool   // the agent-secrets renewer goroutine has been started
-	// recreated is Config.WorkspaceRecreated until Oh My Pi's first agent_start (pump).
-	recreated atomic.Bool
 
 	// renewers is the agent-secrets renewer goroutine (agentsecrets.go's startRenewer), reaped by
 	// Run's deferred Wait before it returns.
@@ -202,7 +192,7 @@ func (s *shim) connect() (acked bool, err error) {
 	defer context.AfterFunc(s.loop, func() { _ = conn.Close() })()
 
 	w := shimwire.NewWriter(conn)
-	if err := w.WriteFrame(shimwire.Hello2{BootToken: s.cfg.BootToken, AgentSecrets: identity, WorkspaceRecreated: s.recreated.Load()}); err != nil {
+	if err := w.WriteFrame(shimwire.Hello2{BootToken: s.cfg.BootToken, AgentSecrets: identity}); err != nil {
 		return false, fmt.Errorf("send hello: %w", err)
 	}
 	r := shimwire.NewReader(conn)
@@ -370,9 +360,6 @@ func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 		var owed []shimwire.Frame
 		if err == nil {
 			owed = s.dedupe.AgentFrame(frame)
-			if _, started := frame.(shimwire.AgentStart); started {
-				s.recreated.Store(false)
-			}
 		}
 		s.out.send(line)
 		for _, f := range owed {

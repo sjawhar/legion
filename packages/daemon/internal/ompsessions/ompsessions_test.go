@@ -147,13 +147,15 @@ func TestWrittenFindsOnlyASessionTheTableHoldsAndWhenItWasWritten(t *testing.T) 
 	}
 }
 
-// Content Postgres cannot keep as text is refused before anything is written.
+// Content Postgres cannot keep as text is refused, by Postgres itself, naming the session, and
+// nothing is written.
 func TestImportRefusesContentNoTextValueHolds(t *testing.T) {
 	conn := connect(t)
 	for name, content := range map[string][]byte{"not UTF-8": {0xff, 0xfe, '\n'}, "a NUL byte": []byte("{}\x00\n")} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Import(context.Background(), conn, sessionPath, content, time.Now()); err == nil {
-				t.Fatal("Import succeeded, want a refusal")
+			_, err := Import(context.Background(), conn, sessionPath, content, time.Now())
+			if err == nil || !strings.Contains(err.Error(), "write session "+sessionPath) || !strings.Contains(err.Error(), "invalid byte sequence") {
+				t.Fatalf("Import = %v, want the write of %s refused for its invalid byte sequence", err, sessionPath)
 			}
 			if _, found, _ := Written(context.Background(), conn, sessionPath); found {
 				t.Error("a refused copy wrote the row")

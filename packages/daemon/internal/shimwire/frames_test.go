@@ -215,15 +215,11 @@ func TestTheFramesTheShippedCodeValidatesRefuseTheirMalformedForms(t *testing.T)
 	}
 }
 
-// A hello2 carries the identity and the recreated workspace only when it has them: a shim of an
-// earlier release, which sends neither, and a daemon of one, which reads neither, still meet.
 func TestHello2RoundTripsWithAndWithoutAnIdentity(t *testing.T) {
 	identity := &AgentSecretsHello{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.sig"}
 	for name, frame := range map[string]Hello2{
-		"with identity":                      {BootToken: "boot", AgentSecrets: identity},
-		"without identity":                   {BootToken: "boot"},
-		"in a recreated workspace":           {BootToken: "boot", WorkspaceRecreated: true},
-		"with identity in a recreated space": {BootToken: "boot", AgentSecrets: identity, WorkspaceRecreated: true},
+		"with identity":    {BootToken: "boot", AgentSecrets: identity},
+		"without identity": {BootToken: "boot"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			line, err := json.Marshal(frame)
@@ -236,16 +232,13 @@ func TestHello2RoundTripsWithAndWithoutAnIdentity(t *testing.T) {
 			if frame.AgentSecrets == nil && bytes.Contains(line, []byte("agentSecrets")) {
 				t.Fatalf("an absent identity is encoded: %s", line)
 			}
-			if !frame.WorkspaceRecreated && bytes.Contains(line, []byte("workspaceRecreated")) {
-				t.Fatalf("a workspace not recreated is encoded: %s", line)
-			}
 			decoded, err := Decode(line)
 			if err != nil {
 				t.Fatal(err)
 			}
 			got, ok := decoded.(Hello2)
 			if !ok || got.BootToken != "boot" || (got.AgentSecrets == nil) != (frame.AgentSecrets == nil) ||
-				(got.AgentSecrets != nil && *got.AgentSecrets != *identity) || got.WorkspaceRecreated != frame.WorkspaceRecreated {
+				(got.AgentSecrets != nil && *got.AgentSecrets != *identity) {
 				t.Fatalf("decoded %#v", decoded)
 			}
 			if err := got.Validate(); err != nil {

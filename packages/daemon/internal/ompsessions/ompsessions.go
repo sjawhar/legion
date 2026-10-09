@@ -18,7 +18,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -49,16 +48,17 @@ var createTables = []string{
 // undefinedTable is Postgres's SQLSTATE for a relation that does not exist.
 const undefinedTable = "42P01"
 
-// ReadDSN is the connection URL a DSN file holds, trimmed as Oh My Pi trims it. Its refusals name
-// the file, never what it holds.
+// ReadDSN is the connection URL a DSN file holds, trimmed as Oh My Pi trims it: the session
+// database's, or the daemon's own for `legion sessions mark-lost`, whose callers say which. Its
+// refusals name the file, never what it holds.
 func ReadDSN(file string) (string, error) {
 	body, err := os.ReadFile(file)
 	if err != nil {
-		return "", fmt.Errorf("read the session database's URL from %s: %w", file, err)
+		return "", fmt.Errorf("read the database URL file %s: %w", file, err)
 	}
 	dsn := strings.TrimSpace(string(body))
 	if dsn == "" {
-		return "", fmt.Errorf("the session database's URL file %s is empty", file)
+		return "", fmt.Errorf("the database URL file %s is empty", file)
 	}
 	return dsn, nil
 }
@@ -175,15 +175,9 @@ func (e *ConflictError) Error() string {
 // transaction, since a session reads as its row followed by its parts. It first creates the two
 // tables when the database has none (createTables). A session the table already holds is left as
 // it is: Identical when it is content byte for byte, a *ConflictError otherwise. Content Postgres
-// cannot keep as text, a byte sequence that is not UTF-8 or a NUL byte, is refused before anything
-// is written.
+// cannot keep as text, a byte sequence that is not UTF-8 or a NUL byte, Postgres refuses itself, and
+// the transaction writes nothing.
 func Import(ctx context.Context, conn *pgx.Conn, path string, content []byte, mtime time.Time) (Outcome, error) {
-	if !utf8.Valid(content) {
-		return "", fmt.Errorf("session %s is not UTF-8 text, which the session table keeps", path)
-	}
-	if bytes.IndexByte(content, 0) >= 0 {
-		return "", fmt.Errorf("session %s holds a NUL byte, which a Postgres text value cannot", path)
-	}
 	for _, statement := range createTables {
 		if _, err := conn.Exec(ctx, statement); err != nil {
 			return "", fmt.Errorf("create Oh My Pi's session tables: %w", err)

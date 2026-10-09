@@ -151,7 +151,7 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	}
 }
 
-// stoppedDaemon is a daemon's database, migrated, holding claims, as `--mark-lost` finds it with
+// stoppedDaemon is a daemon's database, migrated, holding claims, as `sessions mark-lost` finds it with
 // the daemon stopped; and the file holding its URL.
 func stoppedDaemon(t *testing.T, claims ...supervise.Claim) (*store.Store, string) {
 	t.Helper()
@@ -182,7 +182,7 @@ func suspendedClaim(project, token, issue string, role legionclaim.Role, file st
 	return c
 }
 
-// --mark-lost copies nothing and marks, in the stopped daemon's own database, each claim whose
+// `sessions mark-lost` copies nothing and marks, in the stopped daemon's own database, each claim whose
 // recorded session the table lacks as the daemon marks a claim whose volume was lost: no session,
 // no session file, its workspace lost. A claim the table holds, and one whose record no longer
 // names a session, are left as they are.
@@ -205,11 +205,11 @@ func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
 		suspendedClaim("legion", "legion-legion-legion-3-architect", "LEGION-3", legionclaim.RoleArchitect, ""),
 	)
 	var out, errb bytes.Buffer
-	code := run(context.Background(), []string{"legion", "sessions", "import", "--dsn-file", r.dsnFile, "--claims", r.claims, "--mark-lost", "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
+	code := run(context.Background(), []string{"legion", "sessions", "mark-lost", "--dsn-file", r.dsnFile, "--claims", r.claims, "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
 	for _, want := range []string{
 		"legion-legion-legion-2-architect marked lost: the session table holds no " + gone,
 		"legion-legion-legion-3-architect failed to mark lost: the daemon's database holds no such claim recording " + cleared,
-		"legion sessions import: marked lost 1, failed 1\n",
+		"legion sessions mark-lost: marked lost 1, failed 1\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("--mark-lost printed\n%s\nwant a line containing %q", out.String(), want)
@@ -232,8 +232,8 @@ func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
 
 // With the daemon stopped its database is the record, and a claim it records with a session file
 // the claims list does not give that claim — one launched, or relaunched onto a new session, after
-// the list was saved — is one neither the copy nor --mark-lost would reach, and under SQL storage
-// it would fail every launch. --mark-lost names each such claim of the list's project, another
+// the list was saved — is one neither the copy nor mark-lost would reach, and under SQL storage
+// it would fail every launch. mark-lost names each such claim of the list's project, another
 // project's in a shared database aside, and marks nothing; and a database that holds none of the
 // list's claims is not that daemon's.
 func TestSessionsImportMarkLostRefusesAClaimTheListDoesNotHave(t *testing.T) {
@@ -253,7 +253,7 @@ func TestSessionsImportMarkLostRefusesAClaimTheListDoesNotHave(t *testing.T) {
 	)
 	markLost := func(claims string) (int, string, string) {
 		var out, errb bytes.Buffer
-		code := run(context.Background(), []string{"legion", "sessions", "import", "--dsn-file", r.dsnFile, "--claims", claims, "--mark-lost", "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
+		code := run(context.Background(), []string{"legion", "sessions", "mark-lost", "--dsn-file", r.dsnFile, "--claims", claims, "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
 		return code, out.String(), errb.String()
 	}
 
@@ -313,6 +313,12 @@ func TestSessionsImportRefusesWhatIsNotAClaimsList(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "sessions", "import", "--claims", r.claims}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--dsn-file is required") {
 		t.Errorf("import without --dsn-file = %d, %q; want the usage error", code, errb.String())
+	}
+	if code := run(context.Background(), []string{"legion", "sessions", "mark-lost", "--dsn-file", r.dsnFile, "--claims", r.claims}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--daemon-dsn-file is required") {
+		t.Errorf("mark-lost without --daemon-dsn-file = %d, %q; want the usage error", code, errb.String())
+	}
+	if code := run(context.Background(), []string{"legion", "sessions", "import", "--dsn-file", r.dsnFile, "--claims", r.claims, "--mark-lost"}, &out, &errb); code != 2 {
+		t.Errorf("import --mark-lost = %d, want the flag refused now that mark-lost is its own command", code)
 	}
 
 	stdin, writer, err := os.Pipe()

@@ -21,15 +21,13 @@ type AgentSecretsIdentity struct {
 }
 
 // Hello is a shim's hello accepted: the claim's connection is registered, at the generation its
-// boot token was minted for, with the identity the hello carried, if any, and whether it said the
-// agent resumed in a workspace recreated since its session was last written and has had no turn
-// since. Under always-dial the shim says hello before it spawns Oh My Pi, so a Hello says the
-// pane's bridge is up, not that the agent is.
+// boot token was minted for, with the identity the hello carried, if any. Under always-dial the
+// shim says hello before it spawns Oh My Pi, so a Hello says the pane's bridge is up, not that the
+// agent is.
 type Hello struct {
-	Claim              claim.Token
-	Generation         uint64
-	AgentSecrets       *AgentSecretsIdentity
-	WorkspaceRecreated bool
+	Claim        claim.Token
+	Generation   uint64
+	AgentSecrets *AgentSecretsIdentity
 }
 
 // TurnStart is OMP's agent_start. DeliveryID is set only when the frame carried one — the shim's

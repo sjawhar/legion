@@ -274,16 +274,14 @@ type minted struct {
 }
 
 // registration is a hello the listener registered: the claim and generation of the Hello event,
-// the hash of the token the resolver accepted for it, when the shim's hello carried one the pod's
-// agent-secrets session identity, and whether the hello said the agent resumed in a workspace
-// recreated since its session was last written.
+// the hash of the token the resolver accepted for it, and — when the shim's hello carried one —
+// the pod's agent-secrets session identity.
 type registration struct {
-	claim     claim.Token
-	gen       uint64
-	hash      string
-	at        time.Time
-	identity  *stream.AgentSecretsIdentity
-	recreated bool
+	claim    claim.Token
+	gen      uint64
+	hash     string
+	at       time.Time
+	identity *stream.AgentSecretsIdentity
 }
 
 // registry is the harness's store of boot tokens, which outlives every listener and runtime of
@@ -350,7 +348,6 @@ func (g *registry) hello(event stream.Hello) {
 	defer g.mu.Unlock()
 	g.accepted = append(g.accepted, registration{
 		claim: event.Claim, gen: event.Generation, hash: g.pending[event.Claim], at: time.Now(), identity: event.AgentSecrets,
-		recreated: event.WorkspaceRecreated,
 	})
 	close(g.changed)
 	g.changed = make(chan struct{})

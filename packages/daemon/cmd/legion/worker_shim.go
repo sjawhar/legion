@@ -92,19 +92,14 @@ func workerShimConfig(set map[string]bool, connect, bootTokenFile, providerEnvDi
 	if err != nil {
 		return shim.Config{}, err
 	}
-	recreated, err := shim.ReadWorkspaceRecreated(os.LookupEnv)
-	if err != nil {
-		return shim.Config{}, err
-	}
 	return shim.Config{
-		Network:            network,
-		Address:            address,
-		BootToken:          token,
-		Argv:               argv,
-		Env:                os.Environ(),
-		ProviderEnv:        providerEnv,
-		AgentSecrets:       agentSecrets,
-		WorkspaceRecreated: recreated,
-		Grace:              shim.DefaultGrace,
+		Network:      network,
+		Address:      address,
+		BootToken:    token,
+		Argv:         argv,
+		Env:          os.Environ(),
+		ProviderEnv:  providerEnv,
+		AgentSecrets: agentSecrets,
+		Grace:        shim.DefaultGrace,
 	}, nil
 }
