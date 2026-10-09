@@ -7,8 +7,9 @@ import { scriptFunctions } from "./script-functions";
 // merger_self_posted, taken from stage3-4b13b-acceptance.sh by name and run against a merger's
 // session written as Oh My Pi writes it: the 4b.13b acceptance's soft check that the merger never
 // posts or publishes READY itself (the daemon posts the packet the merger completes with). Oh My
-// Pi gives the model three ways to call dispatch_message and envoy_publish, and each must count:
-// the tool itself, a write to its xd:// device, and eval code that calls tool.<name>(...).
+// Pi gives the model four ways to call dispatch_message and envoy_publish, and each must count:
+// the tool itself, a write to its xd:// device, eval code that calls tool.<name>(...), and eval
+// code that calls the generic tool.write(...) naming that device.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"));
 const dir = mkdtempSync(join(tmpdir(), "merger-self-posted-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -79,12 +80,27 @@ describe("merger_self_posted", () => {
     expect(selfPosts(assistant(evalCall(code)))).toHaveLength(1);
   });
 
-  test("any publish counts, through the tool, its device, or eval", () => {
+  test("a READY posted through eval calling the generic tool.write counts", () => {
+    const args = { issue: "LEGSMOKE-1", body: ready };
+    const code = `await tool.write({ path: "xd://dispatch_message", content: ${JSON.stringify(JSON.stringify(args))} });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(1);
+  });
+
+  test("any publish counts, through the tool, its device, or either eval form", () => {
     const args = { topic: "notifications.role.merge-queue", body: note };
     expect(selfPosts(assistant(tool("envoy_publish", args)))).toHaveLength(1);
     expect(selfPosts(assistant(device("envoy_publish", args)))).toHaveLength(1);
     expect(
       selfPosts(assistant(evalCall(`await tool.envoy_publish(${JSON.stringify(args)});`)))
+    ).toHaveLength(1);
+    expect(
+      selfPosts(
+        assistant(
+          evalCall(
+            `await tool.write({ path: "xd://envoy_publish", content: ${JSON.stringify(JSON.stringify(args))} });`
+          )
+        )
+      )
     ).toHaveLength(1);
   });
 
@@ -94,6 +110,15 @@ describe("merger_self_posted", () => {
     expect(selfPosts(assistant(device("dispatch_message", args)))).toHaveLength(0);
     expect(
       selfPosts(assistant(evalCall(`await tool.dispatch_message(${JSON.stringify(args)});`)))
+    ).toHaveLength(0);
+    expect(
+      selfPosts(
+        assistant(
+          evalCall(
+            `await tool.write({ path: "xd://dispatch_message", content: ${JSON.stringify(JSON.stringify(args))} });`
+          )
+        )
+      )
     ).toHaveLength(0);
   });
 
@@ -112,6 +137,37 @@ describe("merger_self_posted", () => {
     expect(selfPosts(assistant(write(" xd://dispatch_message ")))).toHaveLength(1);
     expect(selfPosts(assistant(write("xd://dispatch_messages")))).toHaveLength(0);
     expect(selfPosts(assistant(write("notes/xd://dispatch_message.md")))).toHaveLength(0);
+  });
+
+  test("eval that writes to another device while a comment mentions xd://dispatch_message is no self-post", () => {
+    const code = `// writing xd://another_device, not xd://dispatch_message here\nawait tool.write({ path: "xd://another_device", content: "READY LEGSMOKE-1" });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a READY posted through eval calling tool.write with content built before path counts", () => {
+    const args = { issue: "LEGSMOKE-1", body: ready };
+    const code = `r = await tool.write({"content": ${JSON.stringify(JSON.stringify(args))}, "path": "xd://dispatch_message"})\nr`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(1);
+  });
+
+  test("a block comment naming the device inside another device's write is no self-post", () => {
+    const code = `await tool.write({ path: "xd://another_device", /* xd://dispatch_message */ content: "READY LEGSMOKE-1" });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a file write whose content mentions the device as prose is no self-post", () => {
+    const code = `await tool.write({ path: "./notes.md", content: "READY LEGSMOKE-1. See xd://dispatch_message for the device." });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a Python kwargs file write, then a print naming the device, is no self-post", () => {
+    const code = `tool.write(path="./notes.md", content="READY LEGSMOKE-1")\nprint("the device is xd://dispatch_message")`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a write to a device with the report's name as a prefix is no self-post", () => {
+    const code = `await tool.write({ path: "xd://dispatch_message.md", content: "READY LEGSMOKE-1" });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
   });
 
   test("the completion that carries the packet, and a tool result quoting the tools, are no self-post", () => {

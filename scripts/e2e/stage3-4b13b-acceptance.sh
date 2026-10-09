@@ -555,7 +555,7 @@ merger_summary() {
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
 # merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
-# made any of the three ways Oh My Pi gives the model to call dispatch_message and envoy_publish
+# made any way Oh My Pi gives the model to call dispatch_message and envoy_publish
 # (lib/omp-tool-calls.jq's calls). Any publish counts; a message counts when its body starts with
 # READY, which in eval code is a string literal that starts with it.
 merger_self_posted() {
@@ -1120,9 +1120,9 @@ jq -n --arg issue "$root1" --argjson refusals "$(jq length "$evidence/ready-cap-
 pass
 
 begin merge-at-awaiting-merge-gives-no-pr-merged
-# The early-merge section merged $root2's pull request into the scratch base, and every proof pull
-# request carries its phase handoffs under .legion/, so $root1's no longer merges there cleanly. It
-# merges into a base of its own, cut from the same main commit.
+# The early-merge section merged $root2's pull request into the scratch base, and both proof pull
+# requests branched from the same main commit, so $root1's may no longer merge there cleanly (their
+# retro learnings, for one). It merges into a base of its own, cut from that main commit.
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$merge_base" -f sha="$main_sha" >/dev/null
 gh -R "$repo" pr edit "${pr_of[$root1]}" --base "$merge_base" >/dev/null
 note "$repo#${pr_of[$root1]} retargeted to its own base $merge_base at main $main_sha"
