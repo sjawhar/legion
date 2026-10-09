@@ -1027,8 +1027,11 @@ applies every migration, first sets the transaction's `lock_timeout` to `pgmigra
 (five seconds), after the runner's advisory lock, so a migration queued behind a long transaction
 fails the boot rather than holding every read and write of its table behind its request. While
 the migration runs, its lock watch reads `pg_locks` for the transaction's backend every 200 ms on
-a connection it dials from that backend's own configuration (`pgx.Conn.Config`) at its first
-reading and closes when the migration ends, so a migration faster than one reading dials nothing.
+a connection opened at its first reading by the one `dial` `pgmigrate.Exec` builds: from that
+backend's own configuration (`pgx.Conn.Config`), signed in first through the pool's
+`BeforeConnect` when the pool has one (the broker's RDS IAM token minter, since the backend's own
+token may be older than a token lasts). It closes when the migration ends, so a migration faster
+than one reading dials nothing.
 The watch's last reading is how the failure names the lock and its holders: Postgres's own error
 says only `canceling statement due to lock timeout`.
 
@@ -2120,7 +2123,14 @@ with a warning that its `agent-secrets` calls fail until the machine is logged i
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
 `${BROKER_DATABASE_PASSWORD}` placeholder is substituted, URL-escaped, from
 `BROKER_DATABASE_PASSWORD` — naming the placeholder without the variable, or the variable without
-the placeholder, is refused naming both), `BROKER_PUBLIC_URL` (required; absolute URL, no path —
+the placeholder, is refused naming both; a URL naming a user and no password whose host ends in
+`.rds.amazonaws.com`, for which `pgconn.ParseConfig` finds no password (none in the URL, `PGPASSWORD`
+or a passfile), sets `Config.DatabaseIAM` and must read as that one host with `sslmode=verify-full`
+and an `sslrootcert` file's pool (not `sslrootcert=system`), or `Load` refuses naming the host and
+never the URL; `cmd/broker` then loads the AWS config once, before `store.Open`, and passes
+`store.WithTokenMinter(rdsAuthTokens(awsCfg))` (`cmd/broker/rdsauth.go`, so `internal/broker/store`
+imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new connection),
+`BROKER_PUBLIC_URL` (required; absolute URL, no path —
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),

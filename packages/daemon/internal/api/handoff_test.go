@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -328,6 +329,95 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	}
 	if len(runs) != 2 || runs[0] != 1 || runs[1] != 2 {
 		t.Fatalf("the workflow saw runs %v, want [1 2]", runs)
+	}
+}
+
+// A pull request waiting to be merged that starts conflicting with its base is sent back to the
+// implementer, which merges the base forward in the same run, with the same claim. The key the
+// route builds tells one implementing pass from the last by the round, so that conflict round has
+// to open a round of its own: otherwise a completion that wrote no new handoff reports the carrying
+// commit of the round before at the same round, takes that completion's key and is answered
+// HANDOFF_ALREADY_RECORDED, which tells the worker it was received when nothing moved. The workflow
+// sees it instead and refuses it naming the handoff the round must write, and the completion that
+// carries one moves the issue on to testing.
+func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) {
+	h := newHarness(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: testProject, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+		Handlers: []intake.Handler{engine}, Dispatch: &statusRecorder{},
+	}).Handler
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+		Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	h.recordIssue(issue)
+	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
+		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208",
+			Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	}); err != nil {
+		t.Fatalf("record the pull request: %v", err)
+	}
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	complete := func(commit string) *httptest.ResponseRecorder {
+		t.Helper()
+		return h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+			GrantID: implementer.grant(t), Summary: "implemented", Commit: commit,
+		}, nil)
+	}
+	phaseNow := func() phase.Phase {
+		t.Helper()
+		var got phase.Phase
+		if err := h.store.Pool().QueryRow(ctx, "select phase from issues where key = 'LEGION-208'").Scan(&got); err != nil {
+			t.Fatalf("read the phase: %v", err)
+		}
+		return got
+	}
+
+	if recorder := complete("handoff-1"); recorder.Code != http.StatusOK || phaseNow() != phase.Testing {
+		t.Fatalf("the first round's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
+	}
+	// Testing, review, retro and the merger's READY pass; the issue waits on a human's merge.
+	issue.Phase, issue.Status = phase.AwaitingMerge, "retro"
+	h.recordIssue(issue)
+	if result, err := intake.ApplyFact(ctx, h.store.Pool(), "github", "mergeability-conflicting", intake.PullRequestMergeability{
+		Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting,
+	}, engine); err != nil || result.Refusal != nil {
+		t.Fatalf("apply the conflicting read = %+v, %v", result.Refusal, err)
+	}
+	if got := phaseNow(); got != phase.Implementing {
+		t.Fatalf("after the conflicting read the issue is in %s, want implementing", got)
+	}
+	// The implementer takes the conflict round's task, a task of the run it already serves.
+	machine, ok := h.supervisor.Machine(implementer.token)
+	if !ok {
+		t.Fatal("no machine for the implementer")
+	}
+	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer.token}); err != nil {
+		t.Fatalf("end the first round's turn: %v", err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: implementer.token, Task: "merge main forward", ID: "outbox:conflict", Generation: 1}); err != nil {
+		t.Fatalf("deliver the conflict round's task: %v", err)
+	}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer.token, DeliveryID: "outbox:conflict"}); err != nil {
+		t.Fatalf("start the conflict round's turn: %v", err)
+	}
+
+	// It merges main forward and completes without writing a handoff: the carrying commit is the
+	// first round's.
+	stale := complete("handoff-1")
+	var failure Failure
+	decodeInto(t, stale, &failure)
+	if stale.Code != http.StatusConflict || failure.Code != "HANDOFF_NOT_NEW" || !strings.Contains(failure.Error, "write and commit this phase's handoff") {
+		t.Fatalf("the completion with no new handoff = %d %+v, want 409 HANDOFF_NOT_NEW naming the handoff to write", stale.Code, failure)
+	}
+	if got := phaseNow(); got != phase.Implementing {
+		t.Fatalf("after the refused completion the issue is in %s, want implementing", got)
+	}
+	// With the conflict round's handoff written and committed, its completion moves the issue on.
+	if recorder := complete("handoff-2"); recorder.Code != http.StatusOK || phaseNow() != phase.Testing {
+		t.Fatalf("the conflict round's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
 	}
 }
 

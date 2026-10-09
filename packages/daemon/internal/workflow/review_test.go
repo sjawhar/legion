@@ -447,14 +447,6 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 	ctx := context.Background()
 	seedReview(t, pool, "green")
 	engine := testEngine(config.DesignGateRootIssues, nil)
-	rounds := func() int {
-		t.Helper()
-		var n int
-		if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&n); err != nil {
-			t.Fatalf("read the implementer's rounds: %v", err)
-		}
-		return n
-	}
 	for i, fact := range []intake.Fact{
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head", Author: testReviewApp},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
@@ -466,7 +458,7 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 	if got := issuePhase(t, pool); got != phase.Retro {
 		t.Fatalf("the issue is in %s, want retro", got)
 	}
-	before := rounds()
+	before := implementerRounds(t, pool)
 	if _, err := intake.ApplyFact(ctx, pool, "test", "late", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12,
 		State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "too late"}, engine); err != nil {
 		t.Fatalf("apply the late review: %v", err)
@@ -474,7 +466,7 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 	if got := issuePhase(t, pool); got != phase.Retro {
 		t.Fatalf("after the late review the issue is in %s, want retro", got)
 	}
-	if got := rounds(); got != before {
+	if got := implementerRounds(t, pool); got != before {
 		t.Fatalf("the implementer's rounds went from %d to %d on a review outside reviewing", before, got)
 	}
 }
@@ -583,11 +575,7 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 			if starts != 0 {
 				t.Fatalf("the retry started the reviewer %d times, want none: its round had already ended", starts)
 			}
-			var rounds int
-			if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&rounds); err != nil {
-				t.Fatal(err)
-			}
-			if rounds != tc.rounds {
+			if rounds := implementerRounds(t, pool); rounds != tc.rounds {
 				t.Fatalf("the implementer's rounds = %d, want %d: the round ended once", rounds, tc.rounds)
 			}
 		})
