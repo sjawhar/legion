@@ -229,8 +229,9 @@ func FirstText(fragment *crdt.YXmlFragment) *crdt.YXmlText {
 	return nil
 }
 
-// NestedValue is the string "x" inside depth single-element arrays, each nested inside the next:
-// an attribute value whose nesting, counted in arrays alone, is depth.
+// NestedValue is the string "x" inside depth arrays, each nested inside the next. It builds arrays
+// only; pmdoc's attribute bound counts arrays and objects alike, so depth is the value's nesting as
+// that bound counts it.
 func NestedValue(depth int) any {
 	var value any = "x"
 	for range depth {
