@@ -2071,10 +2071,13 @@ Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 value
 on either path.
 
 The reader alone changes the terminal, including its final flushing restore and bracketed-paste
-disable. It joins the signal watcher before restoring. A terminating signal that arrives while
-another process group holds the terminal (after Ctrl-Z and `bg`) skips the restore, which would
-stop the job until `fg`, and ends the CLI by that signal; bash resets its own terminal when a job
-dies by a signal. It reads the settings it restores only once its process group holds the
+disable. It joins the signal watcher before restoring, and restores only while its process group
+holds the terminal (or the check fails, as on a hung-up terminal). A prompt that ends while
+another group holds it, by a terminating signal after Ctrl-Z and `bg` or orphaned by its shell's
+exit after `bg`, leaves the terminal as that group has it: a restore would stop the job until
+`fg`, or write the paste-off mark onto the other shell's line. A terminating signal then ends the
+CLI by that signal; bash resets its own terminal when a job dies by a signal. It reads the
+settings it restores only once its process group holds the
 terminal (`whenHeld`): a prompt started with `&` waits behind the shell's line editor, whose
 settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
 editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An

@@ -75,12 +75,14 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 				err = errPromptStopped
 			}
 		}
-		// A signal that ends the prompt while another process group holds the terminal leaves
-		// the terminal as that group has it: a restore from the background would stop the job
-		// until fg. When the check itself fails (EIO on a hung-up terminal), the restore runs,
-		// and answers that failure as having nothing to restore to.
+		// The prompt can end while another process group holds the terminal: a signal after
+		// Ctrl-Z and bg, or an orphaned group after bg and its shell's exit. The terminal is then
+		// as that group has it, and a restore from the background would stop the job until fg, or
+		// write the paste-off mark onto that group's line. When the check itself fails (EIO on a
+		// hung-up terminal), the restore runs, and answers that failure as having nothing to
+		// restore to.
 		restore := saved != nil
-		if restore && tty.death != 0 {
+		if restore {
 			held, err := tty.holdsTerminal()
 			restore = held || err != nil
 		}

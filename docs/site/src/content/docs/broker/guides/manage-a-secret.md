@@ -96,7 +96,9 @@ while the remainder is discarded: press Enter, then run the command shown in the
 the whole value again.
 The command exits 2 and stores nothing. After `bg`, the reader waits without touching the
 terminal until `fg` gives it back, then discards the entry in the same way. SIGTERM or SIGHUP
-while it waits there ends it at once by that signal, leaving the terminal to your shell.
+while it waits there ends it at once by that signal, leaving the terminal to your shell. If the
+shell that ran it exits first, it exits 2, naming the command that pipes the value in, and leaves
+the terminal untouched.
 A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry. The macOS
 stop/resume path has not been verified on a macOS machine.
 

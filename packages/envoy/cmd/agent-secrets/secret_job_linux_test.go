@@ -429,6 +429,35 @@ func TestPromptJobSignalInTheBackgroundEndsItWithoutFg(t *testing.T) {
 	}
 }
 
+// A prompt sent to the background with Ctrl-Z and bg, whose shell then exits, is orphaned: it
+// refuses, naming the pipe command, and leaves the terminal to the shell that holds it now, with
+// no write of its own (a bracketed-paste-off mark would land on that shell's line, and its line
+// editor would read its next paste unbracketed).
+func TestPromptJobOrphanedByItsShellsExitLeavesTheTerminalAlone(t *testing.T) {
+	s := newPromptShell(t)
+	s.send("bash --norc --noprofile -i\r")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("printf 'NESTED_%s\\n' READY\r")
+	s.wait("NESTED_READY\r\n")
+	s.wait("PROMPT$ ")
+	s.start(false, false)
+	s.send("\x1a")
+	s.wait("Stopped")
+	s.wait("PROMPT$ ")
+	s.send("bg\r")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("exit\r")
+	s.wait("RETURNED no shell can bring the value prompt to the foreground of this terminal; pipe the value in: agent-secrets secret set DEMO_KEY < FILE")
+	s.pid = 0
+	s.send("printf 'SHELL_%s\\n' ALIVE\r")
+	s.wait("SHELL_ALIVE\r\n")
+	if strings.Contains(s.out.String(), "\x1b[?2004l") {
+		t.Fatalf("the orphaned prompt wrote to the terminal the outer shell holds: %q", s.out.String())
+	}
+}
+
 // processState is the state letter /proc gives process pid ("T" while stopped).
 func processState(t *testing.T, pid int) string {
 	t.Helper()
