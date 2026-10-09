@@ -171,7 +171,13 @@ unsent:
 - `tick on <PROJECT>`: the daemon's periodic wake, a minute after it starts and then every
   `controller_wake_interval_seconds` (an hour by default), whatever the slots. An earlier walk
   that found nothing, a day with no event, and [a tree waiting on a root
-  claim](#trees-waiting-on-a-root-claim-go-daemon) all get a turn from it.
+  claim](#trees-waiting-on-a-root-claim-go-daemon) all get a turn from it. Its payload's
+  `openCapabilities`, when present, names the deployment capabilities (the secrets broker, model
+  fallback, every role's CPU and memory limits) the deployment's own configuration leaves open with
+  no decision recorded. `legion state --json` lists every row under `capabilities`, each open one
+  with its `detail` and the `configLine` to write into `legion.yaml`
+  (`capabilities.decided.<name>: "<reason>"`); name them in the day's report. A gap is the
+  operator's to close or to decide, never yours, and it never stops the walk.
 
 **Scope first.** The scope the deployment instructions state decides which issues are candidates
 at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
@@ -291,6 +297,10 @@ every pull request by its URL.
 - **The slots and the walk.** The free slots, as **How many** counts them, then this turn's walk
   when it made one: what it took, and how many candidates each row of the table skipped, so a
   reader can see why a free slot stays empty.
+- **Open capabilities.** Each row of `capabilities` in `legion state --json` whose `status` is
+  `open` (the `tick` payload's `openCapabilities`): its name, its `detail`, and its `configLine`,
+  the `legion.yaml` line that records a decision. The operator closes or decides it; you only
+  report it, and a report with none says nothing of them.
 
 A day with nothing finished says so in one sentence. When the lists do not fit, keep the counts
 and the highest-priority issues.
@@ -328,7 +338,7 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 | New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
-| `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick"}`) | the project key; the daemon's periodic wake, whatever the slots | Recheck the trees waiting on a claim, then walk if a slot is free; post the day's report if this is the day's first turn |
+| `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `legion state --json` | Recheck the trees waiting on a claim, then walk if a slot is free — a gap never stops the walk; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides it) |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch_ask` only for a human to-do |
 | Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
 | `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `legion state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `legion status <root> backlog`; setting the root back to `todo` later re-admits it as a new generation, which starts again from its architect |

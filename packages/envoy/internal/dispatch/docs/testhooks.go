@@ -49,3 +49,18 @@ func AppendRenderOnlySchemaViolationForTest(ctx context.Context, database *store
 	}
 	return nil
 }
+
+// DocumentReadWeightForTest is the cache weight of markdown parsed as a document read. The
+// memory-process test uses it to choose enough distinct documents to cross documentReadBudget
+// without duplicating the cache's accounting.
+func DocumentReadWeightForTest(markdown string) (int64, error) {
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		return 0, err
+	}
+	read, err := buildDocumentRead("", DocumentStamp{}, tree)
+	if err != nil {
+		return 0, err
+	}
+	return read.weight, nil
+}

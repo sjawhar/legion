@@ -69,10 +69,9 @@ const PROBE_NEEDLE = "GH_CONFIG_DIR=%s";
 
 /** The full headless leg: 33 bash calls and 3 `task` spawns. `short` is the terminal leg: 8
  * bash calls and 1 spawn. Neither prompt names the credential variable or the word `export`, nor
- * `legion handoff complete`, which the extension refuses in a phase worker's shell (its phase
- * ends through the `legion` tool's `handoff_complete`). The credential step writes to stdout on
- * purpose: a `> file` redirection trips the profile's bash interceptor ("use the write tool"),
- * and the stand-in's token is a placeholder anyway. */
+ * `legion handoff complete`: a phase ends through the `legion` tool's `handoff_complete`. The
+ * credential step writes to stdout on purpose: a `> file` redirection trips the profile's bash
+ * interceptor ("use the write tool"), and the stand-in's token is a placeholder anyway. */
 function buildSteps(short: boolean): Step[] {
   const credential = (n: number): Step => ({
     n,

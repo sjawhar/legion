@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -62,6 +63,8 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 	}
 }
 
+// invalidLoadOnceStore loads a document failNextLoad names once, for a room or a cold read, as a
+// history that does not decode.
 type invalidLoadOnceStore struct {
 	docs.VersionedStore
 	mu      sync.Mutex
@@ -74,15 +77,27 @@ func (s *invalidLoadOnceStore) failNextLoad(room string) {
 	s.invalid[room] = true
 }
 
-func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+// takeInvalid reports whether the next load of room is to fail, and consumes that failure.
+func (s *invalidLoadOnceStore) takeInvalid(room string) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	invalid := s.invalid[room]
 	delete(s.invalid, room)
-	s.mu.Unlock()
-	if invalid {
+	return invalid
+}
+
+func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if s.takeInvalid(room) {
 		return persistence.LoadResult{Update: []byte{0xff}}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s *invalidLoadOnceStore) LoadDocument(ctx context.Context, room string) (docs.LoadedDocument, error) {
+	if s.takeInvalid(room) {
+		return docs.LoadedDocument{}, fmt.Errorf("%w: decode live document: the history this test stored does not decode", docs.ErrDocumentUnloadable)
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
 }
 
 // newBrokenTestServer is a test server whose document store hands a load the failNextLoad names a

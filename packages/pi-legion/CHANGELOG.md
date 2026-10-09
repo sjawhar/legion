@@ -16,12 +16,27 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- No Legion handoff reaches the default branch (LEGION-605). The `legion-retro` skill ends retro
+  with one final commit that removes the issue's `.legion/<issue>/`, pushed with its
+  `docs/solutions/` commit in one `legion push`; the `legion-worker` and `legion-architect` skills
+  and the merge-gate reference say the merger accepts that commit above the approved head and that
+  READY refuses a head still carrying it, in place of the rule that every head kept `.legion/` and
+  the daemon stripped main's from the next branch. The `legion` tool's `handoff_read` description
+  says it finds a handoff that commit removed. Install this release with a Go `legion` built from
+  the same commit, whose `legion handoff read` reads such a handoff and whose READY makes that
+  refusal. `legion.daemonApiVersion` is unchanged.
+- `legion.daemonApiVersion` is 16 (LEGION-578). Contract 16 adds `capabilities` to
+  `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
+  `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its
+  `detail`, and on an open row the `configLine` to write into `legion.yaml`. Install this release
+  with a Go `legion` built from the same commit; the daemon's image probe refuses a worker image
+  whose plugin declares 15 (the 8.3.0 release, whose strict state reader has no `capabilities`).
 - `legion.daemonApiVersion` is 15. Contract 15 changes a Sandbox locator on the daemon's
   `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
   `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
   generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The client's strict
-  state parse needs this release beside a daemon at 15; the daemon's boot gate refuses any earlier
-  contract.
+  state parse needs a daemon at this release's contract (the `legion.daemonApiVersion` entry
+  above); the daemon's boot gate refuses any earlier contract.
 - Every phase worker stays live from its role's first assignment until its issue closes
   (LEGION-462): no move between phases suspends it, so a role that finished its phase still
   answers questions through Envoy, and its next assignment arrives in the same session. The worker
@@ -41,7 +56,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 14 (LEGION-592, above; 15 since LEGION-462). The Envoy messaging and Dispatch tools every session loads are
+  release declares 16 (LEGION-578, above; 15 since LEGION-462, 14 since LEGION-592). The Envoy messaging and Dispatch tools every session loads are
   `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
   through the in-process interface the Envoy entry publishes (`@legion/pi-shared/interface`, version
@@ -52,3 +67,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   a Legion skill into the `dispatch` skill are `skill://dispatch/...`, which resolve once both plugins
   are installed. Install both into the daemon's Oh My Pi profile:
   `omp plugin install @sjawhar/pi-envoy && omp plugin install @sjawhar/pi-legion`.
+
+### Removed
+
+- The extension's role gate — the architect's bash restriction to a single `legion` command, and
+  the architect's, reviewer's and merger's refusal of `edit`, `write` and `apply_patch` — and the
+  shell refusal of `legion handoff complete` are removed (LEGION-630). No role is refused a tool:
+  the role prompts alone say who edits what, and the operation-log rule (`jj undo`, `jj abandon`,
+  `jj op restore|revert|abandon|undo` refused in every tree pane and its `task` subagents) stays.
+  `legion.daemonApiVersion` is unchanged.
