@@ -21,20 +21,16 @@ retrospective's durable output.
 1. Tester green and all code-review cycles finish.
 2. The reviewer approves the head. It still carries the issue's handoffs, `.legion/<issue>/`
    (`<issue>` is your `LEGION_ISSUE`), which every tester and reviewer round writes again.
-3. Run this retro: commit durable learnings to `docs/solutions/`, then, as the one final commit,
-   the deletion of `.legion/<issue>/`; bring the pull request body's path-derived content up to
-   date for the head those commits make before you push them, push both with one `legion push`, and
-   post the retro message on the Dispatch issue.
-   Retro writes **no handoff**: its last commit removes the issue's handoffs from the head a human
-   merges, since a squash merge carries every file of that head onto the default branch and
-   nothing there reads a handoff. They stay on the issue branch below that commit, where
-   `legion handoff read` still finds them.
-4. The merger verifies the tip is the approved head plus retro's commits: those that change only
-   `docs/solutions/` and the removal of `.legion/<issue>/` —
-   `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY — and sends the READY
-   packet with its completion, which refuses a head that still carries `.legion/<issue>/`; the
-   daemon posts it on the Dispatch issue and publishes it to the project's merge-queue role when one
-   is configured. A human merges under the repository's GitHub branch-protection and CODEOWNERS
+3. Run this retro (*Durable outputs*, below): its learnings under `docs/solutions/`, then one final
+   commit removing `.legion/<issue>/`, pushed together, and the retro message on the Dispatch
+   issue. Retro writes **no handoff**. The removal exists because a squash merge commits the head
+   merged into the base, and nothing on the base reads a handoff; the handoffs stay on the issue
+   branch below that commit.
+4. The merger verifies the tip is the approved head plus retro's commits, quotes their
+   `jj diff --from <approved-sha> --to <tip-sha> --summary` in READY, and sends the READY packet
+   with its completion, which refuses a head that still carries `.legion/<issue>/`; the daemon
+   posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
+   configured. A human merges under the repository's GitHub branch-protection and CODEOWNERS
    requirements; GitHub's merge queue participates only when the repository enables it.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
    and records it on the PR and the issue: the agent that developed it is responsible for testing
@@ -201,6 +197,8 @@ Before returning, verify all of the following:
   affirms work you did; or the instructions derive nothing.
 - Both proofs were read, and any gap in either is recorded as a learning.
 - Retro wrote no handoff, and its last commit, pushed, removed `.legion/<issue>/` and nothing else:
-  `jj -R "$LEGION_WORKSPACE" file list -r <head> ".legion/$LEGION_ISSUE"` prints nothing.
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r <head> "root:.legion/$LEGION_ISSUE"`
+  prints nothing (`root:` names the path from the repository root, so a run from another directory
+  cannot print nothing by failing).
 - The fresh-eyes analysis was considered alongside the implementer's context.
 - The merger remains a subsequent step, not work performed by retro.

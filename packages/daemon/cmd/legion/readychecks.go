@@ -23,9 +23,13 @@ import (
 var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?/?$`)
 
 // readyChecks refuses a READY whose head GitHub will not merge for its checks, or whose merge would
-// carry the issue's handoffs onto the base branch. The head must not hold .legion/<issue>/, which
-// retro's last commit removes (dispatch://LEGION-605): a squash merge carries every file of the head,
-// and nothing on the base branch reads a handoff. Then every check the base branch requires - its
+// carry the issue's handoffs onto the base branch. A pull request already merged has nothing left to
+// gate: a person merged it before READY, which the workflow takes on to the production check, and no
+// commit can change its head, so READY is published without reading it. Otherwise the head must not
+// hold .legion/<issue>/ (headCarries), which retro's last commit removes (dispatch://LEGION-605): a
+// squash merge commits the head merged into the base, and nothing on the base branch reads a
+// handoff. A read GitHub fails is refused as GitHub's failure, to retry, not the head's. Then every
+// check the base branch requires - its
 // rulesets' required status checks and its branch protection's - must have succeeded on the pull
 // request's head, and every workflow its rulesets require must have a run for the head that
 // succeeded (requiredchecks.Required, requiredchecks.Workflows), judged by the rule the workflow's
@@ -43,12 +47,8 @@ var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:
 // the ordinary state of the smoke sandbox, and a merger there has no check-based gate on the head at
 // all.
 func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout io.Writer) error {
-	key, err := resolveIssue()
-	if err != nil {
-		return err
-	}
 	if issue.PullRequest == nil || issue.PullRequest.Number <= 0 {
-		return fmt.Errorf("the daemon records no pull request for %s", key)
+		return fmt.Errorf("the daemon records no pull request for %s", issue.Key)
 	}
 	repository, err := workspaceRepository(workspace)
 	if err != nil {
@@ -76,6 +76,7 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 		} `json:"base"`
 		// MergeableState is "dirty" while the pull request conflicts with its base.
 		MergeableState string `json:"mergeable_state"`
+		Merged         bool   `json:"merged"`
 	}
 	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", issue.PullRequest.Number), &pull); err != nil {
 		return err
@@ -85,8 +86,16 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 		head = head[:12]
 	}
 	number := issue.PullRequest.Number
-	if err := headCarriesNoHandoffs(ctx, github, key, pull.Head.SHA); err != nil {
-		return fmt.Errorf("head %s of pull request #%d %w", head, number, err)
+	if pull.Merged {
+		fmt.Fprintf(stdout, "[handoff] pull request #%d is already merged, so READY was published without reading its head's checks or handoffs\n", number)
+		return nil
+	}
+	dir := filepath.ToSlash(handoffFile(issue.Key, "")) + "/"
+	switch carries, err := headCarries(ctx, github, dir, pull.Head.SHA); {
+	case err != nil:
+		return fmt.Errorf("GitHub's read of %s at head %s of pull request #%d failed, so whether the head still carries it is unknown: complete again; this is GitHub's failure, not the head's: %w", dir, head, number, err)
+	case carries:
+		return fmt.Errorf("head %s of pull request #%d still carries %s, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", head, number, dir)
 	}
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
 	if err != nil {
@@ -139,21 +148,16 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	return nil
 }
 
-// headCarriesNoHandoffs is nil when GitHub answers that head holds no .legion/<issue>/, the issue's
-// own handoff directory (handoffFile with no name): the contents read of that path at head answers
-// 404. Otherwise it names what stands: the directory still there, or the read GitHub failed, which
-// leaves the head unknown.
-func headCarriesNoHandoffs(ctx context.Context, github githubrest.Client, issue, head string) error {
-	dir := filepath.ToSlash(handoffFile(issue, ""))
-	err := github.Get(ctx, "/contents/"+dir+"?ref="+url.QueryEscape(head), nil)
+// headCarries is whether head holds dir, a directory relative to the repository root: GitHub's
+// contents read of that path at head answers 404 when it does not. Any other failure of the read is
+// an error, which leaves the answer unknown.
+func headCarries(ctx context.Context, github githubrest.Client, dir, head string) (bool, error) {
+	err := github.Get(ctx, "/contents/"+strings.TrimSuffix(dir, "/")+"?ref="+url.QueryEscape(head), nil)
 	var answer *githubrest.Answer
-	switch {
-	case errors.As(err, &answer) && answer.Status == http.StatusNotFound:
-		return nil
-	case err != nil:
-		return fmt.Errorf("could not be read for %s/: %w", dir, err)
+	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
+		return false, nil
 	}
-	return fmt.Errorf("still carries %s/, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", dir)
+	return err == nil, err
 }
 
 // workspaceRepository is the GitHub repository the workspace's origin names.

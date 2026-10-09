@@ -71,12 +71,14 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 	}
 }
 
-// A merger's READY names the head a human merges, and a squash merge carries every file of that
-// head onto the default branch: the issue's own handoffs, .legion/<issue>/, must be gone from it
-// (retro's last commit removes them; dispatch://LEGION-605). READY reads the head's tree on GitHub
-// and is refused, naming the head and the directory, while it still holds .legion/<issue>/, whether
-// or not the base branch requires any check, and posted once GitHub answers that the head has none.
-// A read GitHub fails leaves the head unknown, and READY is refused naming the read.
+// A merger's READY names the head a human merges, and a squash merge commits that head merged into
+// the default branch: the issue's own handoffs, .legion/<issue>/, must be gone from it (retro's last
+// commit removes them; dispatch://LEGION-605). READY reads the head's tree on GitHub and is refused,
+// naming the head and the directory, while it still holds .legion/<issue>/, whether or not the base
+// branch requires any check, and posted once GitHub answers that the head has none. A read GitHub
+// fails leaves the head unknown, and READY is refused as GitHub's failure to retry, never sending the
+// issue back to retro. A pull request a person already merged is posted unread: its head can no
+// longer change, and the workflow takes it on to the production check only on that READY.
 func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *testing.T) {
 	const (
 		head          = "c0de0000000000000000000000000000000000ff"
@@ -85,19 +87,21 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 		requiresCI    = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`
 		stillCarries  = `head c0de00000000 of pull request #42 still carries .legion/THIS-1/`
 		unprotected   = `{"name":"main","protected":false}`
-		readRefused   = `GET /contents/.legion/THIS-1 with 500`
+		readRefused   = `GitHub's read of .legion/THIS-1/ at head c0de00000000 of pull request #42 failed, so whether the head still carries it is unknown: complete again`
 		serverFailure = `{"message":"Server Error"}`
 	)
 	for _, tc := range []struct {
 		name, rules  string
+		merged       bool
 		handoffs     int
 		handoffsBody string
 		refusal      string
 	}{
-		{"a head that still carries them", requiresCI, http.StatusOK, listing, stillCarries},
-		{"a head that still carries them, on a base requiring no check", `[]`, http.StatusOK, listing, stillCarries},
-		{"a head retro removed them from", requiresCI, http.StatusNotFound, notFound, ""},
-		{"a head whose tree GitHub fails to read", requiresCI, http.StatusInternalServerError, serverFailure, readRefused},
+		{"a head that still carries them", requiresCI, false, http.StatusOK, listing, stillCarries},
+		{"a head that still carries them, on a base requiring no check", `[]`, false, http.StatusOK, listing, stillCarries},
+		{"a head retro removed them from", requiresCI, false, http.StatusNotFound, notFound, ""},
+		{"a head whose tree GitHub fails to read", requiresCI, false, http.StatusInternalServerError, serverFailure, readRefused},
+		{"a pull request a person merged while its head still carried them", requiresCI, true, http.StatusOK, listing, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := "/repos/acme/widgets"
@@ -105,8 +109,11 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
 				case repo + "/pulls/42":
-					_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"},"base":{"ref":"main"},"mergeable_state":"clean"}`))
+					_, _ = fmt.Fprintf(w, `{"head":{"sha":"%s"},"base":{"ref":"main"},"mergeable_state":"clean","merged":%t}`, head, tc.merged)
 				case repo + "/contents/.legion/THIS-1":
+					if tc.merged {
+						t.Errorf("READY read the handoffs of a merged pull request's head")
+					}
 					if ref := r.URL.Query().Get("ref"); ref != head {
 						t.Errorf("the handoffs were read at ref %q, want the pull request's head %s", ref, head)
 					}
@@ -135,6 +142,9 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 			if tc.refusal == "" {
 				if code != 0 || len(*bodies) != 1 {
 					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
+				}
+				if want := "pull request #42 is already merged"; tc.merged && !strings.Contains(out.String(), want) {
+					t.Fatalf("READY of a merged pull request said %q; want it to say %q", out.String(), want)
 				}
 				return
 			}

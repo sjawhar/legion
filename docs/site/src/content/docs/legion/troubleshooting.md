@@ -265,7 +265,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   to `retro`); until every check the base branch requires has succeeded on the head, and every
   workflow its rulesets require has a run on the head that succeeded; and while the design gate is
   closed. The refusal names the head and the directory, the check or workflow, or the spec version
-  that needs approval.
+  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
+  failure, and the merger completes again. None of the head checks applies to a pull request a
+  person already merged: its `READY` is published unread, and the issue goes on to its production
+  check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  for a pull request that deletes it.
 
 An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
 or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no

@@ -13,6 +13,6 @@ Verify every acceptance criterion on the surface a user reaches it through — t
 
 When the PR carries a `## Contract change census`, every entry a person invokes is an acceptance criterion: drive it through its real surface, meaning the client that builds the input, run through the new check, and record it like any other. An entry you could not drive is a finding.
 
-After a rebase forced by a GitHub-reported conflict, compute the unchanged-diff fingerprint at the head your verification names and at the new head. Equal: re-run only the bare gates — the repository's CI green at the new head and its smoke check — and do not repeat the real-surface verification. Different: a full test round. Retro's `docs/solutions/` commit is never a reason to re-test.
+After a rebase forced by a GitHub-reported conflict, compute the unchanged-diff fingerprint at the head your verification names and at the new head. Equal: re-run only the bare gates — the repository's CI green at the new head and its smoke check — and do not repeat the real-surface verification. Different: a full test round. Retro's commits are never a reason to re-test.
 
 A failure that requires implementation is a scheduling input for whoever owns the plan; do not silently redefine the acceptance criteria.

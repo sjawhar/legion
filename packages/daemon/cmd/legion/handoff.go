@@ -221,8 +221,8 @@ func removedHandoff(workspace, relPath string) (any, bool) {
 	if !filepath.IsAbs(jj) {
 		return nil, false
 	}
-	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
-	removal, err := ownNonMergeWrite(jj, workspace, relPath, fileset)
+	fileset := rootFileset(relPath)
+	removal, err := ownNonMergeWrite(jj, workspace, relPath)
 	if err != nil || removal == "" {
 		return nil, false
 	}
@@ -274,8 +274,8 @@ func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool
 // main's side, also answers false: content, not merely a touched path, decides. Any jj error, or
 // LEGION_JJ_PATH unset or relative, fails closed to false.
 func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
-	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
-	written, err := ownNonMergeWrite(jj, workspace, relPath, fileset)
+	fileset := rootFileset(relPath)
+	written, err := ownNonMergeWrite(jj, workspace, relPath)
 	if err != nil || written == "" {
 		return false
 	}
@@ -291,10 +291,16 @@ func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
 }
 
 // ownNonMergeWrite is the newest non-merge commit in this tree's own history, (::@ ~ ::trunk()) (the
-// one-call pattern handoffCommit uses to find a commit outside the base), that touched relPath,
-// given as fileset, its root-anchored form; "" when none did.
-func ownNonMergeWrite(jj, workspace, relPath, fileset string) (string, error) {
-	return jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+fileset+"))", "--no-graph", "-T", "commit_id")
+// one-call pattern handoffCommit uses to find a commit outside the base), that touched relPath; ""
+// when none did.
+func ownNonMergeWrite(jj, workspace, relPath string) (string, error) {
+	return jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+rootFileset(relPath)+"))", "--no-graph", "-T", "commit_id")
+}
+
+// rootFileset is relPath, relative to the workspace, as a root-anchored jj fileset, so a jj run from
+// any directory names the same path.
+func rootFileset(relPath string) string {
+	return fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -402,7 +408,7 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 			file = legacy
 		}
 	}
-	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
+	fileset := rootFileset(file)
 	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)
 	if err != nil {
 		return "", err
@@ -452,20 +458,23 @@ func standingCommit(jj, workspace string) (string, error) {
 }
 
 // paneIssue is what a completion reads of the pane's issue from the daemon's state document: its
-// phase, and the pull request the daemon records for it, if any.
+// key (LEGION_ISSUE, which resolveIssue accepted), its phase, and the pull request the daemon
+// records for it, if any.
 type paneIssue struct {
+	Key         string      `json:"-"`
 	Phase       phase.Phase `json:"phase"`
 	PullRequest *struct {
 		Number int `json:"number"`
 	} `json:"pullRequest"`
 }
 
-// issueRecord reads the pane's issue (LEGION_ISSUE) from the daemon's state document, decoding that
-// one issue's phase and pull request and nothing else of the document.
+// issueRecord reads the pane's issue (LEGION_ISSUE, refused unless resolveIssue accepts it) from the
+// daemon's state document, decoding that one issue's phase and pull request and nothing else of the
+// document.
 func issueRecord(ctx context.Context) (paneIssue, error) {
-	issue := os.Getenv("LEGION_ISSUE")
-	if issue == "" {
-		return paneIssue{}, errors.New("LEGION_ISSUE is not set")
+	issue, err := resolveIssue()
+	if err != nil {
+		return paneIssue{}, err
 	}
 	body, err := get(ctx, daemonURL()+"/legion/v1/state")
 	if err != nil {
@@ -481,7 +490,7 @@ func issueRecord(ctx context.Context) (paneIssue, error) {
 	if !ok {
 		return paneIssue{}, fmt.Errorf("the daemon's state records no issue %s", issue)
 	}
-	var current paneIssue
+	current := paneIssue{Key: issue}
 	if err := json.Unmarshal(recorded, &current); err != nil {
 		return paneIssue{}, fmt.Errorf("decode the daemon's record of %s: %w", issue, err)
 	}
