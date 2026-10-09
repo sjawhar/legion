@@ -43,9 +43,10 @@ type Credential struct {
 	Host     string
 }
 
-// LiveCredential is one of the machine logins a person approved, as their machine-login page lists
-// it: a launcher credential minted by their approval and not revoked, either unexpired or still
-// holding a live session it enrolled (Lookup's live: not revoked, its lease not lapsed).
+// LiveCredential is one of the machine logins a person may revoke, as their machine-login page
+// lists it: a launcher credential of one of their own machines, or of any service's login whoever
+// approved it, not revoked, and either unexpired or still holding a live session it enrolled
+// (Lookup's live: not revoked, its lease not lapsed).
 type LiveCredential struct {
 	ID   uuid.UUID
 	Host string
@@ -207,8 +208,9 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
-// A credential revoked by the person who approved it (RevokeCredential), even after the caller's
-// launcher proof was verified, is ErrUnauthenticated.
+// A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
+// by anyone signed in for a service's), even after the caller's launcher proof was verified, is
+// ErrUnauthenticated.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot

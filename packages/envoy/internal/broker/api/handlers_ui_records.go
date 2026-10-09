@@ -2,7 +2,8 @@
 // record's own read, approve and deny routes. Part of the UI routes (uiAuth) Dispatch's server
 // relays to on behalf of the browser: the UI bearer proves Dispatch's server is the caller, and
 // Dispatch names the deciding human in the body's approver field from its own session, so a
-// decision is authorized by that login being the record's approver.
+// decision is authorized by the record's rule admitting that login (record.MayDecide): its
+// approver, or anyone signed in for a shared secret's request or a service's machine login.
 package api
 
 import (

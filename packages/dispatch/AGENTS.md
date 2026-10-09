@@ -429,11 +429,14 @@ has both), a pod enrollment's slot under its enrollment, and has a Revoke button
 one makes that session ask before it gets those secrets again: its other automatic grants of them
 end with it.
 
-`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the machine
-logins the viewer approved that can still reach a secret (`GET /api/v1/machine-logins`,
-`machineLogins.ts`'s `machineLoginsQuery`, which an approval on the page also invalidates), one row
-per login with its machine (the host, or `<service> on <host>` for a service's login such as the
-Legion daemon's), when it was issued and when it expires, and a Revoke button that asks
+`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine` as **Machine
+logins**: the machine logins the viewer may revoke that can still reach a secret
+(`GET /api/v1/machine-logins`, `machineLogins.ts`'s `machineLoginsQuery`, which an approval on the
+page also invalidates), the viewer's own machines' and every service's whoever approved it, since
+anyone signed in approves and revokes a service's login and a person's machine login is that
+person's alone. One row per login with its machine (the host, or `<service> on <host>` for a
+service's login such as the Legion daemon's), who approved it (`approved_by`), when it was issued
+and when it expires, and a Revoke button that asks
 `window.confirm` first and then POSTs `{}` to `/api/v1/machine-logins/{id}/revoke`. A login's
 sessions outlive its expiry, so the broker also lists an expired login while one of its sessions
 runs (`expired: true`), and its row reads `expired, sessions still running` under the machine. The
@@ -475,11 +478,12 @@ whatever login its body names, and the value released; a shared secret's request
 lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
 session's next request for it waiting on its owner while another session still gets it at once;
 once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
-was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a machine login
-listed for the person who approved it alone, another person's revoke refused `403 NOT_APPROVER`
-whatever their body names, and the approver's revoke ending the session it enrolled and its
-launcher proofs; and a service's login listed with its service for its approver alone, and
-revocable by them alone.
+was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a person's
+machine login listed for the person who approved it alone, another person's revoke refused
+`403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
+enrolled and its launcher proofs; a person's machine login refused `403 NOT_APPROVER` to another
+person's approval; and a service's login approved by a person it names nowhere, listed with its
+service and its approver for every signed-in person, and revoked by another.
 
 ## Dark mode
 
