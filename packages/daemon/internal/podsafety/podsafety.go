@@ -1,16 +1,17 @@
-// Package podsafety is the baseline a Legion pod's Oh My Pi starts with, and nothing in it names a
-// model, a provider, or a route: a settings overlay that holds off the endpoints Oh My Pi posts a
-// conversation to on its own and keeps a long-running bash call inside the turn an abort can still
-// reach (supervise.Machine.Quiesce depends on this), and four variables through which a
-// repository's .env would move what the agent runs with. The overlay yields to the operator's own
-// (runtime.kubernetes.pod): it is named first, before the operator's overlays. Apply keeps a
-// variable the pod's environment sets, and the operator may set OTEL_SDK_DISABLED and PI_AUTO_QA;
-// the Sandbox runtime refuses
-// PI_CONFIG_DIR and OMP_SESSION_STORAGE in the operator's pod, since they decide where a session
-// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). Apply, the
-// full baseline, runs only in a pod (`legion worker-shim --pod-safety`, `legion probe-image
-// --pod-safety`); a pane gets the two turn-scoping keys alone, as TurnScopeOverlay, which
-// runtime/tmux writes and names itself (writeTurnScopeOverlay, panePairs).
+// Package podsafety is what a Legion pod's Oh My Pi starts with beyond the operator's pod, and
+// nothing in it names a model, a provider, or a route, nor holds a repository's settings off. It is
+// two things. The two turn-scoping keys supervise.Machine.Quiesce depends on (TurnScopeOverlay,
+// turnscope.yml, which says why), written as the one settings overlay Legion names first in
+// PI_CONFIG_FILES, before the operator's own (runtime.kubernetes.pod): by Oh My Pi's order the
+// operator's overlay outranks it, and both outrank a repository's .omp/config.yml, so a repository's
+// settings reach a pod's agent as they reach any agent session, under the operator's. And the two
+// variables that decide where a pod's Oh My Pi keeps its sessions, set on the agent where the pod
+// leaves them unset — when Oh My Pi would otherwise fill them from the working directory's .env —
+// and never on the shim; the Sandbox runtime refuses them in the operator's pod, since a pod keeps
+// its sessions as files on the tree volume, where a resume reads them (sandbox.CheckPod). Apply,
+// the whole of it, runs only in a pod (`legion worker-shim --pod-safety`, `legion probe-image
+// --pod-safety`); a pane gets the same overlay alone, which runtime/tmux writes and names itself
+// (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -22,25 +23,16 @@ import (
 	"strings"
 )
 
-// overlay is the settings overlay Apply writes (overlay.yml, which says what each setting holds off).
-//
-//go:embed overlay.yml
-var overlay []byte
-
-// OverlayFile is the overlay's file under the state directory Apply is given.
-const OverlayFile = "podsafety-overlay.yml"
-
-// TurnScopeOverlay is the two turn-scoping keys every Legion role's Oh My Pi needs regardless of
-// runtime (turnscope.yml, which says why): bash.autoBackground and async, both off, without the
-// rest of the pod baseline. The pod overlay above already carries both; a runtime with no overlay
-// mechanism of its own (runtime/tmux) writes this one directly, named first in a pane's
-// PI_CONFIG_FILES.
+// TurnScopeOverlay is the one settings overlay every Legion role's Oh My Pi gets, pod or pane
+// (turnscope.yml, which says why): bash.autoBackground and async, both off, and nothing else. Apply
+// writes it for a pod; a runtime with no overlay mechanism of its own (runtime/tmux) writes it
+// directly, named first in a pane's PI_CONFIG_FILES.
 //
 //go:embed turnscope.yml
 var TurnScopeOverlay []byte
 
-// TurnScopeFile is TurnScopeOverlay's file name, wherever a runtime writes it under its own state
-// directory.
+// TurnScopeFile is TurnScopeOverlay's file name under the state directory a runtime writes it to:
+// Apply's stateDir in a pod, the daemon's own for a pane.
 const TurnScopeFile = "podsafety-turnscope-overlay.yml"
 
 // settingsOverlays is Oh My Pi's list of settings overlays, PATH-separated: each outranks the
@@ -52,13 +44,10 @@ const settingsOverlays = "PI_CONFIG_FILES"
 const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
 
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,
-// which is when Oh My Pi would fill them from the working directory's .env, each with why an
-// operator's pod may not set it instead (Variable.Reserved), when it may not.
+// which is when Oh My Pi would fill them from the working directory's .env: the two that place a
+// pod's sessions, each with why an operator's pod may not set it instead (Variable.Reserved).
+// Nothing else is set on a pod's agent; a repository's own settings and .env are its own otherwise.
 var baseline = []struct{ name, value, reserved string }{
-	// The OpenTelemetry SDK exports logs, traces, and metrics to OTEL_EXPORTER_OTLP_ENDPOINT.
-	{"OTEL_SDK_DISABLED", "true", ""},
-	// Outranks dev.autoqa, which pushes tool-issue reports.
-	{"PI_AUTO_QA", "0", ""},
 	// Names the config root Oh My Pi's agent directory is joined under (.omp in the image), which
 	// chooses the models.yml and profile it reads, and the sessions under it: no settings overlay
 	// outranks it.
@@ -70,7 +59,8 @@ var baseline = []struct{ name, value, reserved string }{
 
 // Variable is one variable Apply sets. Reserved, when set, is why an operator's pod may not set it
 // itself: Apply yields to the pod's own value, which for such a variable would give away something
-// the runtime relies on. The operator may set every other one, and the operator's value is kept.
+// the runtime relies on. The one other, PI_CONFIG_FILES, the operator names its own overlays in,
+// and Apply composes.
 type Variable struct {
 	Name, Reserved string
 }
@@ -85,15 +75,15 @@ func Variables() []Variable {
 	return variables
 }
 
-// Apply is environ as a pod's Oh My Pi starts with it: the overlay written read-only to
-// <stateDir>/podsafety-overlay.yml and named first in PI_CONFIG_FILES, ahead of the overlays
-// environ already names, and each baseline variable set where environ leaves it unset or empty.
+// Apply is environ as a pod's Oh My Pi starts with it: TurnScopeOverlay written read-only to
+// <stateDir>/<TurnScopeFile> and named first in PI_CONFIG_FILES, ahead of the overlays environ
+// already names, and each baseline variable set where environ leaves it unset or empty.
 func Apply(environ []string, stateDir string) ([]string, error) {
 	if stateDir == "" {
-		return nil, fmt.Errorf("pod safety: no state directory to write %s to", OverlayFile)
+		return nil, fmt.Errorf("pod safety: no state directory to write %s to", TurnScopeFile)
 	}
-	file := filepath.Join(stateDir, OverlayFile)
-	if err := WriteReadOnly(file, overlay); err != nil {
+	file := filepath.Join(stateDir, TurnScopeFile)
+	if err := WriteReadOnly(file, TurnScopeOverlay); err != nil {
 		return nil, fmt.Errorf("pod safety: write %s: %w", file, err)
 	}
 	overlays := file

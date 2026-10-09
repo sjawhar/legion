@@ -36,7 +36,7 @@ retrospective's durable output.
    and records it on the PR and the issue: the agent that developed it is responsible for testing
    in production. The architect's sign-off waits for that record.
    The record is the pull request's `Production:` line, one pull-request comment, and a
-   `dispatch_message` on the issue, each naming what was driven, how, what was observed, and the
+   `dispatch message` on the issue, each naming what was driven, how, what was observed, and the
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
    owned by the architect and implemented by the same implementer; the parent stays open until it lands.
 
@@ -157,16 +157,15 @@ Then push both commits with one `legion push`, so one CI run covers them. When t
 refused after step 4 wrote the body, write `<dir>/before.md` back the same way before you report
 the refusal to the architect, so the body matches the head GitHub has. After the push, post one
 Dispatch message on
-the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
+the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, and the `gh` shim refuses every GitHub-issue write — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge. The message must carry this revived implementer's structured
 attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
 
-```ts
-dispatch_message({
-  issue: "<KEY>",
-  body: `## Retro Complete
+```bash
+dispatch message --issue <KEY> --body-file - <<'EOF'
+## Retro Complete
 
 **Learnings documented in:**
 - docs/solutions/<path>.md
@@ -178,8 +177,8 @@ dispatch_message({
 
 **Production check:** <what the implementer will drive after the merge, or the deploy/restart step a human will have to perform first>
 
-<!-- legion: {"session":"<session-id>","phase":"retro"} -->`,
-})
+<!-- legion: {"session":"<session-id>","phase":"retro"} -->
+EOF
 ```
 
 The `docs/solutions/` commit, the removal of `.legion/<issue>/`, the PR body lines those commits

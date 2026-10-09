@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/opencode-legion-envoy",
-  "version": "6.4.2",
+  "version": "6.5.1",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/src/server.js",
@@ -23,10 +23,11 @@
     "dist",
     "src",
     "!src/**/__tests__",
-    "skills"
+    "skills",
+    "bin"
   ],
   "scripts": {
-    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*'",
+    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*' && ../envoy-client/scripts/build-dispatch-cli.sh dist",
     "prepack": "./scripts/prepack.sh",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",

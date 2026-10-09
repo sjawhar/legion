@@ -5,16 +5,16 @@ message or document, trace what cites a node, or need the exact `dispatch://` fo
 
 ## What comes back
 
-After a restart, catch up with:
+After a restart, catch up with `dispatch read` (`--issue`, or `--project` and `--artifact`, or `--ref`):
 
-```ts
-dispatch_read({ issue?, project?, artifact?, ref? })
+```bash
+dispatch read --issue <KEY>
 ```
 
-With an issue ref, it returns the issue summary, open asks, references, and recent events with `details` `{ issue }`. With a project
-document owner or ref, it returns a document summary with `details` `{ project, document }`. With an ask ref, it returns that ask's
-question, options, state, answer, and its reply thread. With a comment ref, it returns that comment and its quoted reply chain. With a
-message ref, it returns that message and its reply chain. Reads do not subscribe; use `dispatch_doc_read` for document contents.
+With an issue ref, it prints the issue summary, open asks, references, and recent events. With a project
+document owner or ref, it prints a document summary. With an ask ref, it prints that ask's
+question, options, state, answer, and its reply thread. With a comment ref, it prints that comment and its quoted reply chain. With a
+message ref, it prints that message and its reply chain. Reads do not subscribe; use `dispatch doc-read` for document contents.
 
 An anchored comment or ask also prints `Position:`, where its quote's block stands — `table[3] › row 5 (Red-teamer loop), column Due`
 is the fourth top-level block, a table, its row 5 (row 0 is the header; the index `delete_row` takes), labelled by the row's cells
@@ -31,7 +31,7 @@ followers — and `Links:` lists what it cites. Each row is `- <edge kind> <node
 document source the excerpt is the start of the block holding the mention, and a whole list is one block, so every issue named in
 one list previews the list's first item. When a document references many issues and each backlink should read right, give each
 issue its own paragraph (or block), not an item of one list. Cross-project, always: a message on another project's issue that
-cites an ask shows up under that ask. So "what led to this decision" is one `dispatch_read` on the ask, and "who relies on this
+cites an ask shows up under that ask. So "what led to this decision" is one `dispatch read` on the ask, and "who relies on this
 document" one read on the document. Cite with `dispatch://` references (below) whenever you name a node in a body — a bare id or
 title is invisible to the graph.
 
@@ -40,7 +40,7 @@ title is invisible to the graph.
 Use these in document, ask, comment, and message bodies. In the dashboard, a reference renders
 as an inline link whose text is the target's title (an issue's title, an ask's question, a
 comment's first line, a document's name) once it resolves; a body that is only a bare reference
-still gets an unfurl card instead. Every `ref` argument below (and `issue`/`project`) accepts
+still gets an unfurl card instead. Every `--ref` flag below (and `--issue`/`--project`) accepts
 either form — an issue key or a project key is never ambiguous, since a project key never
 contains a dash:
 
@@ -56,7 +56,7 @@ dispatch://PROJECT/artifact/<document-ref>/ask/<id>
 dispatch://PROJECT/artifact/<document-ref>/comment/<id>
 ```
 
-A bare UUID or `KEY#seq` is not a reference; the `dispatch://` form is what Dispatch links and records. `dispatch_read` also
+A bare UUID or `KEY#seq` is not a reference; the `dispatch://` form is what Dispatch links and records. `dispatch read` also
 accepts the dashboard URL of an issue, spec, artifact, ask, comment, or project document on the configured server (it maps to the
 `dispatch://` form above), and an ask or comment id may be a unique prefix of at least 8 hex characters; a message id is always the
 full uuid. A non-uuid id on `GET /asks/{id}`, `/comments/{id}`, or `/issues/{key}/messages/{id}` is a 400 `ASK_ID_INPUT` /

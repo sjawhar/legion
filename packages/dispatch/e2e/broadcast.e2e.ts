@@ -417,7 +417,7 @@ test("a session that leaves between a refused send and its restore is still in t
 });
 
 /** A broadcast from alice to `sessions`, each of which has answered its copy, as the
- *  `dispatch_message` reply does. */
+ *  `dispatch message` reply does. */
 async function answeredBroadcast(sessions: readonly string[]): Promise<string> {
   const sent = await createBroadcast({
     body: "Report status.",

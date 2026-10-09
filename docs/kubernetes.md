@@ -25,16 +25,17 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   (`packages/daemon/cmd/legion/probe_image.go`);
 - `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
   `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
-  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion` and each linked into the
-  isolated OMP profile `legion` (`OMP_PROFILE=legion`; plugins resolve to
-  `/home/legion/.omp/profiles/legion/plugins/node_modules`). A pod loads the two as Oh My Pi's
-  explicit extensions, the Envoy plugin first, with discovery off;
-- `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
-  CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
-  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`).
-  A pod's agent gets that tool once its launch loads profile plugins (dispatch://LEGION-629): with
-  discovery off, the profile's plugin does not load today, which the capability report's `codegraph`
-  row says ([The deployment's capability report](#the-deployments-capability-report));
+  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two roots a pod names as Oh
+  My Pi's explicit extensions, the Envoy plugin first, with extension discovery on. Neither is linked
+  into the OMP profile: a plugin both installed and named by `--extension` loads twice, and the image
+  probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
+  the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
+  `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
+- `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
+  (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
+  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
+  `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
+  radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -80,8 +81,8 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
 `~/.omp/profiles/legion`). Mount writable volumes below the profile directory, never at `/home/legion`
-itself: everything the image-time probe proved lives under `HOME` — the two plugin links and their lock at
-`~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
+itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
+lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image: Legion's own plugins come from
 the commit, never from an npm release; what the image does take from npm (the CodeGraph plugin and
@@ -112,7 +113,9 @@ measured. This change moves no deadline.
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion` with
 `pi-envoy` beside it, the two at one plugin interface version and without the pre-split package
 (`packages/daemon/internal/daemon/bootgate.go`). The image build's final step runs `legion version`,
-requiring the commit the workflow built, then `legion probe-image`: the same two probes, run by the
+requiring the commit the workflow built, and the plugin's `dispatch` shim
+(`/opt/legion/pi-envoy/bin/dispatch --help`, which needs its bundled `dist/dispatch.js` and the
+image's Bun), then `legion probe-image`: the same two probes, run by the
 daemon's own code, plus a third only the image runs — the session-storage probe, which prints
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the Legion plugin held to
 the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface held to the one the
@@ -130,12 +133,10 @@ would find each — `omp setup python --check`, the `chromium` on `PATH` (or the
 profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun` and `uv` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
 (`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
-An image row the image carries prints `present` with its evidence, but for `codegraph`, which prints
-`installed`: the CLI and the plugin are in the image, and a pod's agent gets the tool once its launch
-loads profile plugins (dispatch://LEGION-629; a pod runs `--no-extensions` with the Envoy and Legion
-plugins as its explicit extensions today, so the profile's plugin never loads). A live row prints
+An image row the image carries prints `present` with its evidence (`codegraph`'s: the CLI on PATH and
+the plugin enabled in the profile's lock, which a pod's launch loads with extension discovery on). A live row prints
 `live` with the check still to prove it, a deployment row `reported`, a withheld row `withheld` with
 its ruling, and an image row the image lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
@@ -352,6 +353,9 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 Only the transcript moves. Tool artifacts and image blobs stay under the agent directory on local disk
 (`~/.omp/profiles/legion/agent/…`), as do OMP's logs and `models.db`; `.legion/` handoffs live in the
 repository. A pod that dies loses those local files as it does today — the conversation it does not.
+The workspace's CodeGraph index, `.codegraph/` in the workspace on the tree volume (185 MB for this
+repository), is built by a role's shim after its Oh My Pi starts ([Anatomy of a Sandbox
+pod](#anatomy-of-a-sandbox-pod)) and outlives the pod with the workspace.
 
 ### The extension under SQL storage
 
@@ -882,10 +886,7 @@ subscription never delivers).
 every worker is a full agent), 19 rows, each checked at one site. The image rows (`eval-js`,
 `eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once
-the probe passed — but for `codegraph`, which reads `installed`: the CLI and plugin are in the image,
-and a pod's agent gets the tool once its launch loads profile plugins (dispatch://LEGION-629; a pod's
-agent runs `--no-extensions` today, so no worker has the tool yet, and the report's job is to name
-what a worker lacks); the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
+the probe passed; the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
 `dispatch-envoy-tools`, `github`) are to be proved by a live check against a running pod —
 dispatch://LEGION-633's integration check and dispatch://LEGION-629's checks, none of which runs
 yet, so each reads `live` with the check it awaits, never as proved; the withheld rows carry the ruling that keeps them from
@@ -915,8 +916,8 @@ broker login reaching `issued` is the one change a running daemon sees), as `cap
 to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
 --json` under `capabilities` (daemon API contract 16: every row as `{name, status, detail,
 decision?, configLine?}`, `status` one of `present`, `installed`, `unchecked`, `live`, `withheld`,
-`decided` or `open`, the image rows `present` once the probe passed — `codegraph` `installed`, as
-above — and `unchecked` before it or under tmux);
+`decided` or `open`, the image rows `present` once the probe passed and `unchecked` before it or
+under tmux);
 the controller's `tick` notice, whose `openCapabilities` names the open rows so the day's report
 names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-config`, which prints
 after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a
@@ -963,8 +964,29 @@ share, at the cost of one download per issue. uv copies each package from the sh
 made in place inside one workspace's `.venv` would change the cache and every other `.venv` of the tree
 that installed the package, including ones installed later. So each `.venv` is a full copy of its
 packages on the tree volume, beside the cache, and a deployment sizes `tree_volume` for one copy per
-workspace of a tree. `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
+workspace of a tree, and for one CodeGraph index per workspace (`.codegraph/`, 185 MB for this
+repository). `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
 stops at the pod, so neither may run while another pod of the tree is using uv.
+
+Each role's shim is started with `--warm-codegraph`: once its Oh My Pi has written its first frame —
+its extensions loaded, its RPC loop serving — the shim builds the workspace's CodeGraph index in the
+background (`codegraph init`, or `codegraph index` to repair one an earlier build left partial, as
+`codegraph status --json` decides). Nothing waits on it: not the launch, not the role's registration,
+not a prompt. Six role shims share one workspace, and a draining pod can overlap its replacement, so
+the warm-up holds a lease at `.codegraph/legion-warm.lock` for its run — an exclusive create whose
+holder refreshes its mtime every 10 s, taken over once it is 60 s stale, the takeover itself under a
+second exclusive create beside it so two shims that both read one stale lease never both build — and a
+shim that finds the lease held leaves the build to its holder (a pod's `flock` reaches no other pod
+under gVisor, so the lease is a file, not a lock). A stop mid-build — the launcher's one SIGTERM to
+the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim exits only
+once the warm-up has released its lease, inside the pod's `terminationGracePeriodSeconds`
+(`worker_stop_timeout_seconds`, which the launcher passes the shim as `--stop-grace`), so the
+relaunch is never told a live build holds the workspace; it runs the warm-up again, and `status` on
+the volume's existing index answers complete, so nothing runs, or reports the index the stop left
+partial, which `codegraph index` repairs. The tester's `affected` and
+the reviewer's `impact`/`callers` queries answer once `codegraph status --json` reports
+`index.state: "complete"`; before that a role falls back to grep, as its prompt says. The init
+containers never call `codegraph`.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;
@@ -1458,12 +1480,14 @@ issue's pod (every role container of it alike) and the image probe's.
   naming the Secret and keys. A `provider_keys` variable that anything else in the pod sets is
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
-  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes the pod
-  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off) and names
-  it first, ahead of the operator's, so the operator's overlay outranks it. The baseline also sets
-  `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
-  when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
-  may not set, since they decide where Oh My Pi keeps the session a resume reads.
+  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes one overlay,
+  the turn-scoping one (`bash.autoBackground.enabled` and `async.enabled` off, the two keys a
+  takeover's abort depends on, `packages/daemon/internal/podsafety/turnscope.yml`), and names it
+  first, ahead of the operator's, so the operator's overlay outranks it. Nothing of a repository's
+  settings is held off: they reach a pod's agent as they reach any agent session, under the
+  operator's overlay. The pod sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent
+  where the pod leaves them unset, which an operator's pod may not set, since they decide where Oh
+  My Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
   `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
   `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate
@@ -1951,10 +1975,12 @@ on the Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.po
 providers Secret, so it reaches models by the route every worker does. Its one container,
 `controller`, runs `legion launcher --role controller`: it authenticates to the worker stream with
 its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on
-the pod baseline (`--pod-safety`), on the daemon's command, as an issue pod's role containers do
-theirs, so a relaunch in a healthy pod is a new generation of that child rather than a new pod. Its
-role Secret, `legion-<project>-controller-controller-boot`, holds that launcher's token alone, bound
-to the pod's uid, and is the only Secret its launch writes: there is no provisioning `-boot` Secret.
+the pod baseline (`--pod-safety`: the turn-scoping overlay first in `PI_CONFIG_FILES` and the two
+session-placing variables, [Settings order](#operator-configuration)), on the daemon's command, as
+an issue pod's role containers do theirs, so a relaunch in a healthy pod is a new generation of that
+child rather than a new pod. Its role Secret, `legion-<project>-controller-controller-boot`, holds
+that launcher's token alone, bound to the pod's uid, and is the only Secret its launch writes: there
+is no provisioning `-boot` Secret.
 Its Sandbox owns a volume of its own (`tree-legion-<project>-controller`, of
 `runtime.kubernetes.tree_volume` and `storage_class`), mounted at `/legion` with its `sessions`
 directory at Oh My Pi's sessions directory, so a relaunch resumes the session. It provisions no

@@ -4,6 +4,10 @@ import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import {
+  sessionDirectory as dispatchSessionDirectory,
+  writeSessionTitle,
+} from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -19,6 +23,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "@legion/pi-shared/pi-types";
+import { dispatchCommandHead } from "@legion/pi-shared/shell-command";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createClaimSession } from "../src/claim-session";
@@ -57,9 +62,13 @@ const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
  * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
  * that runs `legion gh`. A grant lives its ttl (60 seconds, or pushTTL for a `legion push`
  * invocation), so a call that reaches `gh` long after the
- * pane's last bash command needs its own. */
+ * pane's last bash command needs its own. A `dispatch` command (`dispatchCommandHead`) redeems
+ * none: the CLI authenticates with the pane's Dispatch token, so it neither waits on the daemon
+ * nor fails when minting does. */
 function needsGrant({ toolName, input }: ToolCallEvent): boolean {
-  if (toolName === "bash") return typeof input.command === "string";
+  if (toolName === "bash") {
+    return typeof input.command === "string" && dispatchCommandHead(input.command) === undefined;
+  }
   if (toolName === "github") return true;
   const paths = Array.isArray(input.paths) ? input.paths : [input.path];
   return paths.some((entry) => typeof entry === "string" && GH_RESOLVED_URL.test(entry));
@@ -293,7 +302,7 @@ function refusedCommand(
 }
 
 /** The `write` targets that are not files, each scheme in any case, as Oh My Pi routes it: a tool
- * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Dispatch tools), a
+ * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Envoy tools), a
  * message to an agent of this process (`agent://<id>`), or job and service control (`proc://<id>`:
  * `content` goes to a supervised service's stdin; `/kill` stops a job, `/mode` sets its lifetime). */
 const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
@@ -453,11 +462,20 @@ export default function legionExtension(pi: PiApi): void {
    * Names the session by its Legion identity (`src/session-title.ts`), so every Dispatch
    * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
    * session claims its Envoy role: that claim registers the session, and the registration carries
-   * the title then rather than at the next heartbeat.
+   * the title then rather than at the next heartbeat. The `dispatch` command reads the title from
+   * the session's `title` file, which envoy.ts rewrites only before a shell command whose session
+   * name changed, so it is written here too, and the pane's first command already carries it.
    */
   const titleSession = async (context: SessionContext): Promise<void> => {
     const title = legionSessionTitle(classifySession(process.env), process.env.LEGION_PROJECT);
-    if (title !== undefined) await applySessionTitle(pi, context, title);
+    if (title === undefined) return;
+    await applySessionTitle(pi, context, title);
+    const sessionID = context.sessionManager.getSessionId();
+    if (sessionID === "") return;
+    writeSessionTitle(
+      dispatchSessionDirectory(process.env, sessionID),
+      context.sessionManager.getSessionName?.() ?? title
+    );
   };
 
   pi.on("session_start", async (_event, context) => {
@@ -517,9 +535,11 @@ export default function legionExtension(pi: PiApi): void {
     // grant is minted. Classified once per instance, on the first call: a throw for a malformed
     // LEGION_ROLE stays inside the handler, never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
+    // A `dispatch` command's quoted here-document is data on its stdin, never a command, so the
+    // pane rules read only its head line: a message body that names `jj abandon` is not refused.
     const commands =
       toolCall.toolName === "bash" && typeof toolCall.input.command === "string"
-        ? splitShellCommands(toolCall.input.command)
+        ? splitShellCommands(dispatchCommandHead(toolCall.input.command) ?? toolCall.input.command)
         : undefined;
     const refusal = paneRuleRefusal(toolCall, paneRules, commands);
     if (refusal !== undefined) return { block: true, reason: refusal };

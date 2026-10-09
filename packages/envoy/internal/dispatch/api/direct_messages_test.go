@@ -19,7 +19,7 @@ import (
 
 // directConversation is a human's direct message to s1 on a fresh handler whose fake listener
 // delivers it, plus a way for s1 to answer that message's first delivery attempt the way
-// dispatch_message does, asking to follow up once it has answered.
+// `dispatch message` does, asking to follow up once it has answered.
 func directConversation(t *testing.T) (http.Handler, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
 	t.Helper()
 	handler, _, root, reply, sent := directConversationFrom(t, "alice")
@@ -48,7 +48,7 @@ func directConversationFrom(t *testing.T, login string) (http.Handler, *store.St
 	return handler, database, root, reply, &sent
 }
 
-// replyTo is s1 answering the first delivery attempt of rootID the way dispatch_message does,
+// replyTo is s1 answering the first delivery attempt of rootID the way `dispatch message` does,
 // asking to follow up once it has answered.
 func replyTo(t *testing.T, handler http.Handler, rootID, body string) *httptest.ResponseRecorder {
 	t.Helper()
