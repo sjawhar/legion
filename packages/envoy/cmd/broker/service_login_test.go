@@ -44,7 +44,6 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		"BROKER_K8S_OIDC_AUDIENCE="+podAudience,
 	)
 	base := "http://" + addr
-	uiToken := strings.TrimPrefix(productionEnv[0], "BROKER_UI_TOKEN=")
 
 	call := func(method, path string, auth map[string]string, body any) (int, []byte) {
 		t.Helper()
@@ -83,7 +82,7 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 	}
 	ui := func(method, path string, body any) (int, []byte) {
 		t.Helper()
-		return call(method, path, map[string]string{"Authorization": "Bearer " + uiToken}, body)
+		return call(method, path, map[string]string{"Authorization": "Bearer " + testUIToken}, body)
 	}
 	launcher := func(key *ecdsa.PrivateKey, credentialID, method, path string, body any) (int, []byte) {
 		t.Helper()

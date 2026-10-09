@@ -225,6 +225,9 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{service.ID, bob.ID}) {
 		t.Fatalf("LiveCredentials(bob) = %v, want the service login ada approved, then his own", got)
 	}
+	if got := liveCredentialIDs(t, svc, "  "); len(got) != 0 {
+		t.Fatalf("LiveCredentials(no one) = %v, want none: no login lists a service's login", got)
+	}
 
 	for _, tc := range []struct {
 		name, id, approver string
@@ -233,6 +236,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 		{"another person", ada.ID.String(), "bob@example.com", ErrNotApprover},
 		{"no one", ada.ID.String(), "  ", ErrNotApprover},
 		{"the sentinel, a service's login", service.ID.String(), " Anyone ", ErrNotApprover},
+		{"no one, a service's login", service.ID.String(), "  ", ErrNotApprover},
 		{"another person, an expired login", stale.ID.String(), "bob@example.com", ErrNotApprover},
 		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
 	} {
