@@ -1,14 +1,15 @@
 {
-  "completed": "2026-10-09T09:31:34.9226881Z",
-  "documentationFeedback": "Round 1's three minor items are resolved: the refusal-text parenthetical is replaced by `(it is never offered one)`, `leaves the stall open` by `closes nothing`, and the suite count by 192/691 in the body and implement.json. Nothing further.",
+  "completed": "2026-10-09T11:48:32.404290001Z",
+  "documentationFeedback": "Round 3 adds nothing: the merge touched no sentence of the four documents (the fingerprint over the branch diff is unchanged). Round 1's three minor items are resolved: the refusal-text parenthetical is replaced by `(it is never offered one)`, `leaves the stall open` by `closes nothing`, and the suite count by 192/691 in the body and implement.json. Nothing further.",
   "failed": 0,
   "failures": [],
   "implementerProof": {
-    "how": "Round 2 (docs-only: `jj diff --from fac2164dc6e8 --to @- --stat -- '~(.legion | glob:\"**/*.md\")'` is 0 files, so the code the round-1 drives ran on is byte-identical). Re-ran proof 3's checks at f601960448ed (docs head 40d8393953f8): the old-clause grep is empty; `LEGION-631` appears once in each of SKILL.md, pi-legion/AGENTS.md, headless.md and the CHANGELOG (pi-envoy/AGENTS.md carries no grant sentence, so none is needed there); no sentence states the grant as the rule any more (`on the grant … last credentialed call wrote` without today/LEGION-631: no hits); `leaves the stall open` and the `legion is available only to this session…` quotation are gone; SKILL.md 498 lines; skills guard 6 pass; `go test -count=1 ./internal/prompts/...` ok; biome 885 files, no errors; check-private-names clean (3726 files); `LEGION_TEST_OMP=/opt/omp/bin/omp bun test` in pi-legion 192 pass / 0 fail / 691 expect() calls across 14 files — the count the implementer corrected to in this round's body and handoff; pi-shared 18 pass. Each rewritten sentence read against the code: `should one run` / `is not refused` (legion.ts:266 TREE_PANE_RULES = [JJ_LOG_REWRITE]); `closes nothing` (handoff-actions.ts:218-219, phase-stall.ts:58-63; my round-1 refused-completion drive: entries [open, quiet]); `(it is never offered one)` (my round-1 subagent drive: the subagent's tool list has no `legion`); `today … per-call grant … within its 60 seconds` (legion.ts:58); `LEGION-631 replaces that grant with the role's mounted token file` (LEGION-631's title: each role's App token is a mounted file; the grants are deleted).",
+    "how": "Round 3 is the conflict-forced forward merge of main@origin (1511d4fabfa9, after the approval bded287fda31 and retro 5b9d7372c1b8): the fingerprint procedure of skill://legion-worker/references/conflicts-and-rewrites.md at my round-2 head f601960448ed and at the new head 4da26c3891ea gives b66bfa91566f4896b26211c3135740d2520fe7b2dc4fad105b8ce5d21f7665b7 at both, equal to the before/after pair the implementer posted on the pull request (its rebase comment at 11:36Z), so this is a bare-gates re-check and the round-1 and round-2 verification stands. Bare gates: CI green at 4da26c3891ea (Tests 37924753202 lint/typecheck/test, PR Title 37924753243 and 37925592431, Legion Envoy and Contracts 37924753195, Docs 37924753193 all success; Worker Image 37924753216 in progress, not required; GitHub: MERGEABLE, APPROVED) and the smoke check in the tester pod at the merged head after bun install --frozen-lockfile (no changes): LEGION_TEST_OMP=/opt/omp/bin/omp bun test in pi-legion 195 pass / 0 fail / 701 expect() calls across 14 files (main brought three tests), pi-shared 23 pass, pi-legion tsc exit 0. Round 2 (docs head 40d8393953f8) and round 1 (299b3e5410d7) as recorded below.",
     "verdict": "verified"
   },
   "issue": "LEGION-634",
   "observations": [
+    "Round 3: rebase re-check only (fingerprint unchanged); the real-surface verification of rounds 1-2 is not repeated, per the tester's rule in skill://legion-worker/references/pr-body.md.",
     "Round 2 changed four markdown files and implement.json only; the harness, both omp tests and tsconfig are byte-identical to fac2164dc6e8, so the round-1 real-binary drives (the refused tool completion leaving [open, quiet]; the task subagent offered no legion tool and running on the parent's one grant) are the proof of the sentences they support.",
     "The Envoy-delivery recurrence of the reminder still rests on phase-stall.ts:60-61 and legion.test.ts's phase-stall cases: runLegionPane runs no NATS (plan D5).",
     "The hoisted runner's transcriptEntries() wants exactly one .jsonl under sessions; a pane that spawns a task subagent has two, so a future subagent case reads the parent's transcript itself (round-1 note, unchanged)."
@@ -16,6 +17,14 @@
   "passed": 3,
   "phase": "test",
   "proof": [
+    {
+      "command": "jj git fetch; for head in f601960448ed9a661a71788193893d2c682abea4 4da26c3891eaf4d1b4d0b2371fb53771440e67ff: jj diff --from \"fork_point(main@origin | $head)\" --to $head --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; legion gh -- run list --commit 4da26c3891eaf4d1b4d0b2371fb53771440e67ff; bun install --frozen-lockfile; cd packages/pi-legion \u0026\u0026 LEGION_TEST_OMP=/opt/omp/bin/omp bun test \u0026\u0026 bunx tsc --noEmit; cd packages/pi-shared \u0026\u0026 bun test",
+      "criterion": "Rebase re-check f601960448ed → 4da26c3891ea after the conflict-forced forward merge of main@origin: the branch diff is unchanged and the bare gates are green at the new head",
+      "headSha": "4da26c3891eaf4d1b4d0b2371fb53771440e67ff",
+      "negativeControl": "the two heads differ in 235 files once .legion and docs/solutions are counted back in (jj diff --from 4ea68635a688 --to @- --stat: main's LEGION-588 dispatch CLI, the broker IAM change, three releases), and the implementer's own retro commit 5b9d7372c1b8 sits between them — all of which the fileset and the merge exclude, which is why the hash is equal; a SHA the workspace could not resolve would have counted as changed, and both resolved",
+      "observed": "fingerprint b66bfa91566f4896b26211c3135740d2520fe7b2dc4fad105b8ce5d21f7665b7 at both heads (unchanged; the implementer's PR comment names the same pair); CI at 4da26c3891ea: Tests 37924753202, PR Title 37924753243/37925592431, Legion Envoy and Contracts 37924753195, Docs 37924753193 success, Worker Image in progress (not required); pr view: MERGEABLE, APPROVED; smoke at the merged head: 195 pass, 0 fail, 701 expect() calls, 14 files; pi-shared 23 pass; pi-legion tsc exit 0; the workspace clean afterwards",
+      "surface": "the unchanged-diff fingerprint over the shared jj workspace, GitHub Actions at 4da26c3891ea, and the real Oh My Pi /opt/omp/bin/omp (omp/18.6.0) in --mode rpc through runLegionPane at the merged head in the tester pod"
+    },
     {
       "command": "rg -n -c 'LEGION-631' skills/legion-worker/SKILL.md packages/pi-legion/AGENTS.md packages/daemon/internal/prompts/roles/mechanics/headless.md packages/pi-legion/CHANGELOG.md packages/pi-envoy/AGENTS.md; rg -n -F -e 'because the issue has already left your phase' -e 'reaches the phase stall below, which then sends its one follow-up' -e 'not the `legion handoff` shell command, ends your phase' -e 'installs no tool gate' -e 'leaves the stall open' -e 'legion is available only to this session' \u003cthe five files\u003e; rg -n -e \"on the grant (your|the pane's) last credentialed call wrote\" \u003cthe four\u003e; wc -l skills/legion-worker/SKILL.md; cd packages/pi-legion \u0026\u0026 bun test src/skills-guard.test.ts; cd packages/daemon \u0026\u0026 go test -count=1 ./internal/prompts/...; bunx biome check .; bash .github/scripts/check-private-names.sh",
       "criterion": "3. The documents say what holds, with the per-call grant named as what LEGION-631 deletes (the spec's last constraint) and the shell path as what happens should one run; biome and the daemon's prompt structural tests pass",
@@ -44,6 +53,14 @@
     {
       "head": "f601960448ed9a661a71788193893d2c682abea4",
       "round": 2,
+      "verdict": "pass"
+    },
+    {
+      "fingerprint": "b66bfa91566f4896b26211c3135740d2520fe7b2dc4fad105b8ce5d21f7665b7",
+      "from": "f601960448ed9a661a71788193893d2c682abea4",
+      "head": "4da26c3891eaf4d1b4d0b2371fb53771440e67ff",
+      "kind": "rebase re-check",
+      "round": 3,
       "verdict": "pass"
     }
   ],
