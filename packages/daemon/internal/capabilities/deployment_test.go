@@ -85,16 +85,17 @@ func TestTheCodeGraphRowIsInstalledOnceProbedAndUncheckedBefore(t *testing.T) {
 	}
 }
 
-// A live row says its check is still to run: nothing in the daemon proves a live row against a
-// running pod yet, so the row reads as the pending check it is, naming the issue whose check will,
-// where one is named, and never as a check that passed.
-func TestLiveRowsSayTheirCheckIsPending(t *testing.T) {
+// A live row names who proves it and that the daemon does not: the Stage 4b live proof
+// (scripts/e2e/README.md) proves a live row against a running pod, with the record on the issue
+// the ruling names where one is named, and nothing in the daemon reads that result, so the row
+// renders live and never present.
+func TestLiveRowsNameTheStage4bProofAndNeverReadPresent(t *testing.T) {
 	report := states(satisfied.Report())
 	for _, row := range Table {
 		if row.Site != SiteLive {
 			continue
 		}
-		want := "to be proved by a live check against a running pod"
+		want := "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon"
 		if row.Ruling != "" {
 			want += " (" + row.Ruling + ")"
 		}
@@ -103,7 +104,7 @@ func TestLiveRowsSayTheirCheckIsPending(t *testing.T) {
 			t.Errorf("%s = %s (%s), want live (%s)", row.Name, got.Status, got.Detail, want)
 		}
 	}
-	if got, want := report[RepositoryExtensions].Detail, "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries"; got != want {
+	if got, want := report[RepositoryExtensions].Detail, "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon (dispatch://LEGION-578): loads the Oh My Pi extensions the repository it works carries"; got != want {
 		t.Errorf("repository-extensions detail = %q, want %q", got, want)
 	}
 }

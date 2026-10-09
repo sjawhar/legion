@@ -1,9 +1,9 @@
 // Package capabilities is the one list of what a Legion worker can do (LEGION-578: every worker is
 // a full agent). Each capability is checked at one site — in the image by `legion probe-image`
-// (CheckImage), by a live check against a running pod, by the daemon from the deployment's
-// configuration, or withheld by a ruling — and the probe prints the whole table, one line per row,
-// so an operator reads a single declared list in the probe pod's log rather than inferring what
-// was checked from which probes happened to run.
+// (CheckImage), by a live check against a running pod (the Stage 4b live proof), by the daemon
+// from the deployment's configuration, or withheld by a ruling — and the probe prints the whole
+// table, one line per row, so an operator reads a single declared list in the probe pod's log
+// rather than inferring what was checked from which probes happened to run.
 package capabilities
 
 // Name is a capability as the probe prints it and legion.yaml names it.
@@ -38,8 +38,9 @@ const (
 	// SiteImage is checked inside the worker image by `legion probe-image` (CheckImage): the
 	// image either carries what the capability needs or it does not.
 	SiteImage Site = "image"
-	// SiteLive is to be proved by a live check against a running pod: it needs a cluster, a
-	// model, or a service the image alone cannot show. No such check runs yet; the row says so.
+	// SiteLive is proved by a live check against a running pod — the Stage 4b live proof
+	// (scripts/e2e/README.md) — since it needs a cluster, a model, or a service the image alone
+	// cannot show. The daemon reads no live result, so the row renders `live`, never `present`.
 	SiteLive Site = "live"
 	// SiteDeployment is decided by the deployment's legion.yaml, which the daemon reports: no
 	// image or pod can show it.
@@ -55,7 +56,7 @@ type Capability struct {
 	// Summary is one line: what a worker does with it.
 	Summary string
 	// Ruling is the dispatch://LEGION-<n> a withheld row cites; for a live row, the issue whose
-	// live check proves it (may be ""); "" otherwise.
+	// Stage 4b checkpoint proves it and holds its record (may be ""); "" otherwise.
 	Ruling string
 	// Awaits is, on an image row whose tooling the image carries but a pod's agent cannot use yet,
 	// the sentence that says so and names the issue whose landing changes that; "" otherwise. The
@@ -83,7 +84,7 @@ var Table = []Capability{
 	{WebSearch, SiteLive, "searches the web through the web-search tool", "", ""},
 	{Skills, SiteImage, "loads the skills Legion's prompts name", "", ""},
 	{MCP, SiteLive, "reaches the MCP servers the deployment configures", "", ""},
-	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-629", ""},
+	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-578", ""},
 	{DispatchEnvoyTools, SiteLive, "reaches Dispatch and Envoy through the pi-envoy tools", "", ""},
 	{GitHub, SiteLive, "reads and writes GitHub through `legion gh` on its role's App", "dispatch://LEGION-631", ""},
 	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", "", ""},

@@ -143,7 +143,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 			t.Errorf("%s: detail %q, want the ruling %s first", line.Name, line.Detail, row.Ruling)
 		}
 		if row.Site == SiteLive && row.Ruling != "" && !strings.Contains(line.Detail, row.Ruling) {
-			t.Errorf("%s: detail %q, want it to name the live check's issue %s", line.Name, line.Detail, row.Ruling)
+			t.Errorf("%s: detail %q, want it to name the issue whose Stage 4b checkpoint proves it, %s", line.Name, line.Detail, row.Ruling)
 		}
 	}
 	got := byName(lines)
@@ -153,7 +153,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock() + "; a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)",
 		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + "; go version go1.26.8 linux/amd64",
-		RepositoryExtensions: "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries",
+		RepositoryExtensions: "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon (dispatch://LEGION-578): loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {
 			t.Errorf("%s: detail %q, want %q", name, got[name].Detail, want)

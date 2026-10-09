@@ -136,8 +136,8 @@ An image row the image carries prints `present` with its evidence, but for `code
 `installed`: the CLI and the plugin are in the image, and a pod's agent gets the tool once its launch
 loads profile plugins (dispatch://LEGION-629; a pod runs `--no-extensions` with the Envoy and Legion
 plugins as its explicit extensions today, so the profile's plugin never loads). A live row prints
-`live` with the check still to prove it, a deployment row `reported`, a withheld row `withheld` with
-its ruling, and an image row the image lacks `missing` with why.
+`live` naming the Stage 4b live proof that proves it (never the daemon), a deployment row `reported`,
+a withheld row `withheld` with its ruling, and an image row the image lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
@@ -886,9 +886,11 @@ the probe passed — but for `codegraph`, which reads `installed`: the CLI and p
 and a pod's agent gets the tool once its launch loads profile plugins (dispatch://LEGION-629; a pod's
 agent runs `--no-extensions` today, so no worker has the tool yet, and the report's job is to name
 what a worker lacks); the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
-`dispatch-envoy-tools`, `github`) are to be proved by a live check against a running pod —
-dispatch://LEGION-633's integration check and dispatch://LEGION-629's checks, none of which runs
-yet, so each reads `live` with the check it awaits, never as proved; the withheld rows carry the ruling that keeps them from
+`dispatch-envoy-tools`, `github`) are proved against a running pod by the Stage 4b live proof
+(`scripts/e2e/README.md`: its `repository-tools` and `full-agent` checkpoints, and
+`github-credential` for `github`), which the operator lane runs against a release image, with the
+record on dispatch://LEGION-578 (and dispatch://LEGION-631 for `github`); no check in the daemon or
+the image probe reads a live result, so a live row reads `live` and never `present`; the withheld rows carry the ruling that keeps them from
 every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
 dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
 and dispatch://LEGION-205); and the three deployment rows are the daemon's to measure from its own
