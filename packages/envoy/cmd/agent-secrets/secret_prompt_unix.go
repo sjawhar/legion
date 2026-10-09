@@ -104,6 +104,10 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	// bash when a stop gives it the foreground. Every caught stop invalidates the entry.
 	mode.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.NOFLSH
 	mode.Lflag |= unix.ISIG
+	// Ctrl-S and Ctrl-Q reach the reader as control bytes, refused like any other: with IXON on,
+	// the terminal would take them, so a pasted one would vanish from the value, and a lone
+	// Ctrl-S would leave the prompt waiting with its output suspended.
+	mode.Iflag &^= unix.IXON
 	var ignoredKeys [3]byte
 	for i, cc := range ignoredControls {
 		if key := saved.Cc[cc]; key != 0 && key != 0xff {

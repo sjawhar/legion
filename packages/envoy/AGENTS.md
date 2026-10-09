@@ -2025,7 +2025,9 @@ has sent to the background (`whileHeld`). The reader reapplies its current mode 
 EINTR, and before each poll after any stop or resume it rereads the mode and reapplies it when it
 differs, since a stop no handler sees (SIGSTOP from another process) lets the shell put echo back
 while the job is stopped; one poll waits for input or a
-watcher event and also times the quiet window. Reads never block. NOFLSH is cleared: leaving
+watcher event and also times the quiet window. Reads never block. IXON is cleared, so Ctrl-S and
+Ctrl-Q reach the reader and are refused as control bytes rather than suspending the prompt's
+output or vanishing from a paste. NOFLSH is cleared: leaving
 unread secret bytes in the tty queue at a stop would let bash read them. The kernel reports no
 count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
 stays hidden only to discard the remaining line, then exits 2 and names the command to run again
