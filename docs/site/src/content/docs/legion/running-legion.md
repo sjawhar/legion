@@ -50,17 +50,27 @@ and the checks that branch requires (its rulesets and its branch protection), th
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
 - **One reservation per pod, no affinity.** Every container of a Legion pod reserves cpu and memory
-  with its request equal to its limit, so every pod is `Guaranteed`: a role's reservation is
-  `runtime.kubernetes.resources.<role>` (`cpu`, `memory`, each optional), and the daemon's defaults
-  fill the rest — 750m and 4Gi for the implementer, tester and reviewer; 250m and 1Gi for the
-  architect, planner and merger; 1 CPU and 4Gi for the controller (`controller: daemon` only) and the
-  image probe. A six-role issue pod sums to 3 CPU and 15 GiB at the defaults. No pod carries an
-  affinity: each issue pod owns its volume, so the scheduler places it wherever the pool has room
-  and Karpenter adds nodes under the pool's limits. Concurrent issue pods are bounded by what the
-  pool's `limits.cpu` and `limits.memory` leave for pods of that sum (two per 8-vCPU floor node,
-  about 80 at `limits.cpu: 256`, or `limits.memory` / 15 GiB when that is smaller); `admission_cap`
-  bounds roots alone, a tree of N children runs N+1 pods, and a pod the pool cannot place stays
-  `Pending` until the daemon reads it dead and, once its launch failures run out, fails the claim.
+  with its request equal to its limit, so every pod is `Guaranteed`, and bounds its ephemeral
+  storage — the node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go
+  and Bun caches a build fills — with a per-role limit over a smaller request. A role's reservation
+  is `runtime.kubernetes.resources.<role>` (`cpu`, `memory`, `ephemeral_storage` the disk limit,
+  `ephemeral_storage_request` what the scheduler reserves of it, each optional, the request at most
+  the limit), and the daemon's defaults fill the rest — 750m and 4Gi for the implementer, tester
+  and reviewer; 250m and 1Gi for the architect, planner and merger; 1 CPU and 4Gi for the controller
+  (`controller: daemon` only) and the image probe; 20Gi of disk for the implementer and tester and
+  10Gi for every other role, over a 1Gi request each. A six-role issue pod sums to 3 CPU and 15 GiB
+  at the defaults, its disk limits to 80Gi over 6Gi requested. A container past its disk limit has
+  its own pod evicted, the offending issue's alone, rather than the node reaching `DiskPressure`
+  where another tree's pod can go; the 1Gi request reserves almost no disk, so a node's root volume
+  can be oversubscribed by the pods' limits — an operator who knows the root volume raises
+  `ephemeral_storage_request` toward a role's expected use so the scheduler reserves disk and places
+  no pod a full node could not hold. No pod carries an affinity: each issue pod owns its volume, so
+  the scheduler places it wherever the pool has room and Karpenter adds nodes under the pool's
+  limits. Concurrent issue pods are bounded by what the pool's `limits.cpu` and `limits.memory`
+  leave for pods of that sum (two per 8-vCPU floor node, about 80 at `limits.cpu: 256`, or
+  `limits.memory` / 15 GiB when that is smaller); `admission_cap` bounds roots alone, a tree of N
+  children runs N+1 pods, and a pod the pool cannot place stays `Pending` until the daemon reads it
+  dead and, once its launch failures run out, fails the claim.
 - **A namespace and a storage class.** Each issue's volume (`issue_volume`, 20Gi by default; the
   daemon-launched controller's pod owns one too) comes from `storage_class`, which is required.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all

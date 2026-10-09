@@ -1134,7 +1134,9 @@ Every pod runs:
   privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
 - on the Legion pool, with its node selector and toleration, and nothing else of its placement: no
   affinity;
-- `Guaranteed`, every container's request equal to its limit;
+- `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
+  kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
+  ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
 - annotated `karpenter.sh/do-not-disrupt: "true"`.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
