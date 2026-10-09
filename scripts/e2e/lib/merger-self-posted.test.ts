@@ -140,7 +140,33 @@ describe("merger_self_posted", () => {
   });
 
   test("eval that writes to another device while a comment mentions xd://dispatch_message is no self-post", () => {
-    const code = `// writing xd://another_device, not xd://dispatch_message here\nawait tool.write({ path: "xd://another_device", content: "{}" });`;
+    const code = `// writing xd://another_device, not xd://dispatch_message here\nawait tool.write({ path: "xd://another_device", content: "READY LEGSMOKE-1" });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a READY posted through eval calling tool.write with content built before path counts", () => {
+    const args = { issue: "LEGSMOKE-1", body: ready };
+    const code = `r = await tool.write({"content": ${JSON.stringify(JSON.stringify(args))}, "path": "xd://dispatch_message"})\nr`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(1);
+  });
+
+  test("a block comment naming the device inside another device's write is no self-post", () => {
+    const code = `await tool.write({ path: "xd://another_device", /* xd://dispatch_message */ content: "READY LEGSMOKE-1" });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a file write whose content mentions the device as prose is no self-post", () => {
+    const code = `await tool.write({ path: "./notes.md", content: "See xd://dispatch_message for the device. READY LEGSMOKE-1" });`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a Python kwargs file write, then a print naming the device, is no self-post", () => {
+    const code = `tool.write(path="./notes.md", content="READY LEGSMOKE-1")\nprint("the device is xd://dispatch_message")`;
+    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
+  });
+
+  test("a write to a device with the report's name as a prefix is no self-post", () => {
+    const code = `await tool.write({ path: "xd://dispatch_message.md", content: "READY LEGSMOKE-1" });`;
     expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
   });
 

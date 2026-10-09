@@ -5,17 +5,18 @@
 
 # calls(name) is whether a message content entry calls the tool name, by any of the ways Oh My Pi
 # gives the model: the tool itself, a write whose path is the tool's device, xd://<name>, alone,
-# eval code that calls tool.<name>(...), or eval code whose tool.write(...) call itself names the
-# device xd://<name> before the call's own closing brace (the two ways a model can reach a device
-# from eval). The device must fall inside that write call's own arguments, not merely anywhere in
-# the code string, so a comment or an unrelated tool.write to another device never counts.
+# eval code that calls tool.<name>(...), or eval code that calls the generic tool.write(...) and,
+# anywhere in the same code, assigns the device xd://<name> as a quoted string with `:` or `=`
+# (covering content built before path, a path keyword argument, or a path held in a variable). A
+# consumer that needs more than "this cell could write the device" — the report's issue key, or a
+# READY literal — still checks for that itself; calls() only says the device is in play.
 def calls(name):
   .type? == "toolCall" and (
     .name == name
     or (.name == "write" and ((.arguments.path? // "") | tostring | test("^\\s*xd://" + name + "\\s*$")))
     or (.name == "eval" and ((.arguments.code? // "") | tostring | (
          test("\\btool\\." + name + "\\s*\\(")
-         or test("\\btool\\.write\\s*\\([^}]*xd://" + name + "\\b")
+         or (test("\\btool\\.write\\s*\\(") and test("[:=]\\s*[\"'`]xd://" + name + "[\"'`]"))
        )))
   );
 

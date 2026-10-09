@@ -49,7 +49,7 @@ const bash: Call = {
   name: "bash",
   arguments: { command: "legion state --json" },
 };
-// The three surfaces of one dispatch_message call on ISSUE.
+// The surfaces of one dispatch_message call on ISSUE.
 const viaTool = (issue: string): Call => ({
   type: "toolCall",
   id: callId(),
@@ -182,6 +182,108 @@ describe("report_after_tick", () => {
     );
     expect(stdout).toBe("");
     expect(code).toBe(0);
+  });
+
+  test("a report posted through eval calling tool.write with content built before path (JS) passes", () => {
+    const code = `const args = { issue: "${report}", body: \`${body}\` };\nconst r = await tool.write({ content: JSON.stringify(args), path: "xd://dispatch_message", i: "Post" });\nr;`;
+    const {
+      code: exitCode,
+      stdout,
+      stderr,
+    } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_jsfirst",
+        name: "eval",
+        arguments: { language: "js", code },
+      })
+    );
+    expect(stderr).toBe("");
+    expect(stdout).toBe("");
+    expect(exitCode).toBe(0);
+  });
+
+  test("a report posted through eval calling tool.write with content built before path (Python) passes", () => {
+    const code = `r = await tool.write({"content": json.dumps({"issue": "${report}", "body": body}), "path": "xd://dispatch_message", "i": "Post"})\nr`;
+    const {
+      code: exitCode,
+      stdout,
+      stderr,
+    } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_pyfirst",
+        name: "eval",
+        arguments: { language: "py", code },
+      })
+    );
+    expect(stderr).toBe("");
+    expect(stdout).toBe("");
+    expect(exitCode).toBe(0);
+  });
+
+  test("a block comment naming the device inside another device's write is not the report's call", () => {
+    const code = `await tool.write({ path: "xd://another_device", /* xd://dispatch_message */ content: "{}" });`;
+    const { code: exitCode, stdout } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_comment",
+        name: "eval",
+        arguments: { language: "js", code },
+      })
+    );
+    expect(stdout).toBe(
+      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write`
+    );
+    expect(exitCode).toBe(1);
+  });
+
+  test("a file write whose content mentions the device as prose is not the report's call", () => {
+    const code = `await tool.write({ path: "./notes.md", content: "See xd://dispatch_message for the device" });`;
+    const { code: exitCode, stdout } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_prose",
+        name: "eval",
+        arguments: { language: "js", code },
+      })
+    );
+    expect(stdout).toBe(
+      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write`
+    );
+    expect(exitCode).toBe(1);
+  });
+
+  test("a Python kwargs file write, then a print naming the device, is not the report's call", () => {
+    const code = `tool.write(path="./notes.md", content="hello")\nprint("the device is xd://dispatch_message")`;
+    const { code: exitCode, stdout } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_kwprint",
+        name: "eval",
+        arguments: { language: "py", code },
+      })
+    );
+    expect(stdout).toBe(
+      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write`
+    );
+    expect(exitCode).toBe(1);
+  });
+
+  test("a write to a device with the report's name as a prefix is not the report's call", () => {
+    const code = `await tool.write({ path: "xd://dispatch_message.md", content: "{}" });`;
+    const { code: exitCode, stdout } = run(
+      onTickTurn({
+        type: "toolCall",
+        id: "toolu_prefix",
+        name: "eval",
+        arguments: { language: "js", code },
+      })
+    );
+    expect(stdout).toBe(
+      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write`
+    );
+    expect(exitCode).toBe(1);
   });
 
   test("eval code that writes to another device while a comment mentions xd://dispatch_message is not the report's call", () => {
