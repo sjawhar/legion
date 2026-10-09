@@ -4,7 +4,7 @@
 
 Read durable handoffs before planning, with the `legion` tool's `handoff_read`.
 
-The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document (`dispatch_artifact` on the issue), never in the issue's primary document, which is its spec; never commit a plan or spec file to the repository. No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan and spec content goes into the issue, never into a PR. The root `AGENTS.md`'s `docs/plans/` row describes human-authored design history, not a Legion artifact; a skill step that says "save the plan to a file" is satisfied by the handoff write below.
+The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document (`dispatch artifact` on the issue), never in the issue's primary document, which is its spec; never commit a plan or spec file to the repository. No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan and spec content goes into the issue, never into a PR. The root `AGENTS.md`'s `docs/plans/` row describes human-authored design history, not a Legion artifact; a skill step that says "save the plan to a file" is satisfied by the handoff write below.
 
 ## A departure from the spec
 

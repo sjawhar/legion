@@ -98,7 +98,7 @@ func createCorruptedDocument(t *testing.T, handler http.Handler, database *store
 }
 
 // A stored tree outside the schema is the document's own state, so every route that starts from
-// it answers alike - the reads, an edit (what dispatch_doc_edit calls) and a named version - with
+// it answers alike - the reads, an edit (what `dispatch doc-edit` calls) and a named version - with
 // 409 DOC_SCHEMA and one message naming the repair, whatever each route wraps the failure in.
 func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
 	for _, test := range outsideSchemaCorruptions {

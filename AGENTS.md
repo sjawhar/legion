@@ -153,7 +153,7 @@ close an issue into `done` and reopen it into `backlog` from the Dispatch dashbo
 **Handover:** the daemon (`packages/daemon`) works only the issues handed to it with the
 Dispatch label `legion` (in any case), so it can share a Dispatch project with humans and other
 agents; a dedicated project hands its issues over the same way. A human sets the label from the
-issue header in the Dispatch dashboard, an agent with `dispatch_issue` or `dispatch_issue_update`.
+issue header in the Dispatch dashboard, an agent with `dispatch issue` or `dispatch issue-update`.
 The controller hands over work itself: whenever an admission slot is free, it labels and admits
 the highest-priority `todo` leaf issue (one with no children) nobody else is working
 (`skills/legion-controller/SKILL.md`, "Keeping the slots full", which names when it walks).
@@ -168,7 +168,7 @@ the route's topic, where a label only marks the issue; it carries no workflow st
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
 decision blocks are settled and the human has agreed to every point in it, the architect requests
-it with `dispatch_request_approval` and a summary of what the human is approving, and registers
+it with `dispatch request-approval` and a summary of what the human is approving, and registers
 the document id and version with the daemon, and the daemon opens the gate on the
 `artifact.approved` event for that document at its current version — or at registration itself,
 when Dispatch already shows the human approved that version before the architect registered (the

@@ -85,14 +85,15 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 17 for contract 17's independent issue pods, each on a volume of its own (LEGION-632: the
+number is 18 for contract 18's independent issue pods, each on a volume of its own (LEGION-632: the
 init container's environment is the four surfaces above and nothing of a shared disk — no
 removable-workspaces list, no lock wait, no role or generation — and its volume expectation is
-`LEGION_EXPECT_ISSUE_VOLUME`), after contract 16's `capabilities` list on `GET /legion/v1/state`
-(LEGION-578), contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract 14's
-daemon-launched controller pod (LEGION-592) and contract 13's `push` grant and
-`LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583, the list contract 17 removed); the Envoy
-plugin's manifest carries no `legion` key, and the gate reads only this package's.
+`LEGION_EXPECT_ISSUE_VOLUME`), after contract 17's `dispatch` command instructions in every daemon
+role prompt (LEGION-588), contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578),
+contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract 14's daemon-launched
+controller pod (LEGION-592) and contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES`
+payload (LEGION-583, the list contract 18 removed); the Envoy plugin's manifest carries no `legion`
+key, and the gate reads only this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves

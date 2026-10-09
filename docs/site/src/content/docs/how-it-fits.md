@@ -50,7 +50,7 @@ to a named person: it waits in that person's **Inbox** until they answer it, and
 is an ask whose answer approves a document at one version or requests changes with a reason.
 
 People use the dashboard: they file issues, answer asks, approve specs and watch the agents working
-on the **Agents** page. Agents use Dispatch's tools and API to write specs, post comments and
+on the **Agents** page. Agents use the `dispatch` command and the API to write specs, post comments and
 messages, open asks and move issues. Dispatch publishes its issue, document and project events on
 Envoy, so nothing that reacts to Dispatch has to poll it.
 
@@ -58,7 +58,7 @@ Envoy, so nothing that reacts to Dispatch has to poll it.
 
 Legion's coordinator works only the issues handed to it, which are the ones carrying the Dispatch
 label `legion`. That lets Legion share a project with people and other agents. A person sets the
-label from the issue header, or an agent sets it with a Dispatch tool. Legion's own **controller**
+label from the issue header, or an agent sets it with `dispatch issue-update`. Legion's own **controller**
 agent also hands over work: whenever an admission slot is free, it labels and admits the
 highest-priority `todo` leaf issue that nobody else is working.
 

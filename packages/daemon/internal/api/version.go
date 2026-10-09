@@ -64,20 +64,28 @@ package api
 // the gate against a plugin whose strict reader refuses its state. Renumbered, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md says.)
 //
-// 17: LEGION-632 -- each issue's pod is independent, on a volume of its own, so the pod's
+// 17: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// its shell, which the Envoy plugin puts on the pane's PATH, rather than the `dispatch_*` tools it
+// no longer registers: a daemon and a plugin from either side of that change would hand agents
+// instructions for a surface they lack. (This branch first took 16; LEGION-578 landed at 16
+// first, and pi-legion 8.4.0 declares it beside a pi-envoy 8.4.0 that still registers the native
+// tools and puts no `dispatch` on the PATH, so a daemon at 16 would pass the gate against panes
+// that lack the command its prompts name. Renumbered, as the same note says.)
+//
+// 18: LEGION-632 -- each issue's pod is independent, on a volume of its own, so the pod's
 // `workspace-init provision` container no longer carries `LEGION_REMOVABLE_WORKSPACES` (the
 // removable-workspaces pass is gone with the shared tree volume), nor
 // `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (no two provisions share a repository, so the flock
 // and its wait are gone), nor the `LEGION_ROLE` and `LEGION_GENERATION` that seeded that pass's
 // candidate rotation; and `LEGION_EXPECT_TREE_VOLUME` is now `LEGION_EXPECT_ISSUE_VOLUME`. An image
-// built before 17 acts on a contract this daemon no longer speaks: it looks for the old name and so
+// built before 18 acts on a contract this daemon no longer speaks: it looks for the old name and so
 // never learns the volume must already hold the clone, provisioning a lost volume afresh instead of
 // exiting 3, and runs a lock and a removal pass against variables nothing sets; the image probe
 // pairs the daemon with an image built from this contract instead. Each role's agent is told a
 // state home of its own (`XDG_STATE_HOME=/home/legion/.local/state/<role>`), which the image's
 // shim makes Oh My Pi's profile directory under, so the browser broker's lock is one name per
-// container. (This branch first took 16; LEGION-578 landed at 16 first, and pi-legion 8.4.1
-// declares it with `capabilities` but with the init container's old environment, so a daemon at 16
-// would pass the gate against an image whose `workspace-init` speaks the other contract.
-// Renumbered, as the same learning says.)
-const DaemonAPIVersion = 17
+// container. (This branch first took 16, then 17; LEGION-578 landed at 16 and LEGION-588 at 17
+// first, and pi-legion 8.4.1 and 8.5.0 declare those with the init container's old environment,
+// so a daemon at either would pass the gate against an image whose `workspace-init` speaks the
+// other contract. Renumbered twice, as the same learning says.)
+const DaemonAPIVersion = 18

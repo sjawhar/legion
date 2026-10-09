@@ -555,18 +555,17 @@ merger_summary() {
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
 # merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
-# made any way Oh My Pi gives the model to call dispatch_message and envoy_publish
-# (lib/omp-tool-calls.jq's calls). Any publish counts; a message counts when its body starts with
-# READY, which in eval code is a string literal that starts with it.
+# made any of the ways lib/omp-tool-calls.jq's calls counts (the tool, a write to its xd:// device,
+# eval code calling tool.<name>(...), or eval code calling the generic tool.write(...) naming that
+# device): any envoy_publish, and a bash call that runs `dispatch message` (runs_dispatch) with a
+# body (--body, or --body-file - with a here-document) opening READY.
 merger_self_posted() {
   local f
   f=$(claim_session_file "$1" merger) || return 1
   jq -s -c -L "$script_lib" 'include "omp-tool-calls";
     [.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-    | select(calls("dispatch_message") or calls("envoy_publish"))
-    | select(calls("envoy_publish") or
-        ((call_arguments.body // "") | tostring | ltrimstr(" ") | startswith("READY")) or
-        ((.arguments.code? // "") | tostring | test("[`\"\u0027]\\s*READY")))
+    | select(calls("envoy_publish") or (runs_dispatch("message") and (bash_command
+        | test("--body(=|\\s+)\\\\?[\u0027\"]?\\s*READY|--body-file(=|\\s+)-[^\\n]*\\n\\s*READY"))))
     | {name, arguments}]' "$f"
 }
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }

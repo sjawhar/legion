@@ -75,7 +75,7 @@ describe("envoy plugin init", () => {
   });
 });
 
-describe("Dispatch tool gating", () => {
+describe("Dispatch configuration", () => {
   it("keeps Envoy available and logs once when Dispatch is unconfigured", async () => {
     const previous = { ...process.env };
     delete process.env.DISPATCH_URL;
@@ -92,9 +92,7 @@ describe("Dispatch tool gating", () => {
       expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
       expect(hooks.tool.envoy_list).toBeDefined();
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith(
-        "envoy: dispatch tools disabled — no Dispatch URL configured"
-      );
+      expect(warn).toHaveBeenCalledWith("envoy: Dispatch disabled — no Dispatch URL configured");
       hooks.dispose();
     } finally {
       warn.mockRestore();
@@ -119,7 +117,7 @@ describe("Dispatch tool gating", () => {
       expect(hooks.tool.envoy_list).toBeDefined();
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "envoy: dispatch tools disabled — dispatch.token must be a non-empty bearer token"
+        "envoy: Dispatch disabled — dispatch.token must be a non-empty bearer token"
       );
       hooks.dispose();
     } finally {

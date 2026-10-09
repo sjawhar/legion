@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import ts from "typescript"
@@ -190,6 +190,35 @@ test("the committed bundles contain only runtime builtin module specifiers", asy
   for (const name of Object.keys(BUNDLE_ENTRYPOINTS)) {
     const bundle = await readFile(join(distDirectory, `${name}.js`), "utf8")
     expect(await findExternalDependencySpecifiers(bundle)).toEqual([])
+  }
+})
+
+// Claude Code puts the plugin's bin/ on the Bash tool's PATH, and its plugin cache holds the git
+// tree with no node_modules, so bin/dispatch has to run the committed bundle as it stands.
+test("bin/dispatch is executable and runs the committed dist/dispatch.js without node_modules", async () => {
+  expect(BUNDLE_ENTRYPOINTS).toHaveProperty("dispatch", "../envoy-client/bin/dispatch.ts")
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-bin-"))
+  try {
+    await cp(join(packageRoot, "bin"), join(scratch, "bin"), { recursive: true })
+    await cp(distDirectory, join(scratch, "dist"), { recursive: true })
+    const shim = join(scratch, "bin", "dispatch")
+    expect((await stat(join(packageRoot, "bin", "dispatch"))).mode & 0o111).toBe(0o111)
+    const run = Bun.spawn([shim, "--help"], {
+      cwd: scratch,
+      env: { PATH: process.env["PATH"] ?? "", HOME: scratch },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      run.exited,
+      new Response(run.stdout).text(),
+      new Response(run.stderr).text(),
+    ])
+
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+    expect(stdout).toStartWith("Usage: dispatch ")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
   }
 })
 

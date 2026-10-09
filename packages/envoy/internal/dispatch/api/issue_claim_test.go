@@ -309,7 +309,7 @@ func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 
 	// The request has no parameter for claiming on another session's behalf: an invented one
 	// is refused rather than quietly ignored. A bearer still declares its own session in
-	// `actor`, as on every write — `dispatch_claim` fills that from the host runtime.
+	// `actor`, as on every write — `dispatch claim` fills that from the host runtime.
 	onBehalf := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor":      claimActorBody("session-one", "Implementer"),
 		"session_id": "session-two",

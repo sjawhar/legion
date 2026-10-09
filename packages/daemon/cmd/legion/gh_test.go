@@ -44,8 +44,8 @@ func TestGhRefusesGitHubIssueWritesBeforeRedeemingAGrant(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("gh %v exit = %d, want 1; stderr %s", args, code, errb.String())
 		}
-		if !strings.Contains(errb.String(), "Legion issues live on Dispatch") {
-			t.Fatalf("gh %v stderr = %q", args, errb.String())
+		if !strings.Contains(errb.String(), "Legion issues live on Dispatch; use `dispatch message` or `dispatch comment` on ") {
+			t.Fatalf("gh %v stderr = %q, want the refusal naming the dispatch commands", args, errb.String())
 		}
 	}
 }
