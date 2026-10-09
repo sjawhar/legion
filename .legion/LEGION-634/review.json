@@ -1,41 +1,30 @@
 {
-  "codeHead": "40d8393953f89e17e5c8a6cee8d216c131d84fce",
-  "completed": "2026-10-09T09:56:33.550207343Z",
-  "contractChangeCensus": "none required: no refusal added, no field made required, removed or renamed, no signature changed at a process or package boundary; the new harness exports are test-only under packages/pi-shared/test/.",
+  "codeHead": "4da26c3891eaf4d1b4d0b2371fb53771440e67ff",
+  "completed": "2026-10-09T11:51:03.516057735Z",
   "critical": 0,
-  "fastFollow": "One item: the post-hoist pin-and-docs sweep — expect(PHASE_STALL_ENTRY).toBe(\"legion-phase-stall\") beside the src/phase-stall unit tests; packages/pi-legion/README.md:72-74 naming the third cross-entry test and runLegionPane; LegionPaneOptions.answer's comment saying it is for non-gateway paths.",
-  "forgeFacts": "PR #1865 base main, head 4ea68635 (the tester's skip-checks handoff push), mergeable MERGEABLE, no reviews, reviewThreads none (gh api graphql). Required checks on main (rulesets): lint, typecheck, test, pr-title; no required workflows. check-runs at 4ea68635: 0 (skip-checks: true); at the code head's handoff f601960448ed: lint, typecheck, test (Tests run 37910424828), pr-title (37910424897, 37911242798, 37911900243), pi-envoy/pi-legion/pi-shared (Legion Envoy and Contracts 37910424965), Docs 37910424815, Worker Image 37910424746 all success; read_record checksVerdict green carried to 4ea68635. Both E2E lines present in the body with surface, command, observation, head and negative control. Reviewer's own runs at 4ea68635: pi-legion tsc exit 0 with legion-role-tools-omp.test.ts in the program (listFilesOnly count 1), pi-shared tsc exit 0, the no-copy grep (route-definition form) prints nothing, SKILL.md 498 lines, and `LEGION_TEST_OMP=/opt/omp/bin/omp bun test` on both omp tests: 8 pass, 0 fail, 82 expect() on omp/18.6.0.",
+  "fingerprint": "Conflict-forced forward merge after the round-1 approval: retro committed 5b9d7372c1b8 (docs/solutions) on the approved head bded287fda31, main moved (#1837 LEGION-588, #1864, #1861, three releases), and the implementer merged main@origin df983adabce5 into the bookmark in one commit 1511d4fabfa9 (parents 5b9d7372c1b8 and df983adabce5), then pushed its handoff 4da26c3891ea; the tester's bare-gates re-check is 89ed15fd8b3e. Branch diff with '~(.legion | docs/solutions)', --context 0, hunk headers and index lines dropped: at my last review's commit_id bded287fda31 against fork_point(main@origin | bded287f) = 5c956b07e0f6 → b66bfa91566f4896b26211c3135740d2520fe7b2dc4fad105b8ce5d21f7665b7; at the new head 89ed15fd8b3e against fork_point = df983adabce5 → b66bfa91566f4896b26211c3135740d2520fe7b2dc4fad105b8ce5d21f7665b7. Equal, and round 1 was an approval: a confirmation, not a round — no thermonuclear pass, no thread pass. The implementer's rebase comment and the tester's round-3 handoff name the same pair.",
+  "forgeFacts": "PR #1865 head 89ed15fd (the tester's skip-checks push), mergeable MERGEABLE, mergeStateStatus BLOCKED (awaiting the human merge), reviewDecision APPROVED from round 1 (review 5468626621 at bded287f, not dismissed). Required checks at the code head 4da26c3891ea: lint, typecheck, test (Tests run 37924753202) and pr-title (37924753243, 37925592431, 37926046921) all success; read_record shows checksVerdict green carried to 89ed15fd. The tester re-ran only the bare gates at 4da26c38 (195 pass on omp/18.6.0 after main brought three tests; pi-shared 23; tsc clean).",
   "important": 0,
   "issue": "LEGION-634",
-  "keyFindings": [
-    {
-      "description": "The simplify pass replaced the literal `legion-phase-stall` with `PHASE_STALL_ENTRY`, so no check CI runs pins the persisted transcript key any more; scripts/e2e/stage3-4b13b-acceptance.sh:790,794,826 and stage4b-sandbox-tree.sh:1467 grep the wire string, and a `--resume` of an older transcript restores by it. Not a behaviour change: fast-follow (one `expect(PHASE_STALL_ENTRY).toBe(\"legion-phase-stall\")`).",
-      "file": "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts:119",
-      "severity": "minor"
-    },
-    {
-      "description": "Still names two cross-entry tests and says they load both entries themselves; AGENTS.md:307 now names three and the harness's runLegionPane. Docs only: fast-follow.",
-      "file": "packages/pi-legion/README.md:72-74",
-      "severity": "minor"
-    },
-    {
-      "description": "`answer` is consulted ahead of every route, the gateway's included, while `answered`/`lastAnsweredAt` are stamped only in the runner's own gateway branch; the one caller (the stall test's /api/v1/asks/open) never intercepts the gateway, so nothing breaks today. A comment saying `answer` is for non-gateway paths closes it: fast-follow.",
-      "file": "packages/pi-shared/test/omp-harness.ts:453-457",
-      "severity": "minor"
-    }
-  ],
-  "minor": 3,
+  "keyFindings": [],
+  "minor": 0,
   "notProven": [
-    "The daemon side of the shell-completion sentences (completes the phase at the daemon; HANDOFF_NOT_CURRENT_PHASE/HANDOFF_ALREADY_RECORDED) is not exercised by the committed real-binary case, whose legion is the harness's logging stub; it rests on engine.go:324-326,360-363,386-389 and api/handoff.go:109-119 as read, and on the tester's uncommitted round-1 drive.",
-    "The reminder's recurrence after an Envoy delivery rests on phase-stall.ts:60-61 and legion.test.ts's phase-stall cases: runLegionPane runs no NATS (plan D5).",
-    "The subagent sentence has no committed real-binary case: legion.ts:467,526-529, legion.test.ts:1100,1111-1140, and the tester's uncommitted round-1 drive.",
-    "The `today … LEGION-631 replaces that grant` clause in four files is forward-dated; if #1843 merges first those sentences are stale until swept."
+    "Round 1's four Not proven / risk lines stand unchanged in the body."
   ],
   "phase": "review",
-  "reviewedHead": "4ea68635a68802708927ca9a22819eb996167dc3",
-  "round": 1,
+  "previousRounds": [
+    {
+      "approvedCommit": "bded287fda3157598b33ffa189fb14db4addd183",
+      "review": "https://github.com/sjawhar/legion/pull/1865#pullrequestreview-5468626621",
+      "reviewedHead": "bded287fda3157598b33ffa189fb14db4addd183",
+      "round": 1,
+      "verdict": "approved"
+    }
+  ],
+  "reviewedHead": "89ed15fd8b3efa04814c40a44860126269241f08",
+  "round": 2,
   "schemaVersion": 1,
-  "securityLine": "Security[agent-def]: skills/legion-worker/SKILL.md:62-66,429-440, packages/daemon/internal/prompts/roles/mechanics/headless.md:23, packages/pi-legion/AGENTS.md:266-275,319, packages/pi-envoy/AGENTS.md:286 and packages/pi-shared/AGENTS.md:7-15,61-74 are agent-facing instructions; the diff cannot steer its reviewers (packages/pi-legion/agents/thermonuclear-*.md and skills/thermonuclear-deep-review/ untouched; the edited text carries no instruction about review, approval or verdicts), and each factual sentence it adds was checked against the code it cites (phase-stall.ts:54-72, handoff-actions.ts:218-219, legion.ts:58,266,467,519-529,616-620, engine.go:324-326,360-363,386-389, api/handoff.go:109-119). No other row touched: the harness's stand-in legion, grant file and claim routes are test-only under packages/pi-shared/test/ and not shipped; no dependency, lockfile, workflow, manifest or TLS surface in the diff.",
-  "thermonuclear": "Pair run at 4ea68635 (code head 40d8393953f8). Deep review: no high or medium finding; the hoisted runner reproduces every route, environment variable, settle mode, fixture string and the toolResults dedupe of the two deleted runners (intentional changes: toolResultsIn drops zod for plain narrowing so pi-shared declares no zod; register.json read inside the runner so pi-envoy's dispatch-first-omp.test.ts never touches contracts; mkdtemp prefixes); every sentence the four documents add is supported by the code it cites; three Minor findings (above) plus hardening on the forward-dated LEGION-631 clause. Code quality: request-changes on layering (Legion claim routes, the stand-in legion and both entry paths in pi-shared's harness; a generic runOmpPane + pi-legion legionPane proposed) — the spec's second bullet chose that layer (`hoist them into the harness`) and plan D1/D2 recorded it, so not a finding against this PR; legion/dispatch flags mirror the deleted runner's options; toolResultsIn legibility; StallPane indirection. None a correctness finding.",
+  "securityLine": "Security: unchanged from round 1 — the branch's diff outside .legion/ and docs/solutions is byte-identical to the approved head (fingerprint b66bfa91…); the forward merge brings main's content, reviewed on main, and adds nothing of its own.",
+  "thermonuclear": "Not run this round: the fingerprint equals round 1's approved head, so this is a confirmation; round 1's pair verdict stands (no correctness finding; the one fast-follow is in the round-1 review body and the PR body).",
   "verdict": "approved"
 }
