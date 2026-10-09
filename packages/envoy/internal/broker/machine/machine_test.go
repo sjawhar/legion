@@ -382,6 +382,34 @@ func TestAServiceLoginIsDecidedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
 	assertLauncherAuthenticates(t, svc, machineKey, credentialID)
 }
 
+// TestAServiceLoginIsDeniedByAnyoneWhateverItsLoginHintNames pins the deny half of the same rule:
+// a service's login naming testApprover in its login_hint is denied by bob, whom it names nowhere;
+// the denied event records bob, and the login mints no credential.
+func TestAServiceLoginIsDeniedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "cluster", "legion-daemon"))
+	if err != nil {
+		t.Fatalf("Login(a service's login naming %s): %v", testApprover, err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, false, "bob@example.com", code)
+	if err != nil || state != "denied" || credentialID != "" {
+		t.Fatalf("ApplyDecision(deny, bob, whom the login names nowhere) = %q, %q, %v; want denied with no credential", state, credentialID, err)
+	}
+	var login string
+	if err := svc.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='denied'`, view.RecordID).Scan(&login); err != nil || login != "bob@example.com" {
+		t.Fatalf("denied event login = %q, %v; want bob@example.com", login, err)
+	}
+	var minted int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where record_id=$1`, view.RecordID).Scan(&minted); err != nil || minted != 0 {
+		t.Fatalf("launcher_credentials minted from the denied login = %d, %v; want none", minted, err)
+	}
+}
+
 // TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone pins the rule for a service's login a
 // broker from before it opened with a person as the approver, still pending at the deploy: the
 // stored approver is part of the hashed body and is never rewritten, and the rule reads the service
