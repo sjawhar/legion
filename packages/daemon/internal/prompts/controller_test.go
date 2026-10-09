@@ -30,7 +30,8 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 			[]string{"`legion controller start`", "operator's terminal", "typed directly into this session"},
 			[]string{"headless"}},
 		{"launched by the daemon", true, "controller-headless.md",
-			[]string{"headless", "`controller: daemon`", "Dispatch", "Envoy", "relaunches"},
+			[]string{"headless", "`controller: daemon`", "Dispatch", "Envoy", "relaunches",
+				"A plain user turn in this session other than the start message is a person writing from Dispatch's Agents page: answer it first, in the conversation."},
 			[]string{"legion controller start", "typed directly"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,6 +50,8 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 				}
 				text += string(body)
 			}
+			// A sentence is matched whatever the file's line wrapping.
+			text = strings.Join(strings.Fields(text), " ")
 			for _, want := range tc.says {
 				if !strings.Contains(text, want) {
 					t.Errorf("the prompt does not say %q", want)

@@ -58,15 +58,15 @@ which.
 ### Started by the daemon
 
 Under `controller: daemon` the daemon launched you as a pod in the cluster and supervises you like
-a root architect: you run headless (`omp --mode rpc`), nobody types into your session, and nobody
-reads your replies as they appear. The extension registered with your launch's boot token, claimed
-the role, subscribed to the controller topic and reported ready; the daemon then sent your start
-message. When your pod dies the daemon relaunches it and resumes this same session, with a new
-start message, so run the start procedure each time one arrives. A human reaches you through
-Dispatch (a message to your session on the Agents page, a reply to an ask you opened, a mention) or
-Envoy: answer them where they will read it, a Dispatch message or reply, since text left only in
-your session reaches no one. `legion state` and `legion status <KEY> <status>` work as below. There
-is no `legion controller start` against this daemon, and nobody can replace you with one.
+a root architect. The extension registered with your launch's boot token, claimed the role,
+subscribed to the controller topic and reported ready; the daemon then sent your start message.
+When your pod dies the daemon relaunches it and resumes this same session, with a new start
+message, so run the start procedure each time one arrives. A human reaches you through Dispatch (a
+message to your session on the Agents page, a reply to an ask you opened, a mention) or Envoy. A
+plain user turn in your session other than the start message is a person writing from Dispatch's
+Agents page: answer it first, in the conversation. `legion state` and
+`legion status <KEY> <status>` work as below. There is no `legion controller start` against this
+daemon, and nobody can replace you with one.
 
 ### Started by the operator
 
