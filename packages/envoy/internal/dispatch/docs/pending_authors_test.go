@@ -120,8 +120,7 @@ func countVersionAuthor(t *testing.T, database *store.Store, artifactID string, 
 // A settlement lists an edit whose append is held until after it commits, and that append, once
 // it lands, puts nothing back: once the room has gone and another process loads the document, the
 // next version lists only its own author. The append is held by holding the edit's update observer
-// once it has credited alice, before ygo hands the update to persistence. W2: the settlement
-// deleted the pending row, and the append inserted a fresh one that the next load adopted.
+// once it has credited alice, before ygo hands the update to persistence.
 func TestASettlementsListedEditIsNotOwedAgainWhenItsHeldAppendLands(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -301,8 +300,7 @@ func arrangeNoVersionSettlement(t *testing.T, service *Service, artifactID strin
 }
 
 // An author a settlement that wrote no version did not list stays owed across a restart: the next
-// version lists her beside its own author. W5: the settlement deleted the durable credit and kept
-// it only in memory.
+// version lists her beside its own author.
 func TestAnAuthorANoVersionSettlementDidNotListSurvivesARestart(t *testing.T) {
 	service, artifactID := newTestService(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -477,27 +475,7 @@ func TestAnUploadOnOneProcessKeepsAnAuthorOnlyAnotherProcessHeld(t *testing.T) {
 		t.Fatalf("pending authors before the upload = %+v, want bob, whose edit landed on task B", owed)
 	}
 
-	tx, err := taskA.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin task A's upload: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	joined, ledger := taskA.Join(ctx, tx)
-	defer ledger.Discard()
-	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
-	if _, err := taskA.ReplaceText(joined, artifactID, uploaded, uploader); err != nil {
-		t.Fatalf("upload the replacement on task A: %v", err)
-	}
-	number := nextVersionNumber(t, database, artifactID)
-	if _, err := tx.Exec(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, $4)
-	`, artifactID, number, uploaded, []model.Actor{uploader}); err != nil {
-		t.Fatalf("insert the upload's version: %v", err)
-	}
-	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit task A's upload: %v", err)
-	}
+	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded on task A.\n", uploader)
 	if owed := pendingAuthorRows(t, database, artifactID); !slices.Contains(owed, bob) {
 		t.Fatalf("pending authors after task A's upload = %+v, want bob: task A's room never held his edit", owed)
 	}
@@ -506,6 +484,117 @@ func TestAnUploadOnOneProcessKeepsAnAuthorOnlyAnotherProcessHeld(t *testing.T) {
 	commitNamedVersion(t, taskC, artifactID, model.Actor{Kind: "session", ID: "versioner-on-task-c"})
 	if listed := countVersionAuthor(t, database, artifactID, bob); listed != 1 {
 		t.Fatalf("bob is listed on %d versions, want exactly one", listed)
+	}
+}
+
+// A room instance's record of the updates it holds stays bounded however many it takes: the run
+// of its own appends just past its load folds into the head it loaded, and an upload's commit drops
+// the entries whose pending authors it consumed. A row another process's append wrote, at a
+// version the room never took, stays pending through the upload.
+func TestARoomsHeldUpdatesStayBoundedAcrossManyAppendsAndAnUpload(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, database)
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+	if err := taskA.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	live := taskA.srv.GetDoc(artifactID)
+	hold := taskA.holdOf(live)
+	if hold == nil {
+		t.Fatal("task A's room lists no record of the updates it holds")
+	}
+	// The appends below reach the store directly, which touches no room, so the room is kept
+	// resident past ygo's idle timeout by reading it, and must stay the instance the hold is of.
+	keepResident := func() {
+		t.Helper()
+		if err := taskA.warmLiveDocument(context.Background(), artifactID); err != nil {
+			t.Fatalf("keep task A's room resident: %v", err)
+		}
+		if taskA.srv.GetDoc(artifactID) != live {
+			t.Fatal("task A's room was evicted and reloaded during the appends")
+		}
+	}
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	const appends = 10_000
+	for index := range appends {
+		credited := creditOf(nil)
+		switch index {
+		case appends / 2:
+			appendCreditedTo(t, taskB, artifactID, creditOf(&bob, bob), nil)
+		case appends * 3 / 4:
+			credited = creditOf(&alice, alice)
+		}
+		appendCreditedTo(t, taskA, artifactID, credited, hold)
+		if index%200 == 0 {
+			keepResident()
+		}
+	}
+	keepResident()
+	t.Logf("before the upload: %d held entries past the loaded head", heldEntries(hold))
+
+	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded on task A.\n", model.Actor{Kind: "session", ID: "uploader-on-task-a"})
+	held := heldEntries(hold)
+	t.Logf("after the upload: %d held entries past the loaded head", held)
+	if held > 1 {
+		t.Fatalf("task A's room holds %d entries past its loaded head after the upload, want at most 1", held)
+	}
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{bob}) {
+		t.Fatalf("pending authors after the upload = %+v, want bob alone: task A's room held alice's append and not his", owed)
+	}
+}
+
+// heldEntries is how many versions past its loaded head hold records one by one.
+func heldEntries(hold *roomHold) int {
+	hold.mu.Lock()
+	defer hold.mu.Unlock()
+	return len(hold.since)
+}
+
+// A joined transaction whose writes credit two actors records each one's pending row as written by
+// the append that recorded that actor's change, so a room holding the first append and not the
+// second consumes the first author alone.
+func TestAJoinedWritesAuthorsAreRecordedByTheAppendsThatCreditedThem(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	first := model.Actor{Kind: "session", ID: "first-session"}
+	second := model.Actor{Kind: "session", ID: "second-session"}
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the writes: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, "First, once.\n\nSecond.\n", first); err != nil {
+		t.Fatalf("first actor's write: %v", err)
+	}
+	if _, err := service.ReplaceText(joined, artifactID, "First, once.\n\nSecond, twice.\n", second); err != nil {
+		t.Fatalf("second actor's write: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	writtenBy := func(actor model.Actor) int64 {
+		var version int64
+		if err := service.store.Pool.QueryRow(ctx, `
+			select written_through from doc_pending_authors where artifact_id = $1 and actor_kind = $2 and actor_id = $3
+		`, artifactID, actor.Kind, actor.ID).Scan(&version); err != nil {
+			t.Fatalf("read %s's pending row: %v", actor.ID, err)
+		}
+		return version
+	}
+	var head int64
+	if err := service.store.Pool.QueryRow(ctx, `select max(version) from doc_updates where artifact_id = $1`, artifactID).Scan(&head); err != nil {
+		t.Fatalf("read the document's head: %v", err)
+	}
+	if got := []int64{writtenBy(first), writtenBy(second)}; got[0] != head-1 || got[1] != head {
+		t.Fatalf("pending rows written through %v, want [%d %d]: each actor's own append", got, head-1, head)
 	}
 }
 

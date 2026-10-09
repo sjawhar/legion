@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"runtime"
 	"slices"
 	"sync"
 	"weak"
@@ -106,6 +105,9 @@ func (credit *UpdateCredit) held(version persistence.Version) {
 // it published. Another process's append after the load is in neither, since only a reload brings
 // it into this instance. An upload deletes only the pending-author rows whose writing update its
 // room's instance holds (heldUpdates).
+//
+// It stays bounded: an update just past loaded folds into loaded, with the run of updates since
+// that follows it, and an upload's commit drops the updates it consumed the rows of (consumed).
 type roomHold struct {
 	mu     sync.Mutex
 	loaded int64
@@ -117,13 +119,44 @@ func (hold *roomHold) add(version int64) {
 		return
 	}
 	hold.mu.Lock()
+	defer hold.mu.Unlock()
+	if version <= hold.loaded || slices.Contains(hold.since, version) {
+		return
+	}
 	hold.since = append(hold.since, version)
-	hold.mu.Unlock()
+	hold.foldLocked()
+}
+
+// foldLocked folds into loaded the run of held updates that follows it, version by version. The
+// caller holds mu.
+func (hold *roomHold) foldLocked() {
+	slices.Sort(hold.since)
+	folded := 0
+	for folded < len(hold.since) && hold.since[folded] == hold.loaded+1 {
+		hold.loaded++
+		folded++
+	}
+	hold.since = slices.Delete(hold.since, 0, folded)
+}
+
+// consumed drops the updates past loaded an upload's commit deleted the pending-author rows of: a
+// row is written only at the version of the update that recorded it, and versions only increase,
+// so no row written later can match one of them.
+func (hold *roomHold) consumed(held heldUpdates) {
+	if hold == nil {
+		return
+	}
+	hold.mu.Lock()
+	defer hold.mu.Unlock()
+	hold.since = slices.DeleteFunc(hold.since, func(version int64) bool {
+		return slices.Contains(held.since, version)
+	})
 }
 
 // heldUpdates is a roomHold as of one moment, which an upload's commit deletes the pending
 // authors of.
 type heldUpdates struct {
+	hold    *roomHold
 	through int64
 	since   []int64
 }
@@ -134,17 +167,14 @@ func (hold *roomHold) snapshot() heldUpdates {
 	}
 	hold.mu.Lock()
 	defer hold.mu.Unlock()
-	return heldUpdates{through: hold.loaded, since: slices.Clone(hold.since)}
+	return heldUpdates{hold: hold, through: hold.loaded, since: slices.Clone(hold.since)}
 }
 
 // keepHold starts the roomHold of live, a room instance loaded at head, and lists it for the
-// instance's writes (holdOf) while live is resident: the listing holds live weakly and goes once
-// live is collected, as the replica's does (keepReplica).
+// instance's writes (holdOf) while live is resident (listResident).
 func (s *Service) keepHold(live *crdt.Doc, head persistence.Version) *roomHold {
 	hold := &roomHold{loaded: int64(head)}
-	key := weak.Make(live)
-	s.holds.Store(key, hold)
-	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { s.holds.Delete(key) }, key)
+	listResident(&s.holds, live, hold)
 	return hold
 }
 
@@ -237,10 +267,15 @@ func (state *roomState) unconsumedInflightLocked(through uint64) []*inflightCred
 }
 
 // consumeLocked marks the F credits the capture read consumed, once the version that listed them
-// has committed: their appends then write nothing to R. The caller holds capture.state.mu.
+// has committed: their appends then write nothing to R. An upload's capture also drops from its
+// room's hold the updates whose rows its commit deleted (roomHold.consumed). The caller holds
+// capture.state.mu.
 func (capture authorCapture) consumeLocked() {
 	for _, record := range capture.inflight {
 		record.consumed = true
+	}
+	if capture.upload != nil {
+		capture.upload.hold.consumed(*capture.upload)
 	}
 }
 

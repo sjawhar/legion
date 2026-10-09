@@ -944,6 +944,13 @@ func creditOf(lastActor *model.Actor, authors ...model.Actor) *testCredit {
 // (AppendUpdateWithCredit), with an in-flight credit for credited, or none when it is nil.
 func appendCredited(t *testing.T, service *Service, artifactID string, credited *testCredit) {
 	t.Helper()
+	appendCreditedTo(t, service, artifactID, credited, nil)
+}
+
+// appendCreditedTo is appendCredited for an update hold's room instance takes: its credit records
+// the stored version in hold (UpdateCredit.held).
+func appendCreditedTo(t *testing.T, service *Service, artifactID string, credited *testCredit, hold *roomHold) {
+	t.Helper()
 	var credit *UpdateCredit
 	if credited != nil {
 		state := service.lockState(artifactID)
@@ -953,7 +960,7 @@ func appendCredited(t *testing.T, service *Service, artifactID string, credited 
 		}
 		state.inflight[record.seq] = record
 		service.unlockState(artifactID, state)
-		credit = &UpdateCredit{service: service, room: artifactID, state: state, record: record}
+		credit = &UpdateCredit{service: service, room: artifactID, state: state, record: record, hold: hold}
 	}
 	doc := crdt.New()
 	doc.GetXmlFragment(fragmentName)

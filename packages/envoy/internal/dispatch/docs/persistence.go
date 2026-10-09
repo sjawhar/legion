@@ -218,11 +218,11 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one
 	// peer made it; an update no one is credited with keeps the row's.
-	mark := func() error { return markUpdateOwed(ctx, tx, room) }
 	if include && (len(authors) > 0 || lastActor != nil) {
-		mark = func() error { return markUpdateOwedBy(ctx, tx, room, lastActor) }
-	}
-	if err := mark(); err != nil {
+		if err := markUpdateOwedBy(ctx, tx, room, lastActor); err != nil {
+			return 0, err
+		}
+	} else if err := markUpdateOwed(ctx, tx, room); err != nil {
 		return 0, err
 	}
 	if include {

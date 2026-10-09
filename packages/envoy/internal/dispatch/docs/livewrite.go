@@ -77,7 +77,8 @@ type liveWrite struct {
 	// version write does not refresh the same tree's anchors a second time.
 	anchorsTree *pmdoc.Node
 	// credits are the authors of the transaction's content changes no version the transaction
-	// wrote lists (Ledger.recordVersion takes out each author a version lists); actor made the
+	// wrote lists (Ledger.recordVersion takes out each author a version lists), and creditedBy the
+	// append that recorded each one's latest change, which its pending row names; actor made the
 	// latest content change, and is nil while the transaction has made none.
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
 	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.credit,
@@ -100,6 +101,7 @@ type liveWrite struct {
 	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
 	// calls never share one liveWrite today, and a future one that did would need its own guard.
 	credits            map[string]model.Actor
+	creditedBy         map[string]persistence.Version
 	actor              *model.Actor
 	addedAskBlockIDs   map[string]struct{}
 	renamedAskBlockIDs map[string]struct{}
@@ -367,8 +369,11 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
+		write.creditedBy = make(map[string]persistence.Version)
 	}
-	write.credits[actorKey(actor)] = actor
+	key := actorKey(actor)
+	write.credits[key] = actor
+	write.creditedBy[key] = write.versions[len(write.versions)-1]
 	write.actor = new(actor)
 }
 

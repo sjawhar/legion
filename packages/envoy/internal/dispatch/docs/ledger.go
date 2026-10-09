@@ -307,8 +307,10 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if write.actor == nil {
 			continue
 		}
-		if err := upsertPendingAuthors(ctx, l.tx, artifactID, write.credits, write.versions[len(write.versions)-1]); err != nil {
-			return err
+		for key, author := range write.credits {
+			if err := upsertPendingAuthors(ctx, l.tx, artifactID, map[string]model.Actor{key: author}, write.creditedBy[key]); err != nil {
+				return err
+			}
 		}
 		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.actor); err != nil {
 			return err
