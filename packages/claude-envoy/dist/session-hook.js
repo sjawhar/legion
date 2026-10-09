@@ -16884,11 +16884,20 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0)
     return;
-  const [documentAsks, version2] = await Promise.all([
-    blockAsks(client, resolved),
+  const [ownerAsks, version2] = await Promise.all([
+    resolved.issue === undefined ? client.getArtifactAsks(artifact.id) : client.listIssueAsks(resolved.issue.key),
     client.docRead(artifact.id, latest)
   ]);
-  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
+  const withBlocks = ownerAsks.filter((ask) => typeof ask.block_id === "string");
+  const asks = new Map(withBlocks.filter((ask) => ask.block_artifact?.id === artifact.id).map((ask) => [ask.block_id, ask]));
+  const sources = new Map;
+  for (const ask of withBlocks) {
+    if (ask.block_artifact?.id === artifact.id)
+      continue;
+    const earlier = sources.get(ask.block_id);
+    if (earlier === undefined || ask.created_at < earlier.created_at)
+      sources.set(ask.block_id, ask);
+  }
   const lines = version2.markdown.split(`
 `);
   const open = blocks.flatMap((block) => {
@@ -16899,8 +16908,15 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
       return [`${named}, which version ${latest} does not hold yet`];
     if (!states.includes("open") && states.some((state) => state !== undefined))
       return [];
-    if (ask === undefined)
+    if (ask === undefined) {
+      const source = sources.get(block.id);
+      if (source?.state === "open" && resolved.issue !== undefined) {
+        return [
+          `${named}, a copy of ask dispatch://${resolved.issue.key}/ask/${source.id}, which is open on the document it was copied from (${source.block_artifact?.slug ?? "another document"})`
+        ];
+      }
       return [`${named}, whose ask Dispatch has not opened yet`];
+    }
     if (ask.state === "open")
       return [named];
     const next = ask.state === "answered" ? "fold the answer into the text" : "write the decision into the text";
