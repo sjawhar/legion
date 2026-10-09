@@ -2604,6 +2604,149 @@ export interface DeliveryRunDetail {
   readonly jobs: readonly DeliveryRunJobDetail[];
 }
 
+/** A set of durations' median, 90th percentile (linear between the two nearest ranks) and maximum,
+ *  in minutes; all three null for an empty set. */
+export interface DeliverySpread {
+  readonly median_minutes: number | null;
+  readonly p90_minutes: number | null;
+  readonly max_minutes: number | null;
+}
+
+/** One UTC day of the measures' window; `partial` when the window covers only part of it. Runs
+ *  count on the day they started, so the days sum to the window's totals. */
+export interface DeliveryDailyPoint {
+  /** `YYYY-MM-DD`, UTC. */
+  readonly day: string;
+  readonly partial: boolean;
+  /** Runs whose production job succeeded. */
+  readonly deploys: number;
+  /** Runs that concluded success or failure (a cancelled run is not a deploy attempt). */
+  readonly concluded: number;
+  /** Concluded runs whose production job succeeded. */
+  readonly reached_production: number;
+  readonly cancelled: number;
+  /** `reached_production / concluded`; null when nothing concluded. */
+  readonly run_success_rate: number | null;
+}
+
+/** Failed-change flags by state against the population: a flag counts only when its broken pull
+ *  request is in it, and only a confirmed one counts toward `rate`. */
+export interface DeliveryFlagCounts {
+  readonly confirmed: number;
+  readonly pending: number;
+  readonly rejected: number;
+  /** Confirmed flags whose fix is a revert. */
+  readonly reverts: number;
+  /** Pull requests (per PR) or successful deploys (per deploy). */
+  readonly total: number;
+  /** `confirmed / total`; 0 when `total` is 0. */
+  readonly rate: number;
+}
+
+/** The per-deploy change failure rate: each count is deploys that shipped a flagged pull request,
+ *  each deploy once. */
+export interface DeliveryDeployFlagCounts extends DeliveryFlagCounts {
+  /** Deploys with a confirmed or a pending flag. */
+  readonly confirmed_or_pending: number;
+  /** The rate if every pending flag were confirmed: `confirmed_or_pending / total`. */
+  readonly upper_bound_rate: number;
+}
+
+/** The delivery measures (LEGION-294's definitions) over one window's selected population. */
+export interface DeliveryMeasures {
+  /** Successful production deploys on main started in the window; `deploys_with_prs` those that
+   *  shipped at least one pull request merged in the window, whatever the facets. */
+  readonly deploy_frequency: {
+    readonly successful_deploys: number;
+    readonly deploys_with_prs: number;
+    readonly per_day: number;
+    readonly with_prs_per_day: number;
+  };
+  /** Merge, first commit and open to production over the deployed pull requests; open to merge
+   *  over every one. */
+  readonly lead_time: {
+    readonly merge_to_production: DeliverySpread;
+    readonly first_commit_to_production: DeliverySpread;
+    readonly opened_to_production: DeliverySpread;
+    readonly opened_to_merge: DeliverySpread;
+  };
+  readonly change_failure_rate: {
+    readonly per_pr: DeliveryFlagCounts;
+    readonly per_deploy: DeliveryDeployFlagCounts;
+  };
+  /** Median minutes from a broken pull request's deploy to its fix's, over confirmed flags whose
+   *  two pull requests both deployed; null when there is none. */
+  readonly time_to_restore: { readonly median_minutes: number | null };
+  /** Rework pull requests over all; 0 with none. */
+  readonly rework_share: number;
+  /** Deploy runs that concluded success or failure, those of them that reached production, the
+   *  cancelled runs beside them, and the rate (null when none concluded). */
+  readonly deploy_run_success: {
+    readonly concluded: number;
+    readonly reached_production: number;
+    readonly cancelled: number;
+    readonly rate: number | null;
+  };
+  /** Every UTC day of the window, oldest first. */
+  readonly daily: readonly DeliveryDailyPoint[];
+}
+
+/** Sami's engineering targets: "under" targets are met strictly below, "at least" targets at or
+ *  above. */
+export interface DeliveryTargets {
+  /** At least. */
+  readonly deploys_per_day: number;
+  /** Under, per deploy. */
+  readonly change_failure_rate: number;
+  /** Under, for every change: judged on the maximum. */
+  readonly merge_to_production_minutes: number;
+  /** Under, judged on the median. */
+  readonly opened_to_merge_median_minutes: number;
+  /** At least. */
+  readonly deploy_run_success_rate: number;
+  /** Exactly. */
+  readonly unowned_p0: number;
+}
+
+/** Whether each measure meets its target; null when the window has nothing to measure. */
+export interface DeliveryKpiStatus {
+  readonly deploys_per_day: boolean;
+  readonly change_failure_rate: boolean | null;
+  readonly change_failure_rate_upper_bound: boolean | null;
+  readonly merge_to_production_median: boolean | null;
+  /** Every change: the maximum. */
+  readonly merge_to_production: boolean | null;
+  readonly opened_to_merge: boolean | null;
+  readonly deploy_run_success: boolean | null;
+  readonly unowned_p0: boolean;
+}
+
+/** One open P0 issue with neither a claim nor a route. */
+export interface DeliveryUnownedIssue {
+  readonly key: string;
+  readonly title: string;
+}
+
+/**
+ * `GET /api/v1/delivery/measures?from&to&q&<facets>`: the delivery measures for `[from, to)` over
+ * the pull requests the timeline's search and facets select, computed on request from stored
+ * facts. Facets narrow the pull-request measures; deploys and runs follow the window alone.
+ * `flags_source` says whether stored failed-change flags fed the change failure rate and time to
+ * restore (`none`: no flags are stored, so both count nothing). `unowned_p0` spans every project
+ * and follows neither the window nor the facets; `status` judges `measures` and it against
+ * `targets`.
+ */
+export interface DeliveryMeasuresResponse {
+  readonly window: DeliveryTimelineResponse["window"];
+  readonly computed_at: string;
+  readonly measures: DeliveryMeasures;
+  readonly flags_source: "none" | "stored";
+  readonly unowned_p0: readonly DeliveryUnownedIssue[];
+  readonly targets: DeliveryTargets;
+  readonly status: DeliveryKpiStatus;
+  readonly freshness: DeliveryTimelineResponse["freshness"];
+}
+
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
  * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
