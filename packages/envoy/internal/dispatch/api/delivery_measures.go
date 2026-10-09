@@ -54,17 +54,12 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, nil)
+	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, false)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	freshness, err := s.deliveryFreshness(ctx, settings)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	response, err := s.deliveryMeasuresFor(ctx, settings, from, to, population, freshness)
+	response, err := s.deliveryMeasuresFor(ctx, settings, from, to, population)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -80,7 +75,7 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 // request whose first shipping apply is that run, before the facets (population.shipped), so
 // deploys_with_prs belongs to the deploy, not the filter. The measures route and the timeline both
 // answer through it, so the two never disagree.
-func (s *server) deliveryMeasuresFor(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, population deliveryPopulation, freshness delivery.DeliveryFreshnessView) (deliveryMeasuresResponse, error) {
+func (s *server) deliveryMeasuresFor(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, population deliveryPopulation) (deliveryMeasuresResponse, error) {
 	pool := s.deps.Store.Pool
 	prs := make([]measures.PR, 0, len(population.rows))
 	for _, row := range population.rows {
@@ -135,6 +130,6 @@ func (s *server) deliveryMeasuresFor(ctx context.Context, settings delivery.Deli
 		UnownedP0:   unowned,
 		Targets:     measures.DefaultTargets,
 		Status:      measures.KPIStatus(result, len(unowned), measures.DefaultTargets),
-		Freshness:   freshness,
+		Freshness:   population.freshness,
 	}, nil
 }

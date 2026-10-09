@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 
 import type { DeliveryTimelineResponse } from "../../api/types";
 import { MultiSelect } from "../../components/MultiSelect";
@@ -75,7 +75,10 @@ function Facet({
         onOpenChange={onOpenChange}
         open={open}
         optionDetail={(value) => String(countOf(value))}
-        optionDetailLabel={(value) => `${countOf(value)} PR${countOf(value) === 1 ? "" : "s"}`}
+        optionDetailLabel={(value) => {
+          const count = countOf(value);
+          return `${count} PR${count === 1 ? "" : "s"}`;
+        }}
         optionLabel={valueLabel}
         options={options}
         searchLabel={`Search ${label.toLowerCase()}\u2026`}
@@ -110,16 +113,20 @@ export function FacetPanel({
   };
   // How many sub-components each component has in the window's projects: selecting a parent
   // selects them too (the server expands it), and the prototype lists components flat, so the
-  // option says so.
-  const subComponents = new Map<string, number>();
-  for (const component of Object.values(data.components)) {
-    const seen = new Set<string>();
-    for (let parent = component.parent; parent !== null && !seen.has(parent); ) {
-      seen.add(parent);
-      subComponents.set(parent, (subComponents.get(parent) ?? 0) + 1);
-      parent = data.components[parent]?.parent ?? null;
+  // option says so. One walk up from each component counts it under every ancestor, rather than
+  // one descendant walk per component as architecture-model.ts's descendantComponents would take.
+  const subComponents = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const component of Object.values(data.components)) {
+      const seen = new Set<string>();
+      for (let parent = component.parent; parent !== null && !seen.has(parent); ) {
+        seen.add(parent);
+        counts.set(parent, (counts.get(parent) ?? 0) + 1);
+        parent = data.components[parent]?.parent ?? null;
+      }
     }
-  }
+    return counts;
+  }, [data.components]);
   const valueLabel = (key: FacetKey, value: string): string => {
     const placeholder = PLACEHOLDER_LABELS[value];
     if (placeholder !== undefined) return placeholder;

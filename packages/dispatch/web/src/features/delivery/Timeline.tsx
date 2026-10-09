@@ -427,6 +427,10 @@ export function Timeline({
         ],
         tooltip: {
           trigger: "item",
+          // Whole inside the chart, whose wrapper clips (below): confined to it, and wrapping to
+          // its width, since ECharts sets nowrap and a long title is wider than a phone's chart.
+          confine: true,
+          extraCssText: "white-space: normal; overflow-wrap: anywhere; max-width: min(24rem, 90%);",
           formatter: (params: unknown) => {
             const data =
               typeof params === "object" && params !== null && "data" in params
@@ -517,7 +521,10 @@ export function Timeline({
           </div>
         ))}
       </div>
-      <div className="relative min-h-0 w-full flex-1">
+      {/* Clipped: ECharts draws its tooltip inside the host, and its first paint at a press can
+          stand past the chart's edge for a frame, which on a phone widens the layout viewport
+          and scrolls the page under the finger. */}
+      <div className="relative min-h-0 w-full flex-1 overflow-hidden">
         <div
           aria-label={summary}
           className={`absolute inset-0 touch-none rounded-b-lg ${surfaceBg}`}

@@ -107,13 +107,17 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-// The sjawhar/ygo fork carries ygo fixes Dispatch depends on while each waits in its own upstream
-// pull request (reearth/ygo #257, #260, #262, #263, #266, #267, #268, #269): an iterative delete
-// cascade and nested reads, so the stack a delete or read needs does not grow with a tree a peer
-// nested; the transactional GC range search; a merged update's skip parks the items after it
-// rather than dropping the update that fills the gap; a whole document state resolves its own
-// dependencies before the pending cap; items merge only when their right origins match, so a
-// re-encoded document keeps its text order; BroadcastUpdate validates under the server's
-// MaxPendingItems; the bundled stores keep a large incremental update; and Apply stamps a room
-// with no peer idle when it returns, so the idle sweep evicts a room only the API touched.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-sami.2
+// The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
+// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291; the fork carries
+// #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested reads, so
+// the stack a delete or read needs does not grow with a tree a peer nested; the transactional GC
+// range search; a whole document state resolves its own dependencies before the pending cap,
+// through a dependency worklist rather than a re-scan per step; items merge only when their right
+// origins match, so a re-encoded document keeps its text order; the bundled stores keep a large
+// incremental update, and BroadcastUpdate and the cluster relay check one with the stores' check
+// rather than refusing it past a pending cap; Apply stamps a room with no peer idle when it
+// returns, so the idle sweep evicts a room only the API touched; and a Hocuspocus-framed
+// connection is answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's
+// provider learns which of its edits the room took. A merged update's skip parking the items after
+// it (reearth/ygo#257) is upstream since v1.51.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.1

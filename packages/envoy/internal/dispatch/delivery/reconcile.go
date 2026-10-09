@@ -405,14 +405,17 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 
 // attributionBackfillCalls bounds the GitHub calls reconcileAttributionInputs makes in one pass. A
 // row costs one call for the pull request and one per page of 100 commits
-// (fetchAttributionFacts): two for nearly every row, at most maxAttributionCalls. At twelve passes
-// an hour that is at most 1,440 calls an hour, under a third of an installation's 5,000, and the
-// rest of each pass (the merged-PR search, partial rows, the workflow runs and their jobs) keeps
-// the remainder. A 28-day population's ~4,000 rows then backfill over about 70 passes, six hours.
+// (fetchAttributionFacts): two for a pull request under 100 commits, at most maxAttributionCalls.
+// At twelve passes an hour that is at most 1,440 calls an hour, under a third of an
+// installation's 5,000, and the rest of each pass (the merged-PR search, partial rows, the
+// workflow runs and their jobs) keeps the remainder. How many passes a backlog takes depends on
+// its pull requests' commit counts: about 58 rows a pass while nearly all are under 100 commits
+// (~4,000 rows in about 70 passes, six hours), down to 20 a pass when every one needs all
+// maxCommitPages pages (about 207 passes, 17 hours).
 const attributionBackfillCalls = 120
 
 // maxAttributionCalls is the most one row's attribution read can cost: the pull request and every
-// commits page fetchCommitMessagesWithToken reads.
+// commits page fetchCommitMessagesWithToken reads (maxCommitPages, intake.go).
 const maxAttributionCalls = 1 + maxCommitPages
 
 // attributionBackfillRows is how many unread rows a pass lists for the backfill: as many as the
@@ -423,6 +426,13 @@ const attributionBackfillRows = attributionBackfillCalls / 2
 // the most it can cost before it starts and gives back what it did not use, waiting while other
 // reads hold reservations, so the calls made never exceed the allowance however the reads
 // interleave, and a read gives up only once the allowance is spent.
+//
+// golang.org/x/sync/semaphore.Weighted (routes/router.go) does not fit: its weight is held and
+// handed back whole, while a call made here is spent for good, so the allowance only shrinks. Once
+// fewer calls remain than a read reserves, Acquire(ctx, n) waits for a Release that never comes,
+// until the pass's context ends, and TryAcquire(n) gives up even while another read still holds a
+// reservation it is about to hand partly back. callBudget waits in that case only while some
+// reservation is out, and gives up the moment none is.
 type callBudget struct {
 	mu       sync.Mutex
 	changed  *sync.Cond

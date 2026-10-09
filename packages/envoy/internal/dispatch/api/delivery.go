@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // defaultDeliveryWindow is the timeline's default when the caller passes neither from nor to: the
@@ -120,14 +122,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	// The deploy repository's pull requests still waiting at `from`, so the waiting line starts
-	// the window at their count rather than at zero.
-	waitingPRs, err := delivery.ListPullRequestsWaitingAt(ctx, s.deps.Store.Pool, settings.DeployRepo, settings.ProductionJobName, from)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, waitingPRs)
+	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, true)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -173,12 +168,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	freshness, err := s.deliveryFreshness(ctx, settings)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	measured, err := s.deliveryMeasuresFor(ctx, settings, from, to, population, freshness)
+	measured, err := s.deliveryMeasuresFor(ctx, settings, from, to, population)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -194,7 +184,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 			ColorCounts: deliveryColorCounts(population.rows),
 			Components:  population.components,
 			IssueTitles: population.issueTitles,
-			Freshness:   freshness,
+			Freshness:   population.freshness,
 		},
 		Measures: measured,
 	})
@@ -212,8 +202,8 @@ type deliveryTimelineWithMeasures struct {
 // deliveryPopulation is one window's population pull requests, each with its view and its facet
 // values, and what the timeline reads beside them: the request's search and facet selection, the
 // pull requests still waiting at the window's start, the deploy runs whose applies decided each
-// pull request's deploy, those runs' jobs, and the labels of every component and issue the
-// window's pull requests name.
+// pull request's deploy, those runs' jobs, the labels of every component and issue the window's
+// pull requests name, and the data's freshness.
 type deliveryPopulation struct {
 	// rows is every population pull request merged in [from, to), before the facets, in merge
 	// order: the timeline counts facets and colours over it. A row passing
@@ -230,6 +220,10 @@ type deliveryPopulation struct {
 	jobsByRun   map[int64][]delivery.DeliveryRunJob
 	components  map[string]delivery.DeliveryComponentView
 	issueTitles map[string]string
+	// freshness is the timeline's and the measures' freshness object: the settings row's intake
+	// and reconcile times, the last reconcile error, and how many population pull requests can no
+	// longer be fetched from GitHub.
+	freshness delivery.DeliveryFreshnessView
 }
 
 // deliveryWaitingRow is one pull request still waiting at the window's start: its facet values, so
@@ -241,33 +235,81 @@ type deliveryWaitingRow struct {
 
 // filteredDeliveryPullRequests reads the population pull requests merged in [from, to), derives
 // each one's deploy from the deploy runs on main listed from `from` by head commit, joins its
-// issue's facts and its sessions' titles, and parses the request's search and facets. waiting is
-// the pull requests still waiting at `from` (ListPullRequestsWaitingAt), resolved through the
-// same issue and session lookups so the timeline's waiting line filters them alike; the measures
-// pass none. The timeline and the measures both call it, so a pull request the timeline shows is
-// exactly one the measures count.
-func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, waiting []delivery.WaitingPullRequest) (deliveryPopulation, error) {
+// issue's facts and its sessions' titles, and parses the request's search and facets. With
+// withWaiting it also reads the deploy repository's pull requests still waiting at `from`
+// (ListPullRequestsWaitingAt), resolved through the same issue and session lookups so the
+// timeline's waiting line filters them alike; the measures read none. The timeline and the
+// measures both call it, so a pull request the timeline shows is exactly one the measures count.
+func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting bool) (deliveryPopulation, error) {
 	pool := s.deps.Store.Pool
-	prs, err := delivery.ListPullRequestsInWindow(ctx, pool, from, to)
-	if err != nil {
-		return deliveryPopulation{}, err
-	}
 
-	// Every deploy run on main with a head commit at or after `from`: the containment algorithm
-	// needs every apply from there forward, unbounded past `to`, since a PR merged just before `to`
-	// may first ship after it -- bounding this query to [from, to) would wrongly read such a PR as
-	// "waiting". A production job on another branch ships no PR (decision 7). The timeline's
-	// runs[] list is filtered to [from, to) separately.
-	applyRuns, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", from)
-	if err != nil {
-		return deliveryPopulation{}, err
+	// Independent reads, side by side. They never shared a transaction (each is its own
+	// statement on the pool, so each already read its own snapshot), so running them at once
+	// loses no consistency they had. Each takes one connection under a hold mark of its own
+	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
+	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
+	var (
+		prs              []delivery.DeliveryPullRequest
+		waiting          []delivery.WaitingPullRequest
+		applyRuns        []delivery.DeliveryRun
+		jobsByRun        map[int64][]delivery.DeliveryRunJob
+		unfetchableCount int
+	)
+	independent := []func(ctx context.Context) error{
+		func(ctx context.Context) (err error) {
+			prs, err = delivery.ListPullRequestsInWindow(ctx, pool, from, to)
+			return err
+		},
+		// Every deploy run on main with a head commit at or after `from`: the containment
+		// algorithm needs every apply from there forward, unbounded past `to`, since a PR merged
+		// just before `to` may first ship after it -- bounding this query to [from, to) would
+		// wrongly read such a PR as "waiting". A production job on another branch ships no PR
+		// (decision 7). The timeline's runs[] list is filtered to [from, to) separately.
+		func(ctx context.Context) error {
+			runs, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", from)
+			if err != nil {
+				return err
+			}
+			runIDs := make([]int64, len(runs))
+			for i, run := range runs {
+				runIDs[i] = run.RunID
+			}
+			jobs, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
+			if err != nil {
+				return err
+			}
+			applyRuns, jobsByRun = runs, jobs
+			return nil
+		},
+		func(ctx context.Context) (err error) {
+			unfetchableCount, err = delivery.CountUnfetchablePullRequests(ctx, pool)
+			return err
+		},
 	}
-	runIDs := make([]int64, len(applyRuns))
-	for i, run := range applyRuns {
-		runIDs[i] = run.RunID
+	if withWaiting {
+		// The deploy repository's pull requests still waiting at `from`, so the waiting line
+		// starts the window at their count rather than at zero.
+		independent = append(independent, func(ctx context.Context) (err error) {
+			waiting, err = delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.ProductionJobName, from)
+			return err
+		})
 	}
-	jobsByRun, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
-	if err != nil {
+	reads, readsCtx := errgroup.WithContext(ctx)
+	read := func(fn func(ctx context.Context) error) error {
+		readCtx, err := store.ForConcurrentRead(readsCtx)
+		if err != nil {
+			return err
+		}
+		reads.Go(func() error { return fn(readCtx) })
+		return nil
+	}
+	for _, fn := range independent {
+		if err := read(fn); err != nil {
+			_ = reads.Wait()
+			return deliveryPopulation{}, err
+		}
+	}
+	if err := reads.Wait(); err != nil {
 		return deliveryPopulation{}, err
 	}
 	applies := delivery.ProductionApplies(applyRuns, jobsByRun, settings.ProductionJobName)
@@ -372,20 +414,10 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		jobsByRun:   jobsByRun,
 		components:  components,
 		issueTitles: issueTitles,
-	}, nil
-}
-
-// deliveryFreshness is the timeline's and the measures' freshness object: the settings row's
-// intake and reconcile times, the last reconcile error, and how many population pull requests can
-// no longer be fetched from GitHub.
-func (s *server) deliveryFreshness(ctx context.Context, settings delivery.DeliverySettings) (delivery.DeliveryFreshnessView, error) {
-	unfetchableCount, err := delivery.CountUnfetchablePullRequests(ctx, s.deps.Store.Pool)
-	if err != nil {
-		return delivery.DeliveryFreshnessView{}, err
-	}
-	return delivery.DeliveryFreshnessView{
-		LastEventAt: settings.LastEventAt, LastReconcileAt: settings.LastReconcileAt, LastError: settings.LastError,
-		UnfetchableCount: unfetchableCount,
+		freshness: delivery.DeliveryFreshnessView{
+			LastEventAt: settings.LastEventAt, LastReconcileAt: settings.LastReconcileAt, LastError: settings.LastError,
+			UnfetchableCount: unfetchableCount,
+		},
 	}, nil
 }
 
