@@ -273,9 +273,13 @@ included, since Oh My Pi's `write` strips that before it routes) by a plain-text
 refused a tool (LEGION-630). `legion handoff write` and `read` from the shell leave no phase open: a
 root architect reads committed handoffs with `legion handoff read`, and a worker can pipe a handoff
 built from the one on disk to `legion handoff write` on stdin (`skills/legion-worker/SKILL.md`, the
-handoff write section). A completion run from the shell completes the phase at the daemon but never
-reaches the phase stall below, which then sends its one follow-up; the tool call made on it is
-refused by the daemon, since the phase has already moved.
+handoff write section). A completion run from the shell, should one run, completes the phase at
+the daemon as the tool does and is not refused, but it never reaches the phase stall below, which
+the tool's `handoff_complete` alone closes: the follow-up arrives at the settle and again after
+each later Envoy delivery's turn until one next succeeds. A completion made on that follow-up is
+refused — `HANDOFF_NOT_CURRENT_PHASE` once the phase has moved, `HANDOFF_ALREADY_RECORDED` where a
+completion moves nothing — and closes nothing; `extensions/legion-phase-stall-omp.test.ts` pins the
+shell case on the real binary.
 
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), `src/phase-stall.ts`
@@ -295,7 +299,8 @@ message holding a tool call written as text is told so. One follow-up per stall;
 sent follow-up stays quiet until the next Envoy delivery or assignment. The state is appended to the
 transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
-(`LEGION_TEST_OMP`), loading this entry beside `../pi-envoy/extensions/envoy.ts`.
+(`LEGION_TEST_OMP`) through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`),
+which hands both plugin entries to the Oh My Pi child by path.
 
 ## Where to look
 
@@ -306,7 +311,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`; inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals and that `/legion-claim-controller` answers the sentence without exiting |
-| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts` | Load `../pi-envoy/extensions/envoy.ts` by relative path (test-only; the shipped sources never import the sibling): the role claim through the interface with Legion initialised first, and the phase stall on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
+| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
@@ -318,7 +323,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 
 - Register every schema through the injected `pi.zod` (`toolSchema` in `src/tools.ts`). Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load.
 - Nothing under `extensions/` or `src/` imports `packages/pi-envoy`: what both plugins need lives in `@legion/pi-shared`, and this entry reaches the Envoy plugin through the interface alone (`src/no-cross-import.test.ts`). The tests may load the sibling's entry by path.
-- A `task` subagent's session shares its parent's identity (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, mints no grant and is held only to the pane rule, and never exits (`extensions/legion.ts`). The check asks the host's own roster first (`AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`) and falls back to the transcript; the process-local signal it reads is the transcript path the claim session's boot and a launched controller's claim record on the shared interface (`bootstrappedSession`), so a later `session_start` in the same process with a different transcript path is a subagent even under `OMP_SESSION_STORAGE=sql`. The full account is the subagent convention in `packages/pi-envoy/AGENTS.md`.
+- A `task` subagent's session shares its parent's identity (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, mints no grant and is held only to the pane rule — a `legion` command from its bash, a completion included, is the parent's at the daemon, today on the per-call grant the pane's last credentialed call wrote, which LEGION-631 replaces with the role's mounted token file — and never exits (`extensions/legion.ts`). The check asks the host's own roster first (`AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`) and falls back to the transcript; the process-local signal it reads is the transcript path the claim session's boot and a launched controller's claim record on the shared interface (`bootstrappedSession`), so a later `session_start` in the same process with a different transcript path is a subagent even under `OMP_SESSION_STORAGE=sql`. The full account is the subagent convention in `packages/pi-envoy/AGENTS.md`.
 - `claim-session.ts` registers the heartbeat's regain listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it; the regain re-runs `claims/ready` with bounded retries, and the controller re-runs nothing.
 - A daemon refusal of the boot registration itself — `/legion/v1/claims/register` — ends the process (`exitOnRegistrationRefusal` in `src/claim-session.ts`: one log line naming the route, the status, and the daemon's sentence, then `exitProcess(1)`) for every 4xx: a 400 or 404 (a request or a route the daemon does not have), a 403 (the boot token is stale, consumed, or unknown), and a 409 (the same-agent rule, `Worker respawn must resume the same agent session`: this session is not the one the resumed claim recorded; under a database session store that is Oh My Pi having started a fresh session at a path whose row is gone). None changes on retry, and a process that stayed up unregistered would sit alive under the daemon's registration deadline with nothing ever retiring it; exiting hands the outcome to the daemon, which counts the launch failure. Every other error there — a 5xx, a transport failure — propagates out of `session_start` without exiting (LEGION-81; `extensions/legion.test.ts` pins 400, 403, 404 and 409, and 500/503 as the negative control). The Envoy-plugin refusals above take the same exit.
 - Do not alter `~/.omp` from this package. The README documents the development install.
@@ -326,4 +331,4 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 ## Checks
 
 `bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
-`LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts` for the real binary.
+`LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` for the real binary.

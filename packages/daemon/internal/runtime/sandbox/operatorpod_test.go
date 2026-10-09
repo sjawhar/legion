@@ -108,9 +108,6 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: keyPointer("DISPATCH_TOKEN", byRuntime)},
 		{name: "a provider key for the settings overlays", keys: map[string]string{"PI_CONFIG_FILES": "overlays"},
 			want: keyNames("PI_CONFIG_FILES", byBaseline)},
-		{name: "a provider key for a baseline variable", keys: map[string]string{"OTEL_SDK_DISABLED": "otel"},
-			want: keyNames("OTEL_SDK_DISABLED", byBaseline)},
-		{name: "a provider key for another baseline variable", keys: map[string]string{"PI_AUTO_QA": "qa"}, want: keyNames("PI_AUTO_QA", byBaseline)},
 		{name: "a provider key for the config root", keys: map[string]string{"PI_CONFIG_DIR": "root"}, want: keyNames("PI_CONFIG_DIR", bySessions)},
 		{name: "a provider key for the session store", keys: map[string]string{"OMP_SESSION_STORAGE": "store"},
 			want: keyNames("OMP_SESSION_STORAGE", bySessions)},
@@ -125,8 +122,8 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key reading a providers secret's key", keys: map[string]string{"FOO": "NATS_NKEY_SEED"},
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
-		{name: "an operator's own overlays and a baseline variable it overrides",
-			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml", "OTEL_SDK_DISABLED": "false"}}},
+		{name: "an operator's own overlays, which the baseline composes with",
+			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"})

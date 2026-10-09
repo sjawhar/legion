@@ -51,7 +51,10 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// A room still loading is not resident yet. It reads the same history the check below reads,
 	// so it can only fail on a history that cannot load, and its successor load is refused above.
 	// A room stays resident for roomIdleTimeout after its last editor leaves, and ygo's idle
-	// sweep that then evicts it runs every 30 seconds, so the refusal names two minutes.
+	// sweep that then evicts it runs every 30 seconds, so the refusal names two minutes. A load
+	// that starts after this check reads the history this transaction has not yet replaced and
+	// fails on it, since it cannot load, or, once the rebuild commits, reads the rebuilt head:
+	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	if s.srv.GetDoc(artifactID) != nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 	}
@@ -115,12 +118,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
 	}
-	state := s.room(artifactID)
-	state.mu.Lock()
-	capture, authors := captureAuthors(state, nil, &actor)
-	state.mu.Unlock()
+	// RebuildTx holds the document's advisory lock until this transaction ends, so the pending
+	// authors read here are the ones the version's commit deletes.
+	capture, err := s.capturePendingAuthors(ctx, tx, artifactID, nil, &actor)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
 	written, err := s.writeVersionTx(ctx, tx, artifactID, canonical, tree, actor, &versionWrite{
-		authors: authors,
+		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
 	if err != nil {

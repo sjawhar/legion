@@ -460,7 +460,11 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // image whose CLI predates the contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
-// workers run their agents on their models. It must carry the capabilities mark too
+// workers run their agents on their models. It must carry the extensions mark
+// (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
+// roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
+// into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
+// twice. It must carry the capabilities mark too
 // (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
 // checked no capability, and a current one that found a capability missing exits 1 before the OK
 // line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the
@@ -510,6 +514,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		}
 		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models (its OK line's agent-models mark: %s, where the daemon's probe requires %s) — log tail: %s",
 			name, mark, bootprobe.AgentModelsResolved, logTail), none
+	}
+	if !bootprobe.ExtensionsDiscovered(logTail) {
+		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
+			name, logTail), none
 	}
 	if !bootprobe.CapabilitiesChecked(logTail) {
 		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail), none

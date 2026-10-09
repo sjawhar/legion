@@ -113,9 +113,9 @@ func byName(lines []Line) map[Name]Line {
 }
 
 // Under an image that carries everything, every row is rendered in Table's order: the image rows
-// present with their evidence — codegraph installed, its evidence then the sentence naming what a
-// pod's agent still awaits, since the image carrying the CLI and the plugin is not a worker having
-// the tool — the others as what they are, and no error.
+// present with their evidence — codegraph among them, the CLI on PATH and the plugin enabled in the
+// profile's lock, since a pod's launch now loads that plugin — the others as what they are, and no
+// error.
 func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 	s := newStubs(t)
 
@@ -151,7 +151,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		EvalPython:           "omp setup python --check reports available=true",
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
 		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
-		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock() + "; a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)",
+		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
 		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + "; go version go1.26.8 linux/amd64",
 		RepositoryExtensions: "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries",
 	} {
@@ -162,8 +162,8 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 	if want := "probe-image: capability eval-python: present (omp setup python --check reports available=true)"; got[EvalPython].String() != want {
 		t.Errorf("Line.String() = %q, want %q", got[EvalPython].String(), want)
 	}
-	if want := "probe-image: capability codegraph: installed (" + got[CodeGraph].Detail + ")"; got[CodeGraph].Status != installed || got[CodeGraph].String() != want {
-		t.Errorf("codegraph line = %q, want %q: installed, never present", got[CodeGraph].String(), want)
+	if want := "probe-image: capability codegraph: present (" + got[CodeGraph].Detail + ")"; got[CodeGraph].Status != present || got[CodeGraph].String() != want {
+		t.Errorf("codegraph line = %q, want %q: present, with no sentence about a pod's launch", got[CodeGraph].String(), want)
 	}
 }
 
@@ -261,8 +261,8 @@ func TestCheckImageResolvesTheBrowserAsOhMyPiDoes(t *testing.T) {
 }
 
 // CodeGraph is the CLI on PATH and its plugin enabled in the profile's lock, both; each failure is
-// named, and the row is missing and in CheckImage's error — the gate still refuses an image lacking
-// either half, whatever a pod's launch loads — never installed.
+// named, and the row is missing and in CheckImage's error — the gate refuses an image lacking
+// either half.
 func TestCheckImageNeedsTheCodeGraphCLIAndItsPluginEnabled(t *testing.T) {
 	for name, testCase := range map[string]struct {
 		setup func(stubs)

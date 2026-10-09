@@ -59,7 +59,11 @@ only on this phase's artifact.
 
 You never start another Legion role: the daemon starts every phase worker itself, from its fixed
 workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
-is a Legion role.
+is a Legion role. A subagent runs in your pane as you, with every host tool but the `legion` tool
+(it is never offered one), so a `legion` command from its bash, a completion included, is yours at
+the daemon: give a subagent no completion step. Today such a command runs on the per-call grant
+your own last credentialed call wrote, within its 60 seconds (*Four facts about `gh`*, below);
+LEGION-631 (dispatch://LEGION-631) replaces that grant with the role's mounted token file.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
@@ -152,19 +156,16 @@ new work.
 - **Before pushing, check ancestry:** `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`
   — verify only your issue's commits are in the chain, not unrelated work.
 
-**Shared operation safety:** Under the tmux runtime every Legion issue workspace is a `jj workspace`
-of one shared clone, so they all share one operation log; under Kubernetes each issue pod has a clone
-of its own on its own volume, shared by the roles of that one issue and by no other issue, whose
-workspace is on another volume. Either way `jj undo`, `jj abandon`, and
-`jj op restore|revert|abandon|undo` rewrite an operation log other agents work in — every tree's at
-once under tmux, every role of your issue's under Kubernetes. The extension refuses them in every
-phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
-chain, with or without `-R`, judged on the whole argument list (a supervised service's start
-included); `eval` code; and stdin written to a service (a `write` to `proc://<id>`) — from your
-own tool calls and from any `task` subagent you spawn (it runs in your pane, against the same
-log), and a `bash` command whose quoted text merely mentions `jj`
-with one of those words (a heredoc, an echo, a commit message) is refused too: write such text
-with the `write` tool or say "operation-log rollback" instead. `jj restore <paths>`,
+**Shared operation safety:** Under tmux every issue workspace is a `jj workspace` of one shared
+clone and operation log; under Kubernetes each issue pod has its own, shared by that issue's roles
+alone. Either way `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite a log
+other agents work in. The extension refuses them in every phase-worker pane before they run — a
+`bash` command in any position of a pipeline or `&&` chain, with or without `-R`, judged on the
+whole argument list (a supervised service's start included); `eval` code; and stdin written to a
+service (a `write` to `proc://<id>`) — from your own tool calls and from any `task` subagent you
+spawn (it runs in your pane, against the same log), and a `bash` command whose quoted text merely
+mentions `jj` with one of those words (a heredoc, an echo, a commit message) is refused too: write
+such text with the `write` tool or say "operation-log rollback" instead. `jj restore <paths>`,
 `jj op log`, and `jj op show` stay allowed. Recover forward only: a new commit
 (`jj -R "$LEGION_WORKSPACE" new`) or `jj -R "$LEGION_WORKSPACE" restore <paths>` of files.
 Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE" log`
@@ -397,10 +398,9 @@ re-runs it at once. While the pull request conflicts with its base (GitHub shows
 a body edit re-judges nothing there either; a push cures both, but only once the pull request is
 mergeable, so the implementer forward-merges a conflicting one first (*Reintegrating the base* in
 `skill://legion-worker/references/conflicts-and-rewrites.md`). Its ancestry check refuses
-unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every role
-of your issue pushes from the one clone your workspace belongs to (under tmux every issue workspace
-of the daemon shares that clone too), so another role's push moves `legion/<KEY>@origin` here at once, and
-a push that did not descend from it would move the remote branch sideways onto your commit and
+unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): your issue's
+roles share one clone (under tmux every issue does), so another role's push moves the remote branch
+here at once, and a push not descending from it would move it sideways onto your commit and
 drop theirs. A handoff commit never sits on an implementer's unpushed chain: when the issue moves
 back to planning, the implementer's unpushed commits stay off the bookmark until the implementer
 returns, and the planner writes its handoff on the remote tip.
@@ -426,17 +426,18 @@ check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report wit
 
 ## Completion: report to the architect, then stay
 
-Report completion to the architect: call the `legion` tool with `op: "handoff_complete"` and
-`summary`: two sentences for the architect. Report it through that tool call, never the shell
-command `legion handoff complete`: the tool call is what the extension's phase stall records, and
-a turn that ends with the phase still open gets one reminder. A completion run from the shell is
-recorded by the daemon all the same, but the stall does not see it and sends its one reminder; do
-not complete again on that reminder — the first completion stands, and a second is refused
-because the issue has already left your phase.
-
-This publishes your phase's completion to the architect's role and clears the daemon's
-record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
-invent a different completion protocol — this is the whole contract.
+Report completion to the architect with the `legion` tool's `handoff_complete` and a two-sentence
+`summary`. This publishes your phase's completion to the architect's role and clears the daemon's
+record of this issue's active phase. A shell `legion handoff complete`, should one run, completes
+the phase at the daemon just as well and is not refused, but only the tool call tells the
+extension's phase stall: after a shell completion the reminder arrives when the turn settles and
+again after each later Envoy delivery's turn, until a tool `handoff_complete` next succeeds (in
+practice the next phase's). A completion made on that reminder is refused and closes nothing —
+`HANDOFF_NOT_CURRENT_PHASE` once the phase has moved, `HANDOFF_ALREADY_RECORDED` where a
+completion moves nothing (the implementer before its pull request exists; the production check) —
+so answer the reminder with a WAITING line saying the phase was completed from the shell. Do not
+add pipeline labels, run a controller loop, or invent a different completion protocol — this is the
+whole contract.
 
 A reviewer's phase ends with its completion, not with its review; the order of a review round
 (the handoff push; for an approval, CI settled green at that head; the review of that head; then

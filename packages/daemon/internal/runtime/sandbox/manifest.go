@@ -251,13 +251,19 @@ func validateSessionPath(file string) error {
 	return nil
 }
 
-// agentArgv is the command the shim runs: the agent with no extensions but the image's Envoy and
-// Legion plugins, `--resume` on the recorded session when resuming, then RPC mode and the system
-// prompt. `--no-extensions` stops Oh My Pi discovering extensions, so a repository's
-// .omp/extensions (or an `extensions:` setting) cannot register a provider or run in the agent;
-// the two plugins load as the explicit extensions, the Envoy plugin first, their skills with them.
+// agentArgv is the command the shim runs: the agent with the image's Envoy and Legion plugins as
+// its two explicit extensions, the Envoy plugin first, `--resume` on the recorded session when
+// resuming, then RPC mode and the system prompt. Extension discovery stays on: a pod runs the
+// repository's .omp/extensions, hooks, TypeScript commands, `extensions:` settings and installed
+// profile plugins exactly as a tmux pane always has (the boot gate's pane lane is built on
+// discovery). Repository code runs in the agent's process, which holds the role's credential grant
+// file, the credential helper and the Envoy seed, and may register a provider; the operator's
+// overlay still outranks the repository's settings by Oh My Pi's own order, and the operator
+// route's `enabledModels` still bounds the session's model. The two plugins are roots the worker
+// image leaves unlinked from its profile: Oh My Pi loads a plugin that is both installed and named
+// by --extension twice, which the boot gate's pod lane refuses an image for.
 func (l launch) agentArgv(agent []string) []string {
-	argv := append(slices.Clone(agent), "--no-extensions", "--extension", envoyPlugin, "--extension", legionPlugin)
+	argv := append(slices.Clone(agent), "--extension", envoyPlugin, "--extension", legionPlugin)
 	if l.resumeFile != "" {
 		argv = append(argv, "--resume="+l.resumeFile)
 	}
