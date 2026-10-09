@@ -32,31 +32,33 @@ type DeliverySettings struct {
 // DeliverySettings.PopulationAuthors, merged, not in an excluded repository, not a task PR.
 // CreatedAt, MergedAt, Additions and Deletions are nil until the completing GitHub fetch (or a
 // reconcile pass) fills them in — GitHub's webhook payload alone never carries them — and
-// Partial is true for exactly as long as that is so. IssueKey is resolved by the title/body rule
-// only (LEGION-567 slice 1); Sessions are the raw `Omp-Session` commit trailer values.
+// Partial is true for exactly as long as that is so. IssueKey is resolved from five sources
+// (attribution.go), Attribution holding what GitHub said for them (nil until it has been read);
+// Sessions are the raw `Omp-Session` commit trailer values.
 // UnfetchableAt/UnfetchableReason are set when a completing fetch answers a permanent 404/410
 // (the pull request or its repository no longer exists, or no longer reaches this token) rather
 // than retrying forever; both nil for every normal row, and cleared by any later successful
 // fetch of the same pull request.
 type DeliveryPullRequest struct {
-	Repo              string     `json:"repo"`
-	Number            int        `json:"number"`
-	Title             string     `json:"title"`
-	URL               string     `json:"url"`
-	Author            string     `json:"author"`
-	CreatedAt         *time.Time `json:"created_at"`
-	MergedAt          *time.Time `json:"merged_at"`
-	FirstCommitAt     *time.Time `json:"first_commit_at"`
-	MergeCommitSHA    *string    `json:"merge_commit_sha"`
-	Additions         *int       `json:"additions"`
-	Deletions         *int       `json:"deletions"`
-	Rework            bool       `json:"rework"`
-	IssueKey          *string    `json:"issue"`
-	Sessions          []string   `json:"sessions"`
-	Partial           bool       `json:"partial"`
-	UnfetchableAt     *time.Time `json:"unfetchable_at"`
-	UnfetchableReason *string    `json:"unfetchable_reason"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	Repo              string             `json:"repo"`
+	Number            int                `json:"number"`
+	Title             string             `json:"title"`
+	URL               string             `json:"url"`
+	Author            string             `json:"author"`
+	CreatedAt         *time.Time         `json:"created_at"`
+	MergedAt          *time.Time         `json:"merged_at"`
+	FirstCommitAt     *time.Time         `json:"first_commit_at"`
+	MergeCommitSHA    *string            `json:"merge_commit_sha"`
+	Additions         *int               `json:"additions"`
+	Deletions         *int               `json:"deletions"`
+	Rework            bool               `json:"rework"`
+	IssueKey          *string            `json:"issue"`
+	Sessions          []string           `json:"sessions"`
+	Partial           bool               `json:"partial"`
+	UnfetchableAt     *time.Time         `json:"unfetchable_at"`
+	UnfetchableReason *string            `json:"unfetchable_reason"`
+	UpdatedAt         time.Time          `json:"updated_at"`
+	Attribution       *AttributionInputs `json:"-"`
 }
 
 // DeliveryRunKind distinguishes a deploy-workflow run (on pushes to the configured repository's

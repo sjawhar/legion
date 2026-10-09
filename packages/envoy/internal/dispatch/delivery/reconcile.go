@@ -113,6 +113,12 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, since, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
+	record("read attribution inputs of stored pull requests", r.reconcileAttributionInputs(ctx))
+	if changed, err := AttributePullRequests(ctx, r.pool); err != nil {
+		record("attribute stored pull requests", err)
+	} else if changed > 0 {
+		slog.Info("dispatch delivery: attributed stored pull requests", "changed", changed)
+	}
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, since, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, since, now))
@@ -294,6 +300,27 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	}
 	if err := boundedFanOut(ctx, reconcilePartialConcurrency, partials, r.completePartialPullRequest); err != nil {
 		return fmt.Errorf("rate-limited completing partial pull requests: %w", err)
+	}
+	return nil
+}
+
+// attributionBackfillBatch bounds how many stored rows reconcileAttributionInputs reads from
+// GitHub in one pass: each costs two or more calls (the pull request, its commits), and the
+// backfill of a 28-day population's thousands of rows spreads over passes rather than spending
+// one pass's share of the rate limit. Each row is read exactly once (its inputs are then stored).
+const attributionBackfillBatch = 200
+
+// reconcileAttributionInputs reads, once each, the attribution inputs of complete rows stored
+// before those inputs were (ListUnreadAttributionPullRequests, newest first), through the same
+// completion partial rows take, so the database-only resolve (AttributePullRequests) can credit
+// their issue. A rate limit stops the batch and fails the pass, as for partial rows.
+func (r *Reconcile) reconcileAttributionInputs(ctx context.Context) error {
+	unread, err := ListUnreadAttributionPullRequests(ctx, r.pool, attributionBackfillBatch)
+	if err != nil {
+		return fmt.Errorf("list pull requests with unread attribution inputs: %w", err)
+	}
+	if err := boundedFanOut(ctx, reconcilePartialConcurrency, unread, r.completePartialPullRequest); err != nil {
+		return fmt.Errorf("rate-limited reading attribution inputs: %w", err)
 	}
 	return nil
 }

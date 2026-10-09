@@ -303,31 +303,39 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 }
 
 // completePullRequest finishes writing one merged pull request's complete row -- session
-// trailers, issue-key resolution, and the upsert -- once its GitHub facts (FetchPullRequest's
-// answer) are in hand. The shared tail both intake's live handlePullRequestEnvelope and
-// reconcile's completePartialPullRequest call, so "a live webhook completes a PR" and "reconcile
-// completes a partial row" write through the exact same last steps, never two copies that can
-// drift from each other. A rate-limited session-trailer fetch returns the *githubapp.RateLimitError
-// without upserting anything: writing the row Partial: false with no sessions on a rate limit
-// would complete it with empty attribution exactly as permanently as a real "this PR has no
-// Omp-Session trailer" answer, and the next pass would never revisit it to try again -- leaving
-// the row untouched (still partial, for reconcile's own caller; unwritten, for intake's) means
-// whichever path calls this next actually retries the fetch instead of accepting a false empty
-// answer.
+// trailers, attribution inputs, issue resolution, and the upsert -- once its GitHub facts
+// (FetchPullRequest's answer) are in hand. The shared tail both intake's live
+// handlePullRequestEnvelope and reconcile's completePartialPullRequest call, so "a live webhook
+// completes a PR" and "reconcile completes a partial row" write through the exact same last
+// steps, never two copies that can drift from each other. A rate-limited commit fetch returns the
+// *githubapp.RateLimitError without upserting anything: writing the row Partial: false with no
+// sessions or commit keys on a rate limit would complete it with empty attribution exactly as
+// permanently as a real "these commits name nothing" answer, and the next pass would never revisit
+// it to try again -- leaving the row untouched (still partial, for reconcile's own caller;
+// unwritten, for intake's) means whichever path calls this next actually retries the fetch
+// instead of accepting a false empty answer.
 func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest) error {
-	sessions, err := fetchSessionTrailers(ctx, github, owner, repo, number)
+	messages, err := fetchCommitMessages(ctx, github, owner, repo, number)
 	if err != nil {
 		if limited, ok := githubapp.AsRateLimit(err); ok {
 			return limited
 		}
-		slog.Warn("dispatch delivery: fetch session trailers", "repo", repoFull, "number", number, "error", err)
+		slog.Warn("dispatch delivery: fetch commit messages", "repo", repoFull, "number", number, "error", err)
 	}
-	issueKey := resolveIssueKey(ctx, pool, fetched.Title, fetched.Body)
+	inputs := attributionInputsFrom(attributionFacts{
+		Repo: repoFull, URL: fetched.URL, Title: fetched.Title, Body: fetched.Body,
+		HeadRef: fetched.HeadRef, CommitMessages: messages,
+	})
+	issueKey, _, err := resolveStoredIssueKey(ctx, pool, fetched.URL, inputs)
+	if err != nil {
+		return err
+	}
 	return UpsertPullRequest(ctx, pool, DeliveryPullRequest{
 		Repo: repoFull, Number: number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
 		CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
 		MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
-		Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessions, Partial: false,
+		Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessionTrailers(messages),
+		Attribution: &inputs, Partial: false,
 	})
 }
 
@@ -395,7 +403,7 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliveryS
 }
 
 // commitMessagePayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits,
-// limited to the message field fetchSessionTrailers reads (distinct from github_prs.go's
+// limited to the message field fetchCommitMessages reads (distinct from github_prs.go's
 // commitPayload, which reads the same endpoint's dates instead).
 type commitMessagePayload struct {
 	Commit struct {
@@ -403,66 +411,55 @@ type commitMessagePayload struct {
 	} `json:"commit"`
 }
 
-// maxCommitPages bounds fetchSessionTrailers' pagination: 500 commits is already an enormous pull
-// request, and a PR beyond that is not worth the API cost of chasing its full session history.
+// maxCommitPages bounds fetchCommitMessages' pagination: 500 commits is already an enormous pull
+// request, and a PR beyond that is not worth the API cost of chasing its full history.
 const maxCommitPages = 5
 
-// fetchSessionTrailers reads every `Omp-Session:` commit trailer across a pull request's commits
-// (LEGION-294's rule, ported from the prototype's `session_ids`), first-seen order, no repeats.
-// Shared by Intake and Reconcile.reconcilePartialPullRequests (both complete a PR's session
-// attribution the same way; reconcile must resolve this itself rather than carrying forward
-// whatever a stale row already had, see store.go's UpsertPullRequest doc comment on why a partial
-// row is never allowed to regress a complete one's attribution).
-func fetchSessionTrailers(ctx context.Context, client *githubapp.Client, owner, repo string, number int) ([]string, error) {
+// fetchCommitMessages reads a pull request's commit messages, in commit order: what its session
+// trailers (sessionTrailers) and its commit-message issue keys (AttributionInputs.CommitKeys) are
+// read from. Shared by Intake and Reconcile (both complete a PR the same way; reconcile must read
+// them itself rather than carrying forward whatever a stale row already had, see store.go's
+// UpsertPullRequest doc comment on why a partial row is never allowed to regress a complete one's
+// attribution). On an error it answers the messages of the pages it read.
+func fetchCommitMessages(ctx context.Context, client *githubapp.Client, owner, repo string, number int) ([]string, error) {
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s PR #%d: %w", owner, repo, number, err)
 	}
-	var sessions []string
-	seen := map[string]bool{}
+	var messages []string
 	for page := 1; page <= maxCommitPages; page++ {
 		commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
 		body, status, header, err := client.Read(ctx, token, commitsPath)
 		if err != nil {
-			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
+			return messages, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
 		}
 		if err := githubapp.CheckResponse(status, header, body); err != nil {
-			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
+			return messages, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
 		}
 		var commits []commitMessagePayload
 		if err := json.Unmarshal(body, &commits); err != nil {
-			return sessions, fmt.Errorf("decode commits of PR #%d page %d: %w", number, page, err)
+			return messages, fmt.Errorf("decode commits of PR #%d page %d: %w", number, page, err)
 		}
 		for _, c := range commits {
-			for _, match := range ompSessionTrailer.FindAllStringSubmatch(c.Commit.Message, -1) {
-				id := match[1]
-				if !seen[id] {
-					seen[id] = true
-					sessions = append(sessions, id)
-				}
-			}
+			messages = append(messages, c.Commit.Message)
 		}
 		if len(commits) < 100 {
 			break
 		}
 	}
-	return sessions, nil
+	return messages, nil
 }
 
-// resolveIssueKey is LEGION-294's title/body attribution rule, slice 1's scope (the deeper
-// external-links/branch/commit fallback chain is not ported -- see the plan's Risks section): the
-// first bare Dispatch issue key title or body names, title scanned before body, that Dispatch
-// actually has. A key nothing stored names is never accepted ("never point at an issue that
-// doesn't exist"). A package-level function (not a method) so Intake and Reconcile, two otherwise
-// unrelated structs that both need it, share one implementation instead of two identical copies.
-func resolveIssueKey(ctx context.Context, pool *store.Pool, title, body string) *string {
-	for _, candidate := range issueKeyCandidate.FindAllString(title+"\n"+body, -1) {
-		var key string
-		if err := pool.QueryRow(ctx, "select key from issues where key = $1", candidate).Scan(&key); err == nil {
-			return &key
+// sessionTrailers is every `Omp-Session:` commit trailer across messages (LEGION-294's rule,
+// ported from the prototype's `session_ids`), first-seen order, no repeats.
+func sessionTrailers(messages []string) []string {
+	sessions := []string{}
+	for _, message := range messages {
+		for _, match := range ompSessionTrailer.FindAllStringSubmatch(message, -1) {
+			sessions = appendUnique(sessions, match[1])
 		}
 	}
-	return nil
+	return sessions
 }
 
 // mapRunConclusion maps GitHub's raw run conclusion to this schema's narrower check constraint

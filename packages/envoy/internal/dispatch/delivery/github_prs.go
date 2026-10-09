@@ -40,7 +40,8 @@ type FetchedPullRequest struct {
 	MergeCommitSHA *string
 	Additions      *int
 	Deletions      *int
-	Body           string // for later issue-reference resolution
+	Body           string // for issue attribution
+	HeadRef        string // the head branch's name, for issue attribution; empty on a search result
 	FirstCommitAt  *time.Time
 }
 
@@ -66,6 +67,9 @@ type pullRequestPayload struct {
 	MergeCommitSHA *string       `json:"merge_commit_sha"`
 	Additions      int           `json:"additions"`
 	Deletions      int           `json:"deletions"`
+	Head           struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
 }
 
 // commitPayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits, limited to
@@ -146,6 +150,7 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 		Additions:      &additions,
 		Deletions:      &deletions,
 		Body:           payload.Body,
+		HeadRef:        payload.Head.Ref,
 		FirstCommitAt:  &firstCommitAt,
 	}, nil
 }
