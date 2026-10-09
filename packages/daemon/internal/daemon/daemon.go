@@ -410,12 +410,12 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	return errors.Join(liveErr, stopErr)
 }
 
-// awaitStop waits, once the stop has begun (halted), for the daemon's own work to end and report
+// awaitStop waits, once the stop has begun (stopping), for the daemon's own work to end and report
 // on lived, until the stop's budget runs out (stopBy). Then it logs each claim still deciding and
 // leaves it to the next boot; a start that failed, reported on failed before the stop began, is
 // returned either way.
 func (s *supervision) awaitStop(lived, failed <-chan error, bootID int64) error {
-	<-s.halted
+	<-s.stopping.Done()
 	deadline := time.NewTimer(time.Until(s.stopBy))
 	defer deadline.Stop()
 	select {
@@ -709,21 +709,19 @@ type supervision struct {
 	// draining is the worker stream's life and what the API's routes run their decisions on
 	// (api.Options.Drained), one context because they end together: when the API's drain does
 	// (endDrain). decided is the claims those routes are deciding (api.RouteDecisions), whose
-	// connections the halt keeps open. stopping ends when the stop begins (api.Options.Stopping).
+	// connections the halt keeps open. stopping ends when the stop begins (halt), for awaitStop and
+	// the API's routes (api.Options.Stopping); stopBy is when the stop must end by, and drainBy when
+	// the API's drain must, both set before.
 	draining  context.Context
 	endDrain  context.CancelFunc
 	decided   *api.RouteDecisions
 	stopping  context.Context
 	beginStop context.CancelFunc
+	stopBy    time.Time
+	drainBy   time.Time
+	haltOnce  sync.Once
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
-
-	// halted closes when the stop begins (halt). stopBy is when the stop must end by, and drainBy
-	// when the API's drain must, both set before.
-	halted   chan struct{}
-	stopBy   time.Time
-	drainBy  time.Time
-	haltOnce sync.Once
 }
 
 // Deployment is the deployment's capabilities as the configuration alone states them
@@ -871,7 +869,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
-		stopping: stopping, beginStop: beginStop, halted: make(chan struct{}),
+		stopping: stopping, beginStop: beginStop,
 	}, nil
 }
 
@@ -902,12 +900,14 @@ func (s *supervision) start(boot context.Context) error {
 	}
 	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
 	if s.reconcileBootOrphans(boot) {
-		s.launchUnfinished(unfinished)
+		if failed := s.launchUnfinished(unfinished); len(failed) > 0 {
+			s.retryUnfinished(failed, true)
+		}
 	} else if len(unfinished) > 0 {
 		for _, token := range unfinished {
 			s.log.Warn("supervise: unrecorded launch remains uncertain; not relaunching", "claim", token)
 		}
-		s.retryUnfinished(unfinished)
+		s.retryUnfinished(unfinished, false)
 	}
 	close(s.supervisor.restored)
 
@@ -974,57 +974,61 @@ func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
 
 // launchUnfinished starts only claims that remain queued with no locator. A still-live old pane can
 // reconnect while reconciliation was uncertain; its hello changes the state before a later retry,
-// and it must never be joined by a second pane.
-func (s *supervision) launchUnfinished(tokens []claim.Token) {
+// and it must never be joined by a second pane. It returns the claims whose release the store did
+// not take, outside the daemon's stop: each is still launch_uncertain, in memory as in the store,
+// and nothing else in this boot releases it, so the caller retries it (retryUnfinished).
+func (s *supervision) launchUnfinished(tokens []claim.Token) []claim.Token {
+	var failed []claim.Token
 	for _, token := range tokens {
 		m, ok := s.supervisor.Machine(token)
 		if !ok {
 			continue
 		}
 		released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
-		switch {
-		case err != nil && s.supervisor.ctx.Err() != nil:
-			s.log.Info("supervise: the daemon's stop ended the release of an uncertain launch; the next boot takes the claim up", "claim", token, "error", err)
-			continue
-		case err != nil:
-			s.log.Error("supervise: release an uncertain launch", "claim", token, "error", err)
-			continue
-		case !released:
-			c := m.Claim()
-			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
+		if err != nil {
+			if s.supervisor.decisionFailed(token, "release of an uncertain launch", err,
+				"supervise: release an uncertain launch; retrying at the next orphan sweep") {
+				failed = append(failed, token)
+			}
 			continue
 		}
 		c := m.Claim()
-		if c.State != supervise.StateQueued || c.Locator != nil {
+		if !released || c.State != supervise.StateQueued || c.Locator != nil {
 			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
 			continue
 		}
 		s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
 		spawn := supervise.RequestSpawn{Claim: token}
-		s.supervisor.decided(token, spawn, m.Handle(s.supervisor.ctx, spawn), "supervise: launch an unfinished launch again")
+		if err := m.Handle(s.supervisor.ctx, spawn); err != nil {
+			s.supervisor.decisionFailed(token, fmt.Sprintf("%T", spawn), err, "supervise: launch an unfinished launch again")
+		}
 	}
+	return failed
 }
 
-// retryUnfinished retries a previously uncertain boot reconciliation on the normal orphan-sweep
-// cadence. Each reconciliation itself has the bounded retry above; only a success releases these
-// claims to launch.
-func (s *supervision) retryUnfinished(tokens []claim.Token) {
+// retryUnfinished launches tokens' unfinished launches on the normal orphan-sweep cadence, until
+// none is left or the daemon stops. Until the boot reconciliation has succeeded (reconciled), each
+// sweep retries it first — each reconciliation has the bounded retry above, and only a success
+// releases these claims to launch; once it has, a sweep retries only the releases the store did not
+// take (launchUnfinished), since the reconciliation's proof that no predecessor runs still holds.
+func (s *supervision) retryUnfinished(tokens []claim.Token, reconciled bool) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		ticker := time.NewTicker(s.plan.orphanSweep)
 		defer ticker.Stop()
-		for {
+		for len(tokens) > 0 {
 			select {
 			case <-s.supervisor.ctx.Done():
 				return
 			case <-ticker.C:
 			}
-			if !s.reconcileBootOrphans(s.supervisor.ctx) {
-				continue
+			if !reconciled {
+				if reconciled = s.reconcileBootOrphans(s.supervisor.ctx); !reconciled {
+					continue
+				}
 			}
-			s.launchUnfinished(tokens)
-			return
+			tokens = s.launchUnfinished(tokens)
 		}
 	}()
 }
@@ -1054,9 +1058,10 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 }
 
 // halt begins the stop, once. It sets when the stop and the API's drain must end by (stopBy,
-// drainBy), says the daemon is stopping, why (cause) and which claims are deciding, closes halted,
-// and tells the API's routes the stop has begun (api.Options.Stopping), from when an operator's
-// request that would change a claim is refused. Then, in this order:
+// drainBy), says the daemon is stopping, why (cause) and which claims are deciding, and ends
+// stopping, which tells awaitStop the stop has begun, and the API's routes too
+// (api.Options.Stopping), from when an operator's request that would change a claim is refused.
+// Then, in this order:
 //
 //  1. No machine is fed another event (supervisor.halt).
 //  2. The worker stream stops answering a shim's hello and closes every shim connection except
@@ -1088,7 +1093,6 @@ func (s *supervision) halt(cause error) {
 			s.log.Info("legion daemon stopping", "project", s.cfg.Project, "claims", s.supervisor.count(),
 				"deciding", s.supervisor.inDecision(), "cause", cause.Error())
 		}
-		close(s.halted)
 		s.beginStop()
 		s.supervisor.halt()
 		s.stream.Narrow(s.decided.Holds)

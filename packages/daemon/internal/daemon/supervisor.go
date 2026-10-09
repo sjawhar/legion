@@ -171,22 +171,25 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 			if !ok {
 				return
 			}
-			s.decided(token, ev, m.Handle(s.ctx, ev), "supervise: an event failed")
+			if err := m.Handle(s.ctx, ev); err != nil {
+				s.decisionFailed(token, fmt.Sprintf("%T", ev), err, "supervise: an event failed")
+			}
 		}
 	}()
 }
 
-// decided logs a decision of token's machine on ev that returned err, as failed says: at Error,
-// unless the daemon's stop ended it, which is no fault — the next boot takes the claim up.
-func (s *supervisor) decided(token claim.Token, ev supervise.Event, err error, failed string) {
-	switch {
-	case err == nil:
-	case s.ctx.Err() != nil:
+// decisionFailed logs err, a decision on token's claim failing (what names it: the event its
+// machine handled, or the release of an uncertain launch), as failed says: at Error, unless the
+// daemon's stop ended it, which is no fault, since the next boot takes the claim up. It reports
+// whether the failure is a fault.
+func (s *supervisor) decisionFailed(token claim.Token, what string, err error, failed string) bool {
+	if s.ctx.Err() != nil {
 		s.log.Info("supervise: the daemon's stop ended a decision; the next boot takes the claim up",
-			"claim", token, "event", fmt.Sprintf("%T", ev), "error", err)
-	default:
-		s.log.Error(failed, "claim", token, "event", fmt.Sprintf("%T", ev), "error", err)
+			"claim", token, "event", what, "error", err)
+		return false
 	}
+	s.log.Error(failed, "claim", token, "event", what, "error", err)
+	return true
 }
 
 // inDecision is every claim whose machine is deciding an event now, whoever handed it the event,

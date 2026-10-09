@@ -333,6 +333,11 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	others := treeOthers(claims, c.Tree, token)
+	// The one record that no stop check follows (stopped): a claim the tree gained while its root
+	// exited, by an operator's spawn into the tree being closed, is recorded only here, so a daemon's
+	// stop that begins in that same moment may already have closed its connection, and its stop then
+	// ends its agent without the shutdown frame. Its stored state is still right (retired); a check
+	// here would instead leave the root closed and the tree's other claims unstopped.
 	defer s.decisions.begin(others)()
 	var unstopped []string
 	for _, other := range others {

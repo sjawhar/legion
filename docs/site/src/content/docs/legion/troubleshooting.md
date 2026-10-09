@@ -74,18 +74,22 @@ On SIGTERM (`legion stop`, a rollout, a node drain) the daemon logs `legion daem
 `deciding` naming each claim whose decision is in flight and its event. It cuts short every
 relaunch and suspension it started itself and, once it has recorded its boot, the boot steps still
 running. A request in flight from the operator or an agent gets up to 8 seconds to finish, so a
-suspension or stop whose agent is already exiting is recorded; a new operator request that would
-change a claim is refused with `503 the daemon is stopping`. It logs `legion daemon stopped` once
-it has recorded the boot's end. It waits at most 10 seconds for its own work before it records
-that, so it stops well inside a pod's termination grace. It ends no agent: the next boot re-adopts
-every pod or pane still running and relaunches each launch the stop cut short.
+suspension or stop whose agent is already exiting is recorded. An operator request that would
+change a claim and that the daemon accepted before the stop began, but had not started deciding,
+is answered `503` (`<request> refused: the daemon is stopping; ask again once it is back`); one
+sent once the stop has begun finds no daemon listening, since the daemon closes its API listener at
+once. Repeat either once the daemon is back. It logs `legion daemon stopped` once it has recorded
+the boot's end. It waits at most 10 seconds for its own work before it records that, so it stops
+well inside a pod's termination grace. It ends no agent: the next boot re-adopts every pod or pane
+still running and relaunches each launch the stop cut short.
 
-A signal that comes before the boot is recorded does not cut short the cluster check, opening or
-migrating the store, building the runtime or recording the boot: each of those runs to its end,
-and each stretch of them between two of the steps below has at most 30 seconds. The daemon stops
-at the first later step that does end at the signal (the plugin gate, the GitHub App token mint,
-the image probe, the NATS and Dispatch readiness checks), without recording a boot, or else once
-the boot is recorded, which it then stamps.
+A signal that comes before the boot is recorded ends the boot step under way only when that step
+is the plugin gate, which runs first, the GitHub App token mint, the image probe, or the NATS and
+Dispatch readiness checks; the daemon then stops without recording a boot. The cluster check,
+opening and migrating the store, building the runtime and recording the boot are not cut short:
+each runs to its end, with at most 30 seconds between one of the steps that end at the signal and
+the next, and the daemon stops at the next such step, or once its boot is recorded, which it then
+stamps.
 
 - **`legion daemon stopped draining the API`.** A request was still in flight after those 8
   seconds. The daemon cut it short, the caller got an error, and the next boot takes its claim up;
