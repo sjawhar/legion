@@ -55,7 +55,22 @@ func Exec(ctx context.Context, tx pgx.Tx, migration Migration, signIn func(conte
 		return fmt.Errorf("migration %s: set lock_timeout: %w", migration.Name, err)
 	}
 	conn := tx.Conn()
-	watch := startWatch(ctx, conn.Config(), signIn, conn.PgConn().PID())
+	// The watch's own copy of the configuration (pgx.Conn.Config), which signIn may give a fresh
+	// password before each dial.
+	config := conn.Config()
+	dial := func(ctx context.Context) (*pgx.Conn, error) {
+		if signIn != nil {
+			if err := signIn(ctx, config); err != nil {
+				return nil, fmt.Errorf("sign the lock watch in: %w", err)
+			}
+		}
+		dialed, err := pgx.ConnectConfig(ctx, config)
+		if err != nil {
+			return nil, fmt.Errorf("connect the lock watch: %w", err)
+		}
+		return dialed, nil
+	}
+	watch := startWatch(ctx, dial, conn.PgConn().PID())
 	_, err := tx.Exec(ctx, migration.SQL)
 	wait, watchErr := watch.stop()
 	if err == nil {
@@ -202,10 +217,9 @@ const lockWaitQuery = `
 
 // watch reads, every watchInterval until stopped, what one backend is waiting for. It reads on a
 // connection of its own, since the backend's own connection is busy with the statement that
-// waits: dialed from that connection's configuration, signed in afresh by signIn when the pool
-// has one, at the first reading, so a migration that finishes inside one interval dials nothing,
-// and closed when the watch stops. A connection outside every pool keeps it clear of a shared
-// pool whose callers the migration may be holding up.
+// waits: one dial opens, at the first reading, so a migration that finishes inside one interval
+// dials nothing, and closed when the watch stops. A connection outside every pool keeps it clear
+// of a shared pool whose callers the migration may be holding up.
 type watch struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -214,14 +228,14 @@ type watch struct {
 	err  error
 }
 
-func startWatch(ctx context.Context, config *pgx.ConnConfig, signIn func(context.Context, *pgx.ConnConfig) error, pid uint32) *watch {
+func startWatch(ctx context.Context, dial func(context.Context) (*pgx.Conn, error), pid uint32) *watch {
 	ctx, cancel := context.WithCancel(ctx)
 	w := &watch{cancel: cancel, done: make(chan struct{})}
-	go w.run(ctx, config, signIn, pid)
+	go w.run(ctx, dial, pid)
 	return w
 }
 
-func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, signIn func(context.Context, *pgx.ConnConfig) error, pid uint32) {
+func (w *watch) run(ctx context.Context, dial func(context.Context) (*pgx.Conn, error), pid uint32) {
 	defer close(w.done)
 	var conn *pgx.Conn
 	closeConn := func() {
@@ -243,20 +257,10 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, signIn func(con
 		case <-ticker.C:
 		}
 		if conn == nil {
-			// config is the watch's own copy (pgx.Conn.Config), so signIn may set its password;
-			// each dial signs in afresh.
-			if signIn != nil {
-				if err := signIn(ctx, config); err != nil {
-					if ctx.Err() == nil {
-						w.err = fmt.Errorf("sign the lock watch in: %w", err)
-					}
-					continue
-				}
-			}
-			dialed, err := pgx.ConnectConfig(ctx, config)
+			dialed, err := dial(ctx)
 			if err != nil {
 				if ctx.Err() == nil {
-					w.err = fmt.Errorf("connect the lock watch: %w", err)
+					w.err = err
 				}
 				continue
 			}
