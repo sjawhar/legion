@@ -88,8 +88,8 @@ number is 17 for contract 17's token file (LEGION-631: the three routes that red
 GitHub or git credential and the grant request's `push` are gone, the pane gains the GitHub
 variables above and loses the absolute-path pins of its gh, git and jj, the credential-helper
 variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no `commit` and answers
-`note`; `POST /legion/v1/threads/resolve` takes `threads`), after contract 16's `capabilities`
-list on `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
+`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 16's `capabilities` list on
+`GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
 grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries
 no `legion` key, and the gate reads only this package's.
@@ -157,10 +157,10 @@ tool. There is no tool-call hook: nothing a pane runs is refused or minted for. 
 the `legion` tool: architects register gates, release children, request a backward move, choose
 retry or escalation, sign off, close an admitted root tree (a root architect only), and read
 records; phase workers request a backward move and read records; a phase worker and a
-sub-architect complete their phase (`handoff_complete`), and the reviewer resolves review threads
-by node id (`resolve_threads`). Each operation that writes mints its own grant on `/grants` and
-posts it with the request, so no grant is written to the pane. No `claims/exit` report runs at
-shutdown, because a daemon-requested suspend ends the session but keeps its claim for resumption.
+sub-architect complete their phase (`handoff_complete`). Each operation that writes mints its own
+grant on `/grants` and posts it with the request, so no grant is written to the pane. No
+`claims/exit` report runs at shutdown, because a daemon-requested suspend ends the session but
+keeps its claim for resumption.
 
 A daemon that sets `controller: daemon` launches the controller itself, in a Sandbox pod of its own
 whose one container, `controller`, runs `legion launcher` as an issue pod's role containers do: the
@@ -267,12 +267,13 @@ merger's `ready: true`, run READY's checks, so the push comes before the complet
 answer's `note` is what READY's checks said when they read no head. The operation mints its grant
 in-process and posts it with the request; nothing is written to the pane. A predecessor's handoff
 is read with `read` from the issue workspace. GitHub is the pane's plain `gh` and `git`, which read
-the role's App token from the gh files under `GH_CONFIG_DIR`; the one GitHub write the daemon makes
-for a role is the reviewer's `resolve_threads`, which resolves, as the pull request author's App,
-the review threads the reviewer names by GraphQL node id (`threads`) on its issue's recorded pull
-request (`POST /legion/v1/threads/resolve`; the reviewer alone, since GitHub refuses the review
-App that mutation). What a later phase needs goes in the handoff; a question for another live role
-goes to its role topic with `envoy_publish`.
+the role's App token from the gh files under `GH_CONFIG_DIR`; no tool operation writes to GitHub
+for a role. Review threads are the pull request author's to resolve: the reviewer, whose review
+App GitHub refuses `resolveReviewThread` on the implementer's pull request, names the bot threads
+it accepted to the implementer (an Envoy message to its role topic, or its review body), and the
+implementer resolves them with its own `gh`, as it does the threads it answers itself. What a later
+phase needs goes in the handoff; a question for another live role goes to its role topic with
+`envoy_publish`.
 
 The extension registers no `tool_call` hook: it refuses no tool call and mints nothing for one.
 LEGION-630 removed the per-role tool refusals, and LEGION-631 the jj operation-log rule and the

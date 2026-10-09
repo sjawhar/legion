@@ -302,6 +302,19 @@ func isNotFound(err error) bool {
 	return errors.As(err, &answer) && answer.Status == http.StatusNotFound
 }
 
+// issuePullRequest is the pull request recorded for issue, nil when it has none.
+func (s *server) issuePullRequest(ctx context.Context, issue string) (*record.PullRequest, error) {
+	if s.pool == nil || s.records == nil {
+		return nil, errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	return s.records.PullRequest(ctx, tx, issue)
+}
+
 // handoffPosition reads the issue record, its tree's generation (the root's), and its review round:
 // the implementer's count of returns to implementing, which tells each implementing, testing, and
 // reviewing pass from the last.

@@ -48,10 +48,10 @@ before you submit it, since an approval stands only on green checks and GitHub c
 once the head moves, and a verdict that settles red there makes the round's decision a request for
 changes naming the failing checks, unless only review workflows the project declares
 (`projects.<KEY>.review_workflows`) are red on their own findings: then you answer their threads,
-resolve the ones you answered with the `legion` tool's `resolve_threads`, and re-run the failed
-run, as your role prompt says, and approve once it passes. Any other red required workflow is a
-failing check like any other. A request for changes does not wait, since it stands whatever CI
-says and the issue leaves
+name the ones you accepted to the implementer, who resolves them with its own `gh` as the pull
+request's author, and re-run the failed run once they are resolved, as your role prompt says, and
+approve once it passes. Any other red required workflow is a failing check like any other. A
+request for changes does not wait, since it stands whatever CI says and the issue leaves
 reviewing with it. The verdict is of the checks and workflows the base branch requires, the set
 READY checks: red when one of them failed, and never red for a check the base branch does not
 require. A required check that was cancelled, or that the head's checks

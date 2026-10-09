@@ -9,7 +9,7 @@ tags:
   - e2e
   - review-threads
 date: 2026-09-13
-status: superseded by LEGION-631 — the mechanism its example proves, the implementer's `legion threads resolve` closing a thread on the reviewer's `Accepted:`, is gone (threads are resolved by node id, the reviewer's through the `legion` tool's `resolve_threads`); the rule that the phase running as an App manufactures the cross-App case stands
+status: superseded by LEGION-631 — the mechanism its example proves, the implementer's `legion threads resolve` closing a thread on the reviewer's `Accepted:`, is gone (threads are resolved by node id by the implementer with plain `gh` as the pull request's author; the reviewer names the bot threads it accepted to the implementer); the rule that the phase running as an App manufactures the cross-App case stands
 module: legion
 related_issues:
   - "LEGION-34"

@@ -19,8 +19,6 @@ import {
   LegionSignOffRequest,
   type LegionState,
   LegionStateResponse,
-  LegionThreadsResolveRequest,
-  LegionThreadsResolveResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "@legion/contracts/legion-api";
@@ -78,10 +76,6 @@ export interface LegionDaemonClient {
   readonly handoffComplete: (
     input: z.input<typeof LegionHandoffCompleteRequest>
   ) => Promise<z.output<typeof LegionHandoffCompleteResponse>>;
-  /** The reviewer's `resolve_threads`: `POST /legion/v1/threads/resolve`. */
-  readonly threadsResolve: (
-    input: z.input<typeof LegionThreadsResolveRequest>
-  ) => Promise<z.output<typeof LegionThreadsResolveResponse>>;
   readonly issueStatus: (
     input: z.input<typeof LegionIssueStatusRequest>
   ) => Promise<z.output<typeof LegionEmptyResponse>>;
@@ -255,13 +249,6 @@ export function createLegionDaemonClient(
         "/legion/v1/handoff/complete",
         LegionHandoffCompleteRequest,
         LegionHandoffCompleteResponse,
-        input
-      ),
-    threadsResolve: (input) =>
-      post(
-        "/legion/v1/threads/resolve",
-        LegionThreadsResolveRequest,
-        LegionThreadsResolveResponse,
         input
       ),
     issueStatus: (input) =>

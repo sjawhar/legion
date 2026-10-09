@@ -76,18 +76,15 @@ package api
 // `LEGION_CREDENTIAL_HELPER` and `LEGION_GRANT_FILE`: a pane's gh, git and jj are its PATH's,
 // every shared clone's helper is `gh auth git-credential`, and nothing in a pane runs `legion`
 // from bash any more, since the `legion` tool mints its grants in-process for its own daemon calls
-// (`handoff_complete`, `read_record`, `resolve_threads`, the controller's `read_state` and
-// `set_status`). No `worker-bin` directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX`
-// puts the `legion` launcher directory first alone. `HandoffCompleteRequest` loses `commit` and
+// (`handoff_complete`, `read_record`, the controller's `read_state` and `set_status`). No
+// `worker-bin` directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX` puts the `legion`
+// launcher directory first alone. `HandoffCompleteRequest` loses `commit` and
 // `HandoffCompleteResponse` gains `note`: the daemon reads the issue branch's head and the handoff
-// file on GitHub itself at completion. `ThreadsResolveRequest` is `{grantId, threads}`: the pull
-// request is the issue's recorded one (an issue with none is `NO_PULL_REQUEST`), and `threads` the
-// node ids of the review threads to resolve (at least one; an id that is no thread of that pull
-// request is `THREAD_NOT_ON_PULL_REQUEST` before any write); the response answers `{thread,
-// resolved, reason}` per id, losing its `withheld` count. A plugin or image built before 17 would
-// shim gh over a token file it never reads, mint a grant before every command and post a `commit`,
-// against a daemon on 17 that serves none of that, so the boot gate and `legion probe-image`
-// refuse the mixed pair. (This branch first took 16; LEGION-578 landed at 16 first, and pi-legion
-// 8.4.1 declares it without the token file, so a daemon at 16 would pass the gate against it.
-// Renumbered, as the same note says.)
+// file on GitHub itself at completion. `POST /legion/v1/threads/resolve` is deleted: the reviewer
+// names the bot threads it accepted to the implementer, who resolves them with plain `gh` as the
+// pull request's author. A plugin or image built before 17 would shim gh over a token file it never
+// reads, mint a grant before every command and post a `commit`, against a daemon on 17 that serves
+// none of that, so the boot gate and `legion probe-image` refuse the mixed pair. (This branch first
+// took 16; LEGION-578 landed at 16 first, and pi-legion 8.4.1 declares it without the token file,
+// so a daemon at 16 would pass the gate against it. Renumbered, as the same note says.)
 const DaemonAPIVersion = 17

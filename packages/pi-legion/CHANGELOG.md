@@ -31,14 +31,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   when READY was published without reading them, so a worker pushes before it completes; the
   `handoff_write` and `handoff_read` operations are gone with the `legion handoff` and
   `legion push` commands they shelled out beside (a handoff is written with `write`, committed and
-  pushed with plain `jj`, read with `read`); the reviewer's new `resolve_threads` names the review
-  threads to resolve by GraphQL node id and posts them to `POST /legion/v1/threads/resolve`
-  (`legion threads resolve` is gone); and the controller session gets the tool with `read_state`
-  (the whole `GET /legion/v1/state`) and `set_status` (`POST /legion/v1/issues/status` under a
-  controller grant minted with its registration secret), in place of running `legion state` and
-  `legion status` from bash. The client's strict parse needs this release beside a daemon at 17;
-  the daemon's boot gate and `legion probe-image` refuse any earlier contract (the 8.4.1 release
-  declares 16 and still mints a grant before every command).
+  pushed with plain `jj`, read with `read`); the tool resolves no review thread (`legion threads
+  resolve` is gone, and the daemon serves no thread route: the reviewer names the bot threads it
+  accepted to the implementer, who resolves them with plain `gh` as the pull request's author);
+  and the controller session gets the tool with `read_state` (the whole `GET /legion/v1/state`)
+  and `set_status` (`POST /legion/v1/issues/status` under a controller grant minted with its
+  registration secret), in place of running `legion state` and `legion status` from bash. The
+  client's strict parse needs this release beside a daemon at 17; the daemon's boot gate and
+  `legion probe-image` refuse any earlier contract (the 8.4.1 release declares 16 and still mints
+  a grant before every command).
 - No Legion handoff reaches the default branch (LEGION-605). The `legion-retro` skill ends retro
   with one final commit that removes the issue's `.legion/<issue>/`, pushed with its
   `docs/solutions/` commit in one push; the `legion-worker` and `legion-architect` skills and the

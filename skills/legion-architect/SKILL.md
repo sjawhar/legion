@@ -307,16 +307,14 @@ phase (`envoy_publish` to its role topic) to move the issue back to `implementin
 naming the conflict for the human who merges. Do not let the merger send a READY packet for an
 obsolete approval.
 
-If a worker reports that GitHub refused to resolve a review thread — the implementer's own
-`resolveReviewThread`, or the daemon's `resolve_threads` for the reviewer — open a `dispatch_ask`
-that names the thread's id or URL and GitHub's message for a human to resolve it by hand, with
-options for resolved / could not; the merger does not complete while it is open. That is the one
-review-thread step a human takes: GitHub lets only the pull request author's App resolve a
-thread, so the implementer resolves the threads it answers itself and the reviewer resolves the
-bot threads it adjudicated through the daemon, which resolves them as the implement App. A
-reviewer's `resolve_threads` refused with `THREAD_NOT_ON_PULL_REQUEST` named an id that is not a
-thread of the issue's recorded pull request: the reviewer re-lists the threads and sends the right
-ids, and you open nothing for it.
+If the implementer reports that GitHub refused to resolve a review thread — its own
+`resolveReviewThread`, on a thread it answered or one the reviewer named as accepted — open a
+`dispatch_ask` that names the thread's id or URL and GitHub's message for a human to resolve it by
+hand, with options for resolved / could not; the merger does not complete while it is open. That
+is the one review-thread step a human takes: GitHub lets only the pull request author's App
+resolve a thread, so the implementer resolves every thread with plain `gh`, the ones it answers
+and the bot threads the reviewer accepted and named to it (an Envoy message to the implementer's
+role topic, or its review body); the reviewer resolves none.
 
 ## 7. Close
 

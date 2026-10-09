@@ -26,9 +26,10 @@ later phase keeps it current rather than replacing it:
 
 **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
 
-**Threads:** <n> resolved, 0 unresolved. Each answered and resolved individually, never in bulk:
+**Threads:** <n> resolved, 0 unresolved. Each answered and resolved individually by the implementer, the pull request's author, never in bulk (the reviewer names the bot threads it accepted; it resolves none itself):
 - Thread <node id>: fixed in <commit-sha> — <one line>; resolved at <head-sha>.
 - Thread <node id>: not a defect — <reason>; resolved at <head-sha>.
+- Thread <node id>: accepted by the reviewer — <its reason, one line>; resolved at <head-sha>.
 - Thread <node id>: still open — <what remains>; unresolved at <head-sha>.
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the reviewed head <sha>:

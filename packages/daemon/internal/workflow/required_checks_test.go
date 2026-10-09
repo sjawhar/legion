@@ -450,8 +450,8 @@ func TestARedOnlyDeclaredReviewWorkflowsMakeGoesToTheReviewersRound(t *testing.T
 				t.Fatalf("after the tester's pass the issue is in %s, want reviewing", got)
 			}
 			want := "Reason: CI is red at head: " + review + "; only declared review workflows are red, so their findings are the review round's to decide"
-			if task := startTask(t, pool, claim.RoleReviewer); !strings.Contains(task, want) || !strings.Contains(task, "resolve_threads") {
-				t.Fatalf("reviewer task %q, want it to say %q and name resolve_threads", task, want)
+			if task := startTask(t, pool, claim.RoleReviewer); !strings.Contains(task, want) || !strings.Contains(task, "the implementer resolves with plain gh") {
+				t.Fatalf("reviewer task %q, want it to say %q and that the implementer resolves the accepted threads with plain gh", task, want)
 			}
 		})
 	}
@@ -459,11 +459,11 @@ func TestARedOnlyDeclaredReviewWorkflowsMakeGoesToTheReviewersRound(t *testing.T
 
 // An approved round under a red only declared review workflows make is stuck on their findings:
 // the architect is told once, naming the workflow and what the reviewer does about it (adjudicate,
-// resolve each answered thread with resolve_threads, re-run the failed run). The re-run keeps the
-// round open while a read finds it running, and one that passes on the head ends the round with no
-// push. One that stays red is a new attempt of the run, and is told again whether or not a read
-// found it running, as news of a re-run that did not clear it, never sent back to the implementer;
-// a read that finds that same attempt again tells nothing more.
+// name the accepted threads to the implementer, who resolves them with plain gh, re-run the failed
+// run). The re-run keeps the round open while a read finds it running, and one that passes on the
+// head ends the round with no push. One that stays red is a new attempt of the run, and is told
+// again whether or not a read found it running, as news of a re-run that did not clear it, never
+// sent back to the implementer; a read that finds that same attempt again tells nothing more.
 func TestAnApprovedRoundUnderARedOnlyDeclaredReviewWorkflowsMakeSettlesOnTheRerun(t *testing.T) {
 	const workflow = ".github/workflows/claude-pr-review.yml"
 	for _, tc := range []struct {
@@ -496,7 +496,7 @@ func TestAnApprovedRoundUnderARedOnlyDeclaredReviewWorkflowsMakeSettlesOnTheReru
 			applyRefusingNothing(t, pool, engine, read("failure", 1))
 			stuck := reviewStuckNotices(t, pool)
 			if len(stuck) != 1 || !strings.Contains(stuck[0].Reason, "CI is red at head: "+workflow+"; only declared review workflows are red") ||
-				!strings.Contains(stuck[0].Reason, "resolve_threads") || !strings.Contains(stuck[0].Reason, "rerun-failed-jobs") {
+				!strings.Contains(stuck[0].Reason, "the implementer resolves with plain gh") || !strings.Contains(stuck[0].Reason, "rerun-failed-jobs") {
 				t.Fatalf("review-stuck notices %+v, want one naming the workflow and the reviewer's adjudication and re-run", stuck)
 			}
 			if tc.running {

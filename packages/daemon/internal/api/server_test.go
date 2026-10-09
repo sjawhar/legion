@@ -178,3 +178,17 @@ func TestUnknownPathIsARefusedRoute(t *testing.T) {
 		t.Fatalf("body = %s, want {\"error\":\"no route\"}", got)
 	}
 }
+
+// The daemon resolves no review thread for anyone: the reviewer names the bot threads it accepted
+// to the implementer, who resolves them with plain gh as the pull request's author. The route a
+// plugin built before contract 17 would post to is no route at all.
+func TestTheDeletedThreadsResolveRouteAnswersNoRoute(t *testing.T) {
+	recorder := serve(t, fakeSource{}, http.MethodPost, "/legion/v1/threads/resolve")
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if got := strings.TrimSpace(recorder.Body.String()); got != `{"error":"no route"}` {
+		t.Fatalf("body = %s, want {\"error\":\"no route\"}", got)
+	}
+}

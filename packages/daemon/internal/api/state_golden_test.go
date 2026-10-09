@@ -13,7 +13,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
-	"github.com/sjawhar/legion/daemon/internal/reviewthreads"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -342,14 +341,6 @@ func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
 func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "grant.json", GrantResponse{
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
-	})
-	golden(t, "threads-resolve.json", ThreadsResolveResponse{Threads: []reviewthreads.Outcome{
-		{Thread: "PRRT_kwDOLx1Qf85B2c7a", Resolved: true},
-		{Thread: "PRRT_kwDOLx1Qf85B2c7b", Resolved: true, Reason: reviewthreads.AlreadyResolved},
-	}})
-	golden(t, "threads-resolve-refused.json", ThreadsResolveResponse{
-		Threads: []reviewthreads.Outcome{{Thread: "PRRT_kwDOLx1Qf85B2c7a", Resolved: true}},
-		Refused: &ThreadRefusal{Thread: "PRRT_kwDOLx1Qf85B2c7c", Error: "GitHub: Resource not accessible by integration"},
 	})
 	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: `no check is required on "main" of acme/widgets, so READY was published without reading the head's checks`})
 	golden(t, "issue-status.json", IssueStatusResponse{})

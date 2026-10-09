@@ -99,7 +99,7 @@ projects:
 | Envoy event routing    | `packages/envoy/`                              | See `packages/envoy/AGENTS.md`                  |
 | Shared event contracts | `packages/contracts/`                          | See `packages/contracts/AGENTS.md`               |
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | `@sjawhar/pi-envoy`: the Envoy and Dispatch tools every session loads. See `packages/pi-envoy/AGENTS.md`          |
-| Legion OMP plugin      | `packages/pi-legion/`                         | `@sjawhar/pi-legion`: the Legion entry, the Legion tool (`handoff_complete`, `read_record`, `resolve_threads`, the controller's `read_state`/`set_status`), its daemon client, the task agents and the Legion skills. See `packages/pi-legion/AGENTS.md` |
+| Legion OMP plugin      | `packages/pi-legion/`                         | `@sjawhar/pi-legion`: the Legion entry, the Legion tool (`handoff_complete`, `read_record`, the controller's `read_state`/`set_status`), its daemon client, the task agents and the Legion skills. See `packages/pi-legion/AGENTS.md` |
 | Shared plugin interface | `packages/pi-shared/`                        | `@legion/pi-shared`: the versioned in-process interface between the two plugins and the modules both bundle. See `packages/pi-shared/AGENTS.md` |
 | Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | Operator controller configuration (Kubernetes) | `deploy/kubernetes/daemon/controller.yaml.example` | The operator-side file `legion controller start` reads. See `docs/kubernetes.md` "Operator-launched controller" |

@@ -68,10 +68,6 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
-	// GitHubGraphQL is GitHub's GraphQL endpoint, which the threads route resolves the reviewer's
-	// accepted bot threads through; empty, in production, is https://api.github.com/graphql, and a
-	// test points it at a stand-in.
-	GitHubGraphQL string
 	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
@@ -116,21 +112,20 @@ type server struct {
 	controllerLaunched bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
-	controllerMu  sync.Mutex
-	tokens        appauth.Tokens
-	githubOwner   string
-	githubGraphQL string
-	githubAPI     string
-	repository    func(project string) (ghrepo.Repository, bool)
-	grants        *credential.Grants
-	releaser      store.TreeReleaser
-	trees         TreeLifecycles
-	pool          *pgxpool.Pool
-	handlers      []intake.Handler
-	records       record.Store
-	dispatch      dispatch.Client
-	claimReady    func(c supervise.Claim)
-	log           *slog.Logger
+	controllerMu sync.Mutex
+	tokens       appauth.Tokens
+	githubOwner  string
+	githubAPI    string
+	repository   func(project string) (ghrepo.Repository, bool)
+	grants       *credential.Grants
+	releaser     store.TreeReleaser
+	trees        TreeLifecycles
+	pool         *pgxpool.Pool
+	handlers     []intake.Handler
+	records      record.Store
+	dispatch     dispatch.Client
+	claimReady   func(c supervise.Claim)
+	log          *slog.Logger
 }
 
 // NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface
@@ -153,7 +148,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		controllerLaunched: opts.ControllerLaunched,
 		tokens:             opts.Tokens,
 		githubOwner:        opts.GitHubOwner,
-		githubGraphQL:      opts.GitHubGraphQL,
 		githubAPI:          opts.GitHubAPI,
 		repository:         opts.Repository,
 		releaser:           opts.Releaser,
@@ -187,7 +181,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
-	mux.HandleFunc("POST /legion/v1/threads/resolve", s.resolveThreads)
 	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
 	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
 	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)

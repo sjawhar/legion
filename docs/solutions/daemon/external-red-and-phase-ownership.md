@@ -10,7 +10,7 @@ tags:
   - github-apps
   - review
 date: 2026-09-12
-status: superseded by LEGION-631 — the `Accepted:` rule and `legion threads resolve` in §3 are gone; the implementer resolves each thread it has answered by node id with `gh api graphql` (`resolveReviewThread`), the reviewer the ones it adjudicated with the `legion` tool's `resolve_threads`, and no magic word closes a thread
+status: superseded by LEGION-631 — the `Accepted:` rule and `legion threads resolve` in §3 are gone; the implementer, the pull request's author, resolves each thread by node id with plain `gh api graphql` (`resolveReviewThread`), its own and the bot threads the reviewer names to it as accepted, and no magic word closes a thread
 module: daemon
 related_issues:
   - "sjawhar/legion#966"

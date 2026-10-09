@@ -24,8 +24,6 @@ import {
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
-  LegionThreadsResolveRequest,
-  LegionThreadsResolveResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
@@ -48,8 +46,6 @@ const schemas: Record<string, z.ZodType> = {
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
   "grant.json": LegionGrantResponse,
-  "threads-resolve.json": LegionThreadsResolveResponse,
-  "threads-resolve-refused.json": LegionThreadsResolveResponse,
   "handoff-complete.json": LegionHandoffCompleteResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
@@ -80,45 +76,6 @@ test("every Go-written fixture parses through the strict schema", () => {
     const parsed = schema?.safeParse(fixture(name));
     expect(parsed?.error?.issues ?? [], `${name} failed the schema`).toEqual([]);
   }
-});
-
-test("a thread's outcome names its thread and whether it is resolved, its reason optional", () => {
-  const thread = "PRRT_kwDOLx1Qf85B2c7a";
-  for (const outcome of [
-    { thread, resolved: true },
-    { thread, resolved: true, reason: "already resolved" },
-  ]) {
-    expect(LegionThreadsResolveResponse.safeParse({ threads: [outcome] }).success).toBe(true);
-  }
-  for (const outcome of [
-    { thread },
-    { resolved: true },
-    { thread, resolved: "yes" },
-    { thread, resolved: true, reason: "" },
-    { thread, resolved: true, withheld: 0 },
-  ]) {
-    expect(LegionThreadsResolveResponse.safeParse({ threads: [outcome] }).success).toBe(false);
-  }
-  expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(false);
-});
-
-test("a resolve request names at least one thread, none empty, and no pull request", () => {
-  const request = { grantId: "grant-208" };
-  expect(
-    LegionThreadsResolveRequest.safeParse({ ...request, threads: ["PRRT_kwDOLx1Qf85B2c7a"] })
-      .success
-  ).toBe(true);
-  for (const threads of [undefined, [], [""], ["PRRT_kwDOLx1Qf85B2c7a", ""]]) {
-    expect(LegionThreadsResolveRequest.safeParse({ ...request, threads }).success).toBe(false);
-  }
-  expect(
-    LegionThreadsResolveRequest.safeParse({
-      ...request,
-      repo: "acme/widgets",
-      number: 42,
-      threads: ["PRRT_kwDOLx1Qf85B2c7a"],
-    }).success
-  ).toBe(false);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {
@@ -178,11 +135,6 @@ test("every workflow request has a strict schema", () => {
       "controller grant",
       LegionControllerGrantRequest,
       { sessionId: "ses_controller", secret: "s" },
-    ],
-    [
-      "threads resolve",
-      LegionThreadsResolveRequest,
-      { grantId: "grant-208", threads: ["PRRT_kwDOLx1Qf85B2c7a"] },
     ],
     [
       "handoff complete",

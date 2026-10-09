@@ -349,29 +349,6 @@ export const LegionGrantResponse = z.strictObject({
 });
 export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
-/** `api.ThreadsResolveRequest`, the reviewer's `resolve_threads`: its grant and the GraphQL node
- * ids of the review threads to resolve, at least one. The pull request is the one the daemon
- * records for the grant's issue; the request names none. */
-export const LegionThreadsResolveRequest = z.strictObject({
-  grantId: nonEmptyString,
-  threads: z.array(nonEmptyString).min(1),
-});
-/** `reviewthreads.Outcome`: one named thread after the run — its node id, whether GitHub holds it
- * resolved, and `reason`, `already resolved` for a thread GitHub held resolved before the run wrote
- * anything, absent for one this run resolved. */
-const LegionThreadOutcome = z.strictObject({
-  thread: nonEmptyString,
-  resolved: z.boolean(),
-  reason: nonEmptyString.optional(),
-});
-/** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each named
- * thread's outcome, in the order the request named them; and, when GitHub refused to resolve one,
- * that thread and GitHub's message (`refused`), the outcomes before it being all that ran. */
-export const LegionThreadsResolveResponse = z.strictObject({
-  threads: z.array(LegionThreadOutcome),
-  refused: z.strictObject({ thread: nonEmptyString, error: nonEmptyString }).optional(),
-});
-
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
 /** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published

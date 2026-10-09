@@ -597,9 +597,9 @@ assert_handoff_committer() {
 # a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
 # thread's first comment's node id. The account is the devbox gh's, which acts as the user when its
 # App routing fails; the roles treat a bot's thread by its author (the implementer answers and
-# resolves it as any thread, the reviewer adjudicates it and resolves it with the legion tool's
-# resolve_threads), so the thread's author is read back and anything but a bot outside Legion's
-# Apps is refused, naming it.
+# resolves it as any thread, the reviewer adjudicates it and names it to the implementer, who
+# resolves it), so the thread's author is read back and anything but a bot outside Legion's Apps is
+# refused, naming it.
 post_bot_thread() {
   local head posted id login type
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
@@ -626,7 +626,8 @@ bot_thread_replies() {
       (.isResolved | tostring), (.comments.nodes[1:][] | \"\\(.author.login)\\t\\(.body | ltrimstr(\" \") | split(\"\\n\")[0])\")"
 }
 # bot_thread_node_id COMMENT prints the node id of the review thread whose first comment is COMMENT:
-# the id a resolution names (the reviewer's resolve_threads, the daemon's log line).
+# the id a resolution names (the reviewer's message to the implementer, the implementer's
+# resolveReviewThread).
 bot_thread_node_id() {
   # shellcheck disable=SC2016 # a GraphQL query: its $ are GraphQL's
   timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
@@ -636,9 +637,9 @@ bot_thread_node_id() {
     --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") | .id" | grep .
 }
 # bot_thread_resolved COMMENT AUTHOR: the bot's thread is resolved and carries a reply by AUTHOR
-# (legion-implementer, whose own gh resolves the threads it answers; legion-reviewer, whose
-# resolve_threads has the daemon resolve the ones it answered). No word of the reply is read:
-# nothing resolves a thread on a magic form.
+# (legion-implementer, which answered it; legion-reviewer, which adjudicated it and named it to
+# the implementer). Only the pull request author's App resolves, so the resolver is not read; no
+# word of the reply is read either: nothing resolves a thread on a magic form.
 bot_thread_resolved() {
   local replies
   replies=$(bot_thread_replies "$1") || return 1
@@ -681,6 +682,13 @@ review_thread() { review_threads | jq -ce --arg id "$1" '.[] | select(.id == $id
 thread_resolved_by() {
   jq -e --arg author "$2" '.isResolved == true
     and ([.comments[] | select(.state == "SUBMITTED")] | last | .author == $author)' "$1" >/dev/null
+}
+# thread_resolved_with_reply FILE AUTHOR: the thread FILE holds is resolved and carries a submitted
+# reply by AUTHOR somewhere after its opening comment: the bot's thread the reviewer answered and
+# the implementer, told its id, resolved without a reply of its own.
+thread_resolved_with_reply() {
+  jq -e --arg author "$2" '.isResolved == true
+    and any(.comments[1:][]; .state == "SUBMITTED" and .author == $author)' "$1" >/dev/null
 }
 # threads_all_resolved FILE ID: every review thread FILE holds (review_threads' output) is resolved,
 # and the thread ID is one of them.

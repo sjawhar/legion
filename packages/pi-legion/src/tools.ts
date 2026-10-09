@@ -46,7 +46,7 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "read_record",
     "handoff_complete",
   ],
-  "phase-worker": ["request_backward_move", "read_record", "handoff_complete", "resolve_threads"],
+  "phase-worker": ["request_backward_move", "read_record", "handoff_complete"],
   controller: ["read_state", "set_status"],
 };
 
@@ -61,7 +61,6 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   rerun_child: ["issue"],
   read_record: ["issue"],
   handoff_complete: ["summary", "verdict", "ready"],
-  resolve_threads: ["threads"],
   read_state: [],
   set_status: ["issue", "status"],
 };
@@ -85,7 +84,6 @@ function toolSchema(pi: PiApi): unknown {
       "rerun_child",
       "read_record",
       "handoff_complete",
-      "resolve_threads",
       "read_state",
       "set_status",
     ]),
@@ -104,10 +102,6 @@ function toolSchema(pi: PiApi): unknown {
     summary: z.string().optional(),
     verdict: z.enum(["pass", "fail"]).optional(),
     ready: z.boolean().optional(),
-    threads: z
-      .array(z.string())
-      .describe("resolve_threads: the GraphQL node id of each review thread to resolve")
-      .optional(),
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }
@@ -142,8 +136,8 @@ function recordFrom(state: LegionState, issue: string): LegionIssue {
 /** The daemon's role-local workflow surface: no operation can schedule a worker. Every operation
  * that writes mints its own grant in-process and posts it with the request; nothing is written
  * to the pane. `handoff_complete` belongs to every session but the root architect's (a phase
- * worker, and a sub-architect: an architect whose issue is not its tree); `resolve_threads` to the
- * reviewer alone; `read_state` and `set_status` to the controller. */
+ * worker, and a sub-architect: an architect whose issue is not its tree); `read_state` and
+ * `set_status` to the controller. */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionDaemonClient;
@@ -182,9 +176,7 @@ export function createLegionTool(deps: {
       "command pushes or completes a handoff for you. A completion is refused HANDOFF_BRANCH_MISSING, HANDOFF_AUTHOR_MISMATCH, HANDOFF_FILE_MISSING, " +
       "HANDOFF_INVALID (the fields it names), HANDOFF_NOT_NEW (nothing pushed since your last completion), READY_HEAD_CARRIES_HANDOFFS or " +
       "READY_CHECKS_NOT_GREEN; fix what it names, push, and complete again, since a refused completion changed nothing. " +
-      "resolve_threads (the reviewer alone) has the daemon resolve, as the pull request author's App, the review threads you name by GraphQL node id " +
-      "(`threads`, one or more you have replied on) on your issue's recorded pull request, which the daemon knows; the implementer resolves its own " +
-      "threads with gh. The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
+      "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
       "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.",
     defaultInactive: true,
     parameters: toolSchema(pi),
@@ -237,27 +229,6 @@ export function createLegionTool(deps: {
             });
             onPhaseCompleted(context);
             return jsonSuccess(answer);
-          }
-          case "resolve_threads": {
-            if (active.kind !== "phase-worker" || active.role !== "reviewer") {
-              throw new Error(
-                "resolve_threads is available to the reviewer alone: the daemon resolves review threads as the pull request author's App only for the reviewer's grant; the pull request's author resolves its own threads with gh"
-              );
-            }
-            const threads = parameters.threads;
-            if (
-              !Array.isArray(threads) ||
-              threads.length === 0 ||
-              !threads.every(
-                (thread): thread is string => typeof thread === "string" && thread.trim() !== ""
-              )
-            ) {
-              throw new Error(
-                "resolve_threads requires threads: the GraphQL node id of each review thread to resolve, at least one, none empty"
-              );
-            }
-            const grantId = await grantFor(client, active);
-            return jsonSuccess(await client.threadsResolve({ grantId, threads }));
           }
           case "register_gate": {
             const version = parameters.version;

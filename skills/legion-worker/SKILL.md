@@ -283,9 +283,10 @@ never one. **Before you write or edit any line of the PR body or any `proof` arr
 line), the full definition of a proof, what the tester verifies, and the simplify pass.
 
 - **Review threads** are answered and resolved one by one, never in bulk, and never one you have
-  not read: one disposition reply per thread, then that thread's own resolution — the
-  implementer's `gh api graphql` mutation after every push that answers a review, before its
-  completion; the reviewer's `resolve_threads` for the bot threads it adjudicated:
+  not read: one disposition reply per thread, then that thread's own resolution by the
+  implementer, the pull request's author — its `gh api graphql` mutation after every push that
+  answers a review, before its completion, for the threads it answered and for the bot threads the
+  reviewer names to it as accepted (the review App cannot resolve one):
   `skill://legion-worker/references/review-threads.md`.
 - **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
@@ -408,11 +409,10 @@ with `--allow-backwards`. The merger makes no commit and pushes nothing.
 Report completion to the architect: call the `legion` tool with `op: "handoff_complete"` and
 `summary`: two sentences for the architect. The tool is your only way to the daemon
 (`handoff_complete`; `read_record`, your issue's record, which is what "re-read your issue
-record" means; `request_backward_move`; and the reviewer's `resolve_threads`), and nothing of
-yours runs `legion` from bash. The tool call is what the extension's phase stall records, and a
-turn that ends with the phase still open gets one reminder; do not complete again on that reminder
-when your first completion was accepted — it stands, and a second is refused because the issue
-has already left your phase.
+record" means; and `request_backward_move`), and nothing of yours runs `legion` from bash. The
+tool call is what the extension's phase stall records, and a turn that ends with the phase still
+open gets one reminder; do not complete again on that reminder when your first completion was
+accepted — it stands, and a second is refused because the issue has already left your phase.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or

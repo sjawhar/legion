@@ -153,7 +153,6 @@ test("posts every Stage 3 workflow request through its matching route", async ()
   type WorkflowClient = {
     readonly grant: (body: object) => Promise<unknown>;
     readonly handoffComplete: (body: object) => Promise<unknown>;
-    readonly threadsResolve: (body: object) => Promise<unknown>;
     readonly issueStatus: (body: object) => Promise<unknown>;
     readonly gateRegister: (body: object) => Promise<unknown>;
     readonly waveRelease: (body: object) => Promise<unknown>;
@@ -177,13 +176,6 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       "/legion/v1/handoff/complete",
       { grantId: "grant-208", summary: "done", verdict: "", ready: false },
       "handoff-complete.json",
-    ],
-    // The request names no pull request: the daemon resolves on the issue's recorded one.
-    [
-      "threadsResolve",
-      "/legion/v1/threads/resolve",
-      { grantId: "grant-208", threads: ["PRRT_kwDOLx1Qf85B2c7a", "PRRT_kwDOLx1Qf85B2c7b"] },
-      "threads-resolve.json",
     ],
     [
       "issueStatus",

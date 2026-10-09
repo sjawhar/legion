@@ -73,7 +73,6 @@ function recordingDaemon(options: {
     "childRerun",
     "issueStatus",
     "handoffComplete",
-    "threadsResolve",
   ];
   const daemon = {
     grant: async (input: object) => {
@@ -414,71 +413,6 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
   expect(completed).toEqual([]);
 });
 
-test("resolve_threads posts the named thread ids with its grant alone, for the reviewer alone", async () => {
-  const outcome = {
-    threads: [
-      { thread: "PRRT_a", resolved: true },
-      { thread: "PRRT_b", resolved: true, reason: "already resolved" },
-    ],
-  };
-  const run = (session: LegionToolSession, parameters: Record<string, unknown>) => {
-    const recorded = recordingDaemon({ answers: { threadsResolve: outcome } });
-    return {
-      calls: recorded.calls,
-      result: createLegionTool({
-        pi,
-        daemon: recorded.daemon,
-        controllerGrant: noControllerGrant,
-        onPhaseCompleted: () => undefined,
-        resolveDocument: noDocumentLookup,
-        session: () => session,
-      }).execute("", { op: "resolve_threads", ...parameters }, undefined, undefined, context()),
-    };
-  };
-
-  // The request names no pull request: the daemon resolves on the one it recorded for the issue.
-  const reviewer = run(claimSession("reviewer"), { threads: ["PRRT_a", "PRRT_b"] });
-  await expect(reviewer.result).resolves.toEqual({
-    content: [{ type: "text", text: JSON.stringify(outcome) }],
-    details: outcome,
-  });
-  expect(reviewer.calls).toEqual([
-    [
-      "grant",
-      { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
-    ],
-    ["threadsResolve", { grantId: "grant-208", threads: ["PRRT_a", "PRRT_b"] }],
-  ]);
-
-  // Refused before any daemon call: every other role (the implementer resolves its own threads
-  // with gh), an empty or malformed list, a repository (the daemon knows the pull request), and a
-  // sub-architect.
-  const refusals = [
-    [claimSession("implementer"), { threads: ["PRRT_a"] }, "reviewer alone"],
-    [claimSession("merger"), { threads: ["PRRT_a"] }, "reviewer alone"],
-    [
-      claimSession("architect", "LEGION-209"),
-      { threads: ["PRRT_a"] },
-      "not available to a architect session",
-    ],
-    [claimSession("reviewer"), { threads: [] }, "at least one, none empty"],
-    [claimSession("reviewer"), { threads: [" "] }, "at least one, none empty"],
-    [claimSession("reviewer"), {}, "at least one, none empty"],
-    [
-      claimSession("reviewer"),
-      { repo: "acme/widgets", threads: ["PRRT_a"] },
-      'resolve_threads does not accept field "repo"',
-    ],
-  ] as const;
-  for (const [session, parameters, message] of refusals) {
-    const { calls, result } = run(session, parameters);
-    const answer = await result;
-    expect(answer.isError).toBe(true);
-    expect(answer.content).toEqual([{ type: "text", text: expect.stringContaining(message) }]);
-    expect(calls).toEqual([]);
-  }
-});
-
 test("the controller reads the whole state without a grant and sets an issue's status with its own", async () => {
   const state = {
     daemon: { project: "OMP" },
@@ -533,7 +467,6 @@ test("the controller reads the whole state without a grant and sets an issue's s
     [{ op: "read_record", issue: "LEGION-208" }, "not available to a controller session"],
     [{ op: "handoff_complete", summary: "Done." }, "not available to a controller session"],
     [{ op: "sign_off", issue: "LEGION-208" }, "not available to a controller session"],
-    [{ op: "resolve_threads", threads: ["PRRT_a"] }, "not available to a controller session"],
   ] as const;
   for (const [parameters, message] of refusals) {
     const result = await run(parameters);

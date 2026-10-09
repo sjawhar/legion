@@ -81,13 +81,6 @@
 
 ### Added
 
-- `LegionThreadsResolveRequest` and `LegionThreadsResolveResponse`, the body and the answer of the
-  Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer's `resolve_threads` calls:
-  the grant and `threads`, the node ids of the review threads to resolve (at least one, none
-  empty; the pull request is the one recorded for the grant's issue), then each named thread's outcome in the order named,
-  `{thread, resolved, reason}`, `reason` being `already resolved` for a thread GitHub held resolved
-  before the run and absent for one the run resolved, and `refused`, the thread GitHub refused to
-  resolve and its message, when one stopped the run (LEGION-544, LEGION-631).
 - `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
   removed, the head it wrote, the validation error the history failed with, and `source_version`,
   the version the rebuilt document holds (its latest saved version, or the version supplied

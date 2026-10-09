@@ -881,11 +881,11 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
 the API port is already bound by this point (the same as during the image probe, both before this
 gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
-reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`,
-`handoff_complete` and the reviewer's `resolve_threads`, the last two each minting their grant
-in-process first) and `controller start` all wait on that same API, so none of them succeeds until the daemon
-actually serves; a pane's plain `gh` and `git` do not, since they read the role's credential from
-its gh files and call the daemon for nothing.
+reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`
+and `handoff_complete`, the latter minting its grant in-process first) and `controller start` all
+wait on that same API, so none of them succeeds until the daemon actually serves; a pane's plain
+`gh` and `git` do not, since they read the role's credential from its gh files and call the daemon
+for nothing.
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
@@ -1050,8 +1050,7 @@ and with no `advertise_host` set the stream also moves when the daemon restarts 
 daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
 re-adoption alone would leave the role holding the old addresses: a launcher dialling a stale
 stream never reaches the new daemon, and a stale `LEGION_DAEMON_URL` fails every call the agent
-makes to the daemon's API (its phase completion, the reviewer's `resolve_threads`) while its
-stream still works.
+makes to the daemon's API (its phase completion, its record read) while its stream still works.
 
 So the runtime compares a role's addresses with what it hands now on every evaluation of the role
 (each watch event, the probe-interval sweep, each probe):
@@ -1260,10 +1259,11 @@ reviewer's) the review App's; and each role's plain `gh` and `git` run in a cont
 the tree volume, with whatever the tree planted in the shared clone's configuration. A plant in the
 implementer's container, then, reaches a token the implementer already holds for its push and its
 pull request. What no plant reaches is the other App: no review-role container ever holds the
-implement App's token (the reviewer's `legion` tool's `resolve_threads` asks the daemon to resolve as the
-implement App, and the token stays there), and no implement-role container the review App's, so an
-approval posted as the review App is a review-role container's, and a push or a pull request as the
-implement App an implement-role container's.
+implement App's token (the review App cannot resolve a review thread on the implementer's pull
+request, so the reviewer names the bot threads it accepted to the implementer, which resolves them
+with its own `gh`; the daemon serves no thread route), and no implement-role container the review
+App's, so an approval posted as the review App is a review-role container's, and a push or a pull
+request as the implement App an implement-role container's.
 
 On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
 0600 credential files, and the daemon's credentialed clone and fetch run in the shared clone itself.
