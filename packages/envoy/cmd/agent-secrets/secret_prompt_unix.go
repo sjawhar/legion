@@ -112,8 +112,10 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	mode.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG
 	// IEXTEN is off too: macOS acts on Ctrl-V (VLNEXT) and Ctrl-O (VDISCARD) under it whatever
 	// ICANON and ISIG say (bsd/kern/tty.c, ttyinput), so a pasted Ctrl-V would vanish from the
-	// value and Ctrl-O would toggle output discard. Linux reads it only in canonical mode, and the
-	// reader does its own word erase.
+	// value and Ctrl-O would toggle output discard. On Linux n_tty lowercases input under IUCLC
+	// only while IEXTEN is set (I_IUCLC(tty) && L_IEXTEN(tty)), even outside canonical mode, so
+	// clearing it keeps a value typed with IUCLC on from being lowercased. The reader does its own
+	// word erase.
 	mode.Lflag &^= unix.IEXTEN
 	// Ctrl-S and Ctrl-Q reach the reader as control bytes, refused like any other: with IXON on,
 	// the terminal would take them, so a pasted one would vanish from the value, and a lone

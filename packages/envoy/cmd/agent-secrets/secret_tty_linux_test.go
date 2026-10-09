@@ -187,7 +187,8 @@ func TestPromptReadsOneTypedLineWithEchoOff(t *testing.T) {
 // TestPromptClearsIEXTENWhileItReads: the prompt's mode clears IEXTEN, under which macOS's terminal
 // acts on Ctrl-V and Ctrl-O whatever ICANON and ISIG say (bsd/kern/tty.c, ttyinput), so a pasted
 // Ctrl-V would vanish from the value and Ctrl-O would toggle output discard. The restore puts it
-// back. Linux reads IEXTEN only in canonical mode, so this checks the mode itself.
+// back. On Linux n_tty lowercases input under IUCLC only while IEXTEN is set, even outside
+// canonical mode, so this checks the mode itself.
 func TestPromptClearsIEXTENWhileItReads(t *testing.T) {
 	controller, terminal := openPTY(t)
 	if lflag(t, terminal)&unix.IEXTEN == 0 {

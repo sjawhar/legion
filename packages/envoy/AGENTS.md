@@ -2114,7 +2114,8 @@ while the job is stopped; one poll waits for input or a
 watcher event and also times the quiet window. Reads never block. IXON is cleared, so Ctrl-S and
 Ctrl-Q reach the reader and are refused as control bytes rather than suspending the prompt's
 output or vanishing from a paste. IEXTEN is cleared too, since macOS acts on Ctrl-V and Ctrl-O
-under it whatever ICANON and ISIG say; Linux reads it only in canonical mode. Before each caught
+under it whatever ICANON and ISIG say, and on Linux n_tty lowercases input under IUCLC only while
+IEXTEN is set (`I_IUCLC(tty) && L_IEXTEN(tty)`), even outside canonical mode. Before each caught
 stop the watcher discards what the terminal
 holds unread (`discardInput`: TCFLSH on Linux, TIOCFLUSH on Darwin) while the prompt's group
 holds it, so unread secret bytes never reach the shell at a stop; keys typed after the stop has
