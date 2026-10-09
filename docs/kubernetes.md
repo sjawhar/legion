@@ -350,12 +350,13 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 
 ### What stays on the pod's disk
 
-Only the transcript moves. Tool artifacts and image blobs stay under the agent directory on local disk
-(`~/.omp/profiles/legion/agent/…`), as do OMP's logs and `models.db`; `.legion/` handoffs live in the
-repository. A pod that dies loses those local files as it does today — the conversation it does not.
-The workspace's CodeGraph index, `.codegraph/` in the workspace on the tree volume (185 MB for this
-repository), is built by a role's shim after its Oh My Pi starts ([Anatomy of a Sandbox
-pod](#anatomy-of-a-sandbox-pod)) and outlives the pod with the workspace.
+Only the transcript moves. Tool artifacts, image blobs and `models.db` stay under the agent directory
+on local disk (`~/.omp/profiles/legion/agent/…`), and OMP's logs under the role's state home
+(`/home/legion/.local/state/<role>/omp/profiles/legion/logs`, [Anatomy of a Sandbox
+pod](#anatomy-of-a-sandbox-pod)); `.legion/` handoffs live in the repository. A pod that dies loses
+those local files as it does today — the conversation it does not. The workspace's CodeGraph index,
+`.codegraph/` in the workspace on the issue's own volume (185 MB for this repository), is built by a
+role's shim after its Oh My Pi starts and outlives the pod with the workspace.
 
 ### The extension under SQL storage
 
