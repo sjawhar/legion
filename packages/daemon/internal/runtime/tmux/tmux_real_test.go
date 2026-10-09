@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -388,6 +390,11 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 		return runtime.ConnState{}, fmt.Errorf("get_state answered %s", resp.Data)
 	}
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
+}
+
+func (c *stubConn) Abort(ctx context.Context) error {
+	_, err := c.request(ctx, func(id string) shimwire.Frame { return shimwire.Abort{ID: id} })
+	return err
 }
 
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
@@ -964,6 +971,92 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 	}
 	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
 		t.Fatalf("Probe right after Spawn = %+v, want alive: the locator was handed out while its pane was still tmux's fork", obs)
+	}
+}
+
+// A Spawn that fails after it opened its pane returns no locator for the pane's process, so it
+// kills the pane itself: no process the daemon never recorded runs on (runtime.Runtime's Spawn).
+// Each case refuses a read of the new pane process's /proc stat with a permission error, which
+// proves nothing about the process, at one of the two reads that follow the pane's opening: while
+// the launch waits for the pane's command (awaitPaneCommand), and once the command runs, when it
+// reads the process's start time (startTicks).
+func TestRealTmuxSpawnThatFailsAfterOpeningItsPaneKillsThePane(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// refuse is whether to refuse a read of the pane process's stat: execed is whether the
+		// process runs its command yet (its comm is no longer the server's), and reads counts the
+		// reads since it does, this one included.
+		refuse func(execed bool, reads int) bool
+		// startTime is whether the refused read is startTicks': awaitPaneCommand reads the process
+		// once it runs its command and stops there, so only startTicks reads it a second time.
+		startTime bool
+	}{
+		"while it waits for the pane's command":       {refuse: func(bool, int) bool { return true }},
+		"when it reads the pane process's start time": {refuse: func(execed bool, reads int) bool { return execed && reads >= 2 }, startTime: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			read := r.rt.readProc
+			var mu sync.Mutex
+			execedReads, refused := map[int]int{}, map[int]int{}
+			r.rt.readProc = func(path string) ([]byte, error) {
+				var pid int
+				if _, err := fmt.Sscanf(path, "/proc/%d/stat", &pid); err != nil {
+					return read(path)
+				}
+				stat, err := read(path)
+				if err != nil {
+					return stat, err
+				}
+				comm, parentPid, err := parseProcStatCommAndParent(string(stat))
+				if err != nil {
+					return stat, nil
+				}
+				parent, err := read(fmt.Sprintf("/proc/%d/stat", parentPid))
+				if err != nil {
+					return stat, nil
+				}
+				if parentComm, _, err := parseProcStatCommAndParent(string(parent)); err != nil || parentComm != "tmux: server" {
+					return stat, nil
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				execed := comm != "tmux: server"
+				if execed {
+					execedReads[pid]++
+				}
+				if !tc.refuse(execed, execedReads[pid]) {
+					return stat, nil
+				}
+				refused[pid] = execedReads[pid]
+				return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EACCES}
+			}
+
+			if loc, err := r.rt.Spawn(ctx, r.spec("LEGION-8", "LEGION-8", claim.RoleArchitect)); err == nil || !errors.Is(err, syscall.EACCES) {
+				t.Fatalf("Spawn = %+v, %v; want the refused /proc read", loc, err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(refused) == 0 {
+				t.Fatal("no pane process read was refused: the launch did not get as far as its pane")
+			}
+			for pid, reads := range refused {
+				if tc.startTime && reads < 2 {
+					t.Fatalf("pane process %d's refused read came %d reads after its command started, not startTicks' second", pid, reads)
+				}
+				deadline := time.Now().Add(10 * time.Second)
+				for {
+					if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(err) {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("pane process %d still runs after its Spawn failed", pid)
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+		})
 	}
 }
 

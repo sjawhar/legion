@@ -33,15 +33,18 @@ const (
 	fixtureOperator = "sami@example.com"
 	// otherPerson owns ALICE_KEY.
 	otherPerson = "alice@example.com"
-	// fixtureService is the one registered service, which owns SERVICE_KEY.
-	fixtureService = "legion"
+	// fixtureService is the one registered service, which owns SERVICE_KEY, and fixtureSubject the
+	// service account its pods run as.
+	fixtureService = "example-service"
+	fixtureSubject = "system:serviceaccount:example:example-sa"
 )
 
 // fixtureSecrets are the fixture's namespace secrets: DEEL_API_KEY, the operator's and human-tier,
 // needs the operator's approval whoever asks; ALICE_KEY, another person's agent-tier secret, needs
 // alice's approval for the operator's session; AUTO_TOKEN, the operator's agent-tier secret, is
 // automatic for the operator's session; SHARED_KEY, shared and human-tier, needs anyone's approval;
-// SERVICE_KEY, the registered service's, is denied to every session, since none is the service.
+// SERVICE_KEY, the registered service's, goes at once to the pods its launcher enrolled running as
+// fixtureSubject (newServiceEnrollment) and is denied to every other session.
 func fixtureSecrets() []secrets.LocalSecret {
 	return []secrets.LocalSecret{
 		policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"),
@@ -84,10 +87,26 @@ func replayer(st *store.Store) func(context.Context, string, time.Time) (bool, e
 // newEnrollment inserts a live enrollment directly, rather than through enroll.Service.Create:
 // that service still writes the enrollments.approver_kind/approver_issue columns migration 0005
 // already dropped (Task 7's own fix, tracked in this task's report, not this file's job), so it
-// cannot be used to build fixtures on this schema yet. Returns the enrollment id and the
-// requester's own signing key, whose RFC 7638 thumbprint the row carries (and Create checks a
-// request object's iss against).
+// cannot be used to build fixtures on this schema yet. Its launcher credential is a person's
+// (operator) or no one's, and names no service. Returns the enrollment id and the requester's own
+// signing key, whose RFC 7638 thumbprint the row carries (and Create checks a request object's iss
+// against).
 func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operator, subject *string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	return insertEnrollment(t, st, kind, runtimeID, operator, nil, subject)
+}
+
+// newServiceEnrollment is newEnrollment for a pod a service's launcher enrolled, running as the
+// service account subject: its launcher credential names service and no operator, the shape the
+// Legion daemon's machine login mints.
+func newServiceEnrollment(t *testing.T, st *store.Store, service, subject, runtimeID string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	return insertEnrollment(t, st, "pod", runtimeID, nil, &service, &subject)
+}
+
+// insertEnrollment inserts a launcher credential naming operator and service, and a live
+// enrollment under it.
+func insertEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operator, service, subject *string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
 	ctx := context.Background()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -99,8 +118,8 @@ func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operat
 		t.Fatalf("thumbprint: %v", err)
 	}
 	credentialID := uuid.New()
-	if _, err := st.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
-		values ($1,$2,'devbox-test',$3,'{}'::jsonb, now() + interval '30 days')`, credentialID, operator, uuid.NewString()); err != nil {
+	if _, err := st.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, expires_at)
+		values ($1,$2,$3,'devbox-test',$4,'{}'::jsonb, now() + interval '30 days')`, credentialID, operator, service, uuid.NewString()); err != nil {
 		t.Fatalf("insert launcher_credentials: %v", err)
 	}
 	id := uuid.NewString()
@@ -112,9 +131,9 @@ func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operat
 }
 
 // newFixture opens a store on a fresh schema, loads the policy of fixtureSecrets with
-// fixtureService registered, and enrolls one live box session the operator runs. Returns the
-// Machine, that enrollment's id, its own signing key (for record.Sign), and the login
-// DEEL_API_KEY's records name as approver (its owner, the operator).
+// fixtureService registered, its pods running as fixtureSubject, and enrolls one live box session
+// the operator runs. Returns the Machine, that enrollment's id, its own signing key (for
+// record.Sign), and the login DEEL_API_KEY's records name as approver (its owner, the operator).
 func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ecdsa.PrivateKey, approver string) {
 	t.Helper()
 	st := storetest.Open(t)
@@ -122,14 +141,15 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store:      st,
-		Policy:     policytest.Current(t, local, fixtureService),
-		Secrets:    secrets.AWS{Client: local},
-		MaxGrant:   time.Hour,
-		PendingTTL: 12 * time.Hour,
-		Audience:   testAudience,
-		Skew:       time.Minute,
-		Replay:     replayer(st),
+		Store:           st,
+		Policy:          policytest.Current(t, local, fixtureService),
+		Secrets:         secrets.AWS{Client: local},
+		MaxGrant:        time.Hour,
+		PendingTTL:      12 * time.Hour,
+		Audience:        testAudience,
+		Skew:            time.Minute,
+		Replay:          replayer(st),
+		ServiceAccounts: map[string]string{fixtureService: fixtureSubject},
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -367,6 +387,67 @@ func TestDenyOpensNoRecord(t *testing.T) {
 	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY", "SERVICE_KEY"), "")
 	if err != nil || req.State != "denied" || req.RecordID != nil {
 		t.Fatalf("Create = %+v, %v, want denied with no record (any denied name refuses the whole request)", req, err)
+	}
+}
+
+// TestAServicesSecretGoesToItsOwnPodsAlone pins who a registered service's secret reaches: a pod
+// enrolled under the service's launcher credential and running as the service account the service
+// is registered with gets SERVICE_KEY at once, with a grant and no record, and its value is
+// released; once another secret's tags move the policy, the grant still releases it and the same
+// request reuses it, since the session is still the service's. A machine login's service name is
+// the machine's own claim, approved by whoever its login names, so the service account is what
+// proves the service: a pod under the service's login running as another account, a pod running
+// as the service's account under a login for a service the broker does not register, the
+// operator's own host session, and a pod no service's launcher enrolled are each denied it with no
+// record. Nobody approved the service pod's grant and it runs on no one's machine, so no person's
+// grant list holds it.
+func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
+	m, _, _, operator := newFixture(t)
+	ctx := context.Background()
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+
+	granted, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it", "SERVICE_KEY"), "")
+	if err != nil || granted.State != "granted" || granted.GrantID == nil || granted.RecordID != nil {
+		t.Fatalf("Create(the service's pod) = %+v, %v; want granted at once, with a grant and no record", granted, err)
+	}
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); err != nil || values["SERVICE_KEY"] != "service-v1" {
+		t.Fatalf("Values(the service's pod) = %v, %v; want SERVICE_KEY released", values, err)
+	}
+	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); err != nil || values["SERVICE_KEY"] != "service-v1" {
+		t.Fatalf("Values(the service's pod) after the policy moved = %v, %v; want SERVICE_KEY still released", values, err)
+	}
+	if again, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it again", "SERVICE_KEY"), ""); err != nil || again.ID != granted.ID {
+		t.Fatalf("Create(the service's pod) again after the policy moved = %+v, %v; want request %s reused", again, err, granted.ID)
+	}
+
+	impostor, impostorKey := newServiceEnrollment(t, m.Store, fixtureService, "system:serviceaccount:example:other-sa", "impostor-pod-"+t.Name())
+	unlisted, unlistedKey := newServiceEnrollment(t, m.Store, "unlisted-service", fixtureSubject, "unlisted-pod-"+t.Name())
+	host, hostKey := newEnrollment(t, m.Store, "host", "host-"+t.Name(), new(operator), nil)
+	plainPod, plainPodKey := newEnrollment(t, m.Store, "pod", "plain-pod-"+t.Name(), nil, new(fixtureSubject))
+	for who, r := range map[string]struct {
+		enrollment string
+		key        *ecdsa.PrivateKey
+	}{
+		"a pod under the service's login running as another account":       {impostor, impostorKey},
+		"a pod running as the service's account under an unlisted service": {unlisted, unlistedKey},
+		"the operator's host session":                                      {host, hostKey},
+		"a pod no service's launcher enrolled":                             {plainPod, plainPodKey},
+	} {
+		denied, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", "SERVICE_KEY"), "")
+		if err != nil || denied.State != "denied" || denied.GrantID != nil || denied.RecordID != nil {
+			t.Errorf("Create(%s) = %+v, %v; want denied with no grant and no record", who, denied, err)
+		}
+	}
+
+	var records int
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from credential_requests`).Scan(&records); err != nil || records != 0 {
+		t.Fatalf("credential_requests rows = %d, %v; want none", records, err)
+	}
+	for _, person := range []string{operator, otherPerson, record.AnyoneApprover} {
+		if grants, err := m.GrantsForApprover(ctx, person); err != nil || len(grants) != 0 {
+			t.Errorf("GrantsForApprover(%s) = %+v, %v; want nothing", person, grants, err)
+		}
 	}
 }
 
@@ -1063,11 +1144,13 @@ func TestRevokingARevokedGrantWritesNoSecondAuditRow(t *testing.T) {
 }
 
 // TestEveryRequesterIsDecidedByOwnerAndTier drives the policy's whole table through Create: the
-// owner's own session, another person's session and a pod each ask for a person's agent-tier and
-// human-tier secret, a shared agent-tier and human-tier secret, and a service's secret. A request
-// that needs approval writes a record naming the approver and reaches that approver's pending
-// list: another person's session or a pod asking for a person's agent-tier secret is an approval
-// request to its owner.
+// owner's own session, another person's session, a pod, and a pod the service's launcher enrolled
+// running as fixtureSubject each ask for a person's agent-tier and human-tier secret, a shared
+// agent-tier and human-tier secret, and a service's secret. A request that needs approval writes a
+// record naming the
+// approver and reaches that approver's pending list: another person's session or a pod asking for
+// a person's agent-tier secret is an approval request to its owner. The service's pod is a pod
+// with no operator to every secret but the service's own, which it alone gets at once.
 func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 	const otherOperator = "bob@example.com"
 	type outcome struct{ state, approver string }
@@ -1086,12 +1169,17 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 			"AUTO_TOKEN": approval(fixtureOperator), "DEEL_API_KEY": approval(fixtureOperator),
 			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": denied,
 		},
+		"the service's pod": {
+			"AUTO_TOKEN": approval(fixtureOperator), "DEEL_API_KEY": approval(fixtureOperator),
+			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": granted,
+		},
 	}
 	m, ownerEnr, ownerKey, _ := newFixture(t)
 	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
 	ctx := context.Background()
 	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-other-"+t.Name(), new(otherOperator), nil)
 	podEnr, podKey := newEnrollment(t, m.Store, "pod", "pod-"+t.Name(), nil, new("system:serviceaccount:legion:worker"))
+	servicePodEnr, servicePodKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "service-pod-"+t.Name())
 	requesters := map[string]struct {
 		enrollment string
 		key        *ecdsa.PrivateKey
@@ -1099,6 +1187,7 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 		"owner's session":          {ownerEnr, ownerKey},
 		"another person's session": {otherEnr, otherKey},
 		"pod":                      {podEnr, podKey},
+		"the service's pod":        {servicePodEnr, servicePodKey},
 	}
 	for who, row := range table {
 		for name, want := range row {
@@ -1169,5 +1258,27 @@ func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
 	}
 	if pending, err := m.PendingForApprover(ctx, "carol@example.com"); err != nil || len(pending) != 0 {
 		t.Fatalf("PendingForApprover(carol) after bob decided = %+v, %v, want nothing", pending, err)
+	}
+}
+
+// TestAServiceGrantStopsWhenItsServiceAccountChanges pins that a grant of a service's secret is
+// re-checked on every use, not only once the policy's version moves: the registered service
+// accounts are not in the version, so once BROKER_SERVICES binds the service to another account the
+// pod's grant releases nothing and its next request is denied rather than reusing the grant.
+func TestAServiceGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+	granted, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it", "SERVICE_KEY"), "")
+	if err != nil || granted.State != "granted" || granted.GrantID == nil {
+		t.Fatalf("Create(the service's pod) = %+v, %v; want granted", granted, err)
+	}
+	m.ServiceAccounts = map[string]string{fixtureService: "system:serviceaccount:example:other-sa"}
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values after the service's account changed = %v, %v; want ErrGrantNotLive", values, err)
+	}
+	again, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it again", "SERVICE_KEY"), "")
+	if err != nil || again.ID == granted.ID || again.State != "denied" || again.GrantID != nil {
+		t.Fatalf("Create after the service's account changed = %+v, %v; want a new request, denied, not request %s reused", again, err, granted.ID)
 	}
 }

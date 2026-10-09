@@ -55,6 +55,7 @@ import type {
   Message,
   MessageDelivery,
   MessageRead,
+  MyAnswersResponse,
   Project,
   RepoProject,
   SearchResponse,
@@ -472,6 +473,12 @@ export class DispatchApiClient {
 
   getAsk(id: string): Promise<AskRead> {
     return this.json<AskRead>(`/api/v1/asks/${pathSegment(id)}`);
+  }
+
+  /** `GET /api/v1/me/answers`: the signed-in person's answers and ask replies, newest first,
+   *  one page at a time. Human-only. */
+  listMyAnswers(page: { limit: number; offset: number }): Promise<MyAnswersResponse> {
+    return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
   async removeAskFollower(id: string, sessionId: string): Promise<void> {

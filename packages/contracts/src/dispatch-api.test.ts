@@ -4,11 +4,14 @@ import {
   type Agent,
   type Anchor,
   type AnchorInput,
+  type AnswerAskInput,
   type ArtifactBlock,
   type ArtifactText,
   type Ask,
+  type AskAnsweredEventPayload,
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
+  type AskRead,
   type BlockTypeSchema,
   type Comment,
   CommentEventPayloadSchema,
@@ -21,10 +24,12 @@ import {
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
+  type InboxThread,
   IssueEventPayloadSchema,
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
   MessageEventPayloadSchema,
+  type MyAnswersResponse,
   serviceSubjectLabel,
 } from "./dispatch-api";
 
@@ -113,6 +118,97 @@ test("requires a positive opened event id on an ask event payload", () => {
   expect(AskEventPayloadSchema.safeParse({ opened_event_id: 12, question: "Q" }).success).toBe(
     true
   );
+});
+
+test("keeps the replaced answer on a changed ask answer event", () => {
+  const parsed = AskEventPayloadSchema.parse({
+    opened_event_id: 12,
+    question: "Ship it?",
+    answer: { selected: ["Ship"], text: null },
+    previous_answer: {
+      user: "alice@example.com",
+      selected: ["Hold"],
+      text: "Wait for review.",
+      at: "2026-10-08T00:00:00Z",
+    },
+  });
+
+  expect(parsed.previous_answer).toEqual({
+    user: "alice@example.com",
+    selected: ["Hold"],
+    text: "Wait for review.",
+    at: "2026-10-08T00:00:00Z",
+  });
+});
+
+test("models answer changes, ask answer history, and the answers page", () => {
+  const answer = {
+    user: "alice@example.com",
+    selected: ["Ship"],
+    text: null,
+    at: "2026-10-08T00:01:00Z",
+  };
+  const ask = {
+    id: "ask-1",
+    issue_key: "CORE-1",
+    author: { kind: "session", id: "session-1" },
+    kind: "question",
+    question: "Ship it?",
+    options: [{ label: "Ship" }, { label: "Hold" }],
+    multiple: false,
+    urgency: "med",
+    anchor: null,
+    state: "answered",
+    answer,
+    opened_event_id: 7,
+    created_at: "2026-10-08T00:00:00Z",
+    edited_at: null,
+  } satisfies Ask;
+  const input = {
+    selected: ["Hold"],
+    expected_edited_at: null,
+    expected_answer_at: answer.at,
+  } satisfies AnswerAskInput;
+  const payload = {
+    ...ask,
+    previous_answer: { ...answer, selected: ["Hold"] },
+  } satisfies AskAnsweredEventPayload;
+  const read = {
+    ask,
+    replies: [],
+    edits: [],
+    answers: [answer],
+    followers: [],
+  } satisfies AskRead;
+  const thread = { replies: [], edits: [], answers: [], followers: [] } satisfies InboxThread;
+  const page = {
+    rows: [
+      {
+        kind: "answer",
+        at: answer.at,
+        ask_id: ask.id,
+        ref: "/issues/CORE-1/asks/ask-1",
+        question: ask.question,
+        ask_kind: ask.kind,
+        ask_state: ask.state,
+        edited_at: null,
+        owner: { issue: { key: "CORE-1", title: "Release" } },
+        answer,
+        current: true,
+      },
+    ],
+    total: 1,
+    limit: 50,
+    offset: 0,
+  } satisfies MyAnswersResponse;
+
+  expect([
+    input.expected_answer_at,
+    payload.previous_answer.selected,
+    read.answers,
+    thread.answers,
+    page.rows[0]?.current,
+  ]).toEqual([answer.at, ["Hold"], [answer], [], true]);
 });
 
 test("preserves block-pinned and legacy anchors in ask event payloads", () => {

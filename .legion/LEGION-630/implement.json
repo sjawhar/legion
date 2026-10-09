@@ -1,0 +1,76 @@
+{
+  "completed": "2026-10-08T21:45:21.507864059Z",
+  "deviations": [
+    "Plan D6 said no caller could observe PREFIXED_CONFLICT_URL once the gate was gone; the simplify pass found the surviving proc:// stdin rule does (paneRuleRefusal reads nonFileWriteScheme), so a write to \u003cprefix\u003e:conflict://N would have been scanned as service stdin instead of passing as the workspace-file write Oh My Pi routes it to. The unwrap is kept inside nonFileWriteScheme (writeTarget itself is gone) and pinned by one allowed case in the operation-log stdin test.",
+    "Plan T2 kept a trimmed root-architect operation-log test; the simplify pass deleted it as a duplicate of the new role matrix's [architect, REPO-42] case, which asserts the same refusal.",
+    "Plan T3 named the three removed refusal strings as negative assertions in the real-OMP test; they were dropped (the test asserts is_error false and the absence of `block`/`refused`) so the acceptance-2 grep over packages/pi-legion/extensions stays empty as plan section 6 expects.",
+    "Acceptance 3's `go test ./...` could not pass in the pod for environmental reasons listed in proof 3; CI's test job is the authority (the plan's T7 anticipated this).",
+    "scripts/e2e/stage4b-sandbox-tree.sh:1404 (not in the plan's file list) named the renamed section and was updated.",
+    "Simplify pass: 3 applied (the conflict unwrap, the unused Pane fields, the subsumed test), 4 skipped: hoisting isSelfCheck and the stand-in legion writer into omp-harness (scope: touches pi-shared and the sibling test; fast-follow), narrowing nonFileWriteScheme to proc:// only (a rename the reviewer's checklist names the helper by; fast-follow), moving sessionID/active under the needsGrant guard (would edit the LEGION-631 byte-identical region), reflowing the trimmed prompt paragraphs (would touch LEGION-631's sentences).",
+    "Round 2 (conflict): #1752 merged to main as the squash bb51895b after taking fixes past the head this branch had merged (42a685d1), and the PR was retargeted to main, so GitHub showed it CONFLICTING. Resolved as a forward merge of the bookmark with main@origin (569f224841d974d3dc941eddde6a4b7c63c68603), never a rebase: the eight conflicted files this branch never touched (docs/kubernetes.md, internal/launcher/launcher_test.go, internal/runtime/runtime.go, internal/runtime/sandbox/{launcher,relaunch,relaunch_test}.go, internal/supervise/machine.go, scripts/e2e/lib/workflow.sh) took main's version; the three it did touch (AGENTS.md, scripts/e2e/README.md, scripts/e2e/stage4b-sandbox-tree.sh) took main's text with this branch's hunks re-applied. The branch's own diff is unchanged (fingerprint 72d72b28… on both sides); tsc, biome, legion.test.ts (120 pass), the real-OMP test (3 pass on omp/18.6.0), bash -n and the acceptance-2 grep re-run green on the merge result."
+  ],
+  "discoveredComplexity": [],
+  "filesChanged": [
+    "AGENTS.md",
+    "docs/solutions/legion/shell-command-gates-derive-from-bash-word-splitting-not-example-forms.md",
+    "packages/daemon/internal/prompts/roles/architect-root.md",
+    "packages/daemon/internal/prompts/roles/architect.md",
+    "packages/pi-legion/AGENTS.md",
+    "packages/pi-legion/CHANGELOG.md",
+    "packages/pi-legion/extensions/legion-role-tools-omp.test.ts (new)",
+    "packages/pi-legion/extensions/legion.test.ts",
+    "packages/pi-legion/extensions/legion.ts",
+    "packages/pi-legion/scripts/grant-rig/README.md",
+    "packages/pi-legion/scripts/grant-rig/run.ts",
+    "packages/pi-legion/src/handoff-actions.ts",
+    "scripts/e2e/README.md",
+    "scripts/e2e/stage3-4b13b-acceptance.sh",
+    "scripts/e2e/stage4b-sandbox-tree.sh",
+    "skills/legion-worker/SKILL.md"
+  ],
+  "issue": "LEGION-630",
+  "learningsHelpful": [
+    "a-worker-pod-ships-no-go-or-tmux-…: the Go recipe worked first time; GOWORK=off breaks internal/agentsecrets (imports the envoy module through go.work), so leave GOWORK unset for go test ./..."
+  ],
+  "learningsInjected": [
+    "docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-provision-them-under-home-each-relaunch-and-record-every-figure-in-the-handoff.md",
+    "docs/solutions/testing/driving-a-real-omp-worker-against-a-stand-in-daemon.md (via the plan)"
+  ],
+  "openQuestions": [
+    "Whether the architect carries the acceptance-1 wording change (plan specDepartures: proven on the real Oh My Pi binary through the omp harness with the before-leg against main's extension as the negative control) into the spec."
+  ],
+  "phase": "implement",
+  "proof": [
+    {
+      "command": "cd packages/pi-legion \u0026\u0026 LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-role-tools-omp.test.ts",
+      "criterion": "1. An architect session runs `jj log`, reads /proc/self/cgroup and edits a scratch file with `edit`; a reviewer and a merger each edit a scratch file; no refusal",
+      "headSha": "8e25f41e54f03886a0c8ec0b264b7766080cce94; rebase re-check dda891d4ae777b4d7b2538013bc5153165341d1b → 569f224841d974d3dc941eddde6a4b7c63c68603: fingerprint unchanged (72d72b288186bc3840aa1f83916e46985addbf7f4009b4db2ecc5593d263c05d against the stacked base 42a685d1 before, against main@origin 41c4d814 after), bare gates only",
+      "negativeControl": "(a) In each of the three panes the last scripted call, bash `jj -R \"$LEGION_WORKSPACE\" undo`, is refused by the surviving operation-log rule: is_error true, text `refused \\`jj -R $LEGION_WORKSPACE undo\\`: jj undo, jj abandon, and jj op restore/revert/abandon/undo rewrite the jj operation log, which every Legion issue workspace shares …` — the hook is live. (b) The before-leg: main@origin's legion.ts copied beside the extension as legion-main-control.ts (via `jj file show -r main@origin`, never committed) and the same three cases run against it: the architect's `jj log`, `cat`, `write` and `edit` all is_error true `the architect delegates all code work to phase workers`; the reviewer's `write` and `edit` `the reviewer edits no code; its only commits are its review handoffs, made via bash`; the merger's `the merger only verifies and reports`; scratch.txt never written (its `read` fails `Path 'scratch.txt' not found`); `jj undo` refused by the same operation-log reason. 3 pass (the copy asserted the refusals), 33 s; both throwaway files deleted before the commit.",
+      "observed": "3 pass, 0 fail, 50 expect() calls, 9.4 s. The root architect's bash `jj log` tool result is_error false and carries the described commit `role tools scratch`; its bash `cat /proc/self/cgroup` result is non-empty (`\u003cn\u003e:\u003ccontrollers\u003e:\u003cpath\u003e` lines). The architect, the reviewer and the merger each wrote scratch.txt with `write`, read it with `read` (result header `[scratch.txt#TAG]`), and edited it with the real hashline `edit` tool (input `[scratch.txt#TAG]\\nPUT 1.=1:\\n+edited line`, result is_error false `[scratch.txt#9391]\\n1:edited line`); scratch.txt on disk reads `edited line\\n` in every pane. No tool result before the control is an error or contains `block`/`refused`; the stand-in `legion` log carries no handoff line.",
+      "surface": "The real Oh My Pi binary, omp/18.6.0 at /opt/omp/bin/omp in the implementer's worker pod (the minor of .omp-pin's 18.6.0-sami.20261004-022805), in `--mode rpc` loading the branch's packages/pi-legion/extensions/legion.ts beside packages/pi-envoy/extensions/envoy.ts through @legion/pi-shared/test/omp-harness, with a stand-in daemon and model gateway; three panes: a root architect (LEGION_TREE=LEGION_ISSUE=TOOLS-1), a reviewer and a merger (TOOLS-2 in tree TOOLS-1); the pane's workspace made a jj repository with one described commit"
+    },
+    {
+      "command": "cd -- \"$LEGION_WORKSPACE\" \u0026\u0026 grep -rn -E -f /tmp/legion-630-patterns.txt packages/pi-legion/extensions packages/pi-legion/src packages/pi-legion/AGENTS.md packages/pi-legion/scripts/grant-rig/README.md packages/pi-legion/scripts/grant-rig/run.ts packages/daemon/internal/prompts/roles packages/daemon/internal/prompts/go skills AGENTS.md scripts/e2e/README.md scripts/e2e/stage3-4b13b-acceptance.sh   (the 15-pattern file of plan section 6, written with the write tool); then cd packages/pi-legion \u0026\u0026 bun run build \u0026\u0026 grep -c -E \"delegates all code work|edits no code|only verifies and reports|never a shell command\" dist/legion.js",
+      "criterion": "2. No sentence says a role is refused a tool",
+      "headSha": "8e25f41e54f03886a0c8ec0b264b7766080cce94; rebase re-check dda891d4ae777b4d7b2538013bc5153165341d1b → 569f224841d974d3dc941eddde6a4b7c63c68603: fingerprint unchanged (72d72b288186bc3840aa1f83916e46985addbf7f4009b4db2ecc5593d263c05d against the stacked base 42a685d1 before, against main@origin 41c4d814 after), bare gates only",
+      "negativeControl": "The same pattern file over the same path list at main@origin (`jj file show -r main@origin \u003cfile\u003e | grep -c -E -f /tmp/legion-630-patterns.txt`, summed): 40 hits, the planner's before figure.",
+      "observed": "The grep prints nothing (exit 1) at the head; the dist grep prints 0 (exit 1). Repo-wide, CODE_TOOL_REFUSAL, CODE_MUTATION_TOOLS, isSingleLegionCommand, LEGION_HANDOFF_COMPLETE and writeTarget survive only in CHANGELOG history and docs/solutions (which gets its dated superseded note).",
+      "surface": "The source tree at the head and the packed bundle packages/pi-legion/dist/legion.js (`bun run build`)"
+    },
+    {
+      "command": "bun install --frozen-lockfile; cd packages/pi-legion \u0026\u0026 . \"$HOME/proof/env.sh\" \u0026\u0026 LEGION_TEST_OMP=/opt/omp/bin/omp bun test; bunx tsc --noEmit; cd .. \u0026\u0026 bunx biome check .; cd packages/daemon \u0026\u0026 . \"$HOME/proof/env.sh\" \u0026\u0026 go test -count=1 ./...",
+      "criterion": "3. `bun test` in packages/pi-legion, `go test ./...` in packages/daemon and `bunx biome check` pass",
+      "headSha": "8e25f41e54f03886a0c8ec0b264b7766080cce94; rebase re-check dda891d4ae777b4d7b2538013bc5153165341d1b → 569f224841d974d3dc941eddde6a4b7c63c68603: fingerprint unchanged (72d72b288186bc3840aa1f83916e46985addbf7f4009b4db2ecc5593d263c05d against the stacked base 42a685d1 before, against main@origin 41c4d814 after), bare gates only",
+      "negativeControl": "The planner's pod baseline before the change: 183 pass, 4 skip (omp tests, LEGION_TEST_OMP unset), 1 fail (grant-rig run.test.ts without go). cmd/legion's TestThreadsResolveInTheReviewersPaneAsksTheDaemon fails only while the pane's own LEGION_GRANT_FILE is in the test's environment (it then reads the real grant) and passes with `env -u LEGION_GRANT_FILE -u LEGION_GRANT`.",
+      "observed": "pi-legion: 192 pass, 0 fail, 0 skip across 14 files (132 s; both *-omp.test.ts files ran on the real binary, scripts/grant-rig/run.test.ts ran with go on PATH). tsc exit 0. biome: 872 files, no fixes, exit 0 (20 warnings and 4 infos, all pre-existing, in packages/envoy/internal/dispatch/pmdoc/gen/gen.ts, packages/contracts/src/legion-api.test.ts, packages/claude-envoy/tests/dist-fresh.test.ts and biome.json — none in a file this branch touches). go test: internal/prompts ok (the two prompt edits), internal/agentsecrets ok once GOWORK is left to go.work (with GOWORK=off its envoy import has no go.sum entry); every other package the pod can build passed; the failures are environmental: daemon, intake, natsauth, testnats need Docker (testcontainers: `rootless Docker not found`), admit needs LEGION_TEST_PG_DSN, config needs python3, supervise's table tests need cgo (no C compiler), cmd/legion's TestProbeImageWithPodSafety reads the pod's own /etc/legion-operator/overlay.yml, and internal/launcher's TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild is timing-sensitive under gVisor (two different failures in two runs). This branch changes no Go source: the packages/daemon diff is two prompt markdown files (+5/−5), so CI's `test` job (pr-and-main.yaml) is the authority for go test ./....",
+      "surface": "The package suites in the implementer's worker pod (bun 1.3.14, omp 18.6.0, jj 0.45.1, Go 1.26.8 provisioned under $HOME per docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-…md) and CI's lint/test/pi-legion jobs at the head"
+    }
+  ],
+  "schemaVersion": 1,
+  "trickyParts": [
+    "The pane this implementer ran in has the released extension, whose handoff-complete rule refuses any bash command whose text names the three words of the shell completion: the acceptance-2 pattern file was written with the write tool, a commit message naming `jj undo` was refused by the operation-log rule and rephrased, and the deep-workers were told to search for the phrase with the grep tool.",
+    "The pin's `edit` tool takes one string input in the hashline form (`[path#TAG]\\nPUT 1.=1:\\n+text`), and every tool requires an `i` intent field (additionalProperties false); the real-OMP test builds the edit from the previous turn's read result header.",
+    "The harness pins the pane's PATH to \u003cbin\u003e:/usr/local/bin:/usr/bin:/bin, so the test symlinks the jj it finds (Bun.which) into the pane's bin: in CI jj lives in ~/.local/bin.",
+    "Stacked on legion/LEGION-462-issue-pod (#1752) by a forward merge (bcde255e, no conflicts: #1752 had already merged main at ae1f44b7); the PR's base is that branch until #1752 merges."
+  ]
+}

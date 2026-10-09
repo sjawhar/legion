@@ -31,6 +31,18 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	if err := e.everyClaim(ctx, tx, issue, "suspend", fmt.Sprintf("%s is %s", issue.Key, status)); err != nil {
 		return err
 	}
+	root, err := e.store.Issue(ctx, tx, issue.Tree)
+	if err != nil {
+		return err
+	}
+	if root == nil {
+		return fmt.Errorf("suspend issue %s: tree root %s is not recorded", issue.Key, issue.Tree)
+	}
+	if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{
+		Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation,
+	}); err != nil {
+		return err
+	}
 	kind := record.NoticeKind("child-status")
 	if status == "done" {
 		kind = "child-closed"
@@ -56,6 +68,11 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	}
 	for _, member := range members {
 		if err := e.everyClaim(ctx, tx, member, "suspend", fmt.Sprintf("the tree of %s lingers", root.Key)); err != nil {
+			return err
+		}
+		if err := e.enqueue(ctx, tx, member.Key, record.IssueSuspend{
+			Tree: member.Tree, Generation: member.Generation, TreeGeneration: root.Generation,
+		}); err != nil {
 			return err
 		}
 	}
