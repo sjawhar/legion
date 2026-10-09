@@ -325,8 +325,7 @@ describe("renderInbound dispatch events", () => {
     });
     expect(decoded.envoy.dispatch).not.toHaveProperty("issue_key");
     expect(decoded.envoy.reply_with).toEqual({
-      tool: "dispatch_message",
-      args: { issue: "CORE-1", in_reply_to: targetedMessageID, body: "..." },
+      command: `dispatch message --issue CORE-1 --body ... --in-reply-to ${targetedMessageID}`,
     });
     expect(rendered.delivery).toEqual({
       resource: "message",
@@ -364,8 +363,7 @@ describe("renderInbound dispatch events", () => {
       body: "Please update this.",
     });
     expect(decoded.envoy.reply_with).toEqual({
-      tool: "dispatch_comment",
-      args: { issue: "CORE-1", reply_to: targetedCommentID, body: "..." },
+      command: `dispatch comment --issue CORE-1 --body ... --reply-to ${targetedCommentID}`,
     });
   });
 
@@ -540,10 +538,9 @@ describe("renderInbound dispatch events", () => {
       issueKey: null,
     });
     // The conversation has no issue, so the hint names only the message the answer threads
-    // under; `dispatch_message` takes that shape and replies through the delivery route.
+    // under; `dispatch message` takes that shape and replies through the delivery route.
     expect(decoded.envoy.reply_with).toEqual({
-      tool: "dispatch_message",
-      args: { in_reply_to: targetedMessageID, body: "..." },
+      command: `dispatch message --body ... --in-reply-to ${targetedMessageID}`,
     });
   });
 
@@ -825,7 +822,7 @@ describe("renderInbound dispatch events", () => {
     ).toMatchObject({
       skip: false,
       content:
-        "Now following ask ask-1 on DSP-1 (added by alice): its answer and replies reach you directly; dispatch_follow unfollow to stop.",
+        "Now following ask ask-1 on DSP-1 (added by alice): its answer and replies reach you directly; dispatch follow --ask ask-1 --action unfollow to stop.",
     });
     expect(
       renderInbound(
@@ -882,8 +879,7 @@ describe("renderInbound dispatch events", () => {
     expect(decoded.envoy.re).toBe("dispatch://DSP-1/ask/ask-1");
     expect(decoded.envoy.dispatch.question).toBe(apiQuestion);
     expect(decoded.envoy.reply_with).toEqual({
-      tool: "dispatch_comment",
-      args: { issue: "DSP-1", reply_to_ask: "ask-1", body: "..." },
+      command: "dispatch comment --issue DSP-1 --body ... --reply-to-ask ask-1",
     });
   });
 
@@ -897,8 +893,7 @@ describe("renderInbound dispatch events", () => {
     expect(rendered.delivery).toBeUndefined();
 
     expect(decoded.envoy.reply_with).toEqual({
-      tool: "dispatch_comment",
-      args: { issue: "DSP-1", reply_to: "comment-1", body: "..." },
+      command: "dispatch comment --issue DSP-1 --body ... --reply-to comment-1",
     });
   });
 
@@ -935,8 +930,8 @@ describe("renderInbound dispatch events", () => {
 
     expect(decoded.envoy.re).toBe("dispatch://CORE/artifact/design-notes/ask/ask-1");
     expect(decoded.envoy.reply_with).toEqual({
-      tool: "dispatch_comment",
-      args: { project: "CORE", artifact: "design-notes", reply_to_ask: "ask-1", body: "..." },
+      command:
+        "dispatch comment --project CORE --artifact design-notes --body ... --reply-to-ask ask-1",
     });
   });
 

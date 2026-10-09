@@ -637,7 +637,7 @@ func TestAnsweringAfterAnEditAndSettlementSucceeds(t *testing.T) {
 	}
 }
 
-// Acceptance 3: the document is still the way a human or dispatch_doc_edit rewords a block ask,
+// Acceptance 3: the document is still the way a human or `dispatch doc-edit` rewords a block ask,
 // and the row follows it, credited to that editor.
 func TestDocumentEditOfAnAskBlockStillUpdatesTheRow(t *testing.T) {
 	handler, _ := blockAskHandler(t)

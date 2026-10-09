@@ -136,7 +136,7 @@ test("a delivery leaves the session's pictures as they were: the caller adds wha
     shown: [address],
   });
   expect(second).toEqual({
-    content: `envoy: second\n\nPictures:\n- not shown: ${address} (shown earlier this session; dispatch_doc_read shows it again)`,
+    content: `envoy: second\n\nPictures:\n- not shown: ${address} (shown earlier this session; dispatch doc-read shows it again)`,
     shown: [],
   });
   // A person's own turn keeps their text exactly as they sent it.
@@ -156,12 +156,12 @@ test("a transcript's pictures are those its results and cards name as shown and 
         text: [
           "Pictures:",
           `- image 1: ${picture("read")} (read.png, image/png, 10 bytes)`,
-          `- not shown: ${picture("withheld")} (shown earlier this session; dispatch_doc_read shows it again)`,
+          `- not shown: ${picture("withheld")} (shown earlier this session; dispatch doc-read shows it again)`,
         ].join("\n"),
       },
       image,
     ]),
-    // dispatch_doc_read names the one picture it shows the same way.
+    // dispatch doc-read names the one picture it shows the same way.
     message("toolResult", [
       {
         type: "text",
