@@ -231,6 +231,8 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 // A tree that closed retired every member's claim, so a re-admitted root's children sit mid-phase
 // with nothing running: the architect cannot release a child already in the workflow, and only a
 // worker's own handoff moves it. Admission starts each mid-phase child's role with its architect,
+// whichever mid-phase that is — the production check included, whose role is the implementer's
+// (workflow.RoleFor), the path a drain's re-admission restarts production-check children through —
 // and tells it to carry that phase on: the run whose handoff began the phase is over, and a start
 // with no task leaves the resumed agent holding its old transcript with nothing asked of it.
 func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
@@ -244,6 +246,8 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		Phase: phase.Testing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
 	putIssue(t, pool, record.Issue{Key: "LEGION-210", Project: "LEGION", Title: "finished child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-211", Project: "LEGION", Title: "production-check child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "D", LastDispatchSeq: 1})
 
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
@@ -254,6 +258,9 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		{kind: record.OutboxKindIssueBranch, issue: "LEGION-209", payload: record.IssueBranch{Generation: 1}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work.", ResumeTask: true}},
+		{kind: record.OutboxKindIssueBranch, issue: "LEGION-211", payload: record.IssueBranch{Generation: 1}},
+		{kind: record.OutboxKindSupervise, issue: "LEGION-211", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
+			Task: "Continue production-check child. Issue: LEGION-211. Phase: production_check. Resume the existing phase work.", ResumeTask: true}},
 	})
 }
 
