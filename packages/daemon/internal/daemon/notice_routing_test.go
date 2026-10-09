@@ -237,8 +237,7 @@ func TestANoticeIsRoutedWhileItsArchitectLaunches(t *testing.T) {
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
 	sup, fakeRuntime := newOutboxSupervisor(t, "legion", t.TempDir())
-	rt := newStallingRuntime(t, false)
-	rt.Runtime = fakeRuntime
+	rt := newStallingRuntime(t, fakeRuntime, false)
 	sup.deps.Runtime = rt
 	architect := architectClaim(t, sup, "LEGION-1", supervise.StateQueued)
 	machine, _ := sup.Machine(architect)
@@ -270,15 +269,14 @@ func TestANoticeIsRoutedWhileItsArchitectLaunches(t *testing.T) {
 
 // A sub-architect whose suspension is in the runtime holds its role no longer: a notice of its
 // issue's child goes up to the tree's root, as it would once the suspension returned, never to the
-// session being stopped. The routing reads the claim without waiting on the suspension, so it must
-// read the stop in flight from the claim itself (LEGION-650).
+// session being stopped. The routing reads the claim without waiting on the suspension, so it reads
+// the stop in flight from the machine's View (supervise.ClaimView.Stopping) (LEGION-650).
 func TestANoticeIsNotRoutedToASubArchitectBeingSuspended(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
 	sup, fakeRuntime := newOutboxSupervisor(t, "legion", t.TempDir())
-	rt := newStallingRuntime(t, false)
-	rt.Runtime = fakeRuntime
+	rt := newStallingRuntime(t, fakeRuntime, false)
 	sup.deps.Runtime = rt
 	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
 	sub := architectClaim(t, sup, "LEGION-2", supervise.StateQueued)

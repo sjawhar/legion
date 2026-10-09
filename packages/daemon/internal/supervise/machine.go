@@ -114,9 +114,16 @@ type Claim struct {
 	// SuspensionHeld is whether a suspension is held for the agent's turn (holdSuspension). It is
 	// memory only: Machine.Claim reports it, and the store never writes it.
 	SuspensionHeld bool
-	// Stopping is whether the decision in flight is stopping the claim's process — a suspension
-	// or a release in the runtime (suspendProcess, release) — which View reports while the claim
-	// still shows the state it is leaving. It is memory only, and the store never writes it.
+}
+
+// ClaimView is a claim as its machine last published it (Machine.View), with what only the decision
+// in flight knows.
+type ClaimView struct {
+	Claim
+	// Stopping is whether the decision in flight is stopping the claim's process for good — a
+	// suspension, a failure, a release, a root's exit (endProcess, release) — while the claim still
+	// shows the state it is leaving. A process retired and relaunched in one decision
+	// (chargePrompt, the registration deadline) is not stopping: its claim keeps its role.
 	Stopping bool
 }
 
@@ -340,11 +347,16 @@ type Machine struct {
 	// goroutines counts sends whose outcome has not been handled yet; idle wakes Wait.
 	goroutines int
 	idle       *sync.Cond
-	// view is the claim View reports: published under mu as each locked section ends and at every
-	// write of the claim (persist), and read without mu, so a reader never waits on a decision in
-	// flight. stopping is whether that decision is stopping the claim's process (Claim.Stopping).
-	view     atomic.Pointer[Claim]
+	// view is the claim View reports: published under mu as every locked section that can change
+	// the claim ends (unlock) and at every write of the claim (persist), and read without mu, so a
+	// reader never waits on a decision in flight. stopping is whether that decision is stopping
+	// the claim's process for good (ClaimView.Stopping).
+	view     atomic.Pointer[ClaimView]
 	stopping bool
+	// deciding is the event the decision in flight handles, nil between decisions (Deciding). It
+	// has a lock of its own, held only to set, clear or read it, so a reader never waits on mu.
+	decidingMu sync.Mutex
+	deciding   Event
 }
 
 type sending struct {
@@ -401,10 +413,11 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
 // from one source hands each machine its events on its own goroutine, so one claim's stop does
-// not hold another's hello.
+// not hold another's hello. Meanwhile Deciding names ev, whoever the caller.
 func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	m.mu.Lock()
 	defer m.unlock()
+	m.decide(ev)
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
@@ -449,9 +462,12 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // ReleaseUncertainLaunch is the only path out of the persisted uncertain-launch state. The daemon
 // calls it only after reconciliation proves the unrecorded predecessor absent or reaped; concurrent
 // old-pane hellos move the state first, so the caller does not open a second pane. The release is
-// memory only: the launch that follows writes it, as its next generation launching, in its first
-// write. A stop between the two leaves the store holding launch_uncertain, which the next boot
-// reconciles and relaunches, never a claim stored queued with no process that nothing launches.
+// memory only, and the relaunch writes it: its admission (revive), and the retirement of a finished
+// task before it (settle), write the claim queued at the generation it had, before the launch
+// writes its next generation launching. A claim is created queued at generation zero and only this
+// makes one queued again after a launch, so the daemon's next boot counts a claim stored queued at
+// a generation above zero, with no process, as a launch to finish — which is what a stop between
+// the admission and the launch's write leaves.
 func (m *Machine) ReleaseUncertainLaunch() bool {
 	m.mu.Lock()
 	defer m.unlock()
@@ -522,39 +538,57 @@ func (m *Machine) Claim() Claim {
 }
 
 // View is a copy of the claim as the machine last published it: as its latest decision left it, or
-// as the decision in flight last wrote it to the store. It never waits, where Claim waits out a
-// decision that holds the machine through its runtime call — a Sandbox relaunch waits minutes for
-// its pods — so a reader of every claim, like the operator's listing, reads View.
-func (m *Machine) View() Claim {
-	return copyClaim(*m.view.Load())
+// as the decision in flight last tried to write it to the store. It never waits, where Claim waits
+// out a decision that holds the machine through its runtime call — a Sandbox relaunch waits minutes
+// for its pods — so a reader of every claim, like the operator's listing, reads View.
+func (m *Machine) View() ClaimView {
+	v := *m.view.Load()
+	v.Claim = copyClaim(v.Claim)
+	return v
+}
+
+// Deciding is the event the decision in flight handles (Handle), or nil when the machine decides
+// nothing. It never waits on the decision.
+func (m *Machine) Deciding() Event {
+	m.decidingMu.Lock()
+	defer m.decidingMu.Unlock()
+	return m.deciding
+}
+
+// decide publishes ev as the event the decision now beginning handles (Deciding), and unlock
+// clears it. The caller holds mu.
+func (m *Machine) decide(ev Event) {
+	m.decidingMu.Lock()
+	defer m.decidingMu.Unlock()
+	m.deciding = ev
 }
 
 // current is a copy of the claim as the machine holds it now, with what only memory holds. The
 // caller holds mu.
 func (m *Machine) current() Claim {
 	c := copyClaim(m.claim)
-	c.SuspensionHeld, c.Stopping = m.held != nil, m.stopping
+	c.SuspensionHeld = m.held != nil
 	return c
 }
 
 // publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
 func (m *Machine) publish() {
-	c := m.current()
-	m.view.Store(&c)
+	m.view.Store(&ClaimView{Claim: m.current(), Stopping: m.stopping})
 }
 
-// stoppingProcess marks the claim's process as being stopped, for View, until the runtime call
-// that stops it returns; the end of the decision publishes what it left. The caller holds mu.
+// stoppingProcess marks the claim's process as being stopped for good, for View, until the runtime
+// call that stops it returns; the end of the decision publishes what it left. The caller holds mu.
 func (m *Machine) stoppingProcess() func() {
 	m.stopping = true
 	m.publish()
 	return func() { m.stopping = false }
 }
 
-// unlock ends a locked section that may have changed the claim: it publishes the claim, then
-// releases mu.
+// unlock ends a locked section that may have changed the claim: it publishes the claim, says the
+// machine decides nothing, then releases mu.
 func (m *Machine) unlock() {
 	m.publish()
+	m.decide(nil)
 	m.mu.Unlock()
 }
 
@@ -698,7 +732,7 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
 // only a start that succeeds forgets it. A launch that fails stops the process it let go
 // (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch) starts
-// nothing and is charged nothing.
+// nothing and is charged nothing, and so is one whose context ended under it — the daemon's stop.
 func (m *Machine) launch(ctx context.Context) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
@@ -721,6 +755,13 @@ func (m *Machine) launch(ctx context.Context) error {
 			m.log.Info("supervise: launched", "generation", m.claim.Generation, "incarnation", loc.Incarnation,
 				"resumed", m.claim.SessionFile != "")
 			return m.persist(ctx)
+		}
+		if ctx.Err() != nil {
+			// The runtime refused nothing: the launch ended with its context. The claim stays
+			// launching with no process recorded, which the next boot launches again once its orphan
+			// reconciliation has reaped every process no claim records, the one let go included.
+			m.log.Info("supervise: launch cut short; its context ended", "generation", m.claim.Generation, "error", err)
+			return err
 		}
 		err = errors.Join(err, m.stopPrevious(ctx))
 		m.claim.Budgets.LaunchFailures++
@@ -813,7 +854,7 @@ func (m *Machine) loseSession() {
 // on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
-		if err := m.suspendProcess(ctx); err != nil {
+		if err := m.endProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
 		}
 	}
@@ -842,14 +883,23 @@ func (m *Machine) release(ctx context.Context) error {
 
 // suspendProcess asks the runtime to stop the claim's process and keep its session — release's
 // counterpart for a claim that goes on — and lets the stopped process go, for the next launch of
-// the same session to wait out. A suspension that fails leaves the claim holding its process.
+// the same session to wait out. A suspension that fails leaves the claim holding its process. A
+// claim whose process is retired and relaunched in one decision (chargePrompt, the registration
+// deadline) calls it directly; one that does not run again afterwards calls endProcess.
 func (m *Machine) suspendProcess(ctx context.Context) error {
-	defer m.stoppingProcess()()
 	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 		return err
 	}
 	m.letGo()
 	return nil
+}
+
+// endProcess is suspendProcess for a claim that does not run again afterwards — suspended, failed,
+// or a root that exited — so View says the process is being stopped (ClaimView.Stopping) while the
+// runtime stops it, and nothing is routed to the session it stops.
+func (m *Machine) endProcess(ctx context.Context) error {
+	defer m.stoppingProcess()()
+	return m.suspendProcess(ctx)
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.

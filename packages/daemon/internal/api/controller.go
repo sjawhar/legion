@@ -168,7 +168,8 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 // answer is the operator's controller's registration, its generation the launch's, which the
 // agent's ready names.
 func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest, launch BootToken, m *supervise.Machine) {
-	ctx := context.WithoutCancel(r.Context())
+	ctx, decided := s.decision(r)
+	defer decided()
 	secret := rand.Text()
 	s.controllerMu.Lock()
 	defer s.controllerMu.Unlock()

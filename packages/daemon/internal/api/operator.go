@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -181,7 +180,8 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		s.operatorFailure(w, "spawn", token, err)
 		return
 	}
-	ctx := context.WithoutCancel(r.Context())
+	ctx, decided := s.decision(r)
+	defer decided()
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
 		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
@@ -232,7 +232,9 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			return
 		}
 		status := http.StatusOK
-		if err := m.Handle(context.WithoutCancel(r.Context()), ev); errors.Is(err, supervise.ErrSuspendHeld) {
+		ctx, decided := s.decision(r)
+		defer decided()
+		if err := m.Handle(ctx, ev); errors.Is(err, supervise.ErrSuspendHeld) {
 			status = http.StatusAccepted
 		} else if err != nil {
 			s.operatorFailure(w, request, token, err)
@@ -289,7 +291,8 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := root.Claim()
-	ctx := context.WithoutCancel(r.Context())
+	ctx, decided := s.decision(r)
+	defer decided()
 	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
 		s.operatorFailure(w, "close", token, err)
 		return
@@ -353,7 +356,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	views := make([]OperatorClaim, len(claims))
 	for i, c := range claims {
 		if m, ok := s.supervisor.Machine(c.Token); ok {
-			c = m.View()
+			c = m.View().Claim
 		}
 		views[i] = operatorView(c)
 	}

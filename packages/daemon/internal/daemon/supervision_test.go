@@ -556,29 +556,43 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	}
 }
 
-// A launch the previous daemon persisted and never finished — its locator not yet recorded when
-// it died — has no process to re-adopt; boot launches it again rather than leave a claim that
-// waits on a pane nothing knows.
+// A launch the previous daemon began and never finished has no process to re-adopt; boot launches
+// it again rather than leave a claim that waits on a process nothing knows. The previous daemon
+// left one of two rows: launching with no locator, its process (if one opened at all) never
+// recorded; or queued at the generation it had, a launch it released at boot (supervise's
+// ReleaseUncertainLaunch) and stopped before the relaunch wrote its next generation, since the
+// relaunch's admission, and the retirement of a finished task before it, write the claim queued
+// first (LEGION-650).
 func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
-	cfg := testConfig(t)
-	project, _ := claim.ProjectToken(cfg.Project)
-	token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
-	putClaim(t, cfg, supervise.Claim{
-		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-3", Role: claim.RolePlanner,
-		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
-	})
-	writePrompt(t, cfg, token)
-	rt := fake.NewRuntime()
+	for _, tc := range []struct {
+		name  string
+		state supervise.ClaimState
+	}{
+		{name: "stored launching with no process recorded", state: supervise.StateLaunching},
+		{name: "stored queued at its generation, released and never relaunched", state: supervise.StateQueued},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			project, _ := claim.ProjectToken(cfg.Project)
+			token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
+			putClaim(t, cfg, supervise.Claim{
+				Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-3", Role: claim.RolePlanner,
+				Generation: 1, State: tc.state, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
+			})
+			writePrompt(t, cfg, token)
+			rt := fake.NewRuntime()
 
-	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+			d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 
-	testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
-		c := d.claim(token)
-		return c.State == string(supervise.StateLaunching) && c.Locator != nil
-	})
-	spawns := rt.CallsOf("Spawn")
-	if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
-		t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
+			testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
+				c := d.claim(token)
+				return c.State == string(supervise.StateLaunching) && c.Locator != nil
+			})
+			spawns := rt.CallsOf("Spawn")
+			if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
+				t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
+			}
+		})
 	}
 }
 

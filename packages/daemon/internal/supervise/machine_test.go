@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"slices"
 	"testing"
@@ -767,7 +768,7 @@ func TestViewAnswersWhileARelaunchWaitsInTheRuntime(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the relaunch never reached the runtime")
 	}
-	viewed := make(chan Claim, 1)
+	viewed := make(chan ClaimView, 1)
 	go func() { viewed <- h.m.View() }()
 	select {
 	case c := <-viewed:
@@ -789,29 +790,116 @@ func TestViewAnswersWhileARelaunchWaitsInTheRuntime(t *testing.T) {
 	}
 }
 
-// Releasing an uncertain launch and launching its next generation are one write: until the launch
-// records its generation, the store keeps the claim launch_uncertain. A stop between the two —
-// the daemon's stop cancels the launch's own write — must leave a claim the next boot relaunches,
-// never one stored queued with no process that nothing launches again (LEGION-650).
-func TestReleasingAnUncertainLaunchWritesNothingUntilItsLaunchDoes(t *testing.T) {
-	h := newBareHarness(t)
-	uncertain := queuedClaim()
-	uncertain.State, uncertain.Generation = StateLaunchUncertain, 1
-	if err := h.store.PutClaim(h.ctx, uncertain); err != nil {
-		t.Fatal(err)
-	}
-	h.start(uncertain)
+// cancelAtCheckLaunch is the store whose launch recheck (CheckLaunch) is where the daemon's stop
+// lands: once the relaunch's admission has committed, it cancels the decision's context, as the stop
+// does.
+type cancelAtCheckLaunch struct {
+	*memStore
+	cancel context.CancelFunc
+}
 
-	if !h.m.ReleaseUncertainLaunch() {
-		t.Fatal("the uncertain launch was not released")
+func (s cancelAtCheckLaunch) CheckLaunch(ctx context.Context, _ Claim) error {
+	s.cancel()
+	return ctx.Err()
+}
+
+// A released uncertain launch is written queued at the generation it had — by its relaunch's
+// admission and, before that, by the retirement of a task whose turn is over — and launching at its
+// next generation only by the launch itself. A stop between the two leaves the claim stored queued
+// at that generation with no process, which the daemon's next boot counts as a launch to finish,
+// never launching at a generation no process was started for (LEGION-650).
+func TestAStopBetweenAReleasedLaunchsAdmissionAndItsLaunchLeavesItQueuedAtItsGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pending *Delivery
+	}{
+		{name: "a claim holding no task"},
+		{name: "a claim holding a task whose turn is over", pending: &Delivery{ID: "the-task", Task: "the task", Generation: 3, ConfirmedAt: epoch}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBareHarness(t)
+			uncertain := queuedClaim()
+			uncertain.State, uncertain.Generation = StateLaunchUncertain, 1
+			if err := h.store.PutClaim(h.ctx, uncertain); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pending != nil {
+				if err := h.store.PutDelivery(h.ctx, uncertain.Token, *tc.pending); err != nil {
+					t.Fatal(err)
+				}
+				uncertain.Pending = tc.pending
+			}
+			ctx, cancel := context.WithCancel(h.ctx)
+			h.deps.Store = cancelAtCheckLaunch{memStore: h.store, cancel: cancel}
+			h.start(uncertain)
+			if !h.m.ReleaseUncertainLaunch() {
+				t.Fatal("the uncertain launch was not released")
+			}
+
+			if err := h.m.Handle(ctx, RequestSpawn{Claim: testToken}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("spawn = %v, want the stop's cancellation", err)
+			}
+
+			stored := h.store.load(testToken)
+			if stored.State != StateQueued || stored.Generation != 1 || stored.Locator != nil {
+				t.Fatalf("the store holds %s at generation %d with locator %+v, want queued at 1 with none",
+					stored.State, stored.Generation, stored.Locator)
+			}
+			if tc.pending != nil && stored.Pending != nil {
+				t.Errorf("the store still holds the task whose turn is over: %+v", *stored.Pending)
+			}
+			h.wantCalls("Spawn", 0)
+		})
 	}
-	h.store.fail("PutClaim", errBoom)
-	if err := h.handle(RequestSpawn{Claim: testToken}); err == nil {
-		t.Fatal("the launch succeeded although its write failed")
-	}
-	if stored := h.store.load(testToken); stored.State != StateLaunchUncertain || stored.Generation != 1 || stored.Locator != nil {
-		t.Fatalf("the store holds %s at generation %d with locator %+v after the launch's write failed, want launch_uncertain at 1 with none",
-			stored.State, stored.Generation, stored.Locator)
+}
+
+// View says a claim's process is being stopped (ClaimView.Stopping) only while the decision that
+// stops it ends the claim's run, as the operator's suspension does. A process the registration
+// deadline retires is relaunched in the same decision, so its claim keeps its role throughout and
+// View does not say it is stopping: notice routing reads Stopping, and a sub-architect being
+// relaunched would otherwise lose its notices to the architect above it (LEGION-650).
+func TestViewSaysAProcessIsStoppingOnlyWhenItsClaimDoesNotRunAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reach    ClaimState
+		stop     func(h *harness)
+		stopping bool
+	}{
+		{name: "the operator's suspension", reach: StateIdle, stopping: true,
+			stop: func(h *harness) { _ = h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}) }},
+		{name: "the registration deadline's retirement and relaunch", reach: StateLaunching,
+			stop: func(h *harness) { h.clock.Advance(deadline) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBareHarness(t)
+			gated := &gatedRuntime{Runtime: h.rt, entered: make(chan struct{}, 1), release: make(chan struct{})}
+			h.deps.Runtime = gated
+			if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+				t.Fatal(err)
+			}
+			h.start(queuedClaim())
+			h.reach(tc.reach)
+
+			stopped := make(chan struct{})
+			go func() {
+				defer close(stopped)
+				tc.stop(h)
+			}()
+			select {
+			case <-gated.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the suspension never reached the runtime")
+			}
+			if v := h.m.View(); v.Stopping != tc.stopping {
+				t.Errorf("while the runtime stops the process View says stopping %t, want %t", v.Stopping, tc.stopping)
+			}
+			close(gated.release)
+			<-stopped
+			h.m.Wait()
+			if h.m.View().Stopping {
+				t.Error("once the decision returned View still says the process is stopping")
+			}
+		})
 	}
 }
 

@@ -54,6 +54,10 @@ type Options struct {
 	// and a registration registers the controller only from a launch of the controller's claim.
 	// Unset (`controller: operator`), only the operator's capability registers it.
 	ControllerLaunched bool
+	// Stopping is done once the daemon's stop begins, which ends every decision a route asked of a
+	// machine (decision), as it ends the decisions the daemon makes itself. Nil is a server that is
+	// never stopped.
+	Stopping context.Context
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -119,7 +123,9 @@ type server struct {
 	records       record.Store
 	dispatch      dispatch.Client
 	claimReady    func(c supervise.Claim)
-	log           *slog.Logger
+	// stopping is Options.Stopping.
+	stopping context.Context
+	log      *slog.Logger
 	// loginsWarned is when the daemon last logged that it could not read a Legion App's login
 	// (legionAppLogins), which it does at most once a minute.
 	loginsWarnedMu sync.Mutex
@@ -156,6 +162,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
 		log:                opts.Log,
+		stopping:           opts.Stopping,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
@@ -165,6 +172,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if s.log == nil {
 		s.log = slog.Default()
+	}
+	if s.stopping == nil {
+		s.stopping = context.Background()
 	}
 
 	mux := http.NewServeMux()
@@ -212,6 +222,19 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Addr:              net.JoinHostPort(bind, strconv.Itoa(port)),
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
+	}
+}
+
+// decision is the context a route runs a machine's decision on. It outlives the request, so a
+// caller that hangs up mid-request does not leave a registration or a stop half done, and it ends
+// when the daemon's stop begins (Options.Stopping), which cancels every decision in flight. The
+// caller calls the returned function once the decision is made.
+func (s *server) decision(r *http.Request) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	stop := context.AfterFunc(s.stopping, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
 	}
 }
 

@@ -70,15 +70,18 @@ legion start --config legion.yaml --check-config
 
 ## The daemon stops
 
-On SIGTERM (`legion stop`, a rollout, a node drain) the daemon logs `legion daemon stopping`, cuts
-short every relaunch and suspension it has in flight, and logs `legion daemon stopped` once it has
-recorded the boot's end. It waits at most 10 seconds for its own work before it records that, so it
-stops well inside a pod's termination grace. It ends no agent: the next boot re-adopts every pod or
-pane still running and relaunches each launch the stop cut short.
+On SIGTERM (`legion stop`, a rollout, a node drain) the daemon logs `legion daemon stopping`, with
+`deciding` naming each claim whose decision is in flight and its event. It cuts short every one of
+those decisions — a relaunch, a suspension, an operator's request — and its boot's own steps when it
+has not finished booting, and logs `legion daemon stopped` once it has recorded the boot's end. It
+waits at most 10 seconds for its own work before it records that, so it stops well inside a pod's
+termination grace. It ends no agent: the next boot re-adopts every pod or pane still running and
+relaunches each launch the stop cut short.
 
-- **`legion daemon stopped waiting for its work`.** Some of the daemon's work had not ended after 10
-  seconds; `deciding` names each claim whose decision was still running, with its event. The daemon
-  stopped anyway, and the next boot takes those claims up.
+- **`legion daemon stopped waiting for its work`.** Some of the daemon's work had not ended when that
+  wait ran out, which takes a call into a process that does not answer; `deciding` names each claim
+  whose decision was still running, with its event. The daemon stopped anyway, and the next boot
+  takes those claims up.
 
 ## The controller
 
