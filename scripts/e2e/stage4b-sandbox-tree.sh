@@ -188,11 +188,6 @@ fixture_branch=
 # The run's own text in the fixture's two skills: a skill read in a pod is this run's, not a stale
 # checkout's.
 fixture_skill_nonce=
-# When set, claim_session_text prints a claim's session from the first line holding it on: a
-# checkpoint's reads scoped to its own instruction (the nonce the delivery carries), since a
-# negative over the whole session (no bash result names the other App, no notebook ran) would read
-# the role's earlier work in the same session too.
-session_from=
 pair_recorded=
 pair_session=
 # The daemon's configured default bounds launch failures and deaths with work outstanding alike.
@@ -651,17 +646,12 @@ claim_session_file() {
     jq -er --arg issue "$1" --arg role "$2" \
       '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
 }
-# claim_session_text ISSUE ROLE prints the claim's session as the pod holds it, from the first line
-# holding $session_from on when that is set.
+# claim_session_text ISSUE ROLE prints the claim's session as the pod holds it.
 claim_session_text() {
   local issue=$1 role=$2 file pod
   file=$(claim_session_file "$issue" "$role") || return 1
   pod=$(claim_sandbox "$issue" "$role") || return 1
-  if [ -n "$session_from" ]; then
-    pod_exec "$pod" "$role" cat -- "$file" | awk -v mark="$session_from" 'found || index($0, mark) { found = 1; print }'
-  else
-    pod_exec "$pod" "$role" cat -- "$file"
-  fi
+  pod_exec "$pod" "$role" cat -- "$file"
 }
 workspace_jj() {
   local issue=$1 pod
@@ -678,14 +668,12 @@ assert_claim_endpoints() {
     fail "ABORT: $role pod $pod on $issue has $mismatch"
   fi
 }
-# pod_env POD ROLE prints the environment of ROLE's Oh My Pi in POD, one NAME=value a line, from
-# /proc in the role's container: the process whose argv[0] is omp and whose parent is the role's
-# `legion worker-shim`. The container's spec is not where a role's environment is: it carries only
-# what the kubelet resolves (POD_UID, the operator's Secret references), and every other variable
-# reaches the role in its launcher's start command.
-pod_env() {
-  # shellcheck disable=SC2016  # expanded by the pod's shell
-  pod_exec "$1" "$2" sh -c '
+# agent_pid_sh is the POSIX sh that finds ROLE's Oh My Pi in its container, the one rule pod_env and
+# agent_pid share: the process whose argv[0] is omp and whose parent is the role's `legion
+# worker-shim`. It exits 1 naming both pids when two such processes run and saying so when none
+# does; otherwise it leaves the pid in $pid for the line each caller appends.
+# shellcheck disable=SC2016  # expanded by the pod's shell
+agent_pid_sh='
     found=
     for d in /proc/[0-9]*; do
       argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
@@ -702,7 +690,15 @@ pod_env() {
       echo "no Oh My Pi under a legion worker-shim" >&2
       exit 1
     fi
-    tr "\0" "\n" <"$found/environ"'
+    pid=${found#/proc/}'
+# pod_env POD ROLE prints the environment of ROLE's Oh My Pi in POD (agent_pid_sh), one NAME=value a
+# line, from /proc in the role's container. The container's spec is not where a role's environment
+# is: it carries only what the kubelet resolves (POD_UID, the operator's Secret references), and
+# every other variable reaches the role in its launcher's start command.
+pod_env() {
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  pod_exec "$1" "$2" sh -c "$agent_pid_sh"'
+    tr "\0" "\n" <"/proc/$pid/environ"'
 }
 pod_endpoint_mismatch() {
   local pod=$1 role=$2 env name want got
@@ -1544,54 +1540,51 @@ assistant_said() {
     | .message.content[]? | (if .type == "text" then .text elif .type == "toolCall" then (.arguments | tostring) else "" end)
     | select(contains($want))] | length > 0' <<<"$text" >/dev/null
 }
-# tool_result_said ISSUE ROLE TOOL TEXT: a tool call of ROLE's session for TOOL (by name, by its
-# xd:// device, or by eval's tool.<name>) returned without error and its text carries TEXT: the proof
-# a tool ran and answered, where assistant_said only proves the model said so. An error result never
+# session_jq SESSION JQ-ARGS…: jq over SESSION, a session file a checkpoint fetched once and keeps as
+# evidence, read as one raw string (`jq -R -s`) with lib/stage4b-tools.jq on the include path. Every
+# helper below reads a session this way, so the bytes kept are the bytes each assertion judged.
+session_jq() {
+  local session=$1
+  shift
+  jq -R -s -L "$root/scripts/e2e/lib" "$@" <"$session"
+}
+# tool_result_said SESSION TOOL TEXT: a tool call of the session for TOOL (by name, by its xd://
+# device, or by eval's tool.<name>) returned without error and its text carries TEXT: the proof a
+# tool ran and answered, where assistant_said only proves the model said so. An error result never
 # counts, and a result is the tool's by the call it answers, not by the toolName it records: a write
 # to xd://<name> records write (lib/stage4b-tools.jq).
 tool_result_said() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_said($tool; $want)' <<<"$text" >/dev/null
+  session_jq "$1" -e --arg tool "$2" --arg want "$3" 'include "stage4b-tools"; tool_result_said($tool; $want)' >/dev/null
 }
-# tool_ran ISSUE ROLE TOOL: one call of TOOL in ROLE's session returned without error
+# tool_ran SESSION TOOL: one call of TOOL in the session returned without error
 # (lib/stage4b-tools.jq).
 tool_ran() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" 'include "stage4b-tools"; tool_ran($tool)' <<<"$text" >/dev/null
+  session_jq "$1" -e --arg tool "$2" 'include "stage4b-tools"; tool_ran($tool)' >/dev/null
 }
-# tool_result_answered ISSUE ROLE TOOL ARGS TEXT: tool_result_said for the calls of TOOL whose
+# tool_result_answered SESSION TOOL ARGS TEXT: tool_result_said for the calls of TOOL whose
 # arguments carry ARGS (lib/stage4b-tools.jq): the read of skill://<name> among the session's reads,
 # the hover of one file among its hovers.
 tool_result_answered() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" --arg args "$4" --arg want "$5" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' <<<"$text" >/dev/null
+  session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
-# tool_result_quotes ISSUE ROLE TOOL [ARGS]: every result of TOOL in ROLE's session (of the calls
-# whose arguments carry ARGS, when given) on one line, each with its call's arguments, an error
-# marked and its text trimmed: what the tool did return, for the fail line of an expectation it
-# did not meet.
+# tool_result_quotes SESSION TOOL [ARGS]: every result of TOOL in the session (of the calls whose
+# arguments carry ARGS, when given) on one line, each with its call's arguments, an error marked
+# and its text trimmed: what the tool did return, for the fail line of an expectation it did not
+# meet.
 tool_result_quotes() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -r -L "$root/scripts/e2e/lib" --arg tool "$3" --arg args "${4:-}" 'include "stage4b-tools";
-    [tool_results($tool)[] | select(.arguments | contains($args))
-      | (if .isError then "error " else "" end) + .arguments[0:160] + " => " + (.text | gsub("\\s+"; " ") | .[0:400])]
-    | join(" ; ")' <<<"$text"
+  session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
+    [tool_results($tool)[] | select(.arguments | contains($args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
+    | join(" ; ")'
 }
-# codegraph_control ISSUE ROLE: ROLE's session holds a codegraph call for NoSuchSymbol, a symbol the
+# codegraph_control SESSION: the session holds a codegraph call for NoSuchSymbol, a symbol the
 # fixture does not define, and every such call returned an error or a text naming none of the
 # fixture's test (greet_test.go), caller (GreetWorld) or caller's file (caller.go). An index that
 # names the fixture's test and caller proves nothing unless it also names nothing where there is
 # nothing.
 codegraph_control() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -e -L "$root/scripts/e2e/lib" 'include "stage4b-tools";
+  session_jq "$1" -e 'include "stage4b-tools";
     [tool_results("codegraph")[] | select(.arguments | contains("NoSuchSymbol"))]
-    | length > 0 and all(.[]; .isError or (.text | test("greet_test\\.go|GreetWorld|caller\\.go") | not))' <<<"$text" >/dev/null
+    | length > 0 and all(.[]; .isError or (.text | test("greet_test\\.go|GreetWorld|caller\\.go") | not))' >/dev/null
 }
 # full_agent_message ROLE NONCE prints the full-agent instruction for ROLE: eight items, each one
 # tool call, whose answers carry NONCE wherever a tool returns text the checkpoint can hold it to.
@@ -1622,42 +1615,39 @@ full_agent_merger_message() {
   printf "(2) bash: gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login; "
   printf 'reply to this message with one line per item, each starting with %s-answer, then wait for the next instruction.' "$1"
 }
-# full_agent_task_id ISSUE ROLE LOGIN prints the id of the first task-result block, in a task result
-# of ROLE's session that returned without error, whose text carries LOGIN; nothing when none does.
+# full_agent_task_id SESSION LOGIN prints the id of the first task-result block, in a task result
+# of the session that returned without error, whose text carries LOGIN; nothing when none does.
 # The id is the task's name, and the subagent's own session lies beside its parent's at <session
 # stem>/<id>.jsonl, where review-pair reads the pair's.
 full_agent_task_id() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -r -L "$root/scripts/e2e/lib" --arg want "$3" 'include "stage4b-tools";
-    [tool_result_texts("task")[] | select(contains($want)) | capture("<task-result id=\"(?<id>[^\"]+)\"") | .id] | first // ""' <<<"$text"
+  session_jq "$1" -r --arg want "$2" 'include "stage4b-tools";
+    [tool_result_texts("task")[] | select(contains($want)) | capture("<task-result id=\"(?<id>[^\"]+)\"") | .id] | first // ""'
 }
-# full_agent_subagent_verdict APP OTHER reads a subagent's session (JSONL on stdin) and prints
-# whether one of its own bash calls returned APP (login), whether its yield was accepted (yield: an
-# accepted yield ends a subagent, as review-pair reads it), whether any bash returned OTHER (other,
-# the other App, which must be false), and its bash results trimmed.
+# full_agent_subagent_verdict SESSION APP OTHER reads a subagent's session and prints whether one of
+# its own bash calls returned APP (login), whether its yield was accepted (yield: an accepted yield
+# ends a subagent, as review-pair reads it), whether any bash returned OTHER (other, the other App,
+# which must be false), and its bash results trimmed.
 full_agent_subagent_verdict() {
-  jq -R -s -c -L "$root/scripts/e2e/lib" --arg app "$1" --arg other "$2" 'include "stage4b-tools";
-    {login: tool_result_said("bash"; $app), yield: tool_ran("yield"), other: tool_result_said("bash"; $other),
-     bash: [tool_results("bash")[] | (if .isError then "error " else "" end) + (.text | gsub("\\s+"; " ") | .[0:200])]}'
+  session_jq "$1" -c --arg app "$2" --arg other "$3" 'include "stage4b-tools";
+    tool_results("bash") as $bash
+    | {login: any($bash[]; .isError == false and (.text | contains($app))), yield: tool_ran("yield"),
+       other: any($bash[]; .isError == false and (.text | contains($other))),
+       bash: [$bash[] | tool_result_quote(""; 200)]}'
 }
-# full_agent_summary ISSUE ROLE APP prints one line of what ROLE's tools returned: the login, the
-# browser's title line, the toolchain's versions and the first search hit, each trimmed.
+# full_agent_summary SESSION APP prints one line of what the session's tools returned: the login,
+# the browser's title line, the toolchain's versions and the first search hit, each trimmed.
 full_agent_summary() {
-  local text
-  text=$(claim_session_text "$1" "$2") || return 1
-  jq -R -s -r -L "$root/scripts/e2e/lib" --arg app "$3" 'include "stage4b-tools";
-    def said(name; $text): [tool_result_texts(name)[] | select(contains($text))] | first // "none";
+  session_jq "$1" -r --arg app "$2" 'include "stage4b-tools";
+    def said($texts; $text): [$texts[] | select(contains($text))] | first // "none";
     def line: split("\n")[0] | .[0:120];
-    "login \(said("bash"; $app) | line); browser \(said("eval"; "title: ") | line); toolchain \(said("bash"; "go version") | gsub("\\s+"; " ") | .[0:200]); search \(said("web_search"; "https://") | line)"' <<<"$text"
+    tool_result_texts("bash") as $bash | tool_result_texts("eval") as $eval | tool_result_texts("web_search") as $search
+    | "login \(said($bash; $app) | line); browser \(said($eval; "title: ") | line); toolchain \(said($bash; "go version") | gsub("\\s+"; " ") | .[0:200]); search \(said($search; "https://") | line)"'
 }
-# agent_pid POD ROLE prints the pid of ROLE's Oh My Pi in POD: the process whose command line
-# starts with /opt/omp/bin/omp and carries --mode rpc. The shim's own command line carries that
-# text too, after its --, so the match is on how the line starts; Oh My Pi's eval worker starts the
-# same way and carries no --mode rpc.
+# agent_pid POD ROLE prints the pid of ROLE's Oh My Pi in POD (agent_pid_sh).
 agent_pid() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
-  pod_exec "$1" "$2" sh -c 'for p in /proc/[0-9]*; do c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue; case "$c" in /opt/omp/bin/omp*--mode\ rpc*) echo "${p#/proc/}"; break;; esac; done' | grep .
+  pod_exec "$1" "$2" sh -c "$agent_pid_sh"'
+    echo "$pid"'
 }
 # agent_setting POD ROLE PID DIR KEY prints KEY's value, as JSON, as ROLE's Oh My Pi (PID) reads it
 # in DIR: `omp config get` run under that process's own environment (/proc/PID/environ), the one
@@ -2586,35 +2576,38 @@ note "tree 2's CodeGraph index in $fixture_dir: $codegraph_status"
 nonce="repository-tools-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-tools operation, in this repository's checkout: (1) read skill://fixture-omp-skill and skill://fixture-claude-skill with the read tool and quote each one's FIXTURE-SKILL line; (2) with the lsp tool, get its status (the language servers it has for this checkout), then hover Greet in fixture/greet.go, greet in src/greet.ts and greet in fixture_py/greet.py, each on the line that defines it; (3) with the codegraph tool, get its status, then the tests affected by fixture/greet.go, the impact of Greet, and the impact of NoSuchSymbol; (4) reply to this message with one line per step, each starting with $nonce, then wait for the next instruction. Change no file and call no legion operation."
 on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
-claim_session_text "$tree2" planner | jq -R -s -c -L "$root/scripts/e2e/lib" 'include "stage4b-tools";
+# The session is fetched once, and every read below judges the bytes kept as evidence.
+session=$evidence/repository-tools-session.jsonl
+claim_session_text "$tree2" planner >"$session" || fail "tree 2's planner on $tree2 has no readable session"
+session_jq "$session" -c 'include "stage4b-tools";
   {skills: [tool_results("read")[] | select(.arguments | contains("skill://"))], lsp: tool_results("lsp"), codegraph: tool_results("codegraph")}' \
   >"$evidence/repository-tools-results.json" || fail "tree 2's planner session could not be read for its tool results"
 # The skills, as the read tool returned them at skill://<name>: the run's own nonce, which no stale
 # checkout and no skill of the image carries.
 for skill in omp claude; do
-  tool_result_answered "$tree2" planner read "skill://fixture-$skill-skill" "FIXTURE-SKILL-${skill^^}-$fixture_skill_nonce" ||
-    fail "no read of skill://fixture-$skill-skill in tree 2's planner session returned FIXTURE-SKILL-${skill^^}-$fixture_skill_nonce; its reads of skill://: $(tool_result_quotes "$tree2" planner read skill://)"
+  tool_result_answered "$session" read "skill://fixture-$skill-skill" "FIXTURE-SKILL-${skill^^}-$fixture_skill_nonce" ||
+    fail "no read of skill://fixture-$skill-skill in tree 2's planner session returned FIXTURE-SKILL-${skill^^}-$fixture_skill_nonce; its reads of skill://: $(tool_result_quotes "$session" read skill://)"
 done
 # The status listing names the server of each root, which the lsp tool configures from the root
 # marker it finds in the checkout; a hover is the server's own signature, which only a server that
 # started in the checkout gives.
 for server in gopls typescript-language-server pyright; do
-  tool_result_said "$tree2" planner lsp "$server" ||
-    fail "no lsp result in tree 2's planner session names $server, so the checkout's language servers are not the planner's; its lsp results: $(tool_result_quotes "$tree2" planner lsp)"
+  tool_result_said "$session" lsp "$server" ||
+    fail "no lsp result in tree 2's planner session names $server, so the checkout's language servers are not the planner's; its lsp results: $(tool_result_quotes "$session" lsp)"
 done
 for hover in "greet.go=func Greet" "greet.ts=function greet" "greet.py=def greet"; do
-  tool_result_answered "$tree2" planner lsp "${hover%%=*}" "${hover#*=}" ||
-    fail "no lsp result of a call on ${hover%%=*} in tree 2's planner session carries the hover text '${hover#*=}'; its lsp results: $(tool_result_quotes "$tree2" planner lsp)"
+  tool_result_answered "$session" lsp "${hover%%=*}" "${hover#*=}" ||
+    fail "no lsp result of a call on ${hover%%=*} in tree 2's planner session carries the hover text '${hover#*=}'; its lsp results: $(tool_result_quotes "$session" lsp)"
 done
 # The index answers from the graph: the test a change to greet.go reaches, and Greet's caller.
-tool_result_said "$tree2" planner codegraph greet_test.go ||
-  fail "no codegraph result in tree 2's planner session names greet_test.go as a test affected by fixture/greet.go; its codegraph results: $(tool_result_quotes "$tree2" planner codegraph)"
-tool_result_said "$tree2" planner codegraph GreetWorld || tool_result_said "$tree2" planner codegraph caller.go ||
-  fail "no codegraph result in tree 2's planner session names Greet's caller (GreetWorld, or caller.go); its codegraph results: $(tool_result_quotes "$tree2" planner codegraph)"
-codegraph_control "$tree2" planner ||
-  fail "the codegraph control did not hold: tree 2's planner session has no codegraph call for NoSuchSymbol, or one answered naming the fixture's test or caller; its codegraph results: $(tool_result_quotes "$tree2" planner codegraph)"
-note "tree 2's planner read both skills, listed the three language servers and hovered the three roots, and its codegraph named the affected test and Greet's caller; NoSuchSymbol answered: $(tool_result_quotes "$tree2" planner codegraph NoSuchSymbol)"
-note "tool results kept as $evidence/repository-tools-results.json"
+tool_result_said "$session" codegraph greet_test.go ||
+  fail "no codegraph result in tree 2's planner session names greet_test.go as a test affected by fixture/greet.go; its codegraph results: $(tool_result_quotes "$session" codegraph)"
+tool_result_said "$session" codegraph GreetWorld || tool_result_said "$session" codegraph caller.go ||
+  fail "no codegraph result in tree 2's planner session names Greet's caller (GreetWorld, or caller.go); its codegraph results: $(tool_result_quotes "$session" codegraph)"
+codegraph_control "$session" ||
+  fail "the codegraph control did not hold: tree 2's planner session has no codegraph call for NoSuchSymbol, or one answered naming the fixture's test or caller; its codegraph results: $(tool_result_quotes "$session" codegraph)"
+note "tree 2's planner read both skills, listed the three language servers and hovered the three roots, and its codegraph named the affected test and Greet's caller; NoSuchSymbol answered: $(tool_result_quotes "$session" codegraph NoSuchSymbol)"
+note "the session kept as $session, its tool results as $evidence/repository-tools-results.json"
 # The markers repository-configuration recorded are what a worker's loading paths wrote; each of
 # the Oh My Pi ones must be there (the Codex tool and Claude plugin are another agent's paths, and
 # the fixture's LSP config waits for a Markdown file to be opened).
@@ -2628,7 +2621,7 @@ note "tree 2's planner loaded the fixture's extension, tool and both MCP servers
 # Five settings as the agent reads them: three defaults nothing above the repository sets and the
 # repository leaves alone, the repository's own images.urls.enabled, and retry.modelFallback, which
 # the repository sets false and the operator's overlay sets true: the operator's wins.
-pid=$(agent_pid "$pod" planner) || fail "no Oh My Pi (/opt/omp/bin/omp … --mode rpc) runs in tree 2's planner container $pod: $(tr '\n' ';' <<<"$argv")"
+pid=$(agent_pid "$pod" planner) || fail "tree 2's planner container $pod does not hold exactly one Oh My Pi under a legion worker-shim: $(tr '\n' ';' <<<"$argv")"
 settings=
 for pair in 'compaction.remoteEndpoint=""' 'memory.backend="off"' images.urls.enabled=true dev.autoqa=false retry.modelFallback=true; do
   key=${pair%%=*} want=${pair#*=}
@@ -3017,60 +3010,62 @@ on_tree "$tree1" until_true 900 "tree 1's merger to answer $merger_nonce-answer"
 for role in architect planner implementer tester reviewer; do
   nonce=${fa_nonce[$role]}
   app=$(role_app "$role")
-  case $app in 'legion-implementer[bot]') other='legion-reviewer[bot]' ;; *) other='legion-implementer[bot]' ;; esac
-  # Every read below is scoped to the session from the instruction's delivery on: the negatives
-  # (the other App, notebook) would otherwise read the role's earlier work, where a reviewer's
-  # gh pr view names the implementer's App as the author. The excerpt is kept for the record.
-  session_from=$nonce
-  text=$(claim_session_text "$tree1" "$role") || fail "$role on $tree1 has no readable session"
-  printf '%s\n' "$text" >"$evidence/full-agent/$role.jsonl"
-  tool_result_said "$tree1" "$role" eval "$nonce py 42" ||
-    fail "$role: no eval result carries '$nonce py 42', so Python did not run; its eval results: $(tool_result_quotes "$tree1" "$role" eval)"
-  tool_result_said "$tree1" "$role" eval "$nonce js 42" ||
-    fail "$role: no eval result carries '$nonce js 42', so JavaScript did not run; its eval results: $(tool_result_quotes "$tree1" "$role" eval)"
-  tool_result_said "$tree1" "$role" eval "title: full-agent $nonce" ||
-    fail "$role: no eval result carries 'title: full-agent $nonce', so the browser did not open its page; its eval results: $(tool_result_quotes "$tree1" "$role" eval)"
-  tool_result_said "$tree1" "$role" web_search "https://" ||
-    fail "$role: no web_search result carries an https:// URL; its web_search results: $(tool_result_quotes "$tree1" "$role" web_search)"
+  other=$(role_app reviewer)
+  [ "$app" != "$other" ] || other=$(role_app implementer)
+  # The session is fetched once, from the instruction's delivery on, and every read below judges
+  # that excerpt: the negatives (the other App, notebook) would otherwise read the role's earlier
+  # work, where a reviewer's gh pr view names the implementer's App as the author. The excerpt is
+  # kept for the record.
+  excerpt=$evidence/full-agent/$role.jsonl
+  claim_session_text "$tree1" "$role" | awk -v mark="$nonce" 'found || index($0, mark) { found = 1; print }' >"$excerpt" ||
+    fail "$role on $tree1 has no readable session"
+  tool_result_said "$excerpt" eval "$nonce py 42" ||
+    fail "$role: no eval result carries '$nonce py 42', so Python did not run; its eval results: $(tool_result_quotes "$excerpt" eval)"
+  tool_result_said "$excerpt" eval "$nonce js 42" ||
+    fail "$role: no eval result carries '$nonce js 42', so JavaScript did not run; its eval results: $(tool_result_quotes "$excerpt" eval)"
+  tool_result_said "$excerpt" eval "title: full-agent $nonce" ||
+    fail "$role: no eval result carries 'title: full-agent $nonce', so the browser did not open its page; its eval results: $(tool_result_quotes "$excerpt" eval)"
+  tool_result_said "$excerpt" web_search "https://" ||
+    fail "$role: no web_search result carries an https:// URL; its web_search results: $(tool_result_quotes "$excerpt" web_search)"
   for want in "go version go" "Python 3" "curl " "gh version" "git version"; do
-    tool_result_said "$tree1" "$role" bash "$want" ||
-      fail "$role: no bash result carries '$want', so the toolchain chain did not run through; its bash results: $(tool_result_quotes "$tree1" "$role" bash)"
+    tool_result_said "$excerpt" bash "$want" ||
+      fail "$role: no bash result carries '$want', so the toolchain chain did not run through; its bash results: $(tool_result_quotes "$excerpt" bash)"
   done
-  tool_result_said "$tree1" "$role" read "edited $nonce" || tool_result_said "$tree1" "$role" edit "edited $nonce" ||
-    fail "$role: neither a read nor an edit result carries 'edited $nonce', so the edit did not land; its edit results: $(tool_result_quotes "$tree1" "$role" edit); its reads: $(tool_result_quotes "$tree1" "$role" read /tmp/full-agent)"
-  tool_result_said "$tree1" "$role" bash "$app" ||
-    fail "$role: no bash result carries $app, so gh api graphql did not answer as the role's App; its bash results: $(tool_result_quotes "$tree1" "$role" bash)"
-  ! tool_result_said "$tree1" "$role" bash "$other" ||
-    fail "$role: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$tree1" "$role" bash)"
-  tool_result_said "$tree1" "$role" task "$app" ||
-    fail "$role: no task result carries $app, so its FullAgentGh subagent did not answer as the role's App; its task results: $(tool_result_quotes "$tree1" "$role" task)"
-  id=$(full_agent_task_id "$tree1" "$role" "$app")
-  [ -n "$id" ] || fail "$role: the task result carrying $app holds no <task-result id=…> block; its task results: $(tool_result_quotes "$tree1" "$role" task)"
+  tool_result_said "$excerpt" read "edited $nonce" || tool_result_said "$excerpt" edit "edited $nonce" ||
+    fail "$role: neither a read nor an edit result carries 'edited $nonce', so the edit did not land; its edit results: $(tool_result_quotes "$excerpt" edit); its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent)"
+  tool_result_said "$excerpt" bash "$app" ||
+    fail "$role: no bash result carries $app, so gh api graphql did not answer as the role's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  ! tool_result_said "$excerpt" bash "$other" ||
+    fail "$role: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  tool_result_said "$excerpt" task "$app" ||
+    fail "$role: no task result carries $app, so its FullAgentGh subagent did not answer as the role's App; its task results: $(tool_result_quotes "$excerpt" task)"
+  id=$(full_agent_task_id "$excerpt" "$app")
+  [ -n "$id" ] || fail "$role: the task result carrying $app holds no <task-result id=…> block; its task results: $(tool_result_quotes "$excerpt" task)"
   session=$(claim_session_file "$tree1" "$role") || fail "$role on $tree1 has no session file"
   pod=$(claim_sandbox "$tree1" "$role") || fail "$role on $tree1 has no Sandbox"
   container=$(claim_container "$tree1" "$role") || fail "$role on $tree1 has no role container"
   sub="$evidence/full-agent/$role-$id.jsonl"
   pod_exec "$pod" "$container" cat -- "${session%.jsonl}/$id.jsonl" >"$sub" ||
     fail "$role: its subagent's session ${session%.jsonl}/$id.jsonl is not beside its parent's in $pod/$container"
-  verdict=$(full_agent_subagent_verdict "$app" "$other" <"$sub")
+  verdict=$(full_agent_subagent_verdict "$sub" "$app" "$other")
   jq -e '.login and .yield and (.other | not)' <<<"$verdict" >/dev/null ||
     fail "$role: its subagent $id's session must hold a bash result carrying $app, an accepted yield, and no bash result carrying $other: $verdict"
-  ! tool_ran "$tree1" "$role" notebook || fail "$role's session shows the notebook tool ran, which nothing asked for"
-  note "$role as $app: $(full_agent_summary "$tree1" "$role" "$app"); its subagent $id answered $app and yielded"
-  session_from=
+  ! tool_ran "$excerpt" notebook || fail "$role's session shows the notebook tool ran, which nothing asked for"
+  note "$role as $app: $(full_agent_summary "$excerpt" "$app"); its subagent $id answered $app and yielded"
 done
-session_from=$merger_nonce
-text=$(claim_session_text "$tree1" merger) || fail "the merger on $tree1 has no readable session"
-printf '%s\n' "$text" >"$evidence/full-agent/merger.jsonl"
-tool_result_said "$tree1" merger read "edited $merger_nonce" || tool_result_said "$tree1" merger edit "edited $merger_nonce" ||
-  fail "merger: neither a read nor an edit result carries 'edited $merger_nonce'; its edit results: $(tool_result_quotes "$tree1" merger edit); its reads: $(tool_result_quotes "$tree1" merger read /tmp/full-agent)"
-tool_result_said "$tree1" merger bash 'legion-implementer[bot]' ||
-  fail "merger: no bash result carries legion-implementer[bot], so gh api graphql did not answer as the merger's App; its bash results: $(tool_result_quotes "$tree1" merger bash)"
-! tool_result_said "$tree1" merger bash 'legion-reviewer[bot]' ||
-  fail "merger: a bash result carries legion-reviewer[bot], the other App; its bash results: $(tool_result_quotes "$tree1" merger bash)"
-! tool_ran "$tree1" merger notebook || fail "the merger's session shows the notebook tool ran, which nothing asked for"
-note "merger as legion-implementer[bot]: $(full_agent_summary "$tree1" merger 'legion-implementer[bot]')"
-session_from=
+merger_app=$(role_app merger)
+merger_other=$(role_app reviewer)
+excerpt=$evidence/full-agent/merger.jsonl
+claim_session_text "$tree1" merger | awk -v mark="$merger_nonce" 'found || index($0, mark) { found = 1; print }' >"$excerpt" ||
+  fail "the merger on $tree1 has no readable session"
+tool_result_said "$excerpt" read "edited $merger_nonce" || tool_result_said "$excerpt" edit "edited $merger_nonce" ||
+  fail "merger: neither a read nor an edit result carries 'edited $merger_nonce'; its edit results: $(tool_result_quotes "$excerpt" edit); its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent)"
+tool_result_said "$excerpt" bash "$merger_app" ||
+  fail "merger: no bash result carries $merger_app, so gh api graphql did not answer as the merger's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+! tool_result_said "$excerpt" bash "$merger_other" ||
+  fail "merger: a bash result carries $merger_other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+! tool_ran "$excerpt" notebook || fail "the merger's session shows the notebook tool ran, which nothing asked for"
+note "merger as $merger_app: $(full_agent_summary "$excerpt" "$merger_app")"
 # The operation changed nothing of the tree: the finished workers go idle again in the process they
 # first registered with, and tree 1 is still in merging.
 for role in planner implementer tester reviewer; do

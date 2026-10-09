@@ -52,23 +52,25 @@ const resultText = (m: Message) =>
 const errorsCarrying = (text: string) =>
   results.filter((r) => resultText(r).includes(text)).map((r) => r.isError);
 
-// helper runs one of the script's session helpers as the script calls it, for the planner's claim
-// on LEGSMOKE-1 with the fixture as that claim's session, and returns its exit code: 0 is yes and 1
-// is no; any other exit is jq or the harness failing, and throws with its stderr.
+// helper runs one of the script's session helpers as the script calls it, over the fixture as the
+// session file a checkpoint fetched once, and returns its exit code: 0 is yes and 1 is no; any other
+// exit is jq or the harness failing, and throws with its stderr. assistant_said alone still reads
+// the claim (ISSUE ROLE), as an until_true poll, so for it the planner's claim on LEGSMOKE-1 has
+// the fixture as its session.
 function helper(name: string, ...args: string[]): number {
+  const byClaim = name === "assistant_said";
   const ran = Bun.spawnSync(
     [
       "bash",
       "-c",
       `set -Eeuo pipefail
 root=${JSON.stringify(root)}
-claim_session_text() { cat -- "$SESSION"; }
+${byClaim ? 'claim_session_text() { cat -- "$SESSION"; }' : fn("session_jq")}
 ${fn(name)}
 "$@"`,
       "stage4b-tools",
       name,
-      "LEGSMOKE-1",
-      "planner",
+      ...(byClaim ? ["LEGSMOKE-1", "planner"] : [fixture]),
       ...args,
     ],
     { env: { ...process.env, SESSION: fixture } }

@@ -30,6 +30,12 @@ def tool_results(name):
          text: ([.message.content[]? | select(.type == "text") | .text] | join("\n")),
          arguments: $calls[.message.toolCallId]}];
 
+# tool_result_quote($lead; $max) is one of tool_results' entries on one line, for a fail line or a
+# note to quote: `error ` when the result is one, then $lead (the call's arguments, or nothing),
+# then its text with each run of whitespace one space, cut to $max characters.
+def tool_result_quote($lead; $max):
+  (if .isError then "error " else "" end) + $lead + (.text | gsub("\\s+"; " ") | .[0:$max]);
+
 # tool_result_texts(name) are the texts of the tool's results that are no error, for a checkpoint's
 # note to quote.
 def tool_result_texts(name): [tool_results(name)[] | select(.isError == false) | .text];
@@ -37,11 +43,12 @@ def tool_result_texts(name): [tool_results(name)[] | select(.isError == false) |
 # tool_ran(name) is whether one call of the tool returned without error.
 def tool_ran(name): any(tool_results(name)[]; .isError == false);
 
-# tool_result_said(name; $text) is whether one call of the tool returned without error with $text
-# in its text, literally and case-sensitively.
-def tool_result_said(name; $text): any(tool_result_texts(name)[]; contains($text));
-
-# tool_result_answered(name; $args; $text) is tool_result_said for the calls whose arguments carry
-# $args: the hover of one file among a tool's hovers, the read of one skill:// among its reads.
+# tool_result_answered(name; $args; $text) is whether one call of the tool whose arguments carry
+# $args returned without error with $text in its text, literally and case-sensitively: the hover of
+# one file among a tool's hovers, the read of one skill:// among its reads.
 def tool_result_answered(name; $args; $text):
   any(tool_results(name)[]; .isError == false and (.arguments | contains($args)) and (.text | contains($text)));
+
+# tool_result_said(name; $text) is tool_result_answered for every call of the tool, whatever its
+# arguments: they are always JSON text, and every string contains "".
+def tool_result_said(name; $text): tool_result_answered(name; ""; $text);
