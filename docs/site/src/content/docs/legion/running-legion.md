@@ -121,13 +121,16 @@ What each part is for:
   every new issue workspace leaves out of its checkout, under either runtime, so a large tree of
   files no issue changes is not written once per workspace on the tree volume. A new workspace is
   created with nothing checked out and then given jj sparse patterns that name every other entry
-  at its starting commit. A workspace that already exists keeps its patterns. A worker that needs a
-  left-out path runs `jj sparse set --add <path>` in its own workspace. jj does not record a file
-  written outside the patterns, so the role prompt tells each worker to add a path before writing
-  under it. The worker image's jj marks each left-out path skip-worktree in the workspace's Git
-  index, so `git status` does not list it as deleted; a worker still records changes with jj, never
-  `git add -A` or `git commit`. A path that a later commit adds beside a left-out one is not
-  checked out until a worker adds it. `.legion`, where handoffs are written, cannot be left out.
+  at its starting commit, plus `.legion`, where handoffs are written, which an issue branch starts
+  without and which cannot be left out. When no listed path is in the starting commit, the
+  workspace checks out everything. A workspace that already exists keeps its patterns. A worker that
+  needs a left-out path runs `jj sparse set --add <path>` in its own workspace. jj does not record a
+  file written outside the patterns, so the role prompt tells each worker to add a path before
+  writing under it, including a new top-level path or one beside a left-out path. The worker
+  image's jj marks each left-out path skip-worktree in the workspace's Git index, so `git status`
+  does not list it as deleted; a worker still records changes with jj, never `git add -A` or
+  `git commit`. A path that a later commit adds beside a left-out one is not checked out until a
+  worker adds it.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
