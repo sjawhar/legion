@@ -91,8 +91,9 @@ demo-read-token-value
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
 ```
 
-The last command waits for approval. In the third shell, list what waits on the approver and
-approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
+The last command waits for approval, and names who approves it (`waiting for ada@example.com to
+approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
+on the approver and approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
 shows the output), and the command runs:
 
 ```console
