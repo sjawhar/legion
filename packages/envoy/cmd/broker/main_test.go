@@ -93,14 +93,7 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 // Listen would still refuse eventually, but only after already printing that line and binding a
 // real socket.
 func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
-	binPath := filepath.Join(t.TempDir(), "broker")
-	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
-	}
-
-	cmd := exec.Command(binPath)
+	cmd := exec.Command(buildBroker(t))
 	cmd.Env = append(append(os.Environ(), productionEnv...),
 		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
@@ -220,15 +213,23 @@ func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	cmd := exec.Command(buildBroker(t))
-	cmd.Env = append(append(append(os.Environ(), productionEnv...), noAWSEnv(t)...),
+	addr, _ := startBroker(t, append(noAWSEnv(t),
 		"BROKER_DATABASE_URL="+parsed.String(),
 		"PGPASSFILE="+passfile,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
 		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
-	)
+	)...)
+	requireHealthy(t, addr)
+}
+
+// startBroker builds and starts the broker binary with productionEnv and env, stops it with
+// SIGTERM when t ends, and returns the address its "broker listening" line names and its log up
+// to that line.
+func startBroker(t *testing.T, env ...string) (addr, boot string) {
+	t.Helper()
+	cmd := exec.Command(buildBroker(t))
+	cmd.Env = append(append(os.Environ(), productionEnv...), env...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +241,14 @@ func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		_ = cmd.Wait()
 	})
-	addr := waitForBoundAddress(t, stderr)
+	var log strings.Builder
+	addr = waitForBoundAddress(t, io.TeeReader(stderr, &log))
+	return addr, log.String()
+}
+
+// requireHealthy fails t unless GET /healthz at addr answers 200.
+func requireHealthy(t *testing.T, addr string) {
+	t.Helper()
 	resp, err := http.Get("http://" + addr + "/healthz")
 	if err != nil {
 		t.Fatalf("GET http://%s/healthz: %v", addr, err)
@@ -306,13 +314,6 @@ func waitForBoundAddress(t *testing.T, stderr io.Reader) string {
 func TestMainLogsRealBoundAddress(t *testing.T) {
 	databaseURL := storetest.URL(t)
 
-	binPath := filepath.Join(t.TempDir(), "broker")
-	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
-	}
-
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
 	const key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 	const fakeSecrets = `{"secrets": [
@@ -324,34 +325,19 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(binPath)
-	cmd.Env = append(append(os.Environ(), productionEnv...),
+	addr, boot := startBroker(t,
 		"BROKER_DATABASE_URL="+databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
 		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
 		"BROKER_SERVICES=example-service=system:serviceaccount:example:example-sa",
 	)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-	})
-
-	var boot strings.Builder
-	addr := waitForBoundAddress(t, io.TeeReader(stderr, &boot))
 	refused := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ERROR agent secret policy refused name=example/agent-secrets/untagged-key reason=owner-tag-malformed$`)
-	if !refused.MatchString(boot.String()) {
-		t.Fatalf("boot log has no refusal line matching %s:\n%s", refused, boot.String())
+	if !refused.MatchString(boot) {
+		t.Fatalf("boot log has no refusal line matching %s:\n%s", refused, boot)
 	}
-	if strings.Contains(boot.String(), "name=example/agent-secrets/service-key") {
-		t.Fatalf("boot log refuses the secret example-service owns, which BROKER_SERVICES registers:\n%s", boot.String())
+	if strings.Contains(boot, "name=example/agent-secrets/service-key") {
+		t.Fatalf("boot log refuses the secret example-service owns, which BROKER_SERVICES registers:\n%s", boot)
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -364,14 +350,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 		t.Fatalf("logged address %q: want a real, nonzero port, got %q", addr, port)
 	}
 
-	resp, err := http.Get("http://" + addr + "/healthz")
-	if err != nil {
-		t.Fatalf("GET http://%s/healthz: %v", addr, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET http://%s/healthz: status %d, want 200", addr, resp.StatusCode)
-	}
+	requireHealthy(t, addr)
 
 	reread, err := http.Post("http://"+addr+"/v1/secrets/SERVICE_KEY/reread", "application/json", nil)
 	if err != nil {
