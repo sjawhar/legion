@@ -62,10 +62,6 @@ func newBranchGitHub(t *testing.T, rt *fake.Runtime, answer func() (int, string)
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/git/ref/heads/main":
 			_, _ = io.WriteString(w, `{"ref":"refs/heads/main","object":{"sha":"`+branchMainCommit+`","type":"commit"}}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/git/trees/"+branchMainCommit:
-			// No row here carries a .legion/ left on main's tree, so Create strips none of it and
-			// branches at branchMainCommit directly, as every row below asserts.
-			_, _ = io.WriteString(w, `{"sha":"`+branchMainCommit+`","tree":[]}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/widgets/git/refs":
 			var body struct{ Ref, SHA string }
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
