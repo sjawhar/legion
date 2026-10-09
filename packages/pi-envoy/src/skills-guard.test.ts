@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
+import { dispatchToolSpecs } from "@legion/contracts";
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
@@ -10,6 +11,7 @@ import {
   brokenRelativeLinks,
   brokenSkillLinks,
   bundledAgents,
+  files,
   longSkillBodies,
   misnamedSkills,
   oversizedFiles,
@@ -25,6 +27,10 @@ import {
 // its prepack stages it. A `skill://` link resolves by name through Oh My Pi's discovery, so it is
 // held to the repository's skills/, where both plugins' skills live.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
+const skillAndPromptRoots = [
+  repoSkillsRoot,
+  path.join(REPO_ROOT, "packages/daemon/internal/prompts"),
+];
 const packageRoot = path.resolve(import.meta.dir, "..");
 // LEGION_TEST_OMP names the pinned Oh My Pi binary, as in extensions/dispatch-first-omp.test.ts: the
 // fork pin CI's pi-envoy job installs. A run without one skips the rule that reads it, except on
@@ -62,6 +68,26 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   // characters; 6,000 leaves room for a longer install path and a later edit.
   expect(readDispatchFirstContext(file).length).toBeLessThan(6_000);
   expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
+});
+
+// Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
+// to call a native tool it no longer has: each names the command (`dispatch ask`) instead.
+test("no skill or daemon prompt names a native Dispatch tool", () => {
+  const toolName = new RegExp(`\\b(${dispatchToolSpecs.map((spec) => spec.name).join("|")})\\b`);
+  const named = skillAndPromptRoots
+    .flatMap(files)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) =>
+      readFileSync(file, "utf8")
+        .split("\n")
+        .flatMap((line, index) => {
+          const match = toolName.exec(line);
+          return match === null
+            ? []
+            : [`${path.relative(REPO_ROOT, file)}:${index + 1}: ${match[0]}`];
+        })
+    );
+  expect(named).toEqual([]);
 });
 
 test("every skill://<name>/<path> link names a file that exists, and its #anchor a heading in it", () => {

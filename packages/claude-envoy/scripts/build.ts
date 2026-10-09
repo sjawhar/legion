@@ -18,10 +18,12 @@ const repoRoot = resolve(packageRoot, "..", "..")
  *  itself without needing a real file on disk. */
 const pinnedBunVersion = (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim()
 
-/** Output name -> source entrypoint, relative to the package root. */
+/** Output name -> source entrypoint, relative to the package root. `dispatch` is the `dispatch`
+ *  CLI that `bin/dispatch` runs, built from the shared library's entry. */
 export const BUNDLE_ENTRYPOINTS = {
   "envoy-channel": "bin/envoy-channel.ts",
   "session-hook": "hooks/session-hook.ts",
+  dispatch: "../envoy-client/bin/dispatch.ts",
 } as const
 
 /**

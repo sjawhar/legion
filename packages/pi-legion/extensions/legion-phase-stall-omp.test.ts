@@ -291,7 +291,7 @@ test.skipIf(omp === undefined && !onActions)(
     expect(userText(turns[1] as Request)).toContain(
       "You just said you are waiting on a human for something no open ask in Dispatch covers."
     );
-    expect(userText(turns[1] as Request)).toContain("dispatch_ask");
+    expect(userText(turns[1] as Request)).toContain("dispatch ask");
     const selfChecks = pane.selfChecks();
     expect(selfChecks).toHaveLength(1);
     expect(userText(selfChecks[0] as Request)).toContain(heldQuestion);

@@ -62,8 +62,7 @@ export function toolResults(entries: SessionEntry[]): string[] {
   });
 }
 
-/** Dispatch's answer when `dispatch_issue` creates an issue, whatever reached it: a top-level
- * `write` to the `xd://dispatch_issue` device, the same inside an `eval` cell, or a host that calls
- * the tool by name. A refusal reads `Not created:`, which the capital and the key after it keep
- * from matching. */
+/** Dispatch's answer when `dispatch issue` creates an issue, whatever reached it: the command in a
+ * `bash` call, the same run from inside an `eval` cell, or a host that calls the tool by name. A
+ * refusal reads `Not created:`, which the capital and the key after it keep from matching. */
 export const CREATED = /\bCreated ([A-Z][A-Z0-9]*-\d+):/;

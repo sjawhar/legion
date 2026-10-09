@@ -90,8 +90,9 @@ export function AgentConversationPage(): ReactNode {
   // carries untagged shows twice (`packages/pi-envoy/AGENTS.md`, the phase-worker section, says
   // when). A BTW, an issue message, and any message to a session that takes no user turn from
   // Envoy (a Claude Code session) arrive as notices the stream has no frame for, and the session
-  // answers them through dispatch_message, which the stream shows only as that tool call. Without
-  // these the thread would show replies to messages the human cannot see, and no replies at all.
+  // answers them with a `dispatch message` command, which the stream shows only as a `bash` tool
+  // call whose arguments hold that command. Without these the thread would show replies to
+  // messages the human cannot see, and no replies at all.
   // Seeing them here is reading them.
   const queryClient = useQueryClient();
   const stored = useQuery(agentMessagesQuery(sessionId));

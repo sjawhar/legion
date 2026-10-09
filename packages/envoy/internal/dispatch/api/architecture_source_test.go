@@ -455,7 +455,7 @@ func TestArchitectureSourceRePutRevalidatesBeforeWriting(t *testing.T) {
 	}
 }
 
-// The Refresh route (and the dispatch_architecture_sync tool that rides it):
+// The Refresh route (and the `dispatch architecture-sync` command that rides it):
 // a happy import answers the updated row; a rejected model still answers 200
 // with the reason on the row, because the HTTP call itself succeeded and the
 // previous projection stays up.
@@ -482,7 +482,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 		t.Fatalf("put source: status=%d body=%s", saved.Code, saved.Body.String())
 	}
 
-	// authAny: an agent bearer may refresh, which is how the tool reaches it.
+	// authAny: an agent bearer may refresh, which is how the command reaches it.
 	synced := agentRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-source/sync", nil, "agent-token")
 	if synced.Code != http.StatusOK {
 		t.Fatalf("sync: status=%d body=%s", synced.Code, synced.Body.String())

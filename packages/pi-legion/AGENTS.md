@@ -82,7 +82,8 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 16 for contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578), after
+number is 17 for contract 17's `dispatch` command instructions in every daemon role prompt
+(LEGION-588), after contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578),
 contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract 14's daemon-launched
 controller pod (LEGION-592) and contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES`
 payload (LEGION-583); the Envoy plugin's manifest carries no `legion` key, and the gate reads only

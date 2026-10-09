@@ -289,7 +289,7 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 		switch {
 		case len(parts) == 2:
 			return Ref{Kind: "issue", IssueKey: key, ID: key}, true
-		// A document page of the issue, which `dispatch_search` links to with the item in its query
+		// A document page of the issue, which `dispatch search` links to with the item in its query
 		// for an anchored comment or ask.
 		case len(parts) == 3 && parts[2] == "spec":
 			return documentItem(Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, query)

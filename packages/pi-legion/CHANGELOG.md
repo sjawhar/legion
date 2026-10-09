@@ -26,6 +26,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   grant, so a `legion` command from its bash is the parent's — today on the parent's last per-call
   grant, within its 60 seconds, which LEGION-631 replaces with the role's mounted token file.
   `legion.daemonApiVersion` is unchanged.
+- A `dispatch` command's quoted here-document is data on its stdin: the operation-log pane rule
+  reads only the command's head line, so a message body that names `jj abandon` is not refused,
+  and the command mints no grant, since the CLI authenticates with the pane's Dispatch token. The
+  head is found by one scan held to bash: a here-document ends only where bash ends it, at a line
+  that is exactly its delimiter, with leading tabs stripped under `<<-` alone and no line's
+  trailing blanks dropped; the scan splits words on space and tab only, never a no-break space,
+  byte-order mark or ideographic space, which bash reads as part of a word; and a head carrying
+  `$()`, backticks, a redirect, a comment or a second command is no `dispatch` head, so the whole
+  command is held to the pane rule. A test holds the scan to a real bash over 2,822 generated
+  commands.
+- `legion.daemonApiVersion` is 17 (LEGION-588). Contract 17 moves the daemon's role prompts from
+  native Dispatch tools to the `dispatch` command bundled by `@sjawhar/pi-envoy`; pair this
+  release with a Go `legion` built from the same commit, so an agent is never instructed to use a
+  surface its installed plugin does not provide. The daemon's image probe refuses a worker image
+  whose plugin declares 16 (the 8.4.0 release, whose `@sjawhar/pi-envoy` registers the native
+  tools and bundles no `dispatch`).
 - No Legion handoff reaches the default branch (LEGION-605). The `legion-retro` skill ends retro
   with one final commit that removes the issue's `.legion/<issue>/`, pushed with its
   `docs/solutions/` commit in one `legion push`; the `legion-worker` and `legion-architect` skills
@@ -66,7 +82,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 16 (LEGION-578, above; 15 since LEGION-462, 14 since LEGION-592). The Envoy messaging and Dispatch tools every session loads are
+  release declares 17 (LEGION-588, above; 16 since LEGION-578, 15 since LEGION-462, 14 since
+  LEGION-592). The Envoy messaging and Dispatch command every session uses are
   `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
   through the in-process interface the Envoy entry publishes (`@legion/pi-shared/interface`, version
