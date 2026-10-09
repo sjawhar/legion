@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,12 +241,12 @@ func TestCopiedAskSourcesAreTheDocumentOwnersOwn(t *testing.T) {
 	}
 }
 
-// openAsksUnder is the documents holding an open ask under blockID on issue DOC-1.
+// openAsksUnder is the documents holding an open ask under blockID, in the test's own database.
 func openAsksUnder(t *testing.T, service *Service, blockID string) []string {
 	t.Helper()
 	rows, err := service.store.Pool.Query(context.Background(), `
 		select block_artifact_id::text from asks
-		where issue_key = 'DOC-1' and block_id = $1 and state = 'open' order by block_artifact_id
+		where block_id = $1 and state = 'open' order by block_artifact_id
 	`, blockID)
 	if err != nil {
 		t.Fatalf("read open asks under %s: %v", blockID, err)
@@ -461,6 +462,220 @@ func sharesOneAsk(t *testing.T, service *Service, copies []string, opener string
 		}
 	}
 	return true
+}
+
+// settlementBarrier is a settlement hook (afterSettleLock, afterSettleReconcile) that holds each
+// settlement calling it until all n have called it or wait on their project's copy lock
+// (lockProjectCopies). It runs on settlement's goroutine, so a failed read is reported with
+// t.Errorf and lets the settlement go on.
+func settlementBarrier(t *testing.T, service *Service, n int) func(string) {
+	t.Helper()
+	var mu sync.Mutex
+	arrived := 0
+	return func(string) {
+		mu.Lock()
+		arrived++
+		mu.Unlock()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			var waiting int
+			if err := service.store.Pool.QueryRow(context.Background(), `
+				select count(*) from pg_stat_activity
+				where datname = current_database() and wait_event_type = 'Lock' and query like '%copied-asks:%'
+			`).Scan(&waiting); err != nil {
+				t.Errorf("count the settlements waiting on the copy lock: %v", err)
+				return
+			}
+			mu.Lock()
+			reached := arrived
+			mu.Unlock()
+			if reached+waiting >= n {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		t.Errorf("settlements never all reached the barrier or the copy lock")
+	}
+}
+
+// roomGeneration is document's room generation once its live updates are durable, the generation a
+// settlement of it runs at (settleCurrentGeneration).
+func roomGeneration(t *testing.T, service *Service, document string) uint64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, document); err != nil {
+		t.Fatalf("wait for live updates to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, document); err != nil {
+		t.Fatalf("wait for live updates to become durable: %v", err)
+	}
+	state := service.room(document)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.roomGeneration
+}
+
+// Three copies of one open ask on a project's documents, settling at once after settlement retracts
+// the ask, open one ask between them. A project document's owner row is the document itself, so no
+// row orders its siblings' settlements; the project's copy lock does. Each settlement is held past
+// its room lock until all three hold theirs, and past its reconciliation until the others have
+// reconciled too or wait on the copy lock: without the lock all three would read their copy sources
+// before any committed, and each would open an ask.
+func TestThreeProjectCopiesOfARetractedAskSettlingAtOnceShareOneAsk(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	shared := ":::ask{#shared urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	original := createProjectDocument(t, service.store, "# Original")
+	seedServiceText(t, service, original, "Context\n\n"+shared)
+	settleCurrentGeneration(t, service, original)
+	var source string
+	if err := service.store.Pool.QueryRow(context.Background(), `select id::text from asks where block_artifact_id = $1`, original).Scan(&source); err != nil {
+		t.Fatalf("read the source ask: %v", err)
+	}
+	copies := make([]string, 3)
+	for index := range copies {
+		copies[index] = createProjectDocument(t, service.store, "# Copy")
+		seedServiceText(t, service, copies[index], shared)
+		settleCurrentGeneration(t, service, copies[index])
+		requireCopiedStates(t, service, copies[index], `copied_from="`+source+`"`)
+	}
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = tree.Children[:1]
+		return tree
+	})
+	settleCurrentGeneration(t, service, original)
+	if pending := pendingSettlements(t, service); pending != 3 {
+		t.Fatalf("pending settlements after the retraction = %d, want the three copies'", pending)
+	}
+
+	generations := make([]uint64, len(copies))
+	for index, copy := range copies {
+		generations[index] = roomGeneration(t, service, copy)
+	}
+	service.afterSettleLock = settlementBarrier(t, service, len(copies))
+	service.afterSettleReconcile = settlementBarrier(t, service, len(copies))
+	var settling sync.WaitGroup
+	for index, copy := range copies {
+		settling.Go(func() { service.settleRoom(copy, generations[index]) })
+	}
+	settling.Wait()
+	service.afterSettleLock, service.afterSettleReconcile = nil, nil
+
+	open := openAsksUnder(t, service, "shared")
+	shown := map[string]string{}
+	for _, copy := range copies {
+		text, err := service.Text(context.Background(), copy)
+		if err != nil {
+			t.Fatalf("read a copy: %v", err)
+		}
+		shown[copy] = text
+	}
+	pending := pendingSettlements(t, service)
+	if len(open) != 1 || pending != 0 || !sharesOneAsk(t, service, copies, open[0], shown) {
+		t.Fatalf("open asks under shared = %v, pending settlements = %d, want one open ask on a copy that the other two name, none pending; copies:\n%v", open, pending, shown)
+	}
+}
+
+// A copy settling while its source is answered: the answer runs in the answer route's order (the
+// source's owner row and ask row, then SettleCopiesOf, which marks the copy owed and holds its
+// pending row, then the source's block, then the ask.answered event), and the copy's settlement,
+// whose block the copy no longer holds, takes no copy lock and so runs beside it. The settlement
+// deletes its own pending row before it appends an event, so it waits for the answer holding no
+// lock the answer needs, and both finish. Deleting the row after its events would hold the events'
+// commit-order lock, which the answer's event waits for, while waiting on the row the answer holds.
+func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	shared := ":::ask{#shared urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	original := createProjectDocument(t, service.store, "# Original")
+	seedServiceText(t, service, original, "Context\n\n"+shared)
+	settleCurrentGeneration(t, service, original)
+	source, err := ScanAsk(service.store.Pool.QueryRow(ctx, `select `+AskColumns+` from asks a where a.block_artifact_id = $1`, original))
+	if err != nil {
+		t.Fatalf("read the source ask: %v", err)
+	}
+	copied := createProjectDocument(t, service.store, "# Copy")
+	seedServiceText(t, service, copied, "Kept\n\n"+shared)
+	settleCurrentGeneration(t, service, copied)
+	requireCopiedStates(t, service, copied, `copied_from="`+source.ID+`"`)
+	// The copy's live text drops the block while its latest version still holds it, so the answer
+	// marks the copy owed and the copy's settlement has no copy to read the source of.
+	editLiveTree(t, service, copied, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = tree.Children[:1]
+		return tree
+	})
+	generation := roomGeneration(t, service, copied)
+
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the answer: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	answering, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := tx.Exec(ctx, `select 1 from artifacts where id = $1 for no key update`, original); err != nil {
+		t.Fatalf("lock the source's owner row: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `select 1 from asks where id = $1 for no key update`, source.ID); err != nil {
+		t.Fatalf("lock the source ask: %v", err)
+	}
+	if err := service.SettleCopiesOf(answering, source); err != nil {
+		t.Fatalf("mark the copies owed: %v", err)
+	}
+
+	settled := make(chan error, 1)
+	go func() {
+		service.settleRoom(copied, generation)
+		settled <- nil
+	}()
+	waitForLockWait(t, ctx, service.store, "%delete from doc_settlements_pending%", settled)
+
+	region := "eu-west-1"
+	answer := model.AskAnswer{User: alice.ID, Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
+	if err := service.SetBlockAttributes(answering, original, "shared", map[string]any{
+		"state": "answered", "answered_by": alice.ID, "answered_at": answer.At.Format(time.RFC3339Nano),
+		"selected": answer.Selected, "answer": region,
+	}, alice); err != nil {
+		t.Fatalf("write the answer into the source's block: %v", err)
+	}
+	encoded, _ := json.Marshal(answer)
+	if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
+		t.Fatalf("answer the source ask: %v", err)
+	}
+	source.State, source.Answer = "answered", &answer
+	if _, err := service.events.Append(ctx, tx, model.Event{
+		ArtifactID: &original, Type: "ask.answered", Actor: alice, Payload: model.NewAskEventPayload(source, model.ReferenceChanges{}),
+	}); err != nil {
+		t.Fatalf("append the answer's event: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the answer: %v", err)
+	}
+	select {
+	case <-settled:
+	case <-ctx.Done():
+		t.Fatal("the copy's settlement never finished")
+	}
+	state := service.room(copied)
+	state.mu.Lock()
+	failures := state.settleFailures
+	state.mu.Unlock()
+	if failures != 0 {
+		t.Fatalf("the copy's settlement failed %d time(s) beside the answer, want none", failures)
+	}
+	var text string
+	if err := service.store.Pool.QueryRow(ctx, `
+		select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, copied).Scan(&text); err != nil {
+		t.Fatalf("read the copy's latest version: %v", err)
+	}
+	if strings.Contains(text, "#shared") {
+		t.Fatalf("the copy's settlement did not version its text without the block:\n%s", text)
+	}
 }
 
 // The earliest asked match is the source whichever wording it matched on: ask A asks a question

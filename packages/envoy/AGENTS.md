@@ -1546,21 +1546,31 @@ the server-owned `copied_from` and its document's `dispatch://` address (`refs.A
 there, since the copy has no ask row an answer or resolve route could reach and settlement only
 reads the source's; `dispatch request-approval`'s refusal and the dashboard's decision card name
 the source, its document and its state from those attributes, reading no ask. A copy shows its
-source as of its own last settlement, and settles when its own content changes, when a restart
-resumes a settlement it owed, or when settlement retracts its source: a retraction marks owed (one
-`doc_settlements_pending` upsert for every copy), and arms, the settlement of every other document
-of the owner whose latest version holds the block with no ask of its own under that id
-(`owedCopiesOfRetracted`). The first of those to settle opens the block's own ask, credited to the
-author who wrote the block into it, whom the room keeps owed while the block is a copy; every other
-copy then matches that ask and names it, so copies of one owner share one ask once their source is
-retracted and the question waits in one place, and a block pasted elsewhere and then cut, in either
-order, is open in one place. An answer to the source reaches a copy only at the copy's next
-settlement. A copy whose text is changed and an id no ask of the owner indexes open an ask as any
-new block does (LEGION-651). A project document's lookups read `artifacts_project_documents`
-(migration 0085), an issue document's `artifacts_issue_key`, and the owed copies' latest versions
-`artifact_versions`' unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding
-the owed copies reads, with `LIKE`, the latest markdown of every other document of the owner, so a
-retraction costs in proportion to the owner's markdown bytes.
+source as of its own last settlement, and settles again when its own content changes, when a
+restart resumes a settlement it owed, when its source is answered or resolved, and when settlement
+retracts its source: the answer and resolve routes (`SettleCopiesOf`) and a retracting settlement
+(`nameVersion`) mark owed, in one `doc_settlements_pending` upsert (`markSettlementPending`), and
+arm once they commit, the settlement of every other document of the owner whose latest version
+holds the block with no ask of its own under that id (`owedCopiesOf`). After a retraction the first
+of those to settle opens the block's own ask, credited to the author who wrote the block into it,
+whom the room keeps owed while the block is a copy; every other copy then matches that ask and
+names it, so copies of one owner share one ask once their source is retracted and the question
+waits in one place, and a block pasted elsewhere and then cut, in either order, is open in one
+place. That needs the owner's copies to settle one at a time: an issue's documents do, under their
+issue's row (`lockArtifactOwner`), but a project document's owner row is the document itself, so a
+project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
+takes a transaction advisory lock keyed on the project (`lockProjectCopies`,
+`hashtext('copied-asks:' || project)`), as `lockProjectRankAllocation` does, so nothing that locks
+the project's row waits on it; two projects whose keys collide only serialise their copy
+bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before the events'
+commit-order lock, and a settlement deletes its own pending row before it appends its first event,
+since a route marking that document owed holds the row while it waits for the commit-order lock. A
+copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0085), an
+issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
+unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
+reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an
+answer or a resolution of a block ask costs in proportion to the owner's markdown bytes.
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.

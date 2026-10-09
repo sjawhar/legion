@@ -151,10 +151,9 @@ filename can be another's slug (`plan v2` takes `plan-v2`, then a document named
 A document you upload holding a copy of another document's `:::ask` block, under the same `#id` and with the same
 question, options, `multiple` and urgency, on the same issue (or the same project for a project document), opens no
 ask: the copy shows the state and answer of the ask it was copied from, names it and its document in `copied_from` and
-`copied_from_document`, and cannot be answered there. Answer the original. The copy shows the original as of the copy's
-last settlement, which an edit to the copy brings up to date. A copy whose text you change opens a new ask. Once the
-original's block leaves its document, its copies share one new ask: the first copy to settle opens it and the others
-name it.
+`copied_from_document`, and cannot be answered there. Answer the original: its answer or resolution shows on the copy a
+few seconds later. A copy whose text you change opens a new ask. Once the original's block leaves its document, its
+copies share one new ask: the first copy to settle opens it and the others name it.
 
 A picture meant to be seen inline in a message, comment or ask is not uploaded with `dispatch artifact`: pass its local
 path with that command's `--image`, once per picture (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a

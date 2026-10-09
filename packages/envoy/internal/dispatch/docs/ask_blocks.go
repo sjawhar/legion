@@ -121,7 +121,7 @@ func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, e
 // nameVersion completes the reconciliation at the version the settled document is at, writing
 // the retractions whose reason names it and stamping it into every event that carries one, and
 // marks owed the settlement of every other document showing a copy of an ask it retracts
-// (owedCopiesOfRetracted).
+// (owedCopiesOf).
 func (r *settlementReconciliation) nameVersion(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -148,7 +148,7 @@ func (r *settlementReconciliation) nameVersion(
 			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
 		))
 	}
-	copies, err := owedCopiesOfRetracted(ctx, tx, artifactID, owner, r.retracted)
+	copies, err := owedCopiesOf(ctx, tx, artifactID, owner, r.retracted)
 	if err != nil {
 		return err
 	}
@@ -337,6 +337,14 @@ func (s *Service) reconcileAskBlocks(
 			continue
 		}
 		reconciled.retracted = append(reconciled.retracted, ask)
+	}
+	// A retraction marks the copies of what it retracts owed (nameVersion, owedCopiesOf) under the
+	// project's copy lock, which is taken here, before this settlement's repairs append its update
+	// and lock its own pending row: the copy lock comes before any pending row.
+	if len(reconciled.retracted) > 0 {
+		if err := lockProjectCopies(ctx, tx, owner); err != nil {
+			return settlementReconciliation{}, err
+		}
 	}
 	return reconciled, nil
 }

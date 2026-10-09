@@ -1486,6 +1486,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if versioning {
 		settledVersion++
 	}
+	// Every update this settlement read is settled once it commits, so the row that left the
+	// settlement to a later load goes with that commit. It goes before the first event this
+	// settlement appends: a transaction marking this document owed as a copy (owedCopiesOf) holds
+	// its row while it waits for the events' commit-order lock, which this settlement would then be
+	// holding. The pending authors stay unless this settlement's version lists them (deleted
+	// below): a settlement that writes no version lists no one.
+	if err := clearSettlementPending(ctx, tx, room); err != nil {
+		abandon(err)
+		return
+	}
 	if err := reconciliation.nameVersion(ctx, tx, room, owner, settledVersion); err != nil {
 		abandon(err)
 		return
@@ -1529,14 +1539,6 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 	}
 	if err := appendEvents(reconciliation.events); err != nil {
-		abandon(err)
-		return
-	}
-	// Every update this settlement read is settled once it commits, so the row that left the
-	// settlement to a later load goes with that commit. The pending authors stay unless this
-	// settlement's version listed them (deleted above): a settlement that writes no version lists
-	// no one.
-	if err := clearSettlementPending(ctx, tx, room); err != nil {
 		abandon(err)
 		return
 	}

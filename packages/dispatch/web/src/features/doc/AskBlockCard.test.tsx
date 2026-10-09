@@ -305,6 +305,34 @@ test("three copied blocks render their sources without reading one ask", () => {
   }
 });
 
+test("a copy whose source was answered after it settled shows the answer settlement wrote into it", () => {
+  // Answering the source settles its copies again, which writes the answer into each copied block.
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      answer: "After the fix lands.",
+      answered_at: new Date(Date.now() - 60_000).toISOString(),
+      answered_by: "bob",
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+      selected: ["Ship"],
+      state: "answered",
+    }),
+  });
+  try {
+    expect(card.header.getByText(/Copied from/).textContent).toBe(
+      "Copied from CORE-1 plan, answered there"
+    );
+    expect(card.section.querySelector("[data-dispatch-ask-answer]")?.textContent).toBe(
+      "After the fix lands."
+    );
+    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
 test("a block with an ask of its own names no source, whatever its attributes hold", () => {
   const card = renderCard({
     node: askNode({

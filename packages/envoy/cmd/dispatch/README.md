@@ -436,8 +436,9 @@ Migration `0085_artifacts_project_documents` adds the partial index
 `artifacts_project_documents`, on `artifacts (project_key)` where `issue_key` and `session_id` are
 null: a project's unlinked documents. Settlement of a project document holding an ask block no ask
 of its own indexes reads its project's other documents through it, for the ask the block may be a
-copy of and for the copies of an ask it retracts (LEGION-651). Building it takes `SHARE` on
-`artifacts`; its census answers `0` because it refuses and rewrites no row.
+copy of and for the copies of an ask it retracts, and so do the answer and resolve routes, for the
+copies of the ask they close (LEGION-651). Building it takes `SHARE` on `artifacts`; its census
+answers `0` because it refuses and rewrites no row.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

@@ -27,10 +27,11 @@ import (
 // new block does. Of several sources, the earliest asked is the original, whichever wording it
 // matched on, since a copy that opened asks of its own before copies were recognised came after it;
 // two unrelated asks of one owner under one id asking the same thing are therefore one question to
-// a copy, the earlier. The copy shows its source's state as of this settlement; answering the
-// source later changes the copy at the copy's next settlement. The rows are read, never locked or
-// written: settlement holds this document's owner row and room lock, and a source's answer route
-// takes the source's ask row before its own document's room.
+// a copy, the earlier. The copy shows its source's state as of its own last settlement, and an
+// answer or a resolution of the source settles it again (SettleCopiesOf). The rows are read, never
+// locked or written: settlement holds this document's owner row and room lock, and a source's
+// answer route takes the source's ask row before its own document's room. A project document's
+// settlement also takes its project's copy lock first (lockProjectCopies).
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -47,6 +48,9 @@ func copiedAskSources(
 	}
 	if len(unindexed) == 0 {
 		return nil, nil
+	}
+	if err := lockProjectCopies(ctx, tx, owner); err != nil {
+		return nil, err
 	}
 	query, ownerKey := copiedAskSourcesQuery(owner)
 	found, err := tx.Query(ctx, query, unindexed, artifactID, ownerKey)
@@ -112,6 +116,32 @@ type copiedSource struct {
 	document string
 }
 
+// lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
+// settlement's copy-source read (copiedAskSources), and the owed copies a settlement's retraction
+// or a source's answer or resolution marks (owedCopiesOf). Without it two copies of one retracted
+// ask settling at once would each find no source and each open an ask. An issue's documents need
+// no lock of their own, since every one of those transactions already holds their issue's row
+// (lockArtifactOwner, requireOpenOwner); a project document's owner row is the document itself,
+// which no sibling takes. The lock is a transaction advisory lock keyed on the project, as
+// lockProjectRankAllocation's is, so read marks, event appends and issue creation, which lock the
+// project's row, never wait on a settlement. hashtext is 32 bits wide, so two projects can share a
+// key: they then serialise their copy bookkeeping, and nothing else. Every holder takes it before
+// any doc_settlements_pending row and before the events' commit-order lock: a settlement right
+// after its owner row and room lock, an answer or a resolution after its owner row and ask row. The
+// copy-source read is the next statement, so under READ COMMITTED its snapshot holds every ask a
+// sibling's settlement committed while this one waited, and the ask createAskBlock opens commits in
+// this transaction, which holds the lock until then. A settlement whose blocks all have asks of
+// their own and that retracts none takes none.
+func lockProjectCopies(ctx context.Context, tx pgx.Tx, owner artifactOwner) error {
+	if owner.IssueKey != nil || owner.Project == "" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('copied-asks:' || $1))`, owner.Project); err != nil {
+		return fmt.Errorf("lock the project's copied asks: %w", err)
+	}
+	return nil
+}
+
 // ownerDocuments is the predicate on artifacts d that selects owner's documents, and the value it
 // binds as $3: the issue's documents (artifacts_issue_key), or for a project document the
 // project's other unlinked documents (artifacts_project_documents, migration 0085); an agent
@@ -160,25 +190,27 @@ func owedCopiesQuery(owner artifactOwner) (string, string) {
 	`, ownerKey
 }
 
-// owedCopiesOfRetracted marks a settlement owed, in tx, for every other document of owner whose
-// latest version holds the block of an ask settlement is retracting with no ask of its own under
-// that block's id, and returns them for the caller to arm once tx commits. Such a block is a copy
-// of the retracted ask, or one its document has not settled yet. A copy has no ask row and shows
-// its source as of its own last settlement, so without this it would go on showing an open
-// question no ask holds until something else settled it: its next settlement skips the retracted
-// source and opens the block's own ask. A document's latest version is read for the block's
-// opener (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for
-// nothing. The pending rows (markSettlementPending's, written here in one statement however many
-// copies there are) keep the debt across a restart, for the resumption to arm.
-func owedCopiesOfRetracted(
+// owedCopiesOf marks a settlement owed, in tx, for every other document of owner whose latest
+// version holds the block of one of asks with no ask of its own under that block's id, and returns
+// them for the caller to arm once tx commits. Such a block is a copy of the ask, or one its
+// document has not settled yet, and shows the ask as of its own last settlement. Settlement calls
+// this for the asks it retracts, whose copies then open the block's own ask, and an answer or a
+// resolution for the ask it closes (SettleCopiesOf), whose copies then show it. A document's latest
+// version is read for the block's opener (`:::ask{#<id> …}`), so one that quotes the opener
+// elsewhere, in code, is settled for nothing. The pending rows (markSettlementPending, one
+// statement however many copies there are) keep the debt across a restart, for the resumption to
+// arm. They are taken under the project's copy lock (lockProjectCopies), and the caller has taken
+// no other pending row and not the events' commit-order lock: a copy's settlement deletes its own
+// row before it appends an event, so the two can wait on each other in only one direction.
+func owedCopiesOf(
 	ctx context.Context,
 	tx pgx.Tx,
 	artifactID string,
 	owner artifactOwner,
-	retracted []model.Ask,
+	asks []model.Ask,
 ) ([]string, error) {
 	var blockIDs, patterns []string
-	for _, ask := range retracted {
+	for _, ask := range asks {
 		if ask.BlockID == nil {
 			continue
 		}
@@ -189,36 +221,64 @@ func owedCopiesOfRetracted(
 	if len(blockIDs) == 0 {
 		return nil, nil
 	}
+	if err := lockProjectCopies(ctx, tx, owner); err != nil {
+		return nil, err
+	}
 	query, ownerKey := owedCopiesQuery(owner)
 	rows, err := tx.Query(ctx, query, blockIDs, artifactID, ownerKey, patterns)
 	if err != nil {
-		return nil, fmt.Errorf("find copies of retracted asks: %w", err)
+		return nil, fmt.Errorf("find copies of asks: %w", err)
 	}
 	var copies []string
 	for rows.Next() {
 		var copy string
 		if err := rows.Scan(&copy); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("scan copy of a retracted ask: %w", err)
+			return nil, fmt.Errorf("scan a copy of an ask: %w", err)
 		}
 		copies = append(copies, copy)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate copies of retracted asks: %w", err)
+		return nil, fmt.Errorf("iterate copies of asks: %w", err)
 	}
 	if len(copies) == 0 {
 		return nil, nil
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id)
-		select unnest($1::uuid[])
-		on conflict (artifact_id) do update
-		set marked_at = now()
-	`, copies); err != nil {
-		return nil, fmt.Errorf("record the pending settlements of copies of retracted asks: %w", err)
+	if err := markSettlementPending(ctx, tx, copies, nil, false, true); err != nil {
+		return nil, err
 	}
 	return copies, nil
+}
+
+// SettleCopiesOf marks owed, in the transaction ctx joined, the settlement of every other document
+// of ask's owner showing a copy of it (owedCopiesOf), and arms each once that transaction commits
+// (Ledger.Commit), so a copy shows an answer or a resolution of its source a settlement delay after
+// it, rather than at its own next edit. ask is a block ask, its BlockID and BlockArtifactID set.
+// The caller holds ask's owner row and ask row, and calls this before it writes the source's block
+// or appends an event: the copy lock and the copies' pending rows come before the source's room
+// lock, its own pending row and the events' commit-order lock.
+func (s *Service) SettleCopiesOf(ctx context.Context, ask model.Ask) error {
+	tx, joined := txFromContext(ctx)
+	if !joined {
+		return errUnjoined
+	}
+	if ask.BlockID == nil || ask.BlockArtifactID == nil {
+		return fmt.Errorf("ask %q is not a block ask", ask.ID)
+	}
+	var owner artifactOwner
+	if err := tx.QueryRow(ctx, `
+		select issue_key, coalesce(project_key, '') from artifacts where id = $1
+	`, *ask.BlockArtifactID).Scan(&owner.IssueKey, &owner.Project); err != nil {
+		return fmt.Errorf("load the ask's document owner: %w", err)
+	}
+	copies, err := owedCopiesOf(ctx, tx, *ask.BlockArtifactID, owner, []model.Ask{ask})
+	if err != nil {
+		return err
+	}
+	ledger := ledgerFrom(ctx)
+	ledger.copies = append(ledger.copies, copies...)
+	return nil
 }
 
 // likeLiteral escapes text for a LIKE pattern, under its default escape character.

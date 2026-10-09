@@ -46,6 +46,9 @@ type Ledger struct {
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
+	// copies are the documents showing a copy of an ask this transaction answered or resolved,
+	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
+	copies []string
 }
 
 type ledgerVersion struct {
@@ -121,6 +124,9 @@ func (l *Ledger) Commit(ctx context.Context) error {
 	}
 	l.publish()
 	l.publishEvents()
+	for _, copy := range l.copies {
+		l.service.scheduleSettle(copy)
+	}
 	return nil
 }
 

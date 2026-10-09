@@ -17370,8 +17370,10 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     if (sourceId === undefined || document === undefined) {
       return [`${named}, whose ask Dispatch has not opened yet`];
     }
-    const ref = resolved.issue !== undefined ? `dispatch://${resolved.issue.key}/ask/${sourceId}` : `${document}/ask/${sourceId}`;
-    return [`${named}, a copy of ask ${ref}, which is open on ${document}: answer it there`];
+    const source = parseDispatchRef(document);
+    const where = source === null ? document : source.owner.kind === "project" ? documentLabel(source.owner.project, source.id) : `${source.owner.issue} ${source.id}`;
+    const ref = source?.owner.kind === "issue" ? dispatchChildRef(dispatchIssueRef(source.owner.issue), "ask", sourceId) : dispatchChildRef(document, "ask", sourceId);
+    return [`${named}, a copy of ask ${ref}, which is open on ${where}: answer it there`];
   });
   if (open.length === 0)
     return;

@@ -1844,7 +1844,9 @@ async function refuseOpenDecisionBlocks(
     if (ask !== undefined) return ask.state === "open" ? [named] : [stillOpen(named, ask.state)];
     // A block copied from another document's ask opens none: settlement names that ask in
     // `copied_from`, its document in `copied_from_document`, and writes its state into the block,
-    // which this version shows open, so the source is where it is answered.
+    // which this version shows open, so the source is where it is answered. The document is named
+    // as the dashboard's decision card names it, its issue key and slug or its project's
+    // `<project>/<slug>`, so the ask's address is the line's one link.
     const attribute = (name: string): string | undefined =>
       openers
         .map((line) => new RegExp(`\\b${name}="([^"]+)"`).exec(line)?.[1])
@@ -1854,11 +1856,18 @@ async function refuseOpenDecisionBlocks(
     if (sourceId === undefined || document === undefined) {
       return [`${named}, whose ask Dispatch has not opened yet`];
     }
+    const source = parseDispatchRef(document);
+    const where =
+      source === null
+        ? document
+        : source.owner.kind === "project"
+          ? documentLabel(source.owner.project, source.id)
+          : `${source.owner.issue} ${source.id}`;
     const ref =
-      resolved.issue !== undefined
-        ? `dispatch://${resolved.issue.key}/ask/${sourceId}`
-        : `${document}/ask/${sourceId}`;
-    return [`${named}, a copy of ask ${ref}, which is open on ${document}: answer it there`];
+      source?.owner.kind === "issue"
+        ? dispatchChildRef(dispatchIssueRef(source.owner.issue), "ask", sourceId)
+        : dispatchChildRef(document, "ask", sourceId);
+    return [`${named}, a copy of ask ${ref}, which is open on ${where}: answer it there`];
   });
   if (open.length === 0) return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;

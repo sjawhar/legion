@@ -329,13 +329,14 @@
   it was copied from, read-only, and names it and its document in the server-owned `copied_from`
   and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
   copied block, answered and resolved ones included. Of several matching asks the earliest asked
-  is the source, whichever wording it matched on. `dispatch request-approval`'s refusal and the
-  dashboard's decision card name the source, its document and its state from those attributes. A
-  copy whose text is changed, or an id no ask of the owner indexes, still opens one, and so do a
-  source's copies once its block leaves its document: settlement of the source retracts its ask
-  and settles every copy, the first opens one ask, credited to whoever wrote the block into it, and
-  the others name that ask. Migration `0085_artifacts_project_documents` adds the partial index a
-  project document's lookups read (LEGION-651).
+  is the source, whichever wording it matched on. Answering or resolving the source reaches its
+  copies a settlement later. `dispatch request-approval`'s refusal and the dashboard's decision card
+  name the source, its document and its state from those attributes. A copy whose text is changed,
+  or an id no ask of the owner indexes, still opens one, and so do a source's copies once its block
+  leaves its document: settlement of the source retracts its ask and settles every copy, the first
+  opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
+  project's documents as on an issue's. Migration `0085_artifacts_project_documents` adds the
+  partial index a project document's lookups read (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

@@ -148,6 +148,13 @@ export function AskBlockCard({
   );
 }
 
+/** Where a copied block's source stands, by the state settlement wrote into the block. */
+const COPY_STATE_LABELS: Record<string, string> = {
+  answered: "answered there",
+  open: "open there",
+  resolved: "resolved there",
+};
+
 /** Where a copied block is answered: the document settlement names in the block's
  * `copied_from_document`, linked at the block, and the source's state there, which settlement
  * wrote into the block. Both come from the block, so the card reads no ask to show them. */
@@ -161,14 +168,7 @@ function CopiedFromLink({
   state: string;
 }): ReactNode {
   const route = parseDispatchReference(copied.document);
-  const there =
-    state === "open"
-      ? "open there"
-      : state === "answered"
-        ? "answered there"
-        : state === "resolved"
-          ? "resolved there"
-          : "closed there";
+  const there = COPY_STATE_LABELS[state] ?? "closed there";
   return (
     <span className="inline-flex items-center gap-x-2" data-dispatch-ask-copied-from={copied.ask}>
       <span aria-hidden="true">·</span>

@@ -32,6 +32,7 @@ type API interface {
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
 	SetAskBlockText(ctx context.Context, artifactID, blockID string, edit AskBlockEdit, actor model.Actor) (AskBlockText, error)
 	ScheduleSettlement(artifactID string)
+	SettleCopiesOf(ctx context.Context, ask model.Ask) error
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error)
 	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error)
 	BlockForQuote(ctx context.Context, artifactID, quote string) (string, error)

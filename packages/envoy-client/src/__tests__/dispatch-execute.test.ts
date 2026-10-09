@@ -4075,8 +4075,9 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n")[1]).toBe(
-        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on dispatch://DSP-42/artifact/plan: answer it there"
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on DSP-42 plan: answer it there"
       );
+      expect(refusal.split("\n")[1].match(/dispatch:\/\//g)).toHaveLength(1);
       expect(refusal).not.toContain("has not opened yet");
       expect(posts).toEqual([]);
     });
@@ -4095,8 +4096,8 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(1, 3)).toEqual([
-        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-b-1-source, which is open on dispatch://DSP-42/spec: answer it there",
-        "- block b-3, a copy of ask dispatch://DSP-42/ask/ask-b-3-source, which is open on dispatch://DSP-42/spec: answer it there",
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-b-1-source, which is open on DSP-42 spec: answer it there",
+        "- block b-3, a copy of ask dispatch://DSP-42/ask/ask-b-3-source, which is open on DSP-42 spec: answer it there",
       ]);
       expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
       expect(posts).toEqual([]);
@@ -4178,8 +4179,9 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n")[1]).toBe(
-        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on dispatch://CORE/artifact/plan: answer it there"
+        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on CORE/plan: answer it there"
       );
+      expect(refusal.split("\n")[1].match(/dispatch:\/\//g)).toHaveLength(1);
       expect(posts).toEqual([]);
     });
 
@@ -4228,6 +4230,22 @@ describe("executeDispatchTool", () => {
       );
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
+    test("a copy whose source was answered after it settled refuses nothing once settlement has shown the answer", async () => {
+      // Answering the source settles its copies again (SettleCopiesOf), so the copy's latest
+      // version carries the answer and the copy is no open block.
+      const { outcome, posts, requests } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-09T09:00:00Z" selected="[]" answer="eu-west-1" copied_from="ask-source" copied_from_document="dispatch://DSP-42/artifact/plan"}\nQuestion of b-1?\n:::',
+        ],
+        []
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
       expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
     });
   });
