@@ -28,9 +28,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - The `legion-controller` skill no longer tells a controller the daemon launched
   (`controller: daemon`) that nobody types into its session or reads its replies, or that text
   left in its session reaches no one (LEGION-306). A plain user turn in that session other than
-  the start message is a person writing from Dispatch's Agents page, and the controller answers it
-  first, in the conversation. The daemon's `How this controller runs` prompt for that launch says
-  the same. `legion.daemonApiVersion` is unchanged.
+  the start message or a task an operator sent with `legion claims deliver` is a person writing
+  from Dispatch's Agents page, and the controller answers it first, in the conversation. The
+  daemon's `How this controller runs` prompt for that launch says the same.
+  `legion.daemonApiVersion` is unchanged.
 - The `legion-worker` skill says what a shell `legion handoff complete` and a `task` subagent's bash
   can do since LEGION-630 removed the role gate, and how the phase-stall reminder then behaves
   (LEGION-634): a shell completion, should one run, completes the phase at the daemon and is not

@@ -63,10 +63,10 @@ subscribed to the controller topic and reported ready; the daemon then sent your
 When your pod dies the daemon relaunches it and resumes this same session, with a new start
 message, so run the start procedure each time one arrives. A human reaches you through Dispatch (a
 message to your session on the Agents page, a reply to an ask you opened, a mention) or Envoy. A
-plain user turn in your session other than the start message is a person writing from Dispatch's
-Agents page: answer it first, in the conversation. `legion state` and
-`legion status <KEY> <status>` work as below. There is no `legion controller start` against this
-daemon, and nobody can replace you with one.
+plain user turn in your session other than the start message or a task an operator sent with
+`legion claims deliver` is a person writing from Dispatch's Agents page: answer it first, in the
+conversation. `legion state` and `legion status <KEY> <status>` work as below. There is no
+`legion controller start` against this daemon, and nobody can replace you with one.
 
 ### Started by the operator
 
