@@ -69,7 +69,9 @@ review posted without a completion leaves the issue in reviewing until you finis
   covers them; those commits stay, the approval stands, and the tree goes to the merger — never
   back to the tester or reviewer. Anything else above the approved head does void it, and the
   merger tells the architect the head must return to review instead of completing. A
-  conflict-forced rebase after retro moves those commits with the branch; retro never re-runs.
+  conflict-forced rebase after retro moves those commits with the branch. Any round after retro
+  writes `.legion/<issue>/` again, and every approval moves the issue to retro once more, so each
+  retro ends with the removal again; READY refuses a head that skipped it.
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
