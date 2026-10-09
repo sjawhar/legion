@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -65,10 +66,40 @@ func processGroupOrphaned() (bool, error) {
 	return true, nil
 }
 
-// procStat is the part of /proc/<pid>/stat the orphan rule reads.
+// pfExiting is PF_EXITING (include/linux/sched.h), which /proc/<pid>/stat reports in its flags
+// field (fs/proc/array.c) from the start of a task's exit (kernel/exit.c, do_exit's exit_signals).
+const pfExiting = 0x4
+
+// sessionLeaderGone reports whether this process's session leader has exited or begun to. From
+// then on the session has no controlling terminal and can never take one again: do_exit sets
+// PF_EXITING before disassociate_ctty clears the session's terminal (kernel/exit.c), and only a
+// session leader can take a terminal. While this process stays in the session its leader's
+// PID stays the session's (kernel/pid.c frees a PID only once no task uses it), so it names
+// no other process. A leader outside this process's PID namespace has no number here (getsid
+// answers 0: kernel/sys.c, pid_vnr), so nothing can be read of it and it counts as present.
+func sessionLeaderGone() (bool, error) {
+	sid, err := unix.Getsid(0)
+	if err != nil {
+		return false, err
+	}
+	if sid == 0 || sid == unix.Getpid() {
+		return false, nil
+	}
+	leader, err := readProcStat(sid)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+		return true, nil // reaped
+	}
+	if err != nil {
+		return false, err
+	}
+	return leader.state == 'Z' || leader.state == 'X' || leader.flags&pfExiting != 0, nil
+}
+
+// procStat is the part of /proc/<pid>/stat the orphan and session rules read.
 type procStat struct {
 	pid, ppid, pgrp, session int
 	state                    byte
+	flags                    uint64
 }
 
 func readProcStat(pid int) (procStat, error) {
@@ -82,7 +113,7 @@ func readProcStat(pid int) (procStat, error) {
 		return procStat{}, fmt.Errorf("read /proc/%d/stat: no command name", pid)
 	}
 	fields := bytes.Fields(data[end+2:])
-	if len(fields) < 4 || len(fields[0]) != 1 {
+	if len(fields) < 7 || len(fields[0]) != 1 {
 		return procStat{}, fmt.Errorf("read /proc/%d/stat: %q", pid, data)
 	}
 	s := procStat{pid: pid, state: fields[0][0]}
@@ -90,6 +121,9 @@ func readProcStat(pid int) (procStat, error) {
 		if *field, err = strconv.Atoi(string(fields[i+1])); err != nil {
 			return procStat{}, fmt.Errorf("read /proc/%d/stat: %w", pid, err)
 		}
+	}
+	if s.flags, err = strconv.ParseUint(string(fields[6]), 10, 64); err != nil {
+		return procStat{}, fmt.Errorf("read /proc/%d/stat: %w", pid, err)
 	}
 	return s, nil
 }

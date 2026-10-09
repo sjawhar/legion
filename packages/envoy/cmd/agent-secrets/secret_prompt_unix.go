@@ -354,7 +354,10 @@ func (t *promptTerminal) holdsTerminal() (bool, error) {
 }
 
 // controllingTerminal reports whether fd is this process's controlling terminal, by a read-only
-// ioctl that answers ENOTTY for any other terminal (Linux's tiocgpgrp, XNU's isctty check).
+// ioctl that answers ENOTTY for any other terminal (Linux's tiocgpgrp, XNU's isctty check). A
+// terminal that is not, in a session whose leader has exited, may have been the controlling
+// terminal until that exit, which took it from the session: that is errNoForeground, since no
+// shell can hand it back, and ENOTTY alone cannot tell it from a terminal that never was.
 func controllingTerminal(fd int) (bool, error) {
 	for {
 		_, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
@@ -362,6 +365,12 @@ func controllingTerminal(fd int) (bool, error) {
 			continue
 		}
 		if errors.Is(err, unix.ENOTTY) {
+			if gone, err := sessionLeaderGone(); err != nil || gone {
+				if err == nil {
+					err = errNoForeground
+				}
+				return false, err
+			}
 			return false, nil
 		}
 		return err == nil, err

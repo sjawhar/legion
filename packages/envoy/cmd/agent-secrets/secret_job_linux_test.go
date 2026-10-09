@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,7 @@ type promptShell struct {
 	out      bytes.Buffer
 	pid      int
 	history  string
+	env      string // variables start sets for the helper, each followed by a space
 }
 
 // rawFd answers f's file descriptor through its SyscallConn, which, unlike
@@ -101,7 +103,7 @@ func (s *promptShell) wait(want string) {
 
 func (s *promptShell) start(wrapper bool, background bool) {
 	s.t.Helper()
-	command := "AGENT_SECRETS_JOB_HELPER=1 " + shellWord(os.Args[0]) + " -test.run='^TestPromptJobHelper$'"
+	command := s.env + "AGENT_SECRETS_JOB_HELPER=1 " + shellWord(os.Args[0]) + " -test.run='^TestPromptJobHelper$'"
 	if background {
 		// fg hands the job the terminal in the state bash hands every foreground
 		// job, which is what the prompt must restore: not what the terminal holds
@@ -240,6 +242,18 @@ func TestPromptJobHelper(t *testing.T) {
 			}
 		}
 		fmt.Println("PROMPT_STARTING")
+		if os.Getenv("AGENT_SECRETS_JOB_AFTER_SHELL_EXIT") != "" {
+			// Reach the prompt only once the shell's exit has taken the terminal from the
+			// session, as a prompt descheduled that long on a loaded machine would.
+			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+				if _, err := unix.IoctlGetInt(0, unix.TIOCGPGRP); errors.Is(err, unix.ENOTTY) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the shell's exit never took the terminal")
+				}
+			}
+		}
 	}
 	real := readTerminal
 	quiet, readSome := false, false
@@ -601,6 +615,21 @@ func TestPromptJobShellGoneRefuses(t *testing.T) {
 	s.wait("LABEL_HELD=false")
 	if strings.Contains(s.out.String(), "Value for") {
 		t.Fatalf("a prompt whose shell had gone showed its label: %q", s.out.String())
+	}
+}
+
+// A prompt started with & that reaches the terminal only after its shell has exited finds a
+// terminal that is no longer its controlling one: it refuses as when the shell exits under it,
+// rather than take the terminal for one job control never applied to.
+func TestPromptJobShellGoneBeforeThePromptStartsRefuses(t *testing.T) {
+	s := newPromptShell(t)
+	s.env = "AGENT_SECRETS_JOB_AFTER_SHELL_EXIT=1 "
+	s.start(false, true)
+	s.send("exit\r")
+	s.wait("RETURNED no shell can bring the value prompt to the foreground of this terminal; pipe the value in: agent-secrets secret set DEMO_KEY < FILE")
+	s.wait("LABEL_HELD=false")
+	if strings.Contains(s.out.String(), "Value for") {
+		t.Fatalf("a prompt that started after its shell had gone showed its label: %q", s.out.String())
 	}
 }
 
