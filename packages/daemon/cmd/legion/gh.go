@@ -207,7 +207,7 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if issue == "" {
 			issue = "the Dispatch issue"
 		}
-		fmt.Fprintf(stderr, "Legion issues live on Dispatch; use dispatch_message or dispatch_comment on %s\n", issue)
+		fmt.Fprintf(stderr, "Legion issues live on Dispatch; use `dispatch message` or `dispatch comment` on %s\n", issue)
 		return 1
 	}
 	gh := os.Getenv("LEGION_GH_PATH")
