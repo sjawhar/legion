@@ -590,6 +590,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
 		{extra: "nats_nkey_seed_file: ./nats-seed\nprovider_keys: {NATS_NKEY_SEED: NATS_NKEY_SEED_TESTS}\n", says: "provider_keys names NATS_NKEY_SEED, the launch secret every launch carries"},
+		{extra: "provider_keys: {GH_TOKEN: GH_TOKEN_TESTS}\n", says: "provider_keys names GH_TOKEN, which the daemon sets on every pane and pod"},
 	} {
 		config, marker := workflowConfig(t, 13370, variant.extra)
 		if variant.drop != "" {

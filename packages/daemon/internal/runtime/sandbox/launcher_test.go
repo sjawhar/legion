@@ -1,13 +1,18 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
@@ -43,6 +48,70 @@ func TestTheLauncherResolverAcceptsOnlyTheBoundRoleOfTheCurrentPod(t *testing.T)
 				t.Fatalf("accepted %+v (reason %q)", hello, reason)
 			}
 		})
+	}
+}
+
+// conflictSecretUpdates makes the next updates of the Secret named name fail as a conflict, up to
+// times of them, each one after between has rewritten the Secret in the tracker as the write that
+// won the race would have; it counts the conflicts served.
+func conflictSecretUpdates(g *rig, name string, times int32, between func(*corev1.Secret)) *atomic.Int32 {
+	var served atomic.Int32
+	g.kube.PrependReactor("update", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.UpdateAction).GetObject().(*corev1.Secret).Name != name || served.Load() >= times {
+			return false, nil, nil
+		}
+		served.Add(1)
+		editSecret(g, name, between)
+		return true, nil, apierrors.NewConflict(corev1.Resource("secrets"), name, errors.New("the object has been modified"))
+	})
+	return &served
+}
+
+// A binding write the API server refuses as a conflict — the gh-credential refresher rewrote the
+// role's Secret between the binding's read and its write — is retried once over a fresh read: the
+// launch passes, the Secret binds the new pod and keeps the refresher's gh files, and the pod's
+// launcher is accepted.
+func TestABindingWriteRefusedAsAConflictIsRetriedOnceOverAFreshRead(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
+	refreshed := ghconfig.Hosts("ghs_refreshed_lease")
+	served := conflictSecretUpdates(g, secret, 1, func(s *corev1.Secret) { s.Data[GitHubHostsKey] = []byte(refreshed) })
+
+	loc := g.spawn(spec)
+
+	if served.Load() != 1 {
+		t.Fatalf("the conflict reactor served %d conflicts, want the one", served.Load())
+	}
+	after := g.secret(secret)
+	if after.Annotations[launcherPodUIDAnnotation] != loc.Sandbox.PodUID {
+		t.Errorf("the Secret binds pod %q, want the new pod %q", after.Annotations[launcherPodUIDAnnotation], loc.Sandbox.PodUID)
+	}
+	if string(after.Data[GitHubHostsKey]) != refreshed {
+		t.Errorf("the retry wrote over the gh files written between read and write: %q", after.Data[GitHubHostsKey])
+	}
+	hello := shimwire.LauncherHello{Token: string(after.Data[LauncherTokenFile]), Sandbox: loc.Sandbox.Name, Role: string(claim.RoleTester), PodUID: loc.Sandbox.PodUID, LauncherID: "l-1"}
+	if handler, reason := g.r.LauncherResolver()(hello); handler == nil {
+		t.Errorf("the bound pod's launcher was refused: %s", reason)
+	}
+}
+
+// A binding write that conflicts again on its retry fails the launch with the conflict, as any other
+// write failure does: the bind is retried once, not until it lands.
+func TestABindingWriteConflictedTwiceFailsTheLaunch(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
+	served := conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) { s.Data[GitHubHostsKey] = []byte(ghconfig.Hosts("ghs_refreshed_lease")) })
+	g.launcher(spec.Claim)
+
+	err := failedLaunch(t, g, spec)
+
+	if err == nil || !strings.Contains(err.Error(), "bind its role launchers to the new pod") || !apierrors.IsConflict(err) {
+		t.Fatalf("Spawn = %v, want the launch failed on the binding's conflict", err)
+	}
+	if served.Load() != 2 {
+		t.Fatalf("the conflict reactor served %d conflicts, want the write and its one retry", served.Load())
 	}
 }
 

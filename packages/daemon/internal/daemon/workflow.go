@@ -85,10 +85,8 @@ type workflowRuntime struct {
 	githubAPI string
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
-	// nothing about it. appLogins holds it beside the implement App's, keyed by App role, so a
-	// push's author can be read as one Legion App or the other.
+	// nothing about it.
 	reviewAppLogin string
-	appLogins      map[appauth.AppRole]string
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
 	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
 	// reviewPermissionTTL, and a test shortens it. limitedUntil is when GitHub's last rate limit
@@ -129,11 +127,11 @@ var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Seco
 // mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
 // after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token. It returns both Apps' bot logins from their
-// leases, keyed by App role: the engine judges a push by its pusher against the review App's, so
-// one App configured for both roles would make every implementer push the review App's and count
-// no fix attempt, and is refused, as is a review lease that names no login.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (map[appauth.AppRole]string, error) {
+// token passed asks GitHub only for the review token. It returns the review App's bot login from
+// its lease: the engine judges a push by its pusher against it, so one App configured for both
+// roles would make every implementer push the review App's and count no fix attempt, and is
+// refused, as is a review lease that names no login.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
 	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
@@ -154,12 +152,12 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 		return bootprobe.Outcome{Passed: true}
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if logins[appauth.Review] == "" || logins[appauth.Review] == logins[appauth.Implement] {
-		return nil, fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
+		return "", fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
 	}
-	return logins, nil
+	return logins[appauth.Review], nil
 }
 
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
@@ -175,18 +173,18 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if tokens == nil {
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
-	logins, err := mintAtBoot(ctx, tokens, owner, log)
+	reviewAppLogin, err := mintAtBoot(ctx, tokens, owner, log)
 	if err != nil {
 		return nil, err
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	// The database is shared by every project's daemon: the workflow reads this project's issues.
 	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
-	engine := workflow.New(records, engineConfig(cfg, logins[appauth.Review]), log)
+	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
 	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: logins[appauth.Review], appLogins: logins,
+		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
