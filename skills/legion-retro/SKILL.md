@@ -36,7 +36,7 @@ retrospective's durable output.
    and records it on the PR and the issue: the agent that developed it is responsible for testing
    in production. The architect's sign-off waits for that record.
    The record is the pull request's `Production:` line, one pull-request comment, and a
-   `dispatch_message` on the issue, each naming what was driven, how, what was observed, and the
+   `dispatch message` on the issue, each naming what was driven, how, what was observed, and the
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
    owned by the architect and implemented by the same implementer; the parent stays open until it lands.
 
@@ -162,16 +162,15 @@ the push is refused after step 4 wrote the body (`jj git push` refuses a branch 
 moved; never force), write `<dir>/before.md` back the same way before you report the refusal to
 the architect with its output, so the body matches the head GitHub has. After the push, post one
 Dispatch message on
-the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
+the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge. The message must carry this revived implementer's structured
 attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
 
-```ts
-dispatch_message({
-  issue: "<KEY>",
-  body: `## Retro Complete
+```bash
+dispatch message --issue <KEY> --body-file - <<'EOF'
+## Retro Complete
 
 **Learnings documented in:**
 - docs/solutions/<path>.md
@@ -183,16 +182,16 @@ dispatch_message({
 
 **Production check:** <what the implementer will drive after the merge, or the deploy/restart step a human will have to perform first>
 
-<!-- legion: {"session":"<session-id>","phase":"retro"} -->`,
-})
+<!-- legion: {"session":"<session-id>","phase":"retro"} -->
+EOF
 ```
 
 The `docs/solutions/` commit, the removal of `.legion/<issue>/`, the PR body lines those commits
 make stale, and the Dispatch message are the only retro outputs. Never write a handoff, phase
 artifact, local feedback log, or completion label, and change nothing under `.legion/` but that
 removal. Report completion with the `legion` tool's `handoff_complete` alone (its summary: two
-sentences for the architect); the commit the daemon records for retro is the branch head your
-push made, so push before you complete.
+sentences for the architect); retro writes no handoff, so the commit it reports is the one your
+workspace stands on, the removal commit your push made, so push before you complete.
 
 ## Completion check
 

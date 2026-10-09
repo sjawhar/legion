@@ -34,8 +34,8 @@ export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): bool
  * "Claimed by <holder> · <age>" wherever an issue is shown: the issue header's state row, a
  * List row, a Board card. The holder is named by `actorLabel` from `@legion/contracts` — the
  * agent registry's live title, else the title stamped on the claim, else `session:<8>…` — and
- * the agent tools call that same function over the same registry, so a session reading
- * `dispatch_read` and a human reading this page see one name for one holder. The registry is
+ * the agent tools call that same function over the same registry, so a session running
+ * `dispatch read` and a human reading this page see one name for one holder. The registry is
  * read here rather than passed in, so no surface can forget to pass it. The age keeps itself current through the shared `Timestamp` tick, and the
  * whole label with the absolute time is in the `title`, which also says what a claim is: the
  * chip sits among status, priority and assignee, and nothing else on the page defines it. An

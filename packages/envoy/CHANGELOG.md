@@ -4,6 +4,19 @@
 
 ### Added
 
+- The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
+  `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
+  new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
+  auth token minted for that user and host from the AWS SDK's default credentials, in the region
+  `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS config names (it needs `rds-db:connect` on
+  the database user), so no database password exists for RDS to rotate under the broker. Such a URL
+  must name that one host with `sslmode=verify-full` and an `sslrootcert` file, or the broker
+  refuses to start naming the host, since a token is a password for 15 minutes,
+  `sslmode=require` verifies nothing and `sslrootcert=system` holds no RDS CA. A password pgx reads
+  for the URL (`PGPASSWORD`, a passfile) keeps it on that password. The Envoy image ships the RDS global CA bundle at
+  `/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so no binary in the image
+  trusts an RDS CA for any other connection. A URL with a password, the
+  `${BROKER_DATABASE_PASSWORD}` placeholder, or any other host connects as before (LEGION-662).
 - `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
   with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
   `expected_answer_at` to change the current answer; the change is another `ask.answered`
@@ -310,6 +323,23 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A document opens in the editor however many documents the process has touched: the 1,000-room
+  cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
+  nothing still holds it. Before, every document opened since a restart kept its state and counted
+  against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
+- A document's pending authors now survive room release, process restart and overlapping Dispatch
+  tasks in `doc_pending_authors` (migration `0084`). A browser update is first an in-flight,
+  room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
+  document lock. A joined write records its authors in R in its content transaction. A version
+  reads R under that lock and may capture F only from its own room; after its transaction commits,
+  it deletes the R rows it listed and consumes the F credits it listed. The scoped rule means a
+  task can list another task's durable R records but never that task's F, while the same task can
+  consume F before its queued append can re-record an author. Each author is consequently pending
+  in F or R, or listed on one committed version, rather than in more than one of them. A settlement
+  that writes no version leaves R intact, and an upload that writes a replacement clears all R and
+  only the F credits present at its last room read. The document room can therefore go idle without
+  retaining author state or losing the authors a later version, ask or event must name
+  (LEGION-513).
 - `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's

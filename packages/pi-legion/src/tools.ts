@@ -4,6 +4,7 @@ import {
   LegionGateRegisterRequest,
   type LegionGrant,
   type LegionIssue,
+  type LegionPhase,
   type LegionState,
 } from "@legion/contracts/legion-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "@legion/pi-shared/pi-types";
@@ -91,7 +92,7 @@ function toolSchema(pi: PiApi): unknown {
     artifactId: z
       .string()
       .describe(
-        "register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it"
+        "register_gate's root spec document: its artifact id, slug, or filename, as a dispatch command's --artifact takes it"
       )
       .optional(),
     version: z.number().optional(),
@@ -136,7 +137,8 @@ function recordFrom(state: LegionState, issue: string): LegionIssue {
 /** The daemon's role-local workflow surface: no operation can schedule a worker. Every operation
  * that writes mints its own grant in-process and posts it with the request; nothing is written
  * to the pane. `handoff_complete` belongs to every session but the root architect's (a phase
- * worker, and a sub-architect: an architect whose issue is not its tree); `read_state` and
+ * worker, and a sub-architect: an architect whose issue is not its tree), and finds the commit it
+ * reports in the pane first (`handoffCommit`, src/handoff-commit.ts); `read_state` and
  * `set_status` to the controller. */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
@@ -146,12 +148,18 @@ export function createLegionTool(deps: {
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** The commit a completion of `phase` by `role` reports: for a file-backed phase the role
+   * works, the pushed commit carrying `.legion/<issue>/<phase>.json`, found with the pane's jj
+   * (`findHandoffCommit`); otherwise the commit the workspace stands on. Throws naming the remedy
+   * when the handoff is uncommitted, missing, not on this branch, another pane's, or unpushed. */
+  readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
-   * looked up in Dispatch as the Dispatch tools do; throws naming the reference when none matches,
-   * or when it names two documents. */
+   * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
+   * when none matches, or when it names two documents. */
   readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
-  const { pi, daemon, session, controllerGrant, onPhaseCompleted, resolveDocument } = deps;
+  const { pi, daemon, session, controllerGrant, onPhaseCompleted, handoffCommit, resolveDocument } =
+    deps;
   const grantFor = async (
     client: LegionDaemonClient,
     active: LegionClaimToolSession
@@ -171,11 +179,12 @@ export function createLegionTool(deps: {
       "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
       "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " +
       "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " +
-      "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`, that the daemon " +
-      "reads at the head of the issue branch on GitHub when you complete, so commit it and push the branch (`jj git push`) before calling; no CLI " +
-      "command pushes or completes a handoff for you. A completion is refused HANDOFF_BRANCH_MISSING, HANDOFF_AUTHOR_MISMATCH, HANDOFF_FILE_MISSING, " +
-      "HANDOFF_INVALID (the fields it names), HANDOFF_NOT_NEW (nothing pushed since your last completion), READY_HEAD_CARRIES_HANDOFFS or " +
-      "READY_CHECKS_NOT_GREEN; fix what it names, push, and complete again, since a refused completion changed nothing. " +
+      "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " +
+      "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " +
+      "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " +
+      "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
+      "phase: write and commit this phase's handoff), and for READY READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_CONFLICTS or READY_CHECKS_NOT_GREEN; a refused completion changed " +
+      "nothing, so fix what it names and complete again. " +
       "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
       "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.",
     defaultInactive: true,
@@ -220,12 +229,17 @@ export function createLegionTool(deps: {
             if (ready !== undefined && typeof ready !== "boolean") {
               throw new Error("handoff_complete's ready is true or false");
             }
+            // The commit is found before the grant is minted: a refusal here posts nothing and
+            // mints nothing. The phase is the issue record's, the role the session's.
+            const { phase } = recordFrom(await client.state(), active.issue);
+            const commit = await handoffCommit(phase, active.role);
             const grantId = await grantFor(client, active);
             const answer = await client.handoffComplete({
               grantId,
               summary,
               verdict: verdict ?? "",
               ready: ready ?? false,
+              commit,
             });
             onPhaseCompleted(context);
             return jsonSuccess(answer);
@@ -249,8 +263,8 @@ export function createLegionTool(deps: {
               );
             }
             // The daemon takes the document's id alone; `spec`, a slug or a filename, the
-            // references the Dispatch tools accept, is looked up first, so the architect's first
-            // call names the document however it knows it.
+            // references a `dispatch` command's --artifact accepts, is looked up first, so the
+            // architect's first call names the document however it knows it.
             const reference = requiredString(parameters, operation, "artifactId");
             const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);

@@ -14,6 +14,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { readSessionTitle, sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import { noteInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_KEY,
@@ -158,6 +159,7 @@ const environmentKeys = [
   "LEGION_BOOT_TOKEN_FILE",
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
+  "DISPATCH_STATE_DIR",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
@@ -197,10 +199,14 @@ afterAll(async () => {
   await rm(jjTemplate, { force: true, recursive: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // A suite run from inside a Legion pane inherits that pane's LEGION_*/DISPATCH_* launch
-  // environment; every test starts from none and sets only what it declares.
+  // environment; every test starts from none and sets only what it declares. The `dispatch`
+  // command's state (the session title file `titleSession` writes) goes to a scratch directory.
   for (const key of environmentKeys) delete process.env[key];
+  const dispatchState = await mkdtemp(path.join(os.tmpdir(), "legion-dispatch-state-"));
+  temporaryPaths.push(dispatchState);
+  process.env.DISPATCH_STATE_DIR = dispatchState;
 });
 
 afterEach(async () => {
@@ -1248,13 +1254,20 @@ describe("Legion OMP extension", () => {
   });
   test("registers no tool_call hook: nothing a pane runs is refused or minted for, in any role", async () => {
     // No pane rule and no grant mint (LEGION-631): the `legion` tool's own operations mint their
-    // grants in-process, and the role prompts alone say who runs what.
-    const worker = await bootPane({ role: "implementer", sessionId: "ses_implementer_no_hook" });
+    // grants in-process, and the role prompts alone say who runs what. legion.ts is loaded alone
+    // (`bindEnvoy: false`): envoy.ts registers a `tool_call` hook of its own, which writes the
+    // session's title for the `dispatch` command, and the fixture's handlers are shared.
+    const worker = await claimPane({
+      role: "implementer",
+      sessionId: "ses_implementer_no_hook",
+      bindEnvoy: false,
+    });
     expect(worker.handlers.get("tool_call")).toBeUndefined();
-    const root = await bootPane({
+    const root = await claimPane({
       role: "architect",
       issue: "REPO-42",
       sessionId: "ses_root_no_hook",
+      bindEnvoy: false,
     });
     expect(root.handlers.get("tool_call")).toBeUndefined();
   });
@@ -1324,6 +1337,9 @@ describe("Legion OMP extension", () => {
       settles: (text: string, signal?: AbortSignal) =>
         hook(handlers, "session_stop")(settlingOn(text, signal), context),
     });
+    /** jj's root commit: `@-` of a workspace fresh from `jj git init`, which is what a phase that
+     * writes no handoff (retro, here) reports as the commit it stands on. */
+    const ROOT_COMMIT = "0000000000000000000000000000000000000000";
     const bootStalling = async (options: {
       readonly role?: LegionRole;
       readonly issue?: IssueKey;
@@ -1331,8 +1347,31 @@ describe("Legion OMP extension", () => {
       /** The daemon's answer to `POST /legion/v1/handoff/complete`: success unless given. */
       readonly complete?: () => Response;
     }) => {
-      const workspace = await mkdtemp(path.join(os.tmpdir(), "legion-stall-workspace-"));
-      temporaryPaths.push(workspace);
+      // The pane's workspace is a jj repository, as an issue workspace is: `handoff_complete`
+      // finds the commit it reports there with PATH's jj. REPO-43 stands at retro, a phase that
+      // writes no handoff, so the commit is the one the workspace stands on.
+      const workspace = await createJjWorkspace();
+      const state = {
+        daemon: {
+          project: "OMP",
+          schemaVersion: 1,
+          boots: 1,
+          firstBootAt: "2026-09-18T14:03:27Z",
+          startedAt: "2026-09-22T09:15:02Z",
+        },
+        admission: { cap: 1, active: ["REPO-42"], waiting: [] },
+        issues: {
+          "REPO-43": {
+            key: "REPO-43",
+            generation: 2,
+            phase: "retro",
+            status: "in_progress",
+            workers: {},
+          },
+        },
+        pendingStatusWrites: [],
+        capabilities: [],
+      };
       const booted = await bootPane({
         role: options.role ?? "implementer",
         issue: options.issue,
@@ -1340,6 +1379,7 @@ describe("Legion OMP extension", () => {
         workspace,
         branch: options.branch,
         extraRoutes: (url) => {
+          if (url.pathname === "/legion/v1/state") return Response.json(state);
           if (url.pathname === "/legion/v1/grants") {
             return Response.json({ grantId: "grant-stall", expiresAt: "2099-01-01T00:00:00Z" });
           }
@@ -1421,15 +1461,17 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("CI passed.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("a successful handoff_complete posts the completion with a fresh grant and no commit, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
+    test("a successful handoff_complete posts the completion with a fresh grant and the commit found in the pane, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
 
       const { result, calls } = await worker.completes();
       expect(result).toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
-      // The grant is minted in-process and travels only in the request; nothing is written to the
-      // pane, and the completion names no commit: the daemon reads the branch head on GitHub.
+      // The issue's phase is read from the daemon's state, the commit is found in the pane's
+      // workspace with its jj, and the grant is minted in-process and travels only in the request;
+      // nothing is written to the pane.
       expect(calls).toEqual([
+        { path: "/legion/v1/state", body: undefined },
         {
           path: "/legion/v1/grants",
           body: {
@@ -1441,7 +1483,13 @@ describe("Legion OMP extension", () => {
         },
         {
           path: "/legion/v1/handoff/complete",
-          body: { grantId: "grant-stall", summary: "Done.", verdict: "", ready: false },
+          body: {
+            grantId: "grant-stall",
+            summary: "Done.",
+            verdict: "",
+            ready: false,
+            commit: ROOT_COMMIT,
+          },
         },
       ]);
       expect(await worker.settles("Reported.")).toBeUndefined();
@@ -1502,9 +1550,8 @@ describe("Legion OMP extension", () => {
         complete: () =>
           Response.json(
             {
-              error:
-                "no .legion/REPO-43/implement.json at head abc123 of legion/REPO-43: write, commit and push this phase's handoff, then complete again",
-              code: "HANDOFF_FILE_MISSING",
+              error: `the implementer reported commit ${ROOT_COMMIT} for its previous phase of REPO-43; write and commit this phase's handoff before completing`,
+              code: "HANDOFF_NOT_NEW",
             },
             { status: 409 }
           ),
@@ -1517,34 +1564,35 @@ describe("Legion OMP extension", () => {
           {
             type: "text",
             text: expect.stringContaining(
-              "POST /legion/v1/handoff/complete failed with 409 HANDOFF_FILE_MISSING: no .legion/REPO-43/implement.json"
+              `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer reported commit ${ROOT_COMMIT}`
             ),
           },
         ],
         isError: true,
       });
       expect(calls.map((call) => call.path)).toEqual([
+        "/legion/v1/state",
         "/legion/v1/grants",
         "/legion/v1/handoff/complete",
       ]);
       expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("the Envoy extension's own notice (a dispatch_ask's follow notice) does not re-arm a quiet stall", async () => {
+    test("the Envoy extension's own notice (its session-id-changed notice) does not re-arm a quiet stall", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
 
-      // The worker answers the follow-up by opening a dispatch_ask, and the Envoy extension steers
-      // its follow notice into the session: the worker's own doing, not an event from outside.
+      // A branch re-mints the worker's session id, and the Envoy extension steers its notice into
+      // the session: the session's own doing, not an event from outside.
       await worker.arrives({
         message: {
           ...envoyEvent.message,
-          content: "Following ask ask-1 on REPO-43: its answer and replies reach you directly.",
+          content: "envoy:\n  notice: session id changed",
           details: LOCAL_ENVOY_NOTICE,
         },
       });
-      expect(await worker.settles("Asked the human which schema to use.")).toBeUndefined();
+      expect(await worker.settles("Noted the new session id.")).toBeUndefined();
 
       await worker.arrives(envoyEvent);
       expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));
@@ -3123,6 +3171,15 @@ describe("a Legion session's title", () => {
     expect(registrationBeforeClaim(worker.requests, worker.claimToken)).toMatchObject({
       title: "Legion implementer · REPO-43",
     });
+  });
+
+  test("the session's title file holds the Legion title for the pane's first dispatch command", async () => {
+    const worker = await bootPane({ role: "implementer", sessionId: "ses_title_file" });
+
+    expect(worker.title.set).toEqual(["Legion implementer · REPO-43"]);
+    expect(readSessionTitle(sessionDirectory(process.env, "ses_title_file"))).toBe(
+      "Legion implementer · REPO-43"
+    );
   });
 
   test("a root architect is titled by its tree's issue", async () => {

@@ -85,20 +85,20 @@ and the tester's proof below are both this proof.
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
   The proof is the one defined above. It goes into `.legion/<issue>/implement.json` as the required `proof`
   array, and into the PR body, because the reviewer and the merger verify facts on GitHub and never
-  from a handoff. The daemon checks the handoff at the head you pushed when you complete:
-  `HANDOFF_INVALID` names each field — an implement handoff without a `proof` array, or with a
-  blank or whitespace-only field in one — and records nothing, so you fix the file, commit, push,
-  and complete again.
+  from a handoff. Nothing checks the handoff's shape when you complete — `handoff_complete` reports
+  the pushed commit carrying the file, and the daemon reads nothing in it — so an implement handoff
+  without a `proof` array, or with a blank or whitespace-only field in one, reaches the tester as it
+  is, and the tester records it as a failure against you.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
   `.legion/<issue>/test.json` as `implementerProof` (`{verdict, how}`).
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
-  proving it (`HANDOFF_INVALID` refuses a test handoff with a rejected verdict, or `failed > 0`,
-  and no recorded failure). Otherwise, add your own proof before completing — a proof as defined
-  above — as the `E2E (tester)` line and the `proof` array `HANDOFF_INVALID` requires of a test
-  handoff that reports no failure. A code path whose first execution is after merge — a
+  proving it (a rejected verdict, or `failed > 0`, always comes with the failure recorded in
+  `failures`). Otherwise, add your own proof before completing — a proof as defined
+  above — as the `E2E (tester)` line and the `proof` array a test handoff that reports no failure
+  carries. A code path whose first execution is after merge — a
   deploy workflow's inline step, a post-merge helper, a production-only resource — is untested
   until the implementer has executed it against a devN stack; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or

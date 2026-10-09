@@ -62,11 +62,11 @@ const World = z.object({
   code: z.string(),
 });
 const nonEmpty = z.string().min(1);
-/** The tester's handoff as the daemon holds it at the tester's completion (internal/handoff, the
- * `test` shape), as far as the score reads it: the stamps the tester writes itself (`schemaVersion`
- * 1, `phase` test, its `issue`, `completed` an RFC 3339 time), the implementer's proof verdict, the
- * failures, and the tester's own proof, each entry's six fields non-empty. Nothing stamps a
- * handoff for the tester: it writes the whole file with `write`. */
+/** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
+ * daemon holds it to one), as far as the score reads it: the stamps the tester writes itself
+ * (`schemaVersion` 1, `phase` test, its `issue`, `completed` an RFC 3339 time), the implementer's
+ * proof verdict, the failures, and the tester's own proof, each entry's six fields non-empty.
+ * Nothing stamps a handoff for the tester: it writes the whole file with `write`. */
 const TestHandoff = z.looseObject({
   schemaVersion: z.literal(1),
   phase: z.literal("test"),
@@ -286,8 +286,8 @@ function brainstormSurface(runDir: string, run: string, label: string): Row {
   const entries = session(runDir);
   const calls = toolCalls(entries);
   // Whether Dispatch created an issue is its own answer in a tool's result, whatever reached it: a
-  // top-level `write` to the `xd://dispatch_issue` device, one inside an `eval` cell, or a host that
-  // calls the tool by name. A call Dispatch refused as a duplicate created nothing.
+  // `dispatch issue` command in a `bash` call, the same run from inside an `eval` cell, or a host
+  // that calls the tool by name. A call Dispatch refused as a duplicate created nothing.
   const results = toolResults(entries);
   const surface = surfaceOf(
     results.some((text) => CREATED.test(text)),
@@ -366,8 +366,8 @@ function namesOwnCommit(text: string, commits: string[]): boolean {
  *      `mise exec bun@… -- bun greet.ts` and a bun named by its absolute path bypass it, and such
  *      a run reads as having run nothing;
  *   2. that write comes before the first push carrying .legion/<key>/test.json, which comes before
- *      the accepted completion: a push before you complete is the rule, since the daemon reads
- *      the handoff at the branch's head on GitHub;
+ *      the accepted completion: a push before you complete is the rule, since the `legion` tool's
+ *      handoff_complete reports the pushed commit carrying the handoff and refuses an unpushed one;
  *   3. the branch as the tester completed it (its last push before the completion) changes nothing
  *      under the PR's head but .legion/<key>/test.json, which is a test handoff (TestHandoff) of
  *      this issue with `implementerProof.verdict` `verified`, no failures, and a proof whose every

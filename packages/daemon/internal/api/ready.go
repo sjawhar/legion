@@ -10,7 +10,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
-	"github.com/sjawhar/legion/daemon/internal/handoff"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/requiredchecks"
 )
@@ -83,12 +82,19 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 	if pull.Merged {
 		return fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head's checks or handoffs", number), nil
 	}
-	dir := handoff.Dir(issue)
+	dir := handoffDir(issue)
 	switch carries, err := headCarries(ctx, github, dir, pull.Head.SHA); {
 	case err != nil:
 		return "", &refusal{http.StatusBadGateway, "GITHUB_READ_FAILED", fmt.Sprintf("GitHub's read of %s/ at head %s of pull request #%d failed, so whether the head still carries it is unknown: complete again; this is GitHub's failure, not the head's: %v", dir, head, number, err)}
 	case carries:
 		return "", &refusal{http.StatusConflict, "READY_HEAD_CARRIES_HANDOFFS", fmt.Sprintf("head %s of pull request #%d still carries %s/, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", head, number, dir)}
+	}
+	// A pull request GitHub cannot merge gets no pull_request run and no merge: it is refused by
+	// name, before its checks are read, since a missing check would otherwise be reported as the
+	// cause. GitHub reports the conflict as mergeable_state "dirty" (computed shortly after each
+	// push; "unknown" while it computes, which the checks below then judge as they stand).
+	if pull.MergeableState == "dirty" {
+		return "", &refusal{http.StatusConflict, "READY_HEAD_CONFLICTS", fmt.Sprintf("head %s of pull request #%d conflicts with its base %s, which GitHub cannot merge and starts no pull_request CI for: the implementer brings %s into the branch with a forward merge; tell the architect", head, number, pull.Base.Ref, pull.Base.Ref)}
 	}
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
 	if err != nil {
@@ -114,10 +120,8 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 	notGreen := func(check classify.Standing, what, missing string) *refusal {
 		var message string
 		switch name := check.Name; {
-		case check.Result == classify.Missing && pull.MergeableState == "dirty":
-			message = fmt.Sprintf("head %s of pull request #%d has %s the %s %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, number, missing, what, name, pull.Base.Ref)
 		case check.Result == classify.Missing:
-			message = fmt.Sprintf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have, or the pull request conflicts with %s and GitHub started no pull_request CI for it; tell the architect", head, number, missing, what, name, pull.Base.Ref)
+			message = fmt.Sprintf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have; tell the architect", head, number, missing, what, name)
 		case check.Result == classify.Pending:
 			message = fmt.Sprintf("the %s %q is still running on head %s of pull request #%d: wait for it to finish", what, name, head, number)
 		case check.Red():
@@ -162,6 +166,13 @@ func headCarries(ctx context.Context, github githubrest.Client, dir, head string
 	}
 	return err == nil, err
 }
+
+// handoffDir is the directory issue's handoffs live under, relative to the repository root, with no
+// trailing slash: .legion/<issue>/<phase>.json is written there by each file-backed phase's role,
+// and retro's last commit removes the directory from the head a human merges, so none reaches main
+// (dispatch://LEGION-605). READY reads whether the head still carries it (headCarries); the daemon
+// reads nothing inside it.
+func handoffDir(issue string) string { return ".legion/" + issue }
 
 // headCheckResults is each check and commit status reported on sha, by name: success, pending, or
 // the failing conclusion or state (classify.Judge's results). A check run that ended neutral or

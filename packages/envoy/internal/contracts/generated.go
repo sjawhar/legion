@@ -155,8 +155,8 @@ const ReceiptTimeoutCause = "The listener didn't answer within the send window; 
 const MaxBroadcastRecipients = 100
 
 // SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
-// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
-// cannot drift apart.
+// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the `dispatch search`
+// command's cannot drift apart.
 const SearchQueryMax = 1000
 
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
@@ -166,7 +166,7 @@ const SearchQueryHint = "search with a short phrase of a few words, not a passag
 // SearchKindDepth is how many of its best matches each kind of content lists before
 // GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
 // returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
-// dispatch_search tool's account of it cannot drift apart.
+// `dispatch search` command's account of it cannot drift apart.
 const SearchKindDepth = 100
 
 // SearchDegradedEmbedderUnavailable is GET /api/v1/search's SearchResponse.degraded value when
@@ -178,7 +178,7 @@ const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
-// and the dispatch_issues tool's cannot drift apart.
+// and the `dispatch issues` command's cannot drift apart.
 const MaxIssuePageLimit = 250
 const DefaultIssuePageLimit = 50
 

@@ -95,16 +95,19 @@ review posted without a completion leaves the issue in reviewing until you finis
   `--summary` output and the PR body's gate facts. The READY packet names both the implementer's
   and tester's `E2E` lines; a missing one is reported to the architect instead of completing.
 - READY is `handoff_complete` with `ready: true` and the packet as its `summary`; the merger runs
-  no pre-flight of its own. The daemon reads the pull request's head on GitHub and refuses, before
+  no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
+  checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
   recording anything: `READY_HEAD_CARRIES_HANDOFFS` while the head still carries `.legion/<issue>/`
   (tell the architect, which has you move the issue back to `retro` with `request_backward_move`,
   so the implementer's retro removes it; a refusal saying GitHub's read of the directory failed is
-  GitHub's failure, not the head's: complete again); and `READY_CHECKS_NOT_GREEN` unless every
-  check the base branch requires has succeeded at that head and every workflow its rulesets require
-  has a passing run there — no result for a check, or no run of a workflow, means that head's push
-  skipped CI when it should not have, or that the pull request conflicts with its base; a check
-  still running means wait; a failed one is a finding. Report the refusal to the architect; never
-  push a commit to make CI run. On success the daemon posts the packet as a `dispatch_message` on
+  GitHub's failure, not the head's: complete again); `READY_HEAD_CONFLICTS` while the pull
+  request conflicts with its base, named — GitHub can neither merge it nor start pull_request CI
+  for it, so the implementer brings the base into the branch with a forward merge; and
+  `READY_CHECKS_NOT_GREEN` unless every check the base branch requires has succeeded at that head
+  and every workflow its rulesets require has a passing run there — no result for a check, or no
+  run of a workflow, means that head's push skipped CI when it should not have; a check still
+  running means wait; a failed one is a finding. Report the refusal to the architect; never
+  push a commit to make CI run. On success the daemon posts the packet as a `dispatch message` on
   the issue, publishes it to the project's merge queue role when one is set, and says on the issue
   when that role has no live holder; the answer's `note` says when READY was published on a pull
   request a person already merged, whose head can no longer change, or on a base that requires no
@@ -121,10 +124,10 @@ review posted without a completion leaves the issue in reviewing until you finis
   this, since a staging gate does not run every resource production does. If the slot fails on
   the change, the implementer owns the fix and the next slot.
   The record has three places: the PR body's `Production:` line, one pull-request comment
-  carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
+  carrying the Legion footer, and a `dispatch message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch_ask` that starts with the
+  the previous commit, a slot nobody has run), open a `dispatch ask` that starts with the
   production gap and why it matters, then names the required install or restart step, its risk,
   and outcome-named options. Keep the `Production:` line at `pending <what is missing>`, and
   complete the check once the human answers. Never record a staging pass as the production check,

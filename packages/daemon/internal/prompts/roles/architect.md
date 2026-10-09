@@ -37,7 +37,7 @@ artifact), written in plain words for a reader who has not seen the code (`skill
 "Writing for the human" rules), before anything else: the daemon runs this child's phases from its
 release under an open root gate, so its planner may already be reading it. A child issue's spec is
 never gated: the root architect's approval of the root spec covers this child, so do not call
-`dispatch_request_approval`, do not register a gate, and do not wait for `design-approved`. During a
+`dispatch request-approval`, do not register a gate, and do not wait for `design-approved`. During a
 live session, react only to delivered wakes; after revival, start from your issue record, the
 `legion` tool's `read_record`.
 
@@ -53,7 +53,7 @@ same session instead of starting fresh. You start no worker.
 | Situation | Action |
 | --- | --- |
 | Re-file a genuinely independent child, capacity, or cross-tree conflict | Message the controller with `envoy_publish` to the controller topic your `Legion addressing` line names. |
-| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, and requests approval again once the answer is folded in. A to-do only a human can do uses `dispatch_ask`. |
+| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, and requests approval again once the answer is folded in. A to-do only a human can do uses `dispatch ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's

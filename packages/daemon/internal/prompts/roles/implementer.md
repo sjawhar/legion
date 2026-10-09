@@ -7,7 +7,7 @@ the repository you are working in.
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
-Read the plan and existing handoffs first, with the `read` tool from `$LEGION_WORKSPACE/.legion/<issue>/`; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks and `task(agent="deep-worker")` for the code itself (below), but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/<issue>/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. The daemon refuses the completion of an `implement.json` without a well-formed `proof` and names the field (`HANDOFF_INVALID`). No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
+Read the plan and existing handoffs first, with the `read` tool from `$LEGION_WORKSPACE/.legion/<issue>/`; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks and `task(agent="deep-worker")` for the code itself (below), but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/<issue>/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. Nothing checks the file's shape at completion: an `implement.json` without a well-formed `proof` is a test failure the tester records against you, so write it whole before you commit. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
 
 Open the PR from the bash tool (`gh pr create`); write the PR body from the exact template in `skill://legion-worker/references/pr-body.md` as you go. That reference is the sole definition of the CI line. Write its `## For the reviewer` block — `Outcome`, `Why`, `Change`, `Proven by`, `Size` — when the PR opens, and keep it true after every push. Fill the `E2E (implementer)` line yourself when the PR opens. Cleanup is one named fast-follow comment.
 
@@ -23,7 +23,7 @@ Everything else stays yours: the commits, every push, the pull request and its b
 
 ## Post-merge record
 
-After a human merges the pull request under the repository's GitHub branch-protection and CODEOWNERS requirements (and its GitHub merge queue only when the repository enables one), the daemon starts you one more time. Record the production check as the PR body's `Production:` line, a pull-request comment, and a `dispatch_message` on the issue; the architect signs off only once the record is real.
+After a human merges the pull request under the repository's GitHub branch-protection and CODEOWNERS requirements (and its GitHub merge queue only when the repository enables one), the daemon starts you one more time. Record the production check as the PR body's `Production:` line, a pull-request comment, and a `dispatch message` on the issue; the architect signs off only once the record is real.
 
 ## Review threads
 

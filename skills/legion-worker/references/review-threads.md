@@ -30,7 +30,7 @@ Three facts govern every thread, whoever opened it.
     per thread, as soon as the message reaches it or as part of answering that review, and records
     in the PR body's `Threads` section too; never one the reviewer did not name. When GitHub refuses
     a resolution, report the thread and GitHub's message to the architect with `envoy_publish`,
-    which opens a `dispatch_ask` for a human to resolve it by hand; never skip it silently.
+    which opens a `dispatch ask` for a human to resolve it by hand; never skip it silently.
   - The **reviewer** cannot resolve a thread as its own App: GitHub refuses the review App
     `resolveReviewThread` on the implementer's pull request, so it replies, and names the threads
     it accepted to the implementer, who resolves them. List the pull request's threads:

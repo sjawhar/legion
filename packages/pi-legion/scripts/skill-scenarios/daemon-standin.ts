@@ -13,9 +13,10 @@
  * tool's grant request, its completion, and the state document. The grant rule mirrors the real
  * daemon's: a grant lives for 60 seconds and redeems any number of times while it lives; an
  * unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
- * single-use. A completion answers `{}`: the real daemon reads the issue branch's head on GitHub
- * and holds the handoff file to its shape there, which the rig's scorer reads from the run's own
- * remote instead (score.ts testerProof).
+ * single-use. A completion answers `{}`: the `legion` tool found the pushed commit carrying the
+ * handoff in the pane's workspace before posting, the real daemon reads no handoff file, and the
+ * handoff's content is what the rig's scorer reads from the run's own remote (score.ts
+ * testerProof).
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
  * mintedGrantId?}`, the run's record of what reached the daemon.

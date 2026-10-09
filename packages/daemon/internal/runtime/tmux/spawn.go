@@ -219,9 +219,9 @@ func makePaneHome(stateDir string) error {
 }
 
 // writeTurnScopeOverlay writes podsafety.TurnScopeOverlay under stateDir, read-only, so panePairs
-// can name it first in a pane's PI_CONFIG_FILES: the one settings overlay a tmux pane gets at all
-// (podsafety.go's own doc — the rest of the pod baseline is a pod's alone), and the two keys
-// supervise.Machine.Quiesce's own promise depends on regardless of runtime (LEGION-462).
+// can name it first in a pane's PI_CONFIG_FILES: the one settings overlay a tmux pane gets at all,
+// the same one a pod's shim writes (podsafety.Apply), and the two keys supervise.Machine.Quiesce's
+// own promise depends on regardless of runtime (LEGION-462).
 func writeTurnScopeOverlay(stateDir string) error {
 	return podsafety.WriteReadOnly(filepath.Join(stateDir, podsafety.TurnScopeFile), podsafety.TurnScopeOverlay)
 }

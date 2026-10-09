@@ -59,14 +59,16 @@ only on this phase's artifact.
 
 You never start another Legion role: the daemon starts every phase worker itself, from its fixed
 workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
-is a Legion role.
+is a Legion role. A subagent runs in your pane as you, with every host tool but the `legion` tool
+(it is never offered one), so completing your phase is yours alone: give a subagent no completion
+step.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
 agents inside your own process, not the architect's separate one. Never write a decision block
 into a spec yourself: the architect decides whether the human must answer it and writes the block,
 since a new version of an approved root spec closes the tree's design gate. A standalone to-do
-only a human can do is a `dispatch_ask`, and its replies return to your own session.
+only a human can do is a `dispatch ask`, and its replies return to your own session.
 
 Because the same agent works its role until the issue closes, you may receive more than one
 assignment across your lifetime: your session stays live after your phase ends, and when a later
@@ -203,7 +205,7 @@ through the clone's `credential.helper` (`!gh auth git-credential`), and `GH_TOK
 directory is read-only. One rule nothing enforces: **Legion's issues live on Dispatch, never on
 GitHub issues** — no `gh issue` write and no non-GET `gh api` call to an `/issues` path
 (pull-request conversation comments live on that path too; edit them with `gh pr comment`); use
-`dispatch_message` or `dispatch_comment` on your `LEGION_ISSUE`. The `legion` tool's own daemon
+`dispatch message` or `dispatch comment` on your `LEGION_ISSUE`. The `legion` tool's own daemon
 calls carry a credential of their own, minted in-process; `gh` and `git` never see it, and you
 never `cat`, `echo`, copy, or `export` a token. A `task` subagent, an `eval` subprocess, or a
 background job in your pane inherits the same `GH_CONFIG_DIR` and so the same credential, for as
@@ -334,31 +336,36 @@ cd -- "$LEGION_WORKSPACE" && \
 
 Then push (below) and report completion: call the `legion` tool with `op: "handoff_complete"` and
 `summary` (two sentences for the architect; the tester adds `verdict: "pass"` or `"fail"`, the
-merger `ready: true`). **Push before you complete is a hard rule.** The daemon reads
-`legion/<KEY>`'s head on GitHub, and your handoff at that head, and refuses, before recording
-anything:
+merger `ready: true`). **Push before you complete is a hard rule.** `handoff_complete` finds, with
+your pane's jj, the newest commit on the issue branch that carries `.legion/<KEY>/<phase>.json`
+and reports it to the daemon, and refuses — posting nothing — while:
 
-- `HANDOFF_BRANCH_MISSING` — `legion/<KEY>` is not on GitHub: push, then complete again.
-- `HANDOFF_AUTHOR_MISMATCH` — the head was not authored by your role's App: run
-  `jj -R "$LEGION_WORKSPACE" new`, then write, commit and push the handoff again.
-- `HANDOFF_FILE_MISSING` — no `.legion/<KEY>/<phase>.json` at the head: write, commit, push, then
-  complete again.
-- `HANDOFF_INVALID` — each `<field>: <reason>` named: fix the file, commit, push, complete again.
-- `READY_HEAD_CARRIES_HANDOFFS` and `READY_CHECKS_NOT_GREEN` — the merger's READY, in
-  `skill://legion-worker/references/merge-gate.md`.
-- `GITHUB_READ_FAILED` — GitHub's failure, not the head's: complete again.
+- the file has a change still in the working copy: commit it, then complete again;
+- the file is missing from the workspace: write it, then commit and push it;
+- the file is not committed on this branch (only the base carries it): write and commit it;
+- the carrying commit was authored by another App (every role of an issue shares the workspace):
+  run `jj -R "$LEGION_WORKSPACE" new`, then write and commit this phase's handoff again;
+- the carrying commit is not yet on `legion/<KEY>@origin`: push the issue branch, then complete
+  again.
 
-Such a refusal records nothing, so the corrected call at the same head is applied.
-`HANDOFF_NOT_NEW` means the head is the one you reported last time: nothing was pushed since, so
-write, commit and push this phase's handoff, then complete again. The answer may carry a `note`
-(READY published on an already-merged pull request, or a base requiring no check).
+Nothing checks the file's shape: the fields your role prompt spells are what the next role reads.
+The daemon reads no handoff file and no branch head; it refuses, before recording anything:
+
+- `HANDOFF_NOT_NEW` — the commit is the one you reported for your previous phase: write and
+  commit this phase's handoff before completing.
+- `READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS` and `READY_CHECKS_NOT_GREEN` — the
+  merger's READY, in `skill://legion-worker/references/merge-gate.md`.
+- `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
+
+Such a refusal records nothing, so the corrected call at the same commit is applied. The answer
+may carry a `note` (READY published on an already-merged pull request, or a base requiring no
+check).
 
 Retro's last commit removes `.legion/<issue>/` from the head a human merges (`skill://legion-retro`);
 a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff
-again, since `handoff_complete` reads the file at the head. Retro, the merger and the post-merge
-production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report with
-`handoff_complete` alone; the commit the daemon records for them is the branch head (after the
-squash merge deleted the branch, the pull request's recorded head).
+again, since `handoff_complete` reports the commit carrying the file. Retro, the merger and the
+post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report
+with `handoff_complete` alone, which reports the commit the workspace stands on.
 
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — push the issue branch with the plain `jj` of your pane, from bash in your
@@ -472,6 +479,6 @@ decision required.
 
 Never yield while blocked on a decision someone else owns. Before you stop, make the block visible
 where its owner will see it: a product, scope, design, lifecycle, or cross-phase decision goes to
-the owning architect as above, and a standalone human to-do goes in `dispatch_ask`. Otherwise
+the owning architect as above, and a standalone human to-do goes in `dispatch ask`. Otherwise
 proceed: proceeding is the default, and a phase that stops silently holds its issue until someone
 notices.

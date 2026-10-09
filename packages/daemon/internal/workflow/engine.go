@@ -341,10 +341,11 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if phase.FileBacked(issue.Phase) {
-		// The commit a completion carries is the branch head the daemon read on GitHub, so the
-		// head the role reported for its previous phase means nothing was pushed since.
+		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
+		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
+		// previous phase means this phase wrote none.
 		if fact.Commit == row.LastHandoff {
-			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the branch head %s is the one you reported last time: nothing was pushed since; write, commit and push this phase's handoff for %s, then complete again", fact.Commit, issue.Key)), nil
+			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
 		}
 		row.LastHandoff = fact.Commit
 	}
@@ -366,9 +367,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
 	case phase.Testing:
 		if fact.Verdict == "fail" {
-			if err := e.recordRound(ctx, tx, fact.Issue); err != nil {
-				return intake.Result{}, err
-			}
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterFailed, "", row, pr, "")
 		}
 		if fact.Verdict == "pass" {
@@ -716,8 +714,12 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if RoleFor(issue.Phase) == "" || RoleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
-		return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "BACKWARD_REFUSED", Message: "backward moves require the current role and an earlier workflow phase"}}, nil
+	// The table is the guard: a move no backward row serves - to awaiting_merge, which no worker
+	// holds, or to anything but an earlier phase - is refused rather than answered as if it moved.
+	// An empty target is refused first, since the row lookup takes it to match any row.
+	if _, ok := e.row(issue.Phase, TriggerBackward, fact.To, Snapshot{Phase: issue.Phase}); fact.To == "" || !ok || RoleFor(issue.Phase) != fact.Requester {
+		return refused("BACKWARD_REFUSED", fmt.Sprintf("a backward move needs the role running %s of %s and an earlier phase a backward move reaches from it; the %s's move to %s changed nothing",
+			issue.Phase, issue.Key, fact.Requester, fact.To)), nil
 	}
 	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
@@ -728,9 +730,6 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, fact.Requester)
 	if err != nil {
-		return intake.Result{}, err
-	}
-	if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, nil, fact.Reason)
@@ -764,6 +763,17 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return err
+	}
+	// Every move back to an earlier phase counts the implementer a round: the tester's fail, a
+	// review's request for changes, a worker's backward move, and the move the daemon makes on its
+	// own for a red CI verdict or a head that conflicts with its base. The round tells each pass
+	// through a phase from the last (api/handoff.go): a pass that counted none would give a
+	// completion reporting the last pass's carrying commit that pass's key, answered as already
+	// received instead of refused as a handoff not written anew.
+	if movesBack(issue.Phase, row.To) {
+		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
+			return err
+		}
 	}
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
 		return err
@@ -955,4 +965,9 @@ func phaseIndex(value phase.Phase) int {
 		}
 	}
 	return -1
+}
+
+// movesBack says whether to is a workflow phase before from.
+func movesBack(from, to phase.Phase) bool {
+	return phaseIndex(to) >= 0 && phaseIndex(to) < phaseIndex(from)
 }

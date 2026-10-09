@@ -65,7 +65,15 @@ package api
 // the gate against a plugin whose strict reader refuses its state. Renumbered, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md says.)
 //
-// 17: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
+// 17: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// its shell, which the Envoy plugin puts on the pane's PATH, rather than the `dispatch_*` tools it
+// no longer registers: a daemon and a plugin from either side of that change would hand agents
+// instructions for a surface they lack. (This branch first took 16; LEGION-578 landed at 16
+// first, and pi-legion 8.4.0 declares it beside a pi-envoy 8.4.0 that still registers the native
+// tools and puts no `dispatch` on the PATH, so a daemon at 16 would pass the gate against panes
+// that lack the command its prompts name. Renumbered, as the same note says.)
+//
+// 18: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
 // grant the plugin redeems: the three credential routes, `POST /legion/v1/gh-token`,
 // `POST /legion/v1/git-credential` and `POST /legion/v1/provisioning-credential`, and
 // `GrantRequest.push` on `POST /legion/v1/grants` are deleted. The pane and pod environment gains
@@ -78,13 +86,17 @@ package api
 // from bash any more, since the `legion` tool mints its grants in-process for its own daemon calls
 // (`handoff_complete`, `read_record`, the controller's `read_state` and `set_status`). No
 // `worker-bin` directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX` puts the `legion`
-// launcher directory first alone. `HandoffCompleteRequest` loses `commit` and
-// `HandoffCompleteResponse` gains `note`: the daemon reads the issue branch's head and the handoff
-// file on GitHub itself at completion. `POST /legion/v1/threads/resolve` is deleted: the reviewer
-// names the bot threads it accepted to the implementer, who resolves them with plain `gh` as the
-// pull request's author. A plugin or image built before 17 would shim gh over a token file it never
-// reads, mint a grant before every command and post a `commit`, against a daemon on 17 that serves
-// none of that, so the boot gate and `legion probe-image` refuse the mixed pair. (This branch first
-// took 16; LEGION-578 landed at 16 first, and pi-legion 8.4.1 declares it without the token file,
-// so a daemon at 16 would pass the gate against it. Renumbered, as the same note says.)
-const DaemonAPIVersion = 17
+// launcher directory first alone. `HandoffCompleteResponse` gains `note` (READY's three refusals
+// run in the daemon on the pull request's head: `.legion/<issue>/` still carried, a conflict with
+// the base, a required check not green or a required workflow without a passing run); the
+// request's `commit` is the pushed commit carrying the phase's handoff, which the `legion` tool's
+// `handoff_complete` finds in the pane as `legion handoff complete` did.
+// `POST /legion/v1/threads/resolve` is deleted: the reviewer names the bot threads
+// it accepted to the implementer, who resolves them with plain `gh` as the pull request's author. A
+// plugin or image built before 18 would shim gh over a token file it never reads and mint a grant
+// before every command, against a daemon on 18 that serves none of that, so the boot gate and
+// `legion probe-image` refuse the mixed pair. (This branch first
+// took 16, then 17; LEGION-578 landed at 16 and LEGION-588 at 17 first, pi-legion 8.4.1 and 8.6.0
+// declaring them without the token file, so a daemon at either would pass the gate against them.
+// Renumbered, as the collision note says.)
+const DaemonAPIVersion = 18

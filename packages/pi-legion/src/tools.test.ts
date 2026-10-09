@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import type { LegionRole } from "@legion/contracts";
+import type { LegionPhase } from "@legion/contracts/legion-api";
 import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
+import { findHandoffCommit, type JjRunner } from "./handoff-commit";
 import { createLegionTool, type LegionToolSession } from "./tools";
 
 function context(sessionId = "ses_208"): SessionContext {
@@ -40,6 +42,11 @@ const noDocumentLookup = async (_issue: string, reference: string): Promise<stri
 /** The controller grant of a tool that answers for no controller. */
 const noControllerGrant = async (sessionId: string): Promise<never> => {
   throw new Error(`no controller grant expected for ${sessionId}`);
+};
+
+/** The handoff-commit lookup of a tool that must never complete a phase. */
+const noHandoffCommit = async (phase: LegionPhase, role: LegionRole): Promise<never> => {
+  throw new Error(`no handoff-commit lookup expected for the ${role} at ${phase}`);
 };
 
 /** A claim's session on LEGION-208: a root architect's, a sub-architect's (its issue is not its
@@ -109,6 +116,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
+      handoffCommit: noHandoffCommit,
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
@@ -119,6 +127,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
     daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
     resolveDocument: noDocumentLookup,
     session: () => worker,
   });
@@ -230,6 +239,7 @@ test("a workflow refusal tells the agent both its code and message", async () =>
     })) as never,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("architect"),
   });
@@ -261,6 +271,7 @@ test("register_gate takes the document reference the Dispatch tools take, and re
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
+      handoffCommit: noHandoffCommit,
       resolveDocument: async (issue: string, reference: string) => {
         resolved.push([issue, reference]);
         if (reference === "notes") throw new Error(`No document "notes" on ${issue}`);
@@ -302,27 +313,77 @@ test("register_gate takes the document reference the Dispatch tools take, and re
   ]);
 });
 
-test("handoff_complete posts the completion with a fresh grant and no commit, closes the phase on success, and answers the daemon's note", async () => {
+/** The pane a completion runs in: its workspace and issue, and the implement App's identity. */
+const paneEnv = {
+  LEGION_WORKSPACE: "/workspaces/LEGION-208",
+  LEGION_ISSUE: "LEGION-208",
+  JJ_USER: "legion-implementer[bot]",
+  JJ_EMAIL: "271566630+legion-implementer[bot]@users.noreply.github.com",
+};
+const CARRYING = "210d53a9d1b109df97fbb5dd5041d659dbab1323";
+const STANDING = "c0de0000000000000000000000000000000000ff";
+
+/** A jj that answers the lookup's commands for a handoff committed, authored by this pane and
+ * pushed, unless `answers` says otherwise for one of them. */
+function paneJj(answers: {
+  readonly uncommitted?: string;
+  readonly listed?: string;
+  readonly carrying?: string;
+  readonly author?: string;
+  readonly pushed?: string;
+}): JjRunner {
+  return async (args) => {
+    const [command, , revision] = args;
+    if (command === "log" && revision === "@-") return STANDING;
+    if (command === "diff") return answers.uncommitted ?? "";
+    if (command === "file") return answers.listed ?? ".legion/LEGION-208/implement.json";
+    if (command === "log" && revision?.startsWith("latest(")) return answers.carrying ?? CARRYING;
+    if (command === "log" && revision === CARRYING) {
+      return answers.author ?? `${paneEnv.JJ_USER}\n${paneEnv.JJ_EMAIL}`;
+    }
+    if (command === "log" && revision?.includes("remote_bookmarks")) {
+      return answers.pushed ?? CARRYING;
+    }
+    throw new Error(`unexpected jj ${args.join(" ")}`);
+  };
+}
+
+/** A daemon state with LEGION-208 at `phase` (and LEGION-209, a sub-architect's issue, admitted). */
+const stateAt = (phase: LegionPhase) => ({
+  issues: {
+    "LEGION-208": { key: "LEGION-208", phase },
+    "LEGION-209": { key: "LEGION-209", phase: "admitted" },
+  },
+});
+
+test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, closes the phase on success, and answers the daemon's note", async () => {
   const completed: string[] = [];
   const { calls, daemon } = recordingDaemon({
+    state: stateAt("implementing"),
     answers: {
       handoffComplete: {
         note: "no check is required on main, so READY was published without reading the head's checks",
       },
     },
   });
-  const run = (session: LegionToolSession, parameters: Record<string, unknown>) =>
+  const run = (
+    session: LegionToolSession,
+    parameters: Record<string, unknown>,
+    jj: JjRunner = paneJj({})
+  ) =>
     createLegionTool({
       pi,
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+      handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: paneEnv, jj }),
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
 
-  // The implementer reports no verdict and no READY; the request carries the wire's zero values
-  // for both and nothing else: the daemon reads the issue branch's head on GitHub itself.
+  // The implementer at implementing: the issue's phase is read from the daemon's state, the
+  // commit carrying .legion/LEGION-208/implement.json is found in the pane, and the request
+  // carries it with the wire's zero values for the verdict and READY.
   await expect(
     run(claimSession("implementer"), { op: "handoff_complete", summary: "Done." })
   ).resolves.toEqual({
@@ -337,25 +398,30 @@ test("handoff_complete posts the completion with a fresh grant and no commit, cl
     },
   });
   expect(calls).toEqual([
+    ["state", undefined],
     [
       "grant",
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
     ],
-    ["handoffComplete", { grantId: "grant-208", summary: "Done.", verdict: "", ready: false }],
+    [
+      "handoffComplete",
+      { grantId: "grant-208", summary: "Done.", verdict: "", ready: false, commit: CARRYING },
+    ],
   ]);
-  expect(calls.at(-1)?.[1]).not.toHaveProperty("commit");
   expect(completed).toEqual(["ses_208"]);
 
-  // The tester's verdict and the merger's READY travel as given; a sub-architect completes too.
+  // A role that does not work the issue's phase reports the commit the workspace stands on, and
+  // the daemon refuses it naming whose phase it is: the tester at implementing, the merger's
+  // READY, and a sub-architect, each posting @-. The verdict and READY travel as given.
   await run(claimSession("tester"), { op: "handoff_complete", summary: "Red.", verdict: "fail" });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "Red.", verdict: "fail", ready: false },
+    { grantId: "grant-208", summary: "Red.", verdict: "fail", ready: false, commit: STANDING },
   ]);
   await run(claimSession("merger"), { op: "handoff_complete", summary: "READY", ready: true });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "READY", verdict: "", ready: true },
+    { grantId: "grant-208", summary: "READY", verdict: "", ready: true, commit: STANDING },
   ]);
   await run(claimSession("architect", "LEGION-209"), {
     op: "handoff_complete",
@@ -363,7 +429,13 @@ test("handoff_complete posts the completion with a fresh grant and no commit, cl
   });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "Children released.", verdict: "", ready: false },
+    {
+      grantId: "grant-208",
+      summary: "Children released.",
+      verdict: "",
+      ready: false,
+      commit: STANDING,
+    },
   ]);
   expect(completed).toEqual(["ses_208", "ses_208", "ses_208", "ses_208"]);
 
@@ -384,22 +456,63 @@ test("handoff_complete posts the completion with a fresh grant and no commit, cl
   }
   expect(calls).toHaveLength(before);
   expect(completed).toHaveLength(4);
+
+  // Each lookup refusal is the tool's error, naming the remedy: the state is read, and then
+  // nothing is minted or posted, and the phase stays open.
+  const lookupRefusals = [
+    [
+      paneJj({ uncommitted: ".legion/LEGION-208/implement.json" }),
+      ".legion/LEGION-208/implement.json has changes in the working copy that are not committed: commit this phase's handoff before completing",
+    ],
+    [
+      paneJj({ listed: "" }),
+      ".legion/LEGION-208/implement.json is missing from the workspace: write this phase's handoff, then commit and push it before completing",
+    ],
+    [
+      paneJj({ carrying: "" }),
+      ".legion/LEGION-208/implement.json is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff",
+    ],
+    [
+      paneJj({ author: "legion-reviewer[bot]\nr@example.invalid" }),
+      `.legion/LEGION-208/implement.json is carried by commit ${CARRYING}, authored by legion-reviewer[bot] <r@example.invalid>, not this pane's legion-implementer[bot]: run jj new, then write and commit this phase's handoff again`,
+    ],
+    [
+      paneJj({ pushed: "" }),
+      `.legion/LEGION-208/implement.json is carried by commit ${CARRYING}, which is not on legion/LEGION-208@origin: push the issue branch, then complete again`,
+    ],
+  ] as const;
+  for (const [jj, message] of lookupRefusals) {
+    const result = await run(
+      claimSession("implementer"),
+      { op: "handoff_complete", summary: "Done." },
+      jj
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: message }]);
+    expect(calls.at(-1)).toEqual(["state", undefined]);
+  }
+  expect(completed).toHaveLength(4);
 });
 
 test("a refused completion surfaces the daemon's code and leaves the phase open", async () => {
   const refusal = Object.assign(
     new Error(
-      "POST /legion/v1/handoff/complete failed with 409 HANDOFF_FILE_MISSING: no .legion/LEGION-208/implement.json at head abc123 of legion/LEGION-208: write, commit and push this phase's handoff, then complete again"
+      `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer reported commit ${CARRYING} for its previous phase of LEGION-208; write and commit this phase's handoff before completing`
     ),
-    { code: "HANDOFF_FILE_MISSING" }
+    { code: "HANDOFF_NOT_NEW" }
   );
   const completed: string[] = [];
-  const { daemon } = recordingDaemon({ answers: { handoffComplete: refusal } });
+  const { daemon } = recordingDaemon({
+    state: stateAt("implementing"),
+    answers: { handoffComplete: refusal },
+  });
   const tool = createLegionTool({
     pi,
     daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+    handoffCommit: (phase, role) =>
+      findHandoffCommit({ phase, role, env: paneEnv, jj: paneJj({}) }),
     resolveDocument: noDocumentLookup,
     session: () => claimSession("implementer"),
   });
@@ -408,7 +521,7 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
     tool.execute("", { op: "handoff_complete", summary: "Done." }, undefined, undefined, context())
   ).resolves.toMatchObject({
     isError: true,
-    content: [{ type: "text", text: expect.stringContaining("HANDOFF_FILE_MISSING") }],
+    content: [{ type: "text", text: expect.stringContaining("HANDOFF_NOT_NEW") }],
   });
   expect(completed).toEqual([]);
 });
@@ -432,6 +545,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
     onPhaseCompleted: () => {
       throw new Error("a controller completes no phase");
     },
+    handoffCommit: noHandoffCommit,
     resolveDocument: noDocumentLookup,
     session: () => ({ kind: "controller", sessionId: "ses_controller" }),
   });

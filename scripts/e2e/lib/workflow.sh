@@ -548,16 +548,18 @@ close_unpassed_run_pull_requests() {
 
 # ---- the handoffs the daemon accepted -------------------------------------------------------------
 
-# The record keeps each role's phase row: the issue branch's head at the completion the daemon
-# accepted (the daemon reads legion/<KEY> on GitHub when the role completes; a push before the
-# completion is the role's rule), emptied when the role's next phase starts, and, on the
-# implementer's row, the review round (its returns to implementing). The issue moves out of
-# implementing, retro, and merging only on that phase's completion, and a production check's
-# completion moves nothing, so a checker reads the row right after the transition it follows,
-# before the role's next phase can empty it.
+# The record keeps each role's phase row: the commit the role's `handoff_complete` reported at the
+# completion the daemon accepted (for a file-backed phase the pushed commit carrying the handoff,
+# which the `legion` tool finds in the pane and refuses unpushed, so a push before the completion
+# is the role's rule; for retro, READY and the production check the commit the workspace stands
+# on), emptied when the role's next phase starts, and, on the implementer's row, the review round
+# (its returns to implementing). The issue moves out of implementing, retro, and merging only on
+# that phase's completion, and a production check's completion moves nothing, so a checker reads
+# the row right after the transition it follows, before the role's next phase can empty it.
 
-# role_handoff ISSUE ROLE [PHASE...] prints the issue branch's head at ROLE's completion the daemon
-# accepted, when the issue stands in one of the PHASEs (any phase when none is named).
+# role_handoff ISSUE ROLE [PHASE...] prints the pushed commit carrying the handoff that ROLE's
+# `handoff_complete` reported at the completion the daemon accepted, when the issue stands in one
+# of the PHASEs (any phase when none is named).
 role_handoff() {
   local issue=$1 role=$2 phases='' p
   shift 2
@@ -569,18 +571,18 @@ role_handoff() {
 review_round() {
   db_value "select coalesce((select rounds from phases where issue = '$1' and role = 'implementer'), 0)"
 }
-# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the issue branch's head at the completion the
-# daemon accepted for the role's completion of that phase round. The check runs right after the
-# round's transition, before the role's next completion can move it.
+# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the pushed commit carrying the handoff that the
+# role's `handoff_complete` reported for its completion of that phase round. The check runs right
+# after the round's transition, before the role's next completion can move it.
 handoff_fact_commit() {
   [ "$(review_round "$1")" = "$4" ] || return 0
   role_handoff "$1" "$2"
 }
 role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
-# assert_handoff_committer ISSUE ROLE PHASE ROUND: the issue branch's head at the completion the
-# daemon accepted is authored and committed by the role's own App, read from the issue's workspace
-# (the role pushed it from there, so its clone holds the commit), so no other pane sealed another
-# role's handoff.
+# assert_handoff_committer ISSUE ROLE PHASE ROUND: the pushed commit carrying the handoff that the
+# role's `handoff_complete` reported is authored and committed by the role's own App, read from the
+# issue's workspace (the role pushed it from there, so its clone holds the commit), so no other
+# pane sealed another role's handoff.
 assert_handoff_committer() {
   local commit identity want
   commit=$(handoff_fact_commit "$1" "$2" "$3" "$4")

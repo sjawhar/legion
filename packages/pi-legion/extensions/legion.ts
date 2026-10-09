@@ -3,6 +3,10 @@ import path from "node:path";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import {
+  sessionDirectory as dispatchSessionDirectory,
+  writeSessionTitle,
+} from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -18,6 +22,7 @@ import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
 import { createLegionDaemonClient, type LegionDaemonClient } from "../src/daemon-client";
+import { findHandoffCommit } from "../src/handoff-commit";
 import {
   assistantText,
   inboundKind,
@@ -138,11 +143,20 @@ export default function legionExtension(pi: PiApi): void {
    * Names the session by its Legion identity (`src/session-title.ts`), so every Dispatch
    * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
    * session claims its Envoy role: that claim registers the session, and the registration carries
-   * the title then rather than at the next heartbeat.
+   * the title then rather than at the next heartbeat. The `dispatch` command reads the title from
+   * the session's `title` file, which envoy.ts rewrites only before a shell command whose session
+   * name changed, so it is written here too, and the pane's first command already carries it.
    */
   const titleSession = async (context: SessionContext): Promise<void> => {
     const title = legionSessionTitle(classifySession(process.env), process.env.LEGION_PROJECT);
-    if (title !== undefined) await applySessionTitle(pi, context, title);
+    if (title === undefined) return;
+    await applySessionTitle(pi, context, title);
+    const sessionID = context.sessionManager.getSessionId();
+    if (sessionID === "") return;
+    writeSessionTitle(
+      dispatchSessionDirectory(process.env, sessionID),
+      context.sessionManager.getSessionName?.() ?? title
+    );
   };
 
   pi.on("session_start", async (_event, context) => {
@@ -258,6 +272,9 @@ export default function legionExtension(pi: PiApi): void {
         },
         controllerGrant: (sessionId) => controllerSession.mintGrant(sessionId),
         onPhaseCompleted,
+        // The pane's own environment: its workspace and issue, and the identity the daemon put
+        // on it; PATH's jj, the one its shell runs.
+        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
         resolveDocument: async (issue, reference) => {
           const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
           if (config === null) {

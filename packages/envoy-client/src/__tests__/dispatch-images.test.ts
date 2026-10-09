@@ -523,7 +523,7 @@ describe("reading pictures", () => {
     expect(result.images).toBeUndefined();
     expect(result.text).toBe(
       "big.png is 5,242,881 bytes, over the 3,750,000 bytes (5 MB of base64) a model is shown, so " +
-        "dispatch_doc_read cannot show this uploaded image/png picture (version 1). " +
+        "dispatch doc-read cannot show this uploaded image/png picture (version 1). " +
         "GET /api/v1/artifacts/pic-2/versions/1 serves its bytes."
     );
     expect(server.requests).toEqual([`/api/v1/agents/${session}/artifacts/big-png`]);
@@ -582,8 +582,8 @@ describe("reading pictures", () => {
         (index, shown) =>
           `- image ${shown + 1}: dispatch://agent/${session}/artifact/p${index}-png@v1 (p${index}.png, image/png, 16 bytes)`
       ),
-      `- not shown: dispatch://agent/${session}/artifact/p0-png@v1 (past this read's 8 pictures; dispatch_doc_read shows it)`,
-      `- not shown: dispatch://agent/${session}/artifact/p1-png@v1 (past this read's 8 pictures; dispatch_doc_read shows it)`,
+      `- not shown: dispatch://agent/${session}/artifact/p0-png@v1 (past this read's 8 pictures; dispatch doc-read shows it)`,
+      `- not shown: dispatch://agent/${session}/artifact/p1-png@v1 (past this read's 8 pictures; dispatch doc-read shows it)`,
     ]);
     // The two past the limit are named without being read.
     expect(server.requests.filter((pathname) => pathname.includes("p0-png"))).toEqual([]);
@@ -614,7 +614,7 @@ describe("reading pictures", () => {
         "Pictures:",
         `- image 1: dispatch://agent/${session}/artifact/a-png@v1 (a.png, image/png, 3,600,000 bytes)`,
         `- image 2: dispatch://agent/${session}/artifact/b-png@v1 (b.png, image/png, 3,600,000 bytes)`,
-        `- not shown: dispatch://agent/${session}/artifact/c-png@v1 (past this read's 10 MiB of pictures; dispatch_doc_read shows it)`,
+        `- not shown: dispatch://agent/${session}/artifact/c-png@v1 (past this read's 10 MiB of pictures; dispatch doc-read shows it)`,
         `- not shown: dispatch://agent/${session}/artifact/d-png@v1 (d.png is 5,242,881 bytes, over the 3,750,000 bytes (5 MB of base64) a model is shown)`,
         `- not shown: dispatch://agent/${session}/artifact/e-svg@v1 (e.svg is image/svg+xml, not a PNG, JPEG, GIF or WebP a model is shown)`,
       ].join("\n")
@@ -782,7 +782,7 @@ describe("reading pictures", () => {
 
   describe("a picture is shown to a session once", () => {
     const earlier = (address: string) =>
-      `- not shown: ${address} (shown earlier this session; dispatch_doc_read shows it again)`;
+      `- not shown: ${address} (shown earlier this session; dispatch doc-read shows it again)`;
     const sent = (result: DispatchToolResult) =>
       (result.images ?? []).reduce((total, shown) => total + shown.data.length, 0);
 
@@ -990,7 +990,7 @@ describe("reading pictures", () => {
           "Pictures:",
           `- image 1: ${address(1)} (p1.png, image/png, 16 bytes)`,
           earlier(address(2)),
-          `- not shown: ${address(3)} (past this read's 8 pictures; dispatch_doc_read shows it)`,
+          `- not shown: ${address(3)} (past this read's 8 pictures; dispatch doc-read shows it)`,
           `- image 2: ${address(4)} (p4.png, image/png, 16 bytes)`,
         ].join("\n"),
         `envoy: card\n\nPictures:\n- image 1: ${address(1)} (p1.png, image/png, 16 bytes)`,

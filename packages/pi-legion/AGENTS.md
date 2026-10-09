@@ -84,11 +84,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 17 for contract 17's token file (LEGION-631: the three routes that redeemed a grant for a
+number is 18 for contract 18's token file (LEGION-631: the three routes that redeemed a grant for a
 GitHub or git credential and the grant request's `push` are gone, the pane gains the GitHub
 variables above and loses the absolute-path pins of its gh, git and jj, the credential-helper
 variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no `commit` and answers
-`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 16's `capabilities` list on
+`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 17's `dispatch` command
+instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
 grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries
@@ -105,7 +106,7 @@ role `controller` and no tree or issue, the `/grants` controller-session form
 (`{sessionId, secret}`), and `controllerLocator` (`{runtime, external: true, sessionId,
 registeredAt}`) on `/legion/v1/state`.
 Contract 5 added `LEGION_GRANT_FILE` to the pane's environment (LEGION-262), the file the tool-call
-hook minted a grant into before a bash command that invoked `legion`; contract 17 removes it with
+hook minted a grant into before a bash command that invoked `legion`; contract 18 removes it with
 that hook. Nothing in a pane runs `legion` from bash: the `legion` tool mints each operation's grant
 in-process and posts it with the request, and `gh` and `git` read the role's GitHub App token from
 the gh files under the pane's `GH_CONFIG_DIR` (`hosts.yml` and `config.yml`, rendered and refreshed
@@ -259,16 +260,23 @@ A worker's phase ends through the `legion` tool's `handoff_complete`, never shel
 `src/tools.ts` carries it for every session but the root architect's (a phase worker, and a
 sub-architect, an architect whose issue is not its tree). A handoff is a committed file,
 `.legion/<issue>/<phase>.json`, that the worker writes with `write`, commits and pushes with plain
-`jj`; the completion (`POST /legion/v1/handoff/complete`: `summary`, `verdict`, `ready`, and no
-commit) has the daemon read the issue branch's head on GitHub, check the file there and, for the
-merger's `ready: true`, run READY's checks, so the push comes before the completion and a refusal
-(`HANDOFF_BRANCH_MISSING`, `HANDOFF_AUTHOR_MISMATCH`, `HANDOFF_FILE_MISSING`, `HANDOFF_INVALID`,
-`HANDOFF_NOT_NEW`, `READY_HEAD_CARRIES_HANDOFFS`, `READY_CHECKS_NOT_GREEN`) changed nothing; its
-answer's `note` is what READY's checks said when they read no head. The operation mints its grant
-in-process and posts it with the request; nothing is written to the pane. A predecessor's handoff
-is read with `read` from the issue workspace. GitHub is the pane's plain `gh` and `git`, which read
-the role's App token from the gh files under `GH_CONFIG_DIR`; no tool operation writes to GitHub
-for a role. Review threads are the pull request author's to resolve: the reviewer, whose review
+`jj`. The operation finds the commit it reports in the pane first (`src/handoff-commit.ts`, what
+`legion handoff complete` did): the issue's phase from the daemon's state, the role from the
+session; for a file-backed phase the role works, the newest commit on the issue branch carrying
+the file, refused — posting nothing — while the file has an uncommitted change, is missing, is
+not committed on this branch, is carried by a commit another pane's `JJ_USER`/`JJ_EMAIL` authored,
+or is not yet on `legion/<issue>@origin` (push the issue branch, then complete again); for every
+other phase the commit the workspace stands on, `@-`. It then posts
+`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The daemon reads no
+handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
+reported for its previous phase) and, for the merger's `ready: true`, runs READY's three refusals on
+the pull request's head (`READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN`); a refusal changed
+nothing, and the answer's `note` is what READY's checks said when they read no head. The
+operation mints its grant in-process and posts it with the request; nothing is written to the
+pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
+plain `gh` and `git`, which read the role's App token from the gh files under `GH_CONFIG_DIR`; no
+tool operation writes to GitHub for a role. Review threads are the pull request author's to
+resolve: the reviewer, whose review
 App GitHub refuses `resolveReviewThread` on the implementer's pull request, names the bot threads
 it accepted to the implementer (an Envoy message to its role topic, or its review body), and the
 implementer resolves them with its own `gh`, as it does the threads it answers itself. What a later
@@ -298,7 +306,8 @@ message holding a tool call written as text is told so. One follow-up per stall;
 sent follow-up stays quiet until the next Envoy delivery or assignment. The state is appended to the
 transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
-(`LEGION_TEST_OMP`), loading this entry beside `../pi-envoy/extensions/envoy.ts`.
+(`LEGION_TEST_OMP`) through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`),
+which hands both plugin entries to the Oh My Pi child by path.
 
 ## Where to look
 
@@ -309,7 +318,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`; inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals and that `/legion-claim-controller` answers the sentence without exiting |
-| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts` | Load `../pi-envoy/extensions/envoy.ts` by relative path (test-only; the shipped sources never import the sibling): the role claim through the interface with Legion initialised first, and the phase stall on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
+| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
@@ -329,4 +338,4 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 ## Checks
 
 `bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
-`LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts` for the real binary.
+`LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` for the real binary.

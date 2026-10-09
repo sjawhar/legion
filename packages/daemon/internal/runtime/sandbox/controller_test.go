@@ -201,6 +201,9 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	if strings.Contains(command, "--agent-secrets-key-dir") {
 		t.Errorf("command %q enrolls the controller with the secrets broker; it holds no human-tier key", command)
 	}
+	if strings.Contains(command, "--warm-codegraph") {
+		t.Errorf("command %q tells the controller's shim to warm a CodeGraph index; its pod has no workspace", command)
+	}
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)

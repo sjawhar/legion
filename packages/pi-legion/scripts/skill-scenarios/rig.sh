@@ -40,7 +40,7 @@
 # the scenario's scored rule deleted from its skills, never committed. measure-before-ask is the
 # instrument: gate 2 lives in the dispatch skill alone, and its ablate arm scores below the head.
 # ask-on-message and tester-proof are controls: their rules also live in dispatch-first and
-# dispatch_ask's description, and in the tester role prompt, so ablate scores as the head does
+# `dispatch ask --help`, and in the tester role prompt, so ablate scores as the head does
 # and they cannot detect a lost skill rule. A new scenario is an instrument only once an ablate
 # arm has scored lower on it.
 #
@@ -590,7 +590,7 @@ EOF
   C1=$(g rev-parse HEAD)
   # The implement handoff as the implementer writes it with its write tool: the four stamps
   # (schemaVersion, phase, issue, completed) and the phase's fields, at .legion/<key>/implement.json,
-  # the file the daemon reads at the implementer's completion and the tester reads with `read`.
+  # the file whose pushed commit the implementer's handoff_complete reports and the tester reads with `read`.
   mkdir -p "$src/.legion/$worker_key"
   jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
     {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,

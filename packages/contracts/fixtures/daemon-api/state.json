@@ -141,8 +141,8 @@
     },
     {
       "name": "codegraph",
-      "status": "installed",
-      "detail": "the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
     },
     {
       "name": "web-search",

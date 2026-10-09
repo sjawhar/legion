@@ -377,13 +377,17 @@ export const LegionControllerGrantRequest = z.strictObject({
   secret: nonEmptyString,
 });
 
-/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. The commit it
- * reports is not on it: the daemon reads the issue branch's head on GitHub itself. */
+/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. `commit` is
+ * the pushed commit carrying the phase's handoff, `.legion/<issue>/<phase>.json`, which the
+ * `legion` tool's `handoff_complete` finds in the pane with its jj before posting (as
+ * `legion handoff complete` did); a phase that writes no handoff reports the commit the workspace
+ * stands on. The daemon reads no handoff file and no branch head. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
   verdict: z.string(),
   ready: z.boolean(),
+  commit: nonEmptyString,
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

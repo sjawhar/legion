@@ -61,13 +61,50 @@ services, if `BROKER_SERVICES` binds one account to two of them.
 While a secret's owner tag names a service the list leaves out, the broker refuses the secret as
 `owner-tag-malformed` ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
 
+## Signing in to RDS by IAM token
+
+On Amazon RDS or Aurora the broker can sign in to its database with an
+[IAM auth token](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html)
+instead of a password, so no database password exists for it to hold or for RDS to rotate under
+it. It does so when `BROKER_DATABASE_URL` names a user and no password and its host is an RDS
+endpoint, one ending in `.rds.amazonaws.com`:
+
+```sh
+BROKER_DATABASE_URL='postgres://broker@<cluster endpoint>:5432/broker?sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem'
+AWS_REGION=<region>
+```
+
+Each new connection signs in with a token the broker mints for that user and host, signed with
+the AWS SDK's default credentials in the region `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS
+config names; with none, the broker refuses to start. A token is good for 15 minutes from its mint and
+is checked only when a connection signs in, so a connection the broker holds longer keeps working,
+and the next connection it opens brings a fresh token. The broker's AWS identity needs
+`rds-db:connect` on the database user,
+`arn:aws:rds-db:<region>:<account>:dbuser:<cluster resource id>/<user>`, and the database user
+must be a member of `rds_iam`. The cluster needs IAM database authentication turned on.
+
+A token is a password to the database until it expires, so the broker sends one only to a server
+it has verified. The URL must name that one host, with `sslmode=verify-full` and an `sslrootcert`
+file (the Envoy image ships the RDS CA bundle at `/etc/ssl/rds/global-bundle.pem`); otherwise the
+broker refuses to start, naming the host: `sslmode=require` encrypts but verifies nothing, and
+`sslrootcert=system` (in the URL or `PGSSLROOTCERT`) names the system trust store, which holds no RDS
+CA, so every sign-in would fail. The bundle sits outside the system trust store, so nothing else in
+the image trusts it. It is the
+[global bundle](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem) AWS publishes,
+vendored as `packages/envoy/docker/rds-global-bundle.pem` with the date it was fetched and its
+checksum.
+
+A URL with a password, the `${BROKER_DATABASE_PASSWORD}` placeholder, a passwordless URL whose
+password libpq supplies (`PGPASSWORD` or a passfile), or a host that is not an RDS endpoint (a
+local Postgres that trusts its clients, say) connects as given and mints nothing.
+
 ## What it depends on
 
 | Dependency | What the broker needs from it |
 | --- | --- |
-| Postgres | A database the broker owns (`BROKER_DATABASE_URL`). The broker applies its own migrations at startup; they only move forward, so never run an older broker against a database a newer one has migrated. |
+| Postgres | A database the broker owns (`BROKER_DATABASE_URL`). The broker applies its own migrations at startup; they only move forward, so never run an older broker against a database a newer one has migrated. On Amazon RDS it can sign in by IAM token instead of a password ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)). |
 | AWS Secrets Manager | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, tagged `owner` and `tier`, encrypted with the key `BROKER_SECRETS_KMS_KEY_ARN` names, and holding a non-empty string. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the tags, the name each secret is asked for by, and how often the broker rereads them. |
-| AWS credentials | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key, and `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and nothing else. |
+| AWS credentials | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key, `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and, when it signs in to RDS by IAM token, `rds-db:connect` on its database user; nothing else. |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of both AWS services; the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's approval routes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_TOKEN` (or `DISPATCH_AGENT_SECRETS_TOKEN_FILE`) to the same value as the broker's `BROKER_UI_TOKEN`. Without them, Dispatch hides its credential pages. |
 | Kubernetes (optional) | To enroll pods, `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |

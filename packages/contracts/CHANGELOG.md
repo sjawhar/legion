@@ -163,6 +163,13 @@
 
 - The `dispatch_issues` description says Dispatch pages the listing and the answer names how many
   issues match, where it said the rows were paged after the server returned the full response.
+- `LegionHandoffCompleteRequest` keeps `commit`, now the pushed commit carrying the phase's handoff
+  (`.legion/<issue>/<phase>.json`), which the `legion` tool's `handoff_complete` finds in the pane
+  with its jj before posting, as `legion handoff complete` did; `LegionHandoffCompleteResponse`
+  gains `note`, what READY's checks say when READY was published without reading the pull
+  request's head (already merged, or a base requiring no check). The daemon reads no handoff file
+  and no branch head; READY's checks (`READY_HEAD_CARRIES_HANDOFFS`, `READY_CHECKS_NOT_GREEN`) run
+  in the daemon (LEGION-631).
 
 ### Removed
 
@@ -176,5 +183,5 @@
 - Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
   `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
   `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
-  `PLAN_REVIEW_VERDICTS`. The Go `legion handoff write` holds each phase's handoff to the same
-  rules and names every field at fault; `HANDOFF_PHASES`, the `legion` tool's phase words, stays.
+  `PLAN_REVIEW_VERDICTS`. Nothing holds a handoff to a shape any more: each role's prompt spells
+  the fields its handoff carries, and the worker writes the file itself; `HANDOFF_PHASES` stays.
