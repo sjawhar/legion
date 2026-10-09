@@ -62,45 +62,23 @@ func (ts *testServer) newServicePod(t *testing.T) (id string, key *ecdsa.Private
 	return id, key
 }
 
-// approverAnswer is the fields of a request answer this file reads, with approver as raw JSON so
-// an absent field is told from a null one.
+// approverAnswer is the fields of a request answer this file reads. Approver is the field's raw
+// JSON: nil when the body has no approver, `null` when it is null, and the quoted login otherwise.
 type approverAnswer struct {
-	RequestID string  `json:"request_id"`
-	State     string  `json:"state"`
-	RecordID  *string `json:"record_id"`
-	Coalesced bool    `json:"coalesced"`
-	approver  json.RawMessage
+	RequestID string          `json:"request_id"`
+	State     string          `json:"state"`
+	RecordID  *string         `json:"record_id"`
+	Coalesced bool            `json:"coalesced"`
+	Approver  json.RawMessage `json:"approver"`
 }
 
-// approverIs reports whether the answer's approver is want: the JSON string want, or null when want
-// is nil. An absent approver is neither.
-func (a approverAnswer) approverIs(want *string) bool {
-	if a.approver == nil {
-		return false
+// approverJSON is login as the approver field carries it: a JSON string, or null for "".
+func approverJSON(login string) string {
+	if login == "" {
+		return "null"
 	}
-	var got *string
-	if err := json.Unmarshal(a.approver, &got); err != nil {
-		return false
-	}
-	if want == nil || got == nil {
-		return want == nil && got == nil
-	}
-	return *got == *want
-}
-
-func decodeApproverAnswer(t *testing.T, body []byte) approverAnswer {
-	t.Helper()
-	answer := decode[approverAnswer](t, body)
-	answer.approver = decode[map[string]json.RawMessage](t, body)["approver"]
-	return answer
-}
-
-// shown is the answer's approver as the body carries it, or "absent".
-func (a approverAnswer) shown() string {
-	if a.approver == nil {
-		return "absent"
-	}
-	return string(a.approver)
+	quoted, _ := json.Marshal(login)
+	return string(quoted)
 }
 
 // ask posts a request for names as the session, failing t on anything but 200.
@@ -111,7 +89,7 @@ func (ts *testServer) ask(t *testing.T, key *ecdsa.PrivateKey, enrollmentID stri
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/requests %v = %d: %s", names, status, body)
 	}
-	return decodeApproverAnswer(t, body)
+	return decode[approverAnswer](t, body)
 }
 
 // statusOf reads GET /v1/requests/{id} as the session, failing t on anything but 200.
@@ -121,7 +99,7 @@ func (ts *testServer) statusOf(t *testing.T, key *ecdsa.PrivateKey, enrollmentID
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/requests/%s = %d: %s", requestID, status, body)
 	}
-	return decodeApproverAnswer(t, body), body
+	return decode[approverAnswer](t, body), body
 }
 
 // TestARequestNamesWhomItWaitsOn pins approver on both answers: a request for a person's
@@ -133,39 +111,37 @@ func TestARequestNamesWhomItWaitsOn(t *testing.T) {
 	ts := newApproverTestServer(t)
 	person, personKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "carol@example.com")
 	pod, podKey := ts.newServicePod(t)
-	anyone := record.AnyoneApprover
-	owner := testApprover
-
 	for _, c := range []struct {
 		name       string
 		enrollment string
 		key        *ecdsa.PrivateKey
 		secret     string
 		state      string
-		approver   *string
+		approver   string // "" for null
 	}{
-		{"a person's human-tier secret", person, personKey, "DEEL_API_KEY", "pending", &owner},
-		{"a shared human-tier secret", person, personKey, "SHARED_KEY", "pending", &anyone},
-		{"a shared agent-tier secret", person, personKey, "WORKER_TOKEN", "granted", nil},
-		{"a service's secret, to its pod", pod, podKey, "SERVICE_KEY", "granted", nil},
-		{"a service's secret, to a person", person, personKey, "SERVICE_KEY", "denied", nil},
+		{"a person's human-tier secret", person, personKey, "DEEL_API_KEY", "pending", testApprover},
+		{"a shared human-tier secret", person, personKey, "SHARED_KEY", "pending", record.AnyoneApprover},
+		{"a shared agent-tier secret", person, personKey, "WORKER_TOKEN", "granted", ""},
+		{"a service's secret, to its pod", pod, podKey, "SERVICE_KEY", "granted", ""},
+		{"a service's secret, to a person", person, personKey, "SERVICE_KEY", "denied", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			want := approverJSON(c.approver)
 			created := ts.ask(t, c.key, c.enrollment, c.secret)
-			if created.State != c.state || !created.approverIs(c.approver) {
-				t.Fatalf("POST /v1/requests %s = state %q approver %s; want state %q approver %s",
-					c.secret, created.State, created.shown(), c.state, show(c.approver))
+			if created.State != c.state || string(created.Approver) != want {
+				t.Fatalf("POST /v1/requests %s = state %q approver %q; want state %q approver %s",
+					c.secret, created.State, created.Approver, c.state, want)
 			}
 			read, body := ts.statusOf(t, c.key, c.enrollment, created.RequestID)
-			if read.State != c.state || !read.approverIs(c.approver) {
-				t.Fatalf("GET /v1/requests/{id} for %s = %s; want state %q approver %s", c.secret, body, c.state, show(c.approver))
+			if read.State != c.state || string(read.Approver) != want {
+				t.Fatalf("GET /v1/requests/{id} for %s = %s; want state %q approver %s", c.secret, body, c.state, want)
 			}
-			if c.approver == nil {
+			if c.approver == "" {
 				return
 			}
 			_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*created.RecordID, nil)
-			if got := decode[wireRecord](t, body).Approver; got != *c.approver {
-				t.Fatalf("record %s names approver %q; the request answered %q", *created.RecordID, got, *c.approver)
+			if got := decode[wireRecord](t, body).Approver; got != c.approver {
+				t.Fatalf("record %s names approver %q; the request answered %q", *created.RecordID, got, c.approver)
 			}
 		})
 	}
@@ -183,9 +159,9 @@ func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T
 	const newOwner = "bob@example.com"
 	session, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "carol@example.com")
 	first := ts.ask(t, sessionKey, session, "DEEL_API_KEY")
-	owner := testApprover
-	if first.State != "pending" || !first.approverIs(&owner) {
-		t.Fatalf("POST /v1/requests DEEL_API_KEY = state %q approver %s; want pending on %s", first.State, first.shown(), owner)
+	owner, wantOwner := testApprover, approverJSON(testApprover)
+	if first.State != "pending" || string(first.Approver) != wantOwner {
+		t.Fatalf("POST /v1/requests DEEL_API_KEY = state %q approver %q; want pending on %s", first.State, first.Approver, owner)
 	}
 
 	ts.Secrets.Put(policytest.Secret("DEEL_API_KEY", newOwner, policy.TierHuman, "deel-v1"))
@@ -193,12 +169,12 @@ func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T
 		t.Fatalf("reread DEEL_API_KEY after the owner change = %d %s", status, body)
 	}
 
-	if read, body := ts.statusOf(t, sessionKey, session, first.RequestID); read.State != "pending" || !read.approverIs(&owner) {
+	if read, body := ts.statusOf(t, sessionKey, session, first.RequestID); read.State != "pending" || string(read.Approver) != wantOwner {
 		t.Fatalf("GET /v1/requests/{id} after the owner change = %s; want pending on %s, whom its record names", body, owner)
 	}
 	again := ts.ask(t, sessionKey, session, "DEEL_API_KEY")
-	if !again.Coalesced || again.RequestID != first.RequestID || !again.approverIs(&owner) {
-		t.Fatalf("the same session asking again = %+v approver %s; want it joined to %s, on %s", again, again.shown(), first.RequestID, owner)
+	if !again.Coalesced || again.RequestID != first.RequestID || string(again.Approver) != wantOwner {
+		t.Fatalf("the same session asking again = %+v; want it joined to %s, on %s", again, first.RequestID, owner)
 	}
 	if !pendingFor(t, ts, owner, *first.RecordID) || pendingFor(t, ts, newOwner, *first.RecordID) {
 		t.Fatalf("record %s: want it on %s's pending list and off %s's", *first.RecordID, owner, newOwner)
@@ -207,14 +183,14 @@ func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T
 	if status != http.StatusOK {
 		t.Fatalf("deny as %s after the owner change = %d %s", owner, status, body)
 	}
-	if read, body := ts.statusOf(t, sessionKey, session, first.RequestID); read.State != "denied" || !read.approverIs(&owner) {
+	if read, body := ts.statusOf(t, sessionKey, session, first.RequestID); read.State != "denied" || string(read.Approver) != wantOwner {
 		t.Fatalf("GET /v1/requests/{id} once denied = %s; want denied, still naming %s", body, owner)
 	}
 
 	other, otherKey := ts.newSessionEnrollment(t, "box", "box-other-"+t.Name(), "carol@example.com")
 	fresh := ts.ask(t, otherKey, other, "DEEL_API_KEY")
-	if fresh.State != "pending" || !fresh.approverIs(new(newOwner)) {
-		t.Fatalf("a new session's request after the owner change = state %q approver %s; want pending on %s", fresh.State, fresh.shown(), newOwner)
+	if fresh.State != "pending" || string(fresh.Approver) != approverJSON(newOwner) {
+		t.Fatalf("a new session's request after the owner change = state %q approver %q; want pending on %s", fresh.State, fresh.Approver, newOwner)
 	}
 }
 
@@ -233,11 +209,4 @@ func pendingFor(t *testing.T, ts *testServer, approver, recordID string) bool {
 		}
 	}
 	return false
-}
-
-func show(s *string) string {
-	if s == nil {
-		return "null"
-	}
-	return *s
 }
