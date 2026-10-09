@@ -212,7 +212,7 @@ func readOwnHandoff(workspace, issue, phaseWord string) (any, error) {
 }
 
 // removedHandoff is the handoff at relPath that a commit on this tree's own branch removed: the
-// newest non-merge commit in (::@ ~ ::trunk()) that touched relPath, when relPath is absent at that
+// newest non-merge commit that touched relPath (ownNonMergeWrite), when relPath is absent at that
 // commit, read at its parent. A newest touching commit that still holds relPath removed nothing,
 // and a branch that never wrote relPath has no such commit; either answers false, as does any jj
 // error or LEGION_JJ_PATH unset or relative.
@@ -222,7 +222,7 @@ func removedHandoff(workspace, relPath string) (any, bool) {
 		return nil, false
 	}
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
-	removal, err := jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+fileset+"))", "--no-graph", "-T", "commit_id")
+	removal, err := ownNonMergeWrite(jj, workspace, relPath, fileset)
 	if err != nil || removal == "" {
 		return nil, false
 	}
@@ -268,15 +268,14 @@ func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool
 }
 
 // unchangedSinceOwnNonMergeWrite is whether relPath's content at @ is byte-identical to its content
-// at the newest non-merge commit in this tree's own history, (::@ ~ ::trunk()) (the one-call pattern
-// handoffCommit already uses to find a commit outside the base), that touched it. No such commit -
-// this branch never itself wrote relPath, only inherited it from main - answers false. A commit that
-// did, whose content a later forward merge's conflict resolution then replaced with main's side,
-// also answers false: content, not merely a touched path, decides. Any jj error, or
+// at the newest non-merge commit in this tree's own history that touched it (ownNonMergeWrite). No
+// such commit - this branch never itself wrote relPath, only inherited it from main - answers false.
+// A commit that did, whose content a later forward merge's conflict resolution then replaced with
+// main's side, also answers false: content, not merely a touched path, decides. Any jj error, or
 // LEGION_JJ_PATH unset or relative, fails closed to false.
 func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
-	written, err := jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+fileset+"))", "--no-graph", "-T", "commit_id")
+	written, err := ownNonMergeWrite(jj, workspace, relPath, fileset)
 	if err != nil || written == "" {
 		return false
 	}
@@ -289,6 +288,13 @@ func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
 		return false
 	}
 	return atHead == atWritten
+}
+
+// ownNonMergeWrite is the newest non-merge commit in this tree's own history, (::@ ~ ::trunk()) (the
+// one-call pattern handoffCommit uses to find a commit outside the base), that touched relPath,
+// given as fileset, its root-anchored form; "" when none did.
+func ownNonMergeWrite(jj, workspace, relPath, fileset string) (string, error) {
+	return jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+fileset+"))", "--no-graph", "-T", "commit_id")
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {

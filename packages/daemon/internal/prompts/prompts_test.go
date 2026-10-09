@@ -181,17 +181,9 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 				t.Errorf("the composed %s prompt still says %q", role, phrase)
 			}
 		}
-	}
-	merger, err := composer.Compose(claim.RoleMerger, false)
-	if err != nil {
-		t.Fatalf("Compose merger: %v", err)
-	}
-	shared, err := os.ReadFile(merger.RolePromptPaths[1])
-	if err != nil {
-		t.Fatalf("read the merger's shared part: %v", err)
-	}
-	if want := `'~(docs/solutions | .legion/<KEY>)'`; !strings.Contains(string(shared), want) {
-		t.Errorf("the merger's check above the approved head does not exclude %s, which retro's last commit changes", want)
+		if want := `'~(docs/solutions | .legion/<KEY>)'`; role == claim.RoleMerger && !strings.Contains(text.String(), want) {
+			t.Errorf("the merger's check above the approved head does not exclude %s, which retro's last commit changes", want)
+		}
 	}
 }
 
