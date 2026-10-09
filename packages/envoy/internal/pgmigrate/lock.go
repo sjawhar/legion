@@ -39,16 +39,23 @@ var lockTimeoutSetting = strconv.FormatInt(LockTimeout.Milliseconds(), 10) + "ms
 // for that lock is waiting for the first to finish, which queues no read or write behind it,
 // since nothing but a runner takes that lock.
 //
+// signIn is the BeforeConnect of the pool tx came from, nil when the pool has none: the watch's
+// own connection signs in as the pool's new connections do. A pool that signs in with a token
+// minted per connection needs it, because tx's connection may have signed in long before (up to
+// the pool's connection lifetime, an hour by default, plus however long the runner's advisory
+// lock and earlier migrations took), past a token's own life, so its configuration's password
+// cannot sign the watch in.
+//
 // Postgres cancels a statement whose lock wait outlasts lock_timeout saying only "canceling
 // statement due to lock timeout", so Exec reports that cancellation as a *LockTimeoutError naming
 // the migration, the lock it wanted and the sessions holding it, as the watch last saw them. Any
 // other error comes back prefixed with the migration's file name.
-func Exec(ctx context.Context, tx pgx.Tx, migration Migration) error {
+func Exec(ctx context.Context, tx pgx.Tx, migration Migration, signIn func(context.Context, *pgx.ConnConfig) error) error {
 	if _, err := tx.Exec(ctx, "select set_config('lock_timeout', $1, true)", lockTimeoutSetting); err != nil {
 		return fmt.Errorf("migration %s: set lock_timeout: %w", migration.Name, err)
 	}
 	conn := tx.Conn()
-	watch := startWatch(ctx, conn.Config(), conn.PgConn().PID())
+	watch := startWatch(ctx, conn.Config(), signIn, conn.PgConn().PID())
 	_, err := tx.Exec(ctx, migration.SQL)
 	wait, watchErr := watch.stop()
 	if err == nil {
@@ -195,9 +202,10 @@ const lockWaitQuery = `
 
 // watch reads, every watchInterval until stopped, what one backend is waiting for. It reads on a
 // connection of its own, since the backend's own connection is busy with the statement that
-// waits: dialed from that connection's configuration at the first reading, so a migration that
-// finishes inside one interval dials nothing, and closed when the watch stops. A connection
-// outside every pool keeps it clear of a shared pool whose callers the migration may be holding up.
+// waits: dialed from that connection's configuration, signed in afresh by signIn when the pool
+// has one, at the first reading, so a migration that finishes inside one interval dials nothing,
+// and closed when the watch stops. A connection outside every pool keeps it clear of a shared
+// pool whose callers the migration may be holding up.
 type watch struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -206,14 +214,14 @@ type watch struct {
 	err  error
 }
 
-func startWatch(ctx context.Context, config *pgx.ConnConfig, pid uint32) *watch {
+func startWatch(ctx context.Context, config *pgx.ConnConfig, signIn func(context.Context, *pgx.ConnConfig) error, pid uint32) *watch {
 	ctx, cancel := context.WithCancel(ctx)
 	w := &watch{cancel: cancel, done: make(chan struct{})}
-	go w.run(ctx, config, pid)
+	go w.run(ctx, config, signIn, pid)
 	return w
 }
 
-func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
+func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, signIn func(context.Context, *pgx.ConnConfig) error, pid uint32) {
 	defer close(w.done)
 	var conn *pgx.Conn
 	closeConn := func() {
@@ -235,6 +243,16 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 		case <-ticker.C:
 		}
 		if conn == nil {
+			// config is the watch's own copy (pgx.Conn.Config), so signIn may set its password;
+			// each dial signs in afresh.
+			if signIn != nil {
+				if err := signIn(ctx, config); err != nil {
+					if ctx.Err() == nil {
+						w.err = fmt.Errorf("sign the lock watch in: %w", err)
+					}
+					continue
+				}
+			}
 			dialed, err := pgx.ConnectConfig(ctx, config)
 			if err != nil {
 				if ctx.Err() == nil {

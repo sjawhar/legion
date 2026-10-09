@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,137 @@ func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
 	}
 	if strings.Contains(string(out), "broker listening") {
 		t.Fatalf(`broker refused to boot but still logged "broker listening" first — the guard ran after binding: %s`, out)
+	}
+}
+
+// rdsTestHost is an Amazon RDS cluster endpoint's form. Nothing resolves it, so a broker that
+// reached the network for it would fail on the lookup, never on the refusal a test wants.
+const rdsTestHost = "example-cluster.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com"
+
+// noAWSEnv strips the AWS SDK's configuration from a broker run: no region, no credentials, no
+// shared files and no instance metadata, so a run that reaches for AWS says so instead of using
+// the machine's own.
+func noAWSEnv(t *testing.T) []string {
+	t.Helper()
+	empty := filepath.Join(t.TempDir(), "aws-config")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return []string{
+		"AWS_REGION=", "AWS_DEFAULT_REGION=", "AWS_PROFILE=", "AWS_ACCESS_KEY_ID=", "AWS_SECRET_ACCESS_KEY=",
+		"AWS_SESSION_TOKEN=", "AWS_CONFIG_FILE=" + empty, "AWS_SHARED_CREDENTIALS_FILE=" + empty,
+		"AWS_EC2_METADATA_DISABLED=true", "AWS_CONTAINER_CREDENTIALS_FULL_URI=", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=",
+		"AWS_WEB_IDENTITY_TOKEN_FILE=",
+	}
+}
+
+// buildBroker builds cmd/broker into a temporary directory and returns its path.
+func buildBroker(t *testing.T) string {
+	t.Helper()
+	binPath := filepath.Join(t.TempDir(), "broker")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
+	}
+	return binPath
+}
+
+// runRefusedBroker runs the broker binary with env and returns its output, failing t unless it
+// exits non-zero without ever logging "broker listening".
+func runRefusedBroker(t *testing.T, binPath string, env ...string) string {
+	t.Helper()
+	cmd := exec.Command(binPath)
+	cmd.Env = append(append(append(os.Environ(), productionEnv...), noAWSEnv(t)...), env...)
+	out, err := cmd.CombinedOutput()
+	exitErr, isExit := err.(*exec.ExitError)
+	if err == nil || !isExit || exitErr.ExitCode() == 0 {
+		t.Fatalf("broker: want a nonzero exit, got err=%v output=%s", err, out)
+	}
+	if strings.Contains(string(out), "broker listening") {
+		t.Fatalf(`broker refused to boot but logged "broker listening" first: %s`, out)
+	}
+	return string(out)
+}
+
+// TestMainRefusesAnIAMURLThatDoesNotVerifyItsHost drives the real binary with an IAM-form
+// BROKER_DATABASE_URL (a user, no password, an RDS endpoint) that asks only sslmode=require,
+// which encrypts and verifies nothing: it refuses at startup naming the host, before it reaches
+// for AWS or the database.
+func TestMainRefusesAnIAMURLThatDoesNotVerifyItsHost(t *testing.T) {
+	out := runRefusedBroker(t, buildBroker(t),
+		"BROKER_DATABASE_URL=postgres://agent_secrets_broker@"+rdsTestHost+":5432/agent_secrets?sslmode=require",
+		"BROKER_PUBLIC_URL=https://secrets.internal.example",
+	)
+	for _, want := range []string{"BROKER_DATABASE_URL signs in to " + rdsTestHost + " by RDS IAM token", "its sslmode is not verify-full"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("broker refused, but its output does not say %q: %s", want, out)
+		}
+	}
+}
+
+// TestMainMintsTokensBeforeOpeningTheDatabase drives the real binary with a verified IAM-form
+// URL and no AWS region: it refuses naming the region, which proves the token minter is built
+// from the AWS config before the database is opened. A broker that opened the database first
+// would fail on the unresolvable host instead.
+func TestMainMintsTokensBeforeOpeningTheDatabase(t *testing.T) {
+	out := runRefusedBroker(t, buildBroker(t),
+		"BROKER_DATABASE_URL=postgres://agent_secrets_broker@"+rdsTestHost+":5432/agent_secrets?sslmode=verify-full&sslrootcert=../../docker/rds-global-bundle.pem",
+		"BROKER_PUBLIC_URL=https://secrets.internal.example",
+	)
+	if !strings.Contains(out, "needs an AWS region") {
+		t.Fatalf("broker refused, but not for the missing AWS region the token minter needs: %s", out)
+	}
+}
+
+// TestMainSignsInToALocalPasswordlessURLAsGiven drives the real binary with a passwordless URL to
+// a local Postgres, with no AWS configuration at all: it is not an RDS endpoint, so the broker
+// mints no token and signs in as the URL says (here with the password libpq's passfile holds), and
+// boots. A broker that took it for IAM would refuse for the missing AWS region.
+func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
+	databaseURL := storetest.URL(t)
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, _ := parsed.User.Password()
+	parsed.User = url.User(parsed.User.Username())
+	passfile := filepath.Join(t.TempDir(), "pgpass")
+	if err := os.WriteFile(passfile, []byte("*:*:*:"+parsed.User.Username()+":"+password+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
+	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(buildBroker(t))
+	cmd.Env = append(append(append(os.Environ(), productionEnv...), noAWSEnv(t)...),
+		"BROKER_DATABASE_URL="+parsed.String(),
+		"PGPASSFILE="+passfile,
+		"BROKER_LISTEN_ADDR=127.0.0.1:0",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
+	)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	addr := waitForBoundAddress(t, stderr)
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET http://%s/healthz: %v", addr, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET http://%s/healthz: status %d, want 200", addr, resp.StatusCode)
 	}
 }
 

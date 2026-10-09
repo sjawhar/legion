@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -70,7 +71,25 @@ func main() {
 	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
-	st, err := store.Open(ctx, cfg.DatabaseURL)
+	// An IAM-form BROKER_DATABASE_URL signs every connection in with an RDS IAM token, minted
+	// from the AWS config, so that config is loaded before the database is opened, and the
+	// Secrets Manager and KMS clients below reuse it.
+	var awsCfg *aws.Config
+	loadAWS := func() aws.Config {
+		if awsCfg == nil {
+			loaded, err := awsconfig.LoadDefaultConfig(ctx)
+			fatal(err)
+			awsCfg = &loaded
+		}
+		return *awsCfg
+	}
+	var storeOpts []store.Option
+	if cfg.DatabaseIAM {
+		mint, err := store.RDSAuthTokens(loadAWS())
+		fatal(err)
+		storeOpts = append(storeOpts, store.WithTokenMinter(mint))
+	}
+	st, err := store.Open(ctx, cfg.DatabaseURL, storeOpts...)
 	fatal(err)
 	fatal(st.Migrate(ctx))
 	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
@@ -80,10 +99,8 @@ func main() {
 		fatal(err)
 		loader.Secrets, loader.Describer, loader.Aliases, reader = local, local, local, secrets.AWS{Client: local}
 	} else {
-		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-		fatal(err)
-		sm := secretsmanager.NewFromConfig(awsCfg)
-		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
+		sm := secretsmanager.NewFromConfig(loadAWS())
+		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(loadAWS()), secrets.AWS{Client: sm}
 	}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
