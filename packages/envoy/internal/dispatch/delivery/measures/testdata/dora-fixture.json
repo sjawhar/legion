@@ -4,9 +4,7 @@
     "deploy_workflow_path": ".github/workflows/deploy.yml",
     "production_job_name": "widgets-release / widgets-release",
     "pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
-    "population_authors": [
-      "octocat"
-    ],
+    "population_authors": ["octocat"],
     "excluded_repos": []
   },
   "window": {
@@ -412,14 +410,10 @@
         "completed_at": "2026-09-05T13:00:00Z"
       },
       "failed_jobs": [],
-      "expected_prs": [
-        "acme/widgets#101"
-      ],
+      "expected_prs": ["acme/widgets#101"],
       "head_branch": "main",
       "event": "push",
-      "expected_prs_stored": [
-        "acme/widgets#101"
-      ]
+      "expected_prs_stored": ["acme/widgets#101"]
     },
     {
       "run_id": 502,
@@ -433,14 +427,10 @@
         "completed_at": "2026-09-06T14:00:00Z"
       },
       "failed_jobs": [],
-      "expected_prs": [
-        "acme/widgets#102"
-      ],
+      "expected_prs": ["acme/widgets#102"],
       "head_branch": "main",
       "event": "push",
-      "expected_prs_stored": [
-        "acme/widgets#102"
-      ]
+      "expected_prs_stored": ["acme/widgets#102"]
     },
     {
       "run_id": 506,
@@ -473,17 +463,10 @@
         "completed_at": "2026-09-09T10:00:00Z"
       },
       "failed_jobs": [],
-      "expected_prs": [
-        "acme/widgets#104",
-        "acme/widgets#105"
-      ],
+      "expected_prs": ["acme/widgets#104", "acme/widgets#105"],
       "head_branch": "main",
       "event": "push",
-      "expected_prs_stored": [
-        "acme/widgets#103",
-        "acme/widgets#104",
-        "acme/widgets#105"
-      ]
+      "expected_prs_stored": ["acme/widgets#103", "acme/widgets#104", "acme/widgets#105"]
     },
     {
       "run_id": 507,
@@ -519,10 +502,7 @@
         "completed_at": "2026-09-13T09:00:00Z"
       },
       "failed_jobs": [],
-      "expected_prs": [
-        "acme/widgets#108",
-        "acme/widgets#109"
-      ],
+      "expected_prs": ["acme/widgets#108", "acme/widgets#109"],
       "head_branch": "main",
       "event": "push",
       "expected_prs_stored": [
@@ -544,17 +524,10 @@
         "completed_at": "2026-09-17T08:00:00Z"
       },
       "failed_jobs": [],
-      "expected_prs": [
-        "acme/widgets#111",
-        "acme/widgets#112"
-      ],
+      "expected_prs": ["acme/widgets#111", "acme/widgets#112"],
       "head_branch": "main",
       "event": "push",
-      "expected_prs_stored": [
-        "acme/widgets#110",
-        "acme/widgets#111",
-        "acme/widgets#112"
-      ]
+      "expected_prs_stored": ["acme/widgets#110", "acme/widgets#111", "acme/widgets#112"]
     },
     {
       "run_id": 508,
