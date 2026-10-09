@@ -166,6 +166,10 @@ export function Timeline({
   const waitingPoints = useMemo(() => waitingSeries(waiting, timeWindow), [waiting, timeWindow]);
   const maxWaiting = Math.max(1, ...waitingPoints.map((point) => point.count));
 
+  // What the chart shows, for a screen reader: the host's label, and ECharts' own aria
+  // description, which writes the same text onto the host once the chart initialises.
+  const summary = `Delivery timeline, ${new Date(windowStartMs).toLocaleString()} to ${new Date(windowEndMs).toLocaleString()}: ${deploys.length} production deploys, ${failures.length} pipeline failures, ${prs.length} merged pull requests, ${waitingPoints[0]?.count ?? 0} waiting to deploy at the start. The List view holds the same pull requests as a table, each deployed one linking its deploy.`;
+
   // ECharts instance lifecycle: init once, resize on container changes, and dispose on unmount.
   // Options (series/axes) are pushed by a separate effect below, keyed on the actual data.
   useEffect(() => {
@@ -239,11 +243,14 @@ export function Timeline({
       // Brush: manual zrender pointer tracking, not ECharts' built-in brush component, which
       // intercepts every mousedown (it calls preventDefault whether or not a drag starts) and so
       // makes clicking a dot to open its drill-down and setting a brush window mutually
-      // exclusive. `convertFromPixel` takes the one y offset an axis-only finder expects.
+      // exclusive. `convertFromPixel` takes the one y offset an axis-only finder expects. A drag
+      // starts a brush only inside the plot grid: the zoom slider sits on the same canvas, at its
+      // right edge, and dragging it must zoom, never set a window.
       let dragStart: { y: number } | null = null;
       const zr = instance.getZr();
-      const onPointerDown = (event: { offsetY: number }): void => {
-        dragStart = { y: event.offsetY };
+      const onPointerDown = (event: { offsetX: number; offsetY: number }): void => {
+        const inGrid = instance.containPixel({ gridIndex: 0 }, [event.offsetX, event.offsetY]);
+        dragStart = inGrid ? { y: event.offsetY } : null;
       };
       const onPointerMove = (event: { offsetY: number }): void => {
         if (dragStart === null || Math.abs(event.offsetY - dragStart.y) < 4) return;
@@ -372,6 +379,7 @@ export function Timeline({
     chart.setOption(
       {
         animation: false,
+        aria: { enabled: true, label: { description: summary } },
         grid: { left: LEFT_AXIS_WIDTH, right: RIGHT_SLIDER_WIDTH, top: 8, bottom: 8 },
         xAxis: { type: "value", min: 0, max: totalLanes, show: false },
         yAxis: {
@@ -478,6 +486,7 @@ export function Timeline({
     totalLanes,
     timeWindow,
     palette,
+    summary,
   ]);
 
   return (
@@ -510,7 +519,7 @@ export function Timeline({
       </div>
       <div className="relative min-h-0 w-full flex-1">
         <div
-          aria-label={`Delivery timeline, ${new Date(windowStartMs).toLocaleString()} to ${new Date(windowEndMs).toLocaleString()}: ${deploys.length} production deploys, ${failures.length} pipeline failures, ${prs.length} merged pull requests, ${waitingPoints[0]?.count ?? 0} waiting to deploy at the start. The List view holds the same pull requests as a table, each deployed one linking its deploy.`}
+          aria-label={summary}
           className={`absolute inset-0 touch-none rounded-b-lg ${surfaceBg}`}
           data-testid="delivery-chart"
           ref={containerRef}

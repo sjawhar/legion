@@ -168,24 +168,26 @@ func fetchPullRequestPayload(ctx context.Context, client *githubapp.Client, toke
 // complete, and nothing else: the pull request (its title, body and head branch) and then its
 // commits' messages, one page of 100 at a time. A complete row already holds every other fact
 // FetchPullRequest reads, its first commit's time included, so the backfill makes one call plus
-// one per commits page rather than FetchPullRequest's two plus fetchCommitMessages' pages.
-func fetchAttributionFacts(ctx context.Context, client *githubapp.Client, owner, repo, repoFull string, number int) (attributionFacts, error) {
+// one per commits page rather than FetchPullRequest's two plus fetchCommitMessages' pages. It
+// answers how many calls it made, a failed one included (retries inside readGitHubPage aside),
+// for the backfill's call budget.
+func fetchAttributionFacts(ctx context.Context, client *githubapp.Client, owner, repo, repoFull string, number int) (attributionFacts, int, error) {
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
-		return attributionFacts{}, fmt.Errorf("mint installation token for %s PR #%d: %w", repoFull, number, err)
+		return attributionFacts{}, 0, fmt.Errorf("mint installation token for %s PR #%d: %w", repoFull, number, err)
 	}
 	payload, err := fetchPullRequestPayload(ctx, client, token, owner, repo, number)
 	if err != nil {
-		return attributionFacts{}, err
+		return attributionFacts{}, 1, err
 	}
-	messages, err := fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
+	messages, pages, err := fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
 	if err != nil {
-		return attributionFacts{}, err
+		return attributionFacts{}, 1 + pages, err
 	}
 	return attributionFacts{
 		Repo: repoFull, URL: payload.HTMLURL, Title: payload.Title, Body: payload.Body,
 		HeadRef: payload.Head.Ref, CommitMessages: messages,
-	}, nil
+	}, 1 + pages, nil
 }
 
 // commitDate reads one commit's authored time: commit.author.date, or commit.committer.date when

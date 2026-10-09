@@ -244,6 +244,13 @@ export function DeliveryPage(): ReactNode {
     [timelineOptions, state.brush]
   );
   const measures = useQuery(deliveryMeasuresQuery(measuresOptions));
+  // When the answer on screen was read. While a facet change refetches, the previous answer stays
+  // on screen (`keepPreviousData`) and the new query reports `dataUpdatedAt` 0, so this keeps the
+  // last time an answer arrived instead of reading that as the epoch. The response carries no
+  // generated time of its own.
+  const answeredAtRef = useRef(0);
+  if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
+  const answeredAt = answeredAtRef.current;
 
   const activeWindow = useMemo(
     () =>
@@ -303,7 +310,7 @@ export function DeliveryPage(): ReactNode {
         <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Delivery timeline</h1>
         {data === undefined ? null : (
           <div className={`text-xs ${textMutedOnCanvas}`}>
-            Generated {new Date(query.dataUpdatedAt).toLocaleString()} · window{" "}
+            Generated {new Date(answeredAt).toLocaleString()} · window{" "}
             {new Date(data.window.from).toLocaleDateString()}–
             {new Date(data.window.to).toLocaleDateString()}
             {state.brush === null ? null : (
@@ -336,7 +343,7 @@ export function DeliveryPage(): ReactNode {
       ) : (
         <>
           {data === undefined ? null : (
-            <SourceFreshness freshness={data.freshness} readAtMs={query.dataUpdatedAt} />
+            <SourceFreshness freshness={data.freshness} readAtMs={answeredAt} />
           )}
 
           {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}

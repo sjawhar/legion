@@ -121,27 +121,36 @@ func citedIssues(repo, body string) []string {
 	return urls
 }
 
-// attributionSelect is the one statement that resolves an issue from stored inputs: the issue
-// and source of the first source naming an issue Dispatch has, or no row. Its arguments are the
-// SQL expressions for the pull request's URL and its four stored inputs, so a single pull request
-// (resolveStoredIssueKey, bound parameters) and every stored row (AttributePullRequests, the row's
-// own columns) resolve through the same text.
-func attributionSelect(url, titleKeys, citedIssues, branchKeys, commitKeys string) string {
+// attributionColumns are the SQL expressions attributionSelect reads a pull request's URL and its
+// four stored inputs from: bound parameters for one pull request (resolveStoredIssueKey), or a
+// stored row's own columns for every row (AttributePullRequests). Named, so the two callers cannot
+// hand the four text[] inputs over in another order.
+type attributionColumns struct {
+	URL, TitleKeys, CitedIssues, BranchKeys, CommitKeys string
+}
+
+// attributionSelect is the one statement that resolves an issue from stored inputs: the issue and
+// source of the first source naming an issue Dispatch has, or no row. The two link sources compare
+// URLs lowercased on both sides: GitHub's owner and repository names are case-insensitive, its
+// answers spell them as their owners do (`Acme/Widgets`), and Dispatch stores an issue's GitHub
+// link lowercased (canonicalRepo) or as a person typed it (issue_external_links_url_lower
+// serves the comparison).
+func attributionSelect(c attributionColumns) string {
 	return `select s.key, s.source from (
 		select t.key, '` + string(sourceTitleBody) + `' as source, 0 as rank, t.n
-			from unnest(` + titleKeys + `) with ordinality t(key, n) join issues i on i.key = t.key
+			from unnest(` + c.TitleKeys + `) with ordinality t(key, n) join issues i on i.key = t.key
 		union all
 		select l.issue_key, '` + string(sourceExternalLink) + `', 1, 0
-			from issue_external_links l where l.url = ` + url + `
+			from issue_external_links l where lower(l.url) = lower(` + c.URL + `)
 		union all
 		select l.issue_key, '` + string(sourceGitHubIssueLink) + `', 2, c.n
-			from unnest(` + citedIssues + `) with ordinality c(url, n) join issue_external_links l on l.url = c.url
+			from unnest(` + c.CitedIssues + `) with ordinality c(url, n) join issue_external_links l on lower(l.url) = lower(c.url)
 		union all
 		select b.key, '` + string(sourceBranch) + `', 3, b.n
-			from unnest(` + branchKeys + `) with ordinality b(key, n) join issues i on i.key = b.key
+			from unnest(` + c.BranchKeys + `) with ordinality b(key, n) join issues i on i.key = b.key
 		union all
 		select m.key, '` + string(sourceCommitMessage) + `', 4, m.n
-			from unnest(` + commitKeys + `) with ordinality m(key, n) join issues i on i.key = m.key
+			from unnest(` + c.CommitKeys + `) with ordinality m(key, n) join issues i on i.key = m.key
 	) s order by s.rank, s.n limit 1`
 }
 
@@ -154,7 +163,9 @@ func resolveStoredIssueKey(ctx context.Context, pool *store.Pool, url string, in
 	var key string
 	var source attributionSource
 	err := pool.QueryRow(ctx,
-		attributionSelect("$1", "$2::text[]", "$3::text[]", "$4::text[]", "$5::text[]"),
+		attributionSelect(attributionColumns{
+			URL: "$1", TitleKeys: "$2::text[]", CitedIssues: "$3::text[]", BranchKeys: "$4::text[]", CommitKeys: "$5::text[]",
+		}),
 		url, inputs.TitleKeys, inputs.CitedIssues, inputs.BranchKeys, inputs.CommitKeys,
 	).Scan(&key, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -190,9 +201,10 @@ func AttributePullRequests(ctx context.Context, pool *store.Pool, limit int) (in
 		), resolved as (
 			select src.repo, src.number, r.key, src.issue_key is distinct from r.key as changed
 			from batch src
-			left join lateral (`+attributionSelect(
-		"src.url", "src.attribution_title_keys", "src.attribution_cited_issues",
-		"src.attribution_branch_keys", "src.attribution_commit_keys")+`) r on true
+			left join lateral (`+attributionSelect(attributionColumns{
+		URL: "src.url", TitleKeys: "src.attribution_title_keys", CitedIssues: "src.attribution_cited_issues",
+		BranchKeys: "src.attribution_branch_keys", CommitKeys: "src.attribution_commit_keys",
+	})+`) r on true
 		), written as (
 			update delivery_pull_requests pr
 			set issue_key = resolved.key,

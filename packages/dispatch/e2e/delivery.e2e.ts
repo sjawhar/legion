@@ -256,6 +256,31 @@ test("dragging along the time axis sets a brush window, which the header clears"
   await context.close();
 });
 
+test("dragging the zoom slider zooms without setting a brush window", async ({ browser }) => {
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await openTimeline(page);
+
+  // The vertical slider is the chart's rightmost 16 px (Timeline.tsx: `right: 4, width: 12`),
+  // outside the plot grid, on the same canvas the brush listens to.
+  const chart = page.getByTestId("delivery-chart");
+  const box = await chart.boundingBox();
+  if (box === null) throw new Error("no chart");
+  const x = box.x + box.width - 10;
+  await page.mouse.move(x, box.y + box.height * 0.4);
+  await page.mouse.down();
+  await page.mouse.move(x, box.y + box.height * 0.5, { steps: 6 });
+  await page.mouse.move(x, box.y + box.height * 0.6, { steps: 6 });
+  await page.mouse.up();
+
+  await expect(page.getByTestId("delivery-brush-band")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "clear brush window" })).toHaveCount(0);
+  await expect(page).not.toHaveURL(/[?&](ws|we)=/);
+  await expect(page.getByText("2 PRs in current filter/window")).toBeVisible();
+  await context.close();
+});
+
 test("the list sorts by its headers and a row opens the PR's details", async ({
   browser,
 }, testInfo) => {

@@ -18,3 +18,6 @@ create index delivery_pull_requests_attribution_unread on delivery_pull_requests
   where attribution_title_keys is null and not partial and unfetchable_at is null;
 create index delivery_pull_requests_attribution_walk on delivery_pull_requests (attribution_checked_at nulls first, repo, number)
   where attribution_title_keys is not null;
+-- The attribution's link sources compare URLs lowercased, since GitHub's owner and repository
+-- names are case-insensitive and a link may be stored as a person typed it.
+create index issue_external_links_url_lower on issue_external_links (lower(url));
