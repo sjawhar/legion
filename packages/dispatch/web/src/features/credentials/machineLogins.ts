@@ -2,7 +2,8 @@ import { queryOptions } from "@tanstack/react-query";
 
 import { api } from "../../api/client";
 
-/** The machine logins the viewer approved that can still reach a secret, as `MachineLoginsSection`
+/** The machine logins the viewer may revoke that can still reach a secret (their own machines'
+ *  and every service's), as `MachineLoginsSection`
  *  lists them; its key is the one approving a login on the machine-login page and revoking one
  *  both invalidate. */
 export const machineLoginsQuery = () =>
