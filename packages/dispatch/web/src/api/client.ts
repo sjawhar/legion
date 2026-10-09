@@ -38,6 +38,7 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DeliveryMeasuresResponse,
   DeliveryRunDetail,
   DeliverySettings,
   DeliverySettingsInput,
@@ -694,6 +695,12 @@ export class DispatchApiClient {
    *  PRs within `[from, to)`, the search and the given facets, all applied server-side. */
   getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
     return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
+  }
+
+  /** The delivery measures and their targets for `[from, to)`: the same query the timeline takes,
+   *  so the search and facets narrow the pull-request measures exactly as they narrow its PRs. */
+  getDeliveryMeasures(options: DeliveryTimelineOptions): Promise<DeliveryMeasuresResponse> {
+    return this.json<DeliveryMeasuresResponse>(pathWithQuery("/api/v1/delivery/measures", options));
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */

@@ -129,6 +129,15 @@ export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
     queryFn: () => api.getDeliveryTimeline(filters),
   });
 
+/** The measures panel's read, keyed under `["delivery"]` beside the timeline so a settings save's
+ *  `invalidateQueries({ queryKey: ["delivery"] })` refreshes both, and by the same filters so the
+ *  window, the search and every facet drive the measures as they drive the timeline. */
+export const deliveryMeasuresQuery = (filters: DeliveryTimelineOptions) =>
+  queryOptions({
+    queryKey: ["delivery", "measures", filters],
+    queryFn: () => api.getDeliveryMeasures(filters),
+  });
+
 /** One deploy-repository run with every job it ran: a finished run's jobs no longer change, so
  *  the drill-down reads it once per run. */
 export const deliveryRunQuery = (id: number) =>
