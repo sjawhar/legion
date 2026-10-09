@@ -83,7 +83,7 @@ func typeAtPromptInWrites(t *testing.T, gap time.Duration, writes ...string) (*o
 	controller, terminal := openPTY(t)
 	answer := make(chan promptRead, 1)
 	go func() {
-		line, err := readHidden(terminal, nil)
+		line, err := readHidden(terminal, nil, nil)
 		answer <- promptRead{line, err}
 	}()
 	awaitEchoOff(t, terminal)
@@ -295,7 +295,7 @@ func TestPromptRefusesAPasteCutShortByAHangUp(t *testing.T) {
 			}
 			answer := make(chan promptRead, 1)
 			go func() {
-				line, err := readHidden(terminal, nil)
+				line, err := readHidden(terminal, nil, nil)
 				answer <- promptRead{line, err}
 			}()
 			awaitEchoOff(t, terminal)
@@ -329,7 +329,7 @@ func TestPromptSignalHelper(t *testing.T) {
 	if os.Getenv("AGENT_SECRETS_PROMPT_HELPER") == "" {
 		t.Skip("subprocess helper")
 	}
-	_, err := readHidden(0, nil)
+	_, err := readHidden(0, nil, nil)
 	fmt.Printf("RETURNED %v\n", err)
 }
 

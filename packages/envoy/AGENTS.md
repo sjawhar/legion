@@ -1983,8 +1983,10 @@ secrets as if they were the agent secrets), and a write also refuses any ARN but
 `assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
 in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
 before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
-`create` and `set` check the sign-in before they read the value: at a terminal they prompt on
-stderr and read one line with echo off (`readHidden`, `secret_prompt_unix.go`). Canonical mode is
+`create` and `set` check the sign-in before they read the value: at a terminal they read one line
+with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
+reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
+shell's line until `fg`. Canonical mode is
 off, so no terminal line limit cuts the value. Enter or the terminal's end-of-file character ends
 it; erase, word erase and kill edit it. An unhandled control byte is refused, inside bracketed
 pastes too. The reader records the error, discards through the line ending (and through a
@@ -1999,7 +2001,14 @@ on either path.
 
 The reader alone changes the terminal, including its final flushing restore and bracketed-paste
 disable. It joins the signal watcher before restoring, and does not restore a terminal another
-process group owns. The watcher handles SIGINT, SIGQUIT, SIGTERM, SIGHUP and SIGTSTP; signals whose
+process group owns. It reads the settings it restores only once its process group holds the
+terminal (`holdTerminal`): a prompt started with `&` waits behind the shell's line editor, whose
+settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
+editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
+orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
+Darwin the group's job-control count), which no shell can foreground and whose stops the kernel
+discards, ends the wait with exit 2 naming the pipe command. The watcher handles SIGINT, SIGQUIT,
+SIGTERM, SIGHUP and SIGTSTP; signals whose
 kernel disposition is SIG_IGN remain ignored. Their tty control characters are disabled and
 consumed by the reader instead, since even an ignored tty signal would flush unread input.
 SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. On SIGTSTP,
@@ -2018,8 +2027,11 @@ After a terminating signal the reader restores, then re-raises it: SIGHUP, SIGIN
 SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the kernel default, not Go's
 goroutine dump. Core dumps are disabled once, before the first value byte is read, for the rest
 of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
-`secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, ignored
-SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal restoration.
+`secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with
+`&` (the restored settings are compared with those bash hands a foreground job, and the label with
+the terminal's owner and echo when it is printed), a stop before the label, an orphaned group,
+ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
+restoration.
 
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in

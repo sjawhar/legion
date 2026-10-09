@@ -115,7 +115,8 @@ func TestSecretAStoppedPromptWritesNothingAndNamesTheRetry(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(_ int, onStop func()) ([]byte, error) {
+		readHidden = func(_ int, prompt, onStop func()) ([]byte, error) {
+			prompt()
 			onStop()
 			return nil, errPromptStopped
 		}
@@ -561,7 +562,8 @@ func useTerminal(t *testing.T, typed ...string) *[]int {
 		return terminalFD, true
 	}
 	reads := &[]int{}
-	readHidden = func(fd int, _ func()) ([]byte, error) {
+	readHidden = func(fd int, prompt, _ func()) ([]byte, error) {
+		prompt()
 		*reads = append(*reads, fd)
 		if len(*reads) > len(typed) {
 			t.Fatalf("read %d values at the terminal, want %d", len(*reads), len(typed))
@@ -610,6 +612,24 @@ func TestSecretCreateAndSetPromptForTheValueAtATerminal(t *testing.T) {
 	}
 }
 
+// TestSecretAPromptThatNeverHoldsTheTerminalShowsNoLabel: a reader that ends before it holds the
+// terminal (a prompt started in the background, refused before fg) shows no label and no line
+// ending, so nothing is written over the shell's own line.
+func TestSecretAPromptThatNeverHoldsTheTerminalShowsNoLabel(t *testing.T) {
+	local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	startSecretBroker(t, servedBy(local))
+	useAWS(t, local, testAccount, adaSignIn)
+	useTerminal(t)
+	readHidden = func(int, func(), func()) ([]byte, error) { return nil, errValueCutShort }
+	_, stderr, code := runSecret("set", "HELD_KEY")
+	if code != 1 || strings.Contains(stderr, "Value for") || strings.HasPrefix(stderr, "\n") {
+		t.Fatalf("exit %d, stderr %q; want 1 with no label and no leading line ending", code, stderr)
+	}
+	if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+		t.Fatalf("value = %q, want v1 unchanged", v)
+	}
+}
+
 // TestSecretAnEmptyValueAtATerminalIsAUsageError: Enter alone or Ctrl-D with nothing typed, which
 // the real reader answers as an empty line (TestPromptCtrlDEndsTheValue), is a usage error that
 // writes nothing.
@@ -645,7 +665,7 @@ func TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int, func()) ([]byte, error) { return nil, errMoreThanOneLine }
+		readHidden = func(int, func(), func()) ([]byte, error) { return nil, errMoreThanOneLine }
 		_, stderr, code := runSecret(tc.args...)
 		want := "a value of more than one line must be piped in: " + tc.want
 		if code != exitUsageError || !strings.Contains(stderr, want) {
@@ -669,7 +689,7 @@ func TestSecretAPasteCutShortAtATerminalWritesNothing(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int, func()) ([]byte, error) { return nil, errPasteCutShort }
+		readHidden = func(int, func(), func()) ([]byte, error) { return nil, errPasteCutShort }
 		_, stderr, code := runSecret(args...)
 		if code != 1 || !strings.Contains(stderr, errPasteCutShort.Error()) {
 			t.Fatalf("%v: exit %d, stderr %q; want 1 naming %q", args, code, stderr, errPasteCutShort)
@@ -702,7 +722,7 @@ func TestSecretAControlByteAtATerminalIsAUsageError(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int, func()) ([]byte, error) { return nil, testControlByteError(0x01) }
+		readHidden = func(int, func(), func()) ([]byte, error) { return nil, testControlByteError(0x01) }
 		_, stderr, code := runSecret(args...)
 		want := "the control byte 0x01 cannot be typed at the prompt; pipe the value in"
 		if code != exitUsageError || !strings.Contains(stderr, want) {
@@ -725,7 +745,7 @@ func TestSecretAValueCutShortAtATerminalWritesNothing(t *testing.T) {
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
-		readHidden = func(int, func()) ([]byte, error) { return nil, errValueCutShort }
+		readHidden = func(int, func(), func()) ([]byte, error) { return nil, errValueCutShort }
 		_, stderr, code := runSecret(args...)
 		if code != 1 || !strings.Contains(stderr, errValueCutShort.Error()) {
 			t.Fatalf("%v: exit %d, stderr %q; want 1 naming %q", args, code, stderr, errValueCutShort)
