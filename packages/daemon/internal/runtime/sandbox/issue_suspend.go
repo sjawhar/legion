@@ -83,7 +83,7 @@ func (r *Runtime) releaseIssue(ctx context.Context, issue, name string) error {
 		if err != nil {
 			return fmt.Errorf("release issue %s: read Sandbox: %w", issue, err)
 		}
-		err = r.deleteSandbox(ctx, object, true)
+		err = r.deleteSandbox(ctx, object)
 		if apierrors.IsConflict(err) {
 			select {
 			case <-ctx.Done():

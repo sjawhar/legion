@@ -184,8 +184,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 // and finds the Sandbox its old tree suspended, still labelled with that tree. The Sandbox owns the
 // issue's volume, which holds its clone, workspace and its roles' sessions, so the orphan root's
 // launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One still running
-// roles of the old tree is refused and left as it is, and one owning no volume, the tree-volume
-// layout that mounted its old root's, is replaced by one of its own tree that owns one.
+// roles of the old tree is refused and left as it is.
 func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
@@ -231,14 +230,6 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 		}
 		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue(testTree) {
 			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
-		}
-	})
-	t.Run("suspended by its old tree, owning no volume", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree))})
-		g.spawn(orphanSpec(t))
-		s := g.sandbox(name)
-		if s == nil || s.UID == "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || len(s.Spec.VolumeClaimTemplates) == 0 {
-			t.Fatalf("orphan root's Sandbox = %+v, want a new one of tree LEGION-209 owning its volume", s)
 		}
 	})
 }

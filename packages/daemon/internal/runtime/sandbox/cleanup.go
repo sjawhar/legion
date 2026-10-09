@@ -11,17 +11,14 @@ import (
 )
 
 // CleanupTree deletes every issue Sandbox of tree, and with each its role Secrets and the issue's
-// volume: the Sandbox owns its PVC by owner reference, and a foreground delete has garbage
-// collection remove the PVC before the Sandbox is gone. The tree's cleanup reservation calls it
-// (store.CleanupReservedTree) once every stored claim of the tree has retired, so no launch creates a
-// Sandbox of the tree meanwhile. The API's own listing by the tree's label is the census: each
-// Sandbox it names is deleted with foreground propagation, in any order, and awaited until the API
-// no longer has it, and the listing is read again until none is left. The restricted daemon identity
-// has no PVC verb, so a Sandbox's absence after its foreground delete is the API's confirmation
-// that its volume is gone. Each delete is fenced to the listed object's UID and resourceVersion, and
-// one the object changed since (a status write) lists again after a recheck interval, so a
-// controller writing status through a foreground delete does not spin the census; a Sandbox already
-// gone is gone, so a retry after a failure finishes the rest.
+// volume (deleteSandbox says how its foreground delete takes them). The tree's cleanup reservation
+// calls it (store.CleanupReservedTree) once every stored claim of the tree has retired, so no launch
+// creates a Sandbox of the tree meanwhile. The API's own listing by the tree's label is the census:
+// each Sandbox it names is deleted, in any order, and awaited until the API no longer has it, and
+// the listing is read again until none is left. Each delete is fenced to the listed object's UID
+// and resourceVersion, and one the object changed since (a status write) lists again after a
+// recheck interval, so a controller writing status through a foreground delete does not spin the
+// census; a Sandbox already gone is gone, so a retry after a failure finishes the rest.
 func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 	for {
 		sandboxes, err := r.treeSandboxes(ctx, tree)
@@ -32,7 +29,7 @@ func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 			return nil
 		}
 		for _, object := range sandboxes {
-			err := r.deleteSandbox(ctx, object, true)
+			err := r.deleteSandbox(ctx, object)
 			if apierrors.IsConflict(err) {
 				select {
 				case <-ctx.Done():
@@ -67,14 +64,18 @@ func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructur
 	return sandboxes, nil
 }
 
-// deleteSandbox deletes object, fenced to its UID and resourceVersion, waits until the API no
-// longer has it, and forgets its launchers' credentials. A conflict is returned as it is.
-func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstructured, foreground bool) error {
+// deleteSandbox deletes object with foreground propagation, fenced to its UID and resourceVersion,
+// waits until the API no longer has it, and forgets its launchers' credentials. Every delete is
+// foreground: the Sandbox owns its PVC and its role Secrets by owner reference, and foreground
+// propagation has garbage collection remove them before the Sandbox is gone, so the Sandbox's
+// absence is the API's confirmation that its volume is gone — the restricted daemon identity has no
+// PVC verb to confirm it with. A conflict is returned as it is.
+func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstructured) error {
 	name, uid, version := object.GetName(), object.GetUID(), object.GetResourceVersion()
-	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}
-	if foreground {
-		policy := metav1.DeletePropagationForeground
-		options.PropagationPolicy = &policy
+	policy := metav1.DeletePropagationForeground
+	options := metav1.DeleteOptions{
+		PropagationPolicy: &policy,
+		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	}
 	deleting, cancel := call(ctx)
 	err := r.sandboxClient().Delete(deleting, name, options)

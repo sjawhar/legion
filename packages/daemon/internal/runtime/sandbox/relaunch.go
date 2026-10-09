@@ -210,16 +210,17 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // first, bounded by the boot timeout; one by the claim's name that is not this project's is a
 // refusal.
 //
-// A Sandbox fits a launch when it owns its volume (the claim template every Sandbox made now
-// carries) and carries the tree label the launch's pod carries, none for the controller's pod. It is
-// made for an issue, whose key, so its Sandbox's name, outlives a move to another tree: a child of a
-// closed tree re-admitted as a root of its own finds the Sandbox its old tree suspended, labelled
-// with that tree and owning the volume that holds the issue's clone, workspace and its roles'
-// sessions. Such a Sandbox, once Suspended, is relabelled for this launch's tree and kept, volume
-// and sessions with it; the Running patch rewrites its pod template, labels included, before any
-// pod runs. One that still runs roles of the old tree is a refusal, since replacing it would end
-// them. A Suspended Sandbox that owns no volume — the tree-volume layout, which mounted its tree
-// root's — fits no launch and is deleted and made again.
+// A Sandbox fits a launch when it carries the tree label the launch's pod carries, none for the
+// controller's pod. It is made for an issue, whose key, so its Sandbox's name, outlives a move to
+// another tree: a child of a closed tree re-admitted as a root of its own finds the Sandbox its old
+// tree suspended, labelled with that tree and owning the volume that holds the issue's clone,
+// workspace and its roles' sessions. Such a Sandbox, once Suspended, is relabelled for this
+// launch's tree and kept, volume and sessions with it; the Running patch rewrites its pod template,
+// labels included, before any pod runs. One that still runs roles of the old tree is a refusal,
+// since replacing it would end them. Nothing here deletes a Sandbox, and none without a volume of
+// its own reaches here: every Sandbox this runtime makes carries the issue claim template
+// (sandboxManifest), and the boot census refuses one of the tree-volume layout before any launch
+// (treeVolumeLayout).
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
@@ -254,33 +255,20 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			return nil, fmt.Errorf("sandbox %s exists but is not project %s's (%s=%q)", l.name, r.project, labelProject, s.Labels[labelProject])
 		}
 		if s.DeletionTimestamp == nil {
-			ownsVolume := len(s.Spec.VolumeClaimTemplates) > 0
-			if ownsVolume && s.Labels[labelTree] == tree {
+			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
 			if s.mode() != modeSuspended {
-				volume := ""
-				if !ownsVolume {
-					volume = " with no volume of its own"
-				}
-				return nil, fmt.Errorf("sandbox %s, made for tree %s%s, does not fit this launch of tree %s and still runs roles; it is replaced once they stop",
-					l.name, s.Labels[labelTree], volume, tree)
+				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is relabelled once they stop",
+					l.name, s.Labels[labelTree], tree)
 			}
-			if ownsVolume {
-				r.log.Info("sandbox runtime: relabelling a suspended sandbox for its issue's new tree, keeping its volume",
-					"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree)
-				relabelled, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: tree})
-				if err != nil {
-					return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
-				}
-				return relabelled, nil
+			r.log.Info("sandbox runtime: relabelling a suspended sandbox for its issue's new tree, keeping its volume",
+				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree)
+			relabelled, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: tree})
+			if err != nil {
+				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
 			}
-			r.log.Info("sandbox runtime: replacing a sandbox that owns no volume", "sandbox", l.name, "uid", s.UID,
-				"tree", s.Labels[labelTree], "for", tree)
-			if err := r.deleteSandbox(ctx, u, false); err != nil && !apierrors.IsConflict(err) {
-				return nil, err
-			}
-			continue
+			return relabelled, nil
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {
