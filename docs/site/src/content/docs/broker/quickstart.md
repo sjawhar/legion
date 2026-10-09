@@ -57,9 +57,13 @@ The approver is the one the broker recorded when the agent asked: the secret's o
 shared secret, anyone signed in to Dispatch. Tell that person, not whoever you believe owns the
 secret: a request goes to whomever its owner tag named at the moment it was made.
 `agent-secrets request` and `agent-secrets status` print the same `waiting for …` line while the
-request waits. If that person's approval is refused `NOT_APPROVER`, the secret's owner changed
-after the request was made, and they can no longer approve it: run `agent-secrets cancel <request
-id>` and ask again, and the new request goes to the current owner.
+request waits. If that person's approval is refused `NOT_APPROVER`, something changed after the
+request was made ([Approvals](/legion/broker/concepts/#approvals) says what each change does).
+Usually the secret's owner changed: run `agent-secrets cancel <request id>` and ask again, and the
+new request goes to the current owner. If instead the session's operator withheld one of the names,
+the operator is the one who can approve it, so ask them rather than asking again: a new request can
+be refused `MIXED_APPROVERS` or `UNKNOWN_SECRET` ([approving a
+request](/legion/broker/guides/approve-a-request/#decide-it) lists every `NOT_APPROVER` case).
 
 ## 2. The approver decides in Dispatch
 
