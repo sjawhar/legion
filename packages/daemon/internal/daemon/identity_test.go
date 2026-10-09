@@ -3,12 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -16,10 +16,8 @@ import (
 )
 
 // A pane commits as its role's App: the launch carries the six git identity variables every worker
-// pane gets, and a launch whose identity cannot be resolved does not happen. Beside them, a daemon
-// with GitHub Apps tells every tree role both Apps' bot logins as LEGION_IMPLEMENT_APP_LOGIN and
-// LEGION_REVIEW_APP_LOGIN, plain values `legion threads resolve` builds its bot-thread rule from; a
-// daemon without Apps sets neither, and the rule then has no Legion App to spare.
+// pane gets, nothing else of the Apps, and a launch whose identity cannot be resolved does not
+// happen.
 func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	stateDir := t.TempDir()
 	token, err := claim.NewToken("s1", "S1-1", claim.RoleImplementer)
@@ -52,34 +50,14 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
 	}
 	s.repo = ghrepo.Repository{}
-	for name, want := range map[string]string{
+	identity := map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
 		"GIT_AUTHOR_NAME": bot.Name, "GIT_AUTHOR_EMAIL": bot.Email,
 		"GIT_COMMITTER_NAME": bot.Name, "GIT_COMMITTER_EMAIL": bot.Email,
-	} {
-		if spec.Env[name] != want {
-			t.Errorf("the launch's %s = %q, want %q", name, spec.Env[name], want)
-		}
 	}
-	for _, name := range appauth.LoginEnv {
-		if value, set := spec.Env[name]; set {
-			t.Errorf("a daemon with no GitHub Apps told the launch %s=%q", name, value)
-		}
+	if !maps.Equal(spec.Env, identity) {
+		t.Errorf("the launch's Env = %v, want the six git identity variables alone", spec.Env)
 	}
-	s.appLogins = map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}
-	withApps, err := s.SpawnSpec(context.Background(), c)
-	if err != nil {
-		t.Fatalf("SpawnSpec with App logins: %v", err)
-	}
-	for name, want := range map[string]string{"LEGION_IMPLEMENT_APP_LOGIN": "legion-implementer[bot]", "LEGION_REVIEW_APP_LOGIN": "legion-reviewer[bot]"} {
-		if withApps.Env[name] != want {
-			t.Errorf("the launch's %s = %q, want %q", name, withApps.Env[name], want)
-		}
-	}
-	if withApps.Env["JJ_USER"] != bot.Name {
-		t.Errorf("the launch with App logins lost its git identity: JJ_USER = %q", withApps.Env["JJ_USER"])
-	}
-	s.appLogins = nil
 
 	s.identity = func(context.Context, claim.Role) (runtime.GitIdentity, error) {
 		return runtime.GitIdentity{}, errors.New("github_app_not_installed")

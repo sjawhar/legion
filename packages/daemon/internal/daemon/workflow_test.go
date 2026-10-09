@@ -65,7 +65,7 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 }
 
 // The boot mint hands back both Apps' bot logins keyed by App role — the review App's for the
-// engine, both for every tree role's launch (specs.appLogins) — from the leases it minted.
+// engine, both for reading whose App a push's commits are — from the leases it minted.
 func TestMintAtBootReturnsBothAppLogins(t *testing.T) {
 	tokens := loginTokens{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}
 	logins, err := mintAtBoot(context.Background(), tokens, "acme", slog.New(slog.NewTextHandler(io.Discard, nil)))

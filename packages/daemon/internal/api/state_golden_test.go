@@ -344,12 +344,12 @@ func TestTask310RouteGoldens(t *testing.T) {
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
 	})
 	golden(t, "threads-resolve.json", ThreadsResolveResponse{Threads: []reviewthreads.Outcome{
-		{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"},
-		{URL: "https://github.com/acme/widgets/pull/42#discussion_r2", LeftOpen: "not its opener's or the Legion reviewer's acceptance", NewestBy: "legion-implementer"},
-	}, Withheld: 1})
+		{Thread: "PRRT_kwDOLx1Qf85B2c7a", Resolved: true},
+		{Thread: "PRRT_kwDOLx1Qf85B2c7b", Resolved: true, Reason: reviewthreads.AlreadyResolved},
+	}})
 	golden(t, "threads-resolve-refused.json", ThreadsResolveResponse{
-		Threads: []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
-		Refused: &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#discussion_r3", Error: "GitHub: Resource not accessible by integration"},
+		Threads: []reviewthreads.Outcome{{Thread: "PRRT_kwDOLx1Qf85B2c7a", Resolved: true}},
+		Refused: &ThreadRefusal{Thread: "PRRT_kwDOLx1Qf85B2c7c", Error: "GitHub: Resource not accessible by integration"},
 	})
 	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: `no check is required on "main" of acme/widgets, so READY was published without reading the head's checks`})
 	golden(t, "issue-status.json", IssueStatusResponse{})

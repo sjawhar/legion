@@ -33,21 +33,20 @@ func (roleTokens) Token(_ context.Context, role appauth.AppRole, _ string) (appa
 	return appauth.Lease{Token: string(role) + "-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: login}}, nil
 }
 
-// reviewThread is one unresolved thread as GitHub's GraphQL answers it: who opened it, and who
-// wrote its newest submitted comment and what it says. A login is GraphQL's, a Bot's bare slug.
+// reviewThread is one review thread as GitHub's GraphQL answers it: its node id, and whether GitHub
+// holds it resolved.
 type reviewThread struct {
-	id, openerType, opener, newestType, newest, body string
+	id       string
+	resolved bool
 }
 
 // threadsGitHub is GitHub's GraphQL holding threads on whichever pull request it is asked for. It
 // records the bearer of every call, each pull request a threads query names, and the id of each
-// thread a resolveReviewThread resolved; it refuses to resolve each thread refuse names, and serves
-// the newest comment of each thread pending names as a draft in a pending review.
+// thread a resolveReviewThread resolved; it refuses to resolve each thread refuse names.
 type threadsGitHub struct {
 	url      string
 	mu       sync.Mutex
 	refuse   map[string]bool
-	pending  map[string]bool
 	bearers  []string
 	queried  []string
 	resolved []string
@@ -81,15 +80,7 @@ func newThreadsGitHub(t *testing.T, threads ...reviewThread) *threadsGitHub {
 		g.queried = append(g.queried, fmt.Sprintf("%s/%s#%v", request.Variables["owner"], request.Variables["name"], request.Variables["number"]))
 		nodes := []map[string]any{}
 		for _, thread := range threads {
-			state := "SUBMITTED"
-			if g.pending[thread.id] {
-				state = "PENDING"
-			}
-			nodes = append(nodes, map[string]any{"id": thread.id, "isResolved": false,
-				"opener": map[string]any{"nodes": []map[string]any{{"url": "https://github.com/acme/widgets/pull/42#" + thread.id,
-					"author": map[string]any{"__typename": thread.openerType, "login": thread.opener}}}},
-				"newest": map[string]any{"nodes": []map[string]any{{"url": "https://github.com/acme/widgets/pull/42#" + thread.id + "-newest", "body": thread.body, "state": state,
-					"author": map[string]any{"__typename": thread.newestType, "login": thread.newest}}}}})
+			nodes = append(nodes, map[string]any{"id": thread.id, "isResolved": thread.resolved})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
 			"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""}}}}}})
@@ -128,45 +119,39 @@ func newThreadsHarness(t *testing.T, github *threadsGitHub, log *bytes.Buffer) *
 	return h
 }
 
+// resolveRequest is the reviewer's request naming threads on LEGION-208's pull request.
+func resolveRequest(grant string, threads ...string) ThreadsResolveRequest {
+	return ThreadsResolveRequest{GrantID: grant, Repo: "acme/widgets", Number: 42, Threads: threads}
+}
+
 // The reviewer cannot resolve a thread on the implementer's pull request, so the daemon does it for
-// the reviewer, as the implement App: exactly the threads a bot outside Legion's role Apps opened
-// whose newest submitted comment is the review App's Accepted:. A thread a Legion App opened, even
-// one its opener accepted, and one whose newest comment is anything else - the reviewer's Still
-// open:, or the pull request author's own Accepted: - stay open, each named with why. Every
-// resolution is logged with the thread and whose acceptance closed it, and the implement App's
-// token goes to GitHub alone, never back to the reviewer.
-func TestTheDaemonResolvesForTheReviewerOnlyTheBotThreadsItAccepted(t *testing.T) {
-	github := newThreadsGitHub(t,
-		reviewThread{"bot-accepted", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect — the gate runs after the last round"},
-		reviewThread{"bot-still-open", "Bot", "claude", "Bot", "legion-reviewer", "Still open: the record is missing"},
-		reviewThread{"bot-author-accepted", "Bot", "claude", "Bot", "legion-implementer", "Accepted: fixed in abc123"},
-		reviewThread{"reviewer-opened", "Bot", "legion-reviewer", "Bot", "legion-reviewer", "Accepted: fixed in abc123"},
-		reviewThread{"implementer-opened", "Bot", "legion-implementer", "Bot", "legion-reviewer", "Accepted: fine"},
-		reviewThread{"person", "User", "octocat", "Bot", "legion-reviewer", "Accepted: not a defect"},
-	)
+// the reviewer, as the implement App: exactly the threads the reviewer names by node id, in the
+// order named, after one listing of the pull request's threads. A thread GitHub already holds
+// resolved is answered as resolved with the reason "already resolved" and not written again, so a
+// retry after a partial run is idempotent; a thread the reviewer did not name is left alone. Every
+// resolution is logged with its thread, and the implement App's token goes to GitHub alone, never
+// back to the reviewer.
+func TestTheDaemonResolvesForTheReviewerExactlyTheThreadsItNames(t *testing.T) {
+	github := newThreadsGitHub(t, reviewThread{"bot-finding", false}, reviewThread{"done-earlier", true}, reviewThread{"still-open", false}, reviewThread{"not-named", false})
 	var log bytes.Buffer
 	h := newThreadsHarness(t, github, &log)
 	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
-	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
+	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", resolveRequest(reviewer.grant(t), "still-open", "done-earlier", "bot-finding"), nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
 	}
 	var answer ThreadsResolveResponse
 	decodeInto(t, recorder, &answer)
-	var resolved []reviewthreads.Outcome
-	for _, outcome := range answer.Threads {
-		if outcome.Resolved != "" {
-			resolved = append(resolved, outcome)
-		} else if outcome.LeftOpen == "" {
-			t.Errorf("outcome %+v neither resolved nor says why it was left open", outcome)
-		}
+	want := []reviewthreads.Outcome{
+		{Thread: "still-open", Resolved: true},
+		{Thread: "done-earlier", Resolved: true, Reason: reviewthreads.AlreadyResolved},
+		{Thread: "bot-finding", Resolved: true},
 	}
-	if len(answer.Threads) != 6 || len(resolved) != 1 || resolved[0].URL != "https://github.com/acme/widgets/pull/42#bot-accepted" ||
-		resolved[0].Resolved != reviewthreads.ReviewersAcceptanceOfABot {
-		t.Fatalf("outcomes %+v, want six, the accepted bot thread alone resolved", answer.Threads)
+	if !slices.Equal(answer.Threads, want) || answer.Refused != nil {
+		t.Fatalf("answer %+v, want the three named threads in order, the resolved one answered as already resolved", answer)
 	}
-	if !slices.Equal(github.queried, []string{"acme/widgets#42"}) || !slices.Equal(github.resolved, []string{"bot-accepted"}) {
-		t.Fatalf("GitHub was asked for %v and resolved %v, want #42's threads and the accepted bot thread alone", github.queried, github.resolved)
+	if !slices.Equal(github.queried, []string{"acme/widgets#42"}) || !slices.Equal(github.resolved, []string{"still-open", "bot-finding"}) {
+		t.Fatalf("GitHub was asked for %v and resolved %v, want #42's threads once and the two open named threads in order", github.queried, github.resolved)
 	}
 	for _, bearer := range github.bearers {
 		if bearer != "Bearer implement-token" {
@@ -176,87 +161,73 @@ func TestTheDaemonResolvesForTheReviewerOnlyTheBotThreadsItAccepted(t *testing.T
 	if strings.Contains(recorder.Body.String(), "implement-token") {
 		t.Fatalf("the answer %s carries the implement App's token", recorder.Body)
 	}
-	if line := log.String(); !strings.Contains(line, "thread=https://github.com/acme/widgets/pull/42#bot-accepted") ||
-		!strings.Contains(line, `by="the Legion reviewer's acceptance of a bot's thread"`) || strings.Contains(line, "bot-still-open") {
-		t.Fatalf("log %q, want the one resolution with its thread and whose acceptance closed it", line)
+	if line := log.String(); !strings.Contains(line, "thread=still-open") || !strings.Contains(line, "thread=bot-finding") ||
+		strings.Contains(line, "done-earlier") || strings.Contains(line, "not-named") {
+		t.Fatalf("log %q, want the two resolutions with their threads and nothing of the others", line)
+	}
+}
+
+// An id that is no review thread of the issue's pull request refuses the whole request, naming
+// every such id, before any write: the named threads that are the pull request's stay as they were,
+// so a reviewer who pasted a wrong id resolves nothing by accident, on this pull request or any
+// other. A request naming no thread, or an empty id, is refused before GitHub is called.
+func TestTheDaemonRefusesAThreadThatIsNotOnThePullRequestBeforeAnyWrite(t *testing.T) {
+	github := newThreadsGitHub(t, reviewThread{"ours", false})
+	var log bytes.Buffer
+	h := newThreadsHarness(t, github, &log)
+	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
+	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", resolveRequest(reviewer.grant(t), "ours", "theirs", "nowhere"), nil)
+	body := recorder.Body.String()
+	assertFailure(t, recorder, http.StatusBadRequest, "THREAD_NOT_ON_PULL_REQUEST")
+	if !strings.Contains(body, "theirs, nowhere") || !strings.Contains(body, "acme/widgets#42") {
+		t.Fatalf("refusal %s, want it to name the foreign ids and the pull request", body)
+	}
+	if len(github.resolved) != 0 || !slices.Equal(github.queried, []string{"acme/widgets#42"}) {
+		t.Fatalf("GitHub resolved %v after %v, want nothing written after the one listing", github.resolved, github.queried)
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		code string
+	}{
+		{"no threads", `{"grantId":%q,"repo":"acme/widgets","number":42}`, "MISSING_FIELD"},
+		{"an empty list", `{"grantId":%q,"repo":"acme/widgets","number":42,"threads":[]}`, "MISSING_FIELD"},
+		{"an empty id", `{"grantId":%q,"repo":"acme/widgets","number":42,"threads":["ours",""]}`, "INVALID_THREAD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := len(github.bearers)
+			assertFailure(t, h.request(http.MethodPost, "/legion/v1/threads/resolve", fmt.Sprintf(tc.body, reviewer.grant(t)), nil), http.StatusBadRequest, tc.code)
+			if len(github.bearers) != calls {
+				t.Fatalf("GitHub was called %d times, want none", len(github.bearers)-calls)
+			}
+		})
 	}
 }
 
 // GitHub refusing to resolve a thread stops the run, and the answer names the refused thread beside
-// the outcomes before it, the thread already resolved among them, and the count of the threads
-// before it that hold the implementer's draft, so the reviewer sees what the daemon did; the
-// threads after it are neither resolved nor named.
+// the outcomes before it, the thread already resolved among them, so the reviewer sees what the
+// daemon did; the threads after it are neither resolved nor named.
 func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T) {
-	github := newThreadsGitHub(t,
-		reviewThread{"first", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"},
-		reviewThread{"draft", "Bot", "claude", "Bot", "legion-implementer", "Fixed in abc123: the guard moved"},
-		reviewThread{"second", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: fixed in abc123"},
-		reviewThread{"third", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: fine"},
-	)
+	github := newThreadsGitHub(t, reviewThread{"first", false}, reviewThread{"second", false}, reviewThread{"third", false})
 	github.refuse = map[string]bool{"second": true}
-	github.pending = map[string]bool{"draft": true}
 	var log bytes.Buffer
 	h := newThreadsHarness(t, github, &log)
 	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
-	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
+	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", resolveRequest(reviewer.grant(t), "first", "second", "third"), nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
 	}
 	var answer ThreadsResolveResponse
 	decodeInto(t, recorder, &answer)
 	want := ThreadsResolveResponse{
-		Threads:  []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#first", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
-		Withheld: 1,
-		Refused:  &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#second", Error: "GitHub: Resource not accessible by integration"},
+		Threads: []reviewthreads.Outcome{{Thread: "first", Resolved: true}},
+		Refused: &ThreadRefusal{Thread: "second", Error: "GitHub: Resource not accessible by integration"},
 	}
-	if !slices.Equal(answer.Threads, want.Threads) || answer.Withheld != want.Withheld || answer.Refused == nil || *answer.Refused != *want.Refused {
+	if !slices.Equal(answer.Threads, want.Threads) || answer.Refused == nil || *answer.Refused != *want.Refused {
 		t.Fatalf("answer %+v (refused %+v), want %+v (refused %+v)", answer, answer.Refused, want, want.Refused)
 	}
 	if !slices.Equal(github.resolved, []string{"first"}) {
 		t.Fatalf("GitHub resolved %v, want the first thread alone", github.resolved)
-	}
-}
-
-// GitHub shows a draft in a pending review only to its author, and the daemon reads the threads as
-// the implement App, so it sees the implementer's own drafts. The reviewer's answer never names a
-// thread whose newest comment is such a draft, neither its URL nor its author, and counts it as
-// withheld instead, so an answer that names no thread does not read as no thread being unresolved.
-func TestADaemonResolveWithholdsTheThreadsHoldingTheImplementersDraft(t *testing.T) {
-	accepted := reviewThread{"bot-accepted", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"}
-	drafts := []reviewThread{
-		{"implementer-draft", "Bot", "claude", "Bot", "legion-implementer", "Fixed in abc123: the guard moved"},
-		{"implementer-draft-too", "Bot", "legion-reviewer", "Bot", "legion-implementer", "Declined: out of scope"},
-	}
-	for _, tc := range []struct {
-		name     string
-		threads  []reviewThread
-		named    []string
-		withheld int
-	}{
-		{"beside a thread it resolves", []reviewThread{accepted, drafts[0]}, []string{"https://github.com/acme/widgets/pull/42#bot-accepted"}, 1},
-		{"when they are every unresolved thread", drafts, nil, 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := newThreadsGitHub(t, tc.threads...)
-			github.pending = map[string]bool{"implementer-draft": true, "implementer-draft-too": true}
-			var log bytes.Buffer
-			h := newThreadsHarness(t, github, &log)
-			reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
-			recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
-			}
-			body := recorder.Body.String()
-			var answer ThreadsResolveResponse
-			decodeInto(t, recorder, &answer)
-			var named []string
-			for _, outcome := range answer.Threads {
-				named = append(named, outcome.URL)
-			}
-			if !slices.Equal(named, tc.named) || answer.Withheld != tc.withheld || strings.Contains(body, "implementer-draft") || strings.Contains(body, "legion-implementer") {
-				t.Fatalf("answer %s, want the threads %v named, %d withheld, and nothing of a draft's thread", body, tc.named, tc.withheld)
-			}
-		})
 	}
 }
 
@@ -275,11 +246,12 @@ func TestTheDaemonResolvesThreadsOnlyForTheReviewerOnItsOwnPullRequest(t *testin
 		{"the reviewer naming another issue's pull request", claim.RoleReviewer, 43, "PULL_REQUEST_NOT_THE_ISSUES"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			github := newThreadsGitHub(t, reviewThread{"bot-accepted", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"})
+			github := newThreadsGitHub(t, reviewThread{"bot-finding", false})
 			var log bytes.Buffer
 			h := newThreadsHarness(t, github, &log)
 			worker := newLiveClaim(t, h, "LEGION-208", tc.role)
-			assertFailure(t, h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: worker.grant(t), Repo: "acme/widgets", Number: tc.number}, nil),
+			assertFailure(t, h.request(http.MethodPost, "/legion/v1/threads/resolve",
+				ThreadsResolveRequest{GrantID: worker.grant(t), Repo: "acme/widgets", Number: tc.number, Threads: []string{"bot-finding"}}, nil),
 				http.StatusForbidden, tc.code)
 			if len(github.bearers) != 0 {
 				t.Fatalf("GitHub was called %d times, want none", len(github.bearers))

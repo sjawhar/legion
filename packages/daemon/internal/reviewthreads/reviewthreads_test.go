@@ -1,63 +1,145 @@
 package reviewthreads
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
-// The rule's vectors. The subject of a finding never closes it. A thread closes on its opener's
-// Accepted:, or, when a Bot that is none of Legion's role Apps opened it (a CI bot, or a person
-// whose gh is routed to an App: GitHub cannot tell them apart), on Legion's review App's, the
-// independent party; the acceptance says which. The pull request author's reply (Fixed in,
-// Declined, its own Accepted:) closes nothing. Accepted: counts only as the first line of a
-// submitted comment, after space, tab, CR or LF alone, whatever the login's case. A thread either
-// Legion App opened closes only on its opener's Accepted:, and a person's thread only on its
-// opener's. An account is its type and its login together: a User who registered the review App's
-// bare slug is not the review App, nor the Bot opener of that name. A caller that cannot know
-// Legion's Apps leaves every bot's thread to its opener.
-func TestResolutionClosesAThreadOnlyOnItsOpenersOrTheLegionReviewersAcceptance(t *testing.T) {
-	apps, err := AppsFrom(map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"})
+// fakeGitHub is GitHub's GraphQL holding the pull request's review threads, each with whether it is
+// resolved, served in pages of pageSize. It records every resolveReviewThread's thread id in order
+// and refuses the ones refuse names with GitHub's own message.
+type fakeGitHub struct {
+	threads  []fakeThread
+	pageSize int
+	refuse   map[string]bool
+	queries  int
+	resolved []string
+}
+
+type fakeThread struct {
+	id       string
+	resolved bool
+}
+
+func (g *fakeGitHub) call(_ context.Context, query string, variables map[string]any, into any) error {
+	if strings.Contains(query, "resolveReviewThread") {
+		id := variables["threadId"].(string)
+		if g.refuse[id] {
+			return errors.New("GitHub: Resource not accessible by integration")
+		}
+		g.resolved = append(g.resolved, id)
+		return nil
+	}
+	g.queries++
+	start := 0
+	if after, _ := variables["after"].(string); after != "" {
+		start, _ = strconv.Atoi(strings.TrimPrefix(after, "cursor-"))
+	}
+	end := len(g.threads)
+	if g.pageSize > 0 && start+g.pageSize < end {
+		end = start + g.pageSize
+	}
+	nodes := []map[string]any{}
+	for _, thread := range g.threads[start:end] {
+		nodes = append(nodes, map[string]any{"id": thread.id, "isResolved": thread.resolved})
+	}
+	encoded, err := json.Marshal(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+		"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": end < len(g.threads), "endCursor": fmt.Sprintf("cursor-%d", end)}}}}}})
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	const notEither = "not its opener's or the Legion reviewer's acceptance"
-	bot := func(opener, newestType, newest, body string) Thread {
-		return Thread{OpenerTypename: "Bot", OpenerLogin: opener, NewestTypename: newestType, NewestLogin: newest, NewestBody: body}
+	return json.Unmarshal(encoded, into)
+}
+
+var widgets = ghrepo.MustParse("acme/widgets")
+
+// The run resolves exactly the ids it is given, in the order given, after one listing of the pull
+// request's threads: a thread GitHub already holds resolved is answered as resolved with
+// AlreadyResolved and not written again, and so is an id named twice, so a retry after a partial
+// run resolves what remains without a failed write. A thread the caller did not name is left as it
+// is, whatever its state.
+func TestResolveResolvesTheNamedThreadsInOrderAndAnswersAResolvedOneIdempotently(t *testing.T) {
+	github := &fakeGitHub{threads: []fakeThread{{"t1", false}, {"t2", true}, {"t3", false}, {"t4", false}}, pageSize: 2}
+	outcomes, err := Resolve(context.Background(), github.call, widgets, 42, []string{"t3", "t2", "t1", "t3"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
-	for _, tc := range []struct {
-		name   string
-		thread Thread
-		apps   *Apps
-		want   Acceptance
-		reason string
-	}{
-		{"the reviewer accepts a bot's finding", bot("claude", "Bot", "legion-reviewer", "Accepted: fixed in 1a2b3c4 — moved the guard"), apps, ReviewersAcceptanceOfABot, ""},
-		{"in any case, after space, tab, CR and LF", bot("claude", "Bot", "Legion-Reviewer", " \t\r\nAccepted: not a defect — the loop is bounded"), apps, ReviewersAcceptanceOfABot, ""},
-		{"the author declines", bot("claude", "Bot", "legion-implementer", "Declined: the loop is bounded"), apps, "", notEither},
-		{"the author says it fixed it", bot("claude", "Bot", "legion-implementer", "Fixed in 1a2b3c4: moved the guard"), apps, "", notEither},
-		{"the author accepts", bot("claude", "Bot", "legion-implementer", "Accepted: my own fix"), apps, "", notEither},
-		{"the reviewer says it still stands", bot("claude", "Bot", "legion-reviewer", "Still open: the loop is not bounded"), apps, "", notEither},
-		{"a no-break space before Accepted:", bot("claude", "Bot", "legion-reviewer", "\u00a0Accepted: fixed"), apps, "", notEither},
-		{"Accepted: on a second line", bot("claude", "Bot", "legion-reviewer", "Thanks.\nAccepted: fixed"), apps, "", notEither},
-		{"the reviewer's draft", Thread{OpenerTypename: "Bot", OpenerLogin: "claude", NewestTypename: "Bot", NewestLogin: "legion-reviewer", NewestBody: "Accepted: drafted", NewestPending: true}, apps, "", "an unsubmitted draft in a pending review"},
-		{"a routed person's finding the reviewer accepts", bot("sjawhar-agent", "Bot", "legion-reviewer", "Accepted: fixed in 1a2b3c4 — moved the guard"), apps, ReviewersAcceptanceOfABot, ""},
-		{"a routed person accepting its own", bot("sjawhar-agent", "Bot", "sjawhar-agent", "Accepted: fixed"), apps, OpenersAcceptance, ""},
-		{"the reviewer's thread the author answered", bot("legion-reviewer", "Bot", "legion-implementer", "Fixed in 1a2b3c4: moved the guard"), apps, "", "not an acceptance"},
-		{"the implementer App's thread the reviewer accepts", bot("legion-implementer", "Bot", "legion-reviewer", "Accepted: fine"), apps, "", "not an acceptance"},
-		{"a person's thread the reviewer accepts", Thread{OpenerTypename: "User", OpenerLogin: "octocat", NewestTypename: "Bot", NewestLogin: "legion-reviewer", NewestBody: "Accepted: fixed"}, apps, "", "not an acceptance"},
-		{"a User named as the review App accepts a bot's", bot("claude", "User", "legion-reviewer", "Accepted: fixed"), apps, "", notEither},
-		{"a User named as the review App accepts the review App's", bot("legion-reviewer", "User", "legion-reviewer", "Accepted: fixed"), apps, "", "not an acceptance"},
-		{"a person accepts their own after space, tab, CR and LF", Thread{OpenerLogin: "reviewer", NewestLogin: "reviewer", NewestBody: " \t\r\nAccepted: fixed"}, apps, OpenersAcceptance, ""},
-		{"a person's no-break space before Accepted:", Thread{OpenerLogin: "reviewer", NewestLogin: "reviewer", NewestBody: "\u00a0Accepted: fixed"}, apps, "", "not an acceptance"},
-		{"a bot's thread the reviewer accepts, Legion's Apps unknown", bot("claude", "Bot", "legion-reviewer", "Accepted: fixed"), nil, "",
-			"not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:"},
-		{"a person's thread, Legion's Apps unknown", Thread{OpenerTypename: "User", OpenerLogin: "octocat", NewestTypename: "Bot", NewestLogin: "legion-implementer", NewestBody: "Fixed in 1a2b3c4: moved the guard"}, nil, "", "not an acceptance"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got, reason := Resolution(tc.thread, tc.apps); got != tc.want || reason != tc.reason {
-				t.Fatalf("Resolution = %q, %q; want %q, %q", got, reason, tc.want, tc.reason)
-			}
-		})
+	want := []Outcome{
+		{Thread: "t3", Resolved: true},
+		{Thread: "t2", Resolved: true, Reason: AlreadyResolved},
+		{Thread: "t1", Resolved: true},
+		{Thread: "t3", Resolved: true, Reason: AlreadyResolved},
+	}
+	if !slices.Equal(outcomes, want) {
+		t.Fatalf("outcomes %+v, want %+v", outcomes, want)
+	}
+	if !slices.Equal(github.resolved, []string{"t3", "t1"}) {
+		t.Fatalf("GitHub resolved %v, want t3 then t1 and nothing else", github.resolved)
+	}
+	if github.queries != 2 {
+		t.Fatalf("GitHub was asked for threads %d times, want the two pages once each", github.queries)
+	}
+}
+
+// An id that is no thread of the pull request fails the run before any write, naming every such id
+// in the order given: the threads among the ids that are the pull request's stay as they were.
+func TestResolveRefusesAnIdThatIsNoThreadOfThePullRequestBeforeAnyWrite(t *testing.T) {
+	github := &fakeGitHub{threads: []fakeThread{{"t1", false}, {"t2", true}}}
+	outcomes, err := Resolve(context.Background(), github.call, widgets, 42, []string{"t1", "other-pr", "t2", "nowhere"})
+	var foreign *NotOnPullRequest
+	if !errors.As(err, &foreign) || !slices.Equal(foreign.Threads, []string{"other-pr", "nowhere"}) {
+		t.Fatalf("Resolve = %+v, %v; want a NotOnPullRequest naming other-pr and nowhere", outcomes, err)
+	}
+	if outcomes != nil || len(github.resolved) != 0 {
+		t.Fatalf("outcomes %+v, GitHub resolved %v; want nothing answered and nothing written", outcomes, github.resolved)
+	}
+	if !strings.Contains(err.Error(), "other-pr, nowhere") {
+		t.Fatalf("error %q, want it to name the foreign ids", err)
+	}
+}
+
+// GitHub refusing a thread stops the run: the outcomes before it are returned beside a Refused
+// naming the thread and carrying GitHub's message, and the ids after it are not written.
+func TestResolveStopsAtTheThreadGitHubRefuses(t *testing.T) {
+	github := &fakeGitHub{threads: []fakeThread{{"t1", false}, {"t2", false}, {"t3", false}}, refuse: map[string]bool{"t2": true}}
+	outcomes, err := Resolve(context.Background(), github.call, widgets, 42, []string{"t1", "t2", "t3"})
+	var refused *Refused
+	if !errors.As(err, &refused) || refused.Thread != "t2" || refused.Err.Error() != "GitHub: Resource not accessible by integration" {
+		t.Fatalf("Resolve error = %v, want a Refused for t2 with GitHub's message", err)
+	}
+	if !slices.Equal(outcomes, []Outcome{{Thread: "t1", Resolved: true}}) || !slices.Equal(github.resolved, []string{"t1"}) {
+		t.Fatalf("outcomes %+v, GitHub resolved %v; want t1 alone before the refusal", outcomes, github.resolved)
+	}
+}
+
+// A pull request GitHub does not know fails the run before any write, naming it.
+func TestResolveFailsOnAPullRequestGitHubDoesNotKnow(t *testing.T) {
+	call := func(_ context.Context, _ string, _ map[string]any, into any) error {
+		return json.Unmarshal([]byte(`{"data":{"repository":{"pullRequest":null}}}`), into)
+	}
+	if _, err := Resolve(context.Background(), call, widgets, 7, []string{"t1"}); err == nil || !strings.Contains(err.Error(), "acme/widgets#7 was not found by GitHub") {
+		t.Fatalf("Resolve = %v, want the missing pull request named", err)
+	}
+}
+
+// Result reads a GraphQL body as GitHub's first error, or as the shape asked for.
+func TestResultAnswersGitHubsFirstErrorOrDecodes(t *testing.T) {
+	if err := Result([]byte(`{"errors":[{"message":"Could not resolve to a node"},{"message":"second"}]}`), nil); err == nil || err.Error() != "GitHub: Could not resolve to a node" {
+		t.Fatalf("Result with errors = %v, want GitHub's first message", err)
+	}
+	var page threadsPage
+	if err := Result([]byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"t1","isResolved":true}],"pageInfo":{"hasNextPage":false}}}}}}`), &page); err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if nodes := page.Data.Repository.PullRequest.ReviewThreads.Nodes; len(nodes) != 1 || nodes[0].ID != "t1" || !nodes[0].IsResolved {
+		t.Fatalf("decoded %+v, want the one resolved thread", nodes)
 	}
 }

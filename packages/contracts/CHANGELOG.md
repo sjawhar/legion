@@ -82,12 +82,12 @@
 ### Added
 
 - `LegionThreadsResolveRequest` and `LegionThreadsResolveResponse`, the body and the answer of the
-  Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer pane's `legion threads
-  resolve` calls: the grant and the pull request it names, then each unresolved review thread's
-  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), `withheld`, the
-  count of threads whose newest comment is a draft in the implement App's pending review, which the
-  answer never names, and `refused`, the thread GitHub refused to resolve and its message, when one
-  stopped the run (LEGION-544).
+  Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer's `resolve_threads` calls:
+  the grant, the pull request it names and `threads`, the node ids of the review threads to
+  resolve (at least one, none empty), then each named thread's outcome in the order named,
+  `{thread, resolved, reason}`, `reason` being `already resolved` for a thread GitHub held resolved
+  before the run and absent for one the run resolved, and `refused`, the thread GitHub refused to
+  resolve and its message, when one stopped the run (LEGION-544, LEGION-631).
 - `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
   removed, the head it wrote, the validation error the history failed with, and `source_version`,
   the version the rebuilt document holds (its latest saved version, or the version supplied
@@ -146,7 +146,6 @@
 - Added `PROJECT_KEY_PATTERN`, a whole project key as the Dispatch server creates them; `dispatch_search`'s `project` must now be empty or match it (`project must be a project key such as CORE`), where any other value was sent and answered with no results.
 - Added `maxHint` to `SchemaApi.string`'s options: text appended to the over-cap message, saying what to send instead.
 - Added `LegionGoChildRequest`, the body of the Go daemon's `POST /legion/v1/children/park` and `/rerun` (an architect's `park_child` and `rerun_child`), whose answers are `LegionGoEmptyResponse`.
-- Added optional `legionAppLogins` to `LegionGoGitHubTokenResponse` and to `LegionDaemonApi.GitHubToken`'s response: each Legion role App's login keyed by its App role (`{implement, review}`), on `/legion/v1/gh-token`, which `legion threads resolve` keeps out of its bot-thread rule and whose `review` login's `Accepted:` closes a bot's thread (LEGION-208).
 - Added optional `Message.broadcast_id`, the broadcast a message is one recipient's copy of: null
   for every other message, absent from a Dispatch older than the field. Added optional
   `AgentStreamMessage.dispatchMessageId`, the Dispatch message a streamed user message delivered,

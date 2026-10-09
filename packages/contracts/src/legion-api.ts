@@ -349,37 +349,29 @@ export const LegionGrantResponse = z.strictObject({
 });
 export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
-/** `api.ThreadsResolveRequest`, the reviewer pane's `legion threads resolve`: its grant, and the
- * pull request it names, which must be its issue's. */
+/** `api.ThreadsResolveRequest`, the reviewer's `resolve_threads`: its grant, the pull request it
+ * names, which must be its issue's, and the GraphQL node ids of the review threads to resolve, at
+ * least one. */
 export const LegionThreadsResolveRequest = z.strictObject({
   grantId: nonEmptyString,
   repo: nonEmptyString,
   number: z.number().int().positive(),
+  threads: z.array(nonEmptyString).min(1),
 });
-/** `reviewthreads.Outcome`: an unresolved review thread the daemon resolved for the reviewer, on
- * whose acceptance (`resolved`), or left open and why (`leftOpen`) — exactly one of the two — with
- * its newest comment's author. */
-const LegionThreadOutcome = z.union([
-  z.strictObject({
-    url: nonEmptyString,
-    resolved: nonEmptyString,
-    newestBy: nonEmptyString.optional(),
-  }),
-  z.strictObject({
-    url: nonEmptyString,
-    leftOpen: nonEmptyString,
-    newestBy: nonEmptyString.optional(),
-  }),
-]);
-/** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each unresolved
- * thread's outcome, in GitHub's order, but for the threads whose newest comment is a draft in the
- * implement App's pending review, which `withheld` counts without naming; and, when GitHub refused
- * to resolve a thread, that thread and GitHub's message (`refused`), the outcomes and the count
- * before it being all that ran. */
+/** `reviewthreads.Outcome`: one named thread after the run — its node id, whether GitHub holds it
+ * resolved, and `reason`, `already resolved` for a thread GitHub held resolved before the run wrote
+ * anything, absent for one this run resolved. */
+const LegionThreadOutcome = z.strictObject({
+  thread: nonEmptyString,
+  resolved: z.boolean(),
+  reason: nonEmptyString.optional(),
+});
+/** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each named
+ * thread's outcome, in the order the request named them; and, when GitHub refused to resolve one,
+ * that thread and GitHub's message (`refused`), the outcomes before it being all that ran. */
 export const LegionThreadsResolveResponse = z.strictObject({
   threads: z.array(LegionThreadOutcome),
-  withheld: z.number().int().nonnegative(),
-  refused: z.strictObject({ url: nonEmptyString, error: nonEmptyString }).optional(),
+  refused: z.strictObject({ thread: nonEmptyString, error: nonEmptyString }).optional(),
 });
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */

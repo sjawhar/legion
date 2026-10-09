@@ -38,15 +38,6 @@ const (
 // Roles is every App role, the Apps a Legion deployment configures one of each of.
 var Roles = []AppRole{Implement, Review}
 
-// LoginEnv is the variable a tree agent reads each Legion App's bot login from: the daemon sets
-// both on every tree launch beside the role's git identity (internal/daemon specs), and `legion
-// threads resolve` builds its bot-thread rule from them (cmd/legion threads). One table, so the
-// producer and the consumer cannot drift apart silently.
-var LoginEnv = map[AppRole]string{
-	Implement: "LEGION_IMPLEMENT_APP_LOGIN",
-	Review:    "LEGION_REVIEW_APP_LOGIN",
-}
-
 // GitIdentity is the bot identity that jj and git must use for work a role performs.
 type GitIdentity = runtime.GitIdentity
 

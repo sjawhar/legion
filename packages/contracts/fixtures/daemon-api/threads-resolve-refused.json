@@ -1,14 +1,12 @@
 {
   "threads": [
     {
-      "url": "https://github.com/acme/widgets/pull/42#discussion_r1",
-      "resolved": "the Legion reviewer's acceptance of a bot's thread",
-      "newestBy": "legion-reviewer"
+      "thread": "PRRT_kwDOLx1Qf85B2c7a",
+      "resolved": true
     }
   ],
-  "withheld": 0,
   "refused": {
-    "url": "https://github.com/acme/widgets/pull/42#discussion_r3",
+    "thread": "PRRT_kwDOLx1Qf85B2c7c",
     "error": "GitHub: Resource not accessible by integration"
   }
 }

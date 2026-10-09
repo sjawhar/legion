@@ -1,11 +1,9 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -106,30 +104,6 @@ func (s *server) claimGrant(w http.ResponseWriter, r *http.Request, req GrantReq
 }
 
 const timeFormat = "2006-01-02T15:04:05.999999999Z07:00"
-
-// legionAppLogins is the login of each role App the daemon leases for the repository owner, keyed
-// by its App role: the accounts Legion's own roles post as. `legion threads resolve` keeps their
-// threads out of its bot-thread rule and takes the review App's Accepted: on a thread a bot outside
-// them opened. It is nil when any App's identity cannot be read: the command then cannot tell a
-// Legion App from any other bot, and a bot's thread closes only on its opener's Accepted:. The
-// failure turns that rule off for the answer, so it is logged, at most once a minute.
-func (s *server) legionAppLogins(ctx context.Context) map[appauth.AppRole]string {
-	logins := map[appauth.AppRole]string{}
-	for _, role := range appauth.Roles {
-		lease, err := s.tokens.Token(ctx, role, s.githubOwner)
-		if err != nil || lease.Identity.Name == "" {
-			s.loginsWarnedMu.Lock()
-			if time.Since(s.loginsWarned) >= time.Minute {
-				s.loginsWarned = time.Now()
-				s.log.Warn("api: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute)", "role", role, "error", err)
-			}
-			s.loginsWarnedMu.Unlock()
-			return nil
-		}
-		logins[role] = lease.Identity.Name
-	}
-	return logins
-}
 
 // redeem is every route's one grant check. A grant serves each request of the command it was
 // minted for until it expires, and a claim grant only while its claim is supervised under the

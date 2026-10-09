@@ -72,14 +72,15 @@ package api
 // `GH_CONFIG_DIR`, the role's directory of gh files (`hosts.yml` and `config.yml` rendered from
 // its App token and rewritten as the lease turns over), with `GH_TOKEN`, `GITHUB_TOKEN` and
 // `GH_HOST` set to the empty string so nothing in the environment outranks the file — all four
-// runtime-set — and `LEGION_IMPLEMENT_APP_LOGIN` and `LEGION_REVIEW_APP_LOGIN`, the two Legion
-// Apps' bot logins, set in the spec's Env beside the git identity, which `legion threads resolve`
-// reads in place of `legionAppLogins` on the gh-token answer; and it loses `LEGION_GH_PATH`,
-// `LEGION_GIT_PATH`, `LEGION_JJ_PATH` and `LEGION_CREDENTIAL_HELPER`, since a pane's gh, git and
-// jj are its PATH's and every shared clone's helper is `gh auth git-credential`. No `worker-bin`
-// directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX` puts the `legion` launcher
-// directory first alone. The plugin mints a grant only before a bash command that invokes
-// `legion` (`legion push`, say), never before every command. A plugin or image built before 17
+// runtime-set; and it loses `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` and
+// `LEGION_CREDENTIAL_HELPER`, since a pane's gh, git and jj are its PATH's and every shared
+// clone's helper is `gh auth git-credential`. No `worker-bin` directory leads PATH: nothing shims
+// gh, and `PI_SHELL_PREFIX` puts the `legion` launcher directory first alone. The plugin mints a
+// grant only before a bash command that invokes `legion` (`legion push`, say), never before every
+// command. `POST /legion/v1/threads/resolve` takes `threads`, the node ids of the review threads
+// to resolve (at least one), reads no comment, refuses an id that is no thread of the issue's pull
+// request (`THREAD_NOT_ON_PULL_REQUEST`) before any write, and answers `{thread, resolved,
+// reason}` per id, with no `withheld` count. A plugin or image built before 17
 // would still shim gh over a token file it never reads and mint a grant before every command,
 // against routes a daemon on 17 no longer serves, so the boot gate and `legion probe-image`
 // refuse the mixed pair. (This branch first took 16; LEGION-578 landed at 16 first, and pi-legion

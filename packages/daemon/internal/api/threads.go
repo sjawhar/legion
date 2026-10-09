@@ -16,47 +16,42 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/reviewthreads"
 )
 
-// ThreadsResolveRequest is the reviewer's `legion threads resolve`: its grant, and the pull request
-// it names, which must be the one recorded for the issue the grant is for.
+// ThreadsResolveRequest is the reviewer's resolve_threads: its grant, the pull request it names,
+// which must be the one recorded for the issue the grant is for, and the GraphQL node ids of the
+// review threads to resolve, at least one.
 type ThreadsResolveRequest struct {
-	GrantID string `json:"grantId"`
-	Repo    string `json:"repo"`
-	Number  int    `json:"number"`
+	GrantID string   `json:"grantId"`
+	Repo    string   `json:"repo"`
+	Number  int      `json:"number"`
+	Threads []string `json:"threads"`
 }
 
-// ThreadsResolveResponse is each unresolved review thread's outcome, in GitHub's order, but for the
-// threads whose newest comment is a draft in the implement App's pending review, which Withheld
-// counts without naming. When GitHub refused to resolve a thread the rule closes, Refused names it
-// and why, and Threads and Withheld hold the threads before it, the ones already resolved among
-// them: the run stopped there.
+// ThreadsResolveResponse is each named thread's outcome, in the order the request named them.
+// When GitHub refused to resolve one, Refused names it and why, and Threads holds the ones before
+// it, resolved: the run stopped there, and the ids after it were not written.
 type ThreadsResolveResponse struct {
-	Threads  []reviewthreads.Outcome `json:"threads"`
-	Withheld int                     `json:"withheld"`
-	Refused  *ThreadRefusal          `json:"refused,omitempty"`
+	Threads []reviewthreads.Outcome `json:"threads"`
+	Refused *ThreadRefusal          `json:"refused,omitempty"`
 }
 
-// ThreadRefusal is the thread GitHub refused to resolve, and GitHub's message.
+// ThreadRefusal is the thread GitHub refused to resolve, by node id, and GitHub's message.
 type ThreadRefusal struct {
-	URL   string `json:"url"`
-	Error string `json:"error"`
+	Thread string `json:"thread"`
+	Error  string `json:"error"`
 }
 
-// resolveThreads resolves, for the reviewer, each review thread on its issue's pull request that a
-// bot outside Legion's role Apps opened and whose newest submitted comment is the Legion review
-// App's Accepted: (reviewthreads.ReviewersAcceptanceOfABot), as the implement App: GitHub lets only
-// the pull request's author's App resolve its threads, and the implementer opens every Legion pull
-// request, so the reviewer, who acts as the review App, cannot. The reviewer is the party that
-// adjudicates such a bot's finding, and a required review workflow that fails while its threads
-// stand passes on a re-run only once they are resolved. Every other thread is left open, its
-// outcome saying why: the daemon resolves nothing a Legion App opened (the implementer's and the
-// merger's own `legion threads resolve` close those on their opener's Accepted:), and nothing whose
-// newest comment is anything but that acceptance. A thread whose newest comment is a draft in the
-// implement App's pending review is left open and only counted, never named: GitHub shows that
-// draft to its author alone. Only the reviewer's grant may call it, for its issue's pull request
-// alone, and the implement App's token never leaves the daemon. Each resolution is logged with the
-// thread and whose acceptance closed it. A thread GitHub refuses to resolve stops the run, and the
-// answer names it beside the outcomes and the count before it, so the reviewer sees the threads
-// already resolved; a read that fails before any write answers 502.
+// resolveThreads resolves, for the reviewer, the review threads it names by node id on its issue's
+// pull request, as the implement App: GitHub lets only the pull request's author's App resolve its
+// threads, and the implementer opens every Legion pull request, so the reviewer, who acts as the
+// review App, cannot. The daemon reads no comment and judges nothing: the reviewer chose the
+// threads, one by one, having answered each. Only the reviewer's grant may call it, for its
+// issue's pull request alone, and the implement App's token never leaves the daemon. The pull
+// request's threads are listed once before any write: an id that is no thread of it refuses the
+// whole request, naming every such id, and a thread GitHub already holds resolved is answered as
+// resolved with reviewthreads.AlreadyResolved, so a retry after a partial run is idempotent. Each
+// resolution is logged with its thread. A thread GitHub refuses to resolve stops the run, and the
+// answer names it beside the outcomes before it, so the reviewer sees the threads already
+// resolved; a read that fails before any write answers 502.
 func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 	var req ThreadsResolveRequest
 	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"repo", req.Repo}) {
@@ -67,12 +62,22 @@ func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_PULL_REQUEST", "repo must be owner/name and number a positive pull request number")
 		return
 	}
+	if len(req.Threads) == 0 {
+		writeFailure(w, http.StatusBadRequest, "MISSING_FIELD", "threads is required: the node id of each review thread to resolve")
+		return
+	}
+	for _, thread := range req.Threads {
+		if strings.TrimSpace(thread) == "" {
+			writeFailure(w, http.StatusBadRequest, "INVALID_THREAD", "every thread must be a review thread's node id, none empty")
+			return
+		}
+	}
 	grant, ok := s.redeem(w, req.GrantID)
 	if !ok {
 		return
 	}
 	if grant.Controller || grant.Role != claim.RoleReviewer {
-		writeFailure(w, http.StatusForbidden, "REVIEWER_REQUIRED", "only the reviewer's grant has the daemon resolve review threads; every other role runs legion threads resolve as its own App")
+		writeFailure(w, http.StatusForbidden, "REVIEWER_REQUIRED", "only the reviewer's grant has the daemon resolve review threads; the pull request's author resolves its own with gh")
 		return
 	}
 	pr, err := s.issuePullRequest(r.Context(), grant.Issue)
@@ -89,41 +94,27 @@ func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusForbidden, "PULL_REQUEST_NOT_THE_ISSUES", fmt.Sprintf("the grant is for %s, whose pull request is %s#%d, not %s#%d", grant.Issue, pr.Repo, pr.Number, repository, req.Number))
 		return
 	}
-	apps, err := reviewthreads.AppsFrom(s.legionAppLogins(r.Context()))
-	if err != nil || apps == nil {
-		writeFailure(w, http.StatusBadGateway, "LEGION_APP_LOGINS_UNAVAILABLE", "could not read the logins of Legion's role Apps, so no thread can be told a bot's")
-		return
-	}
 	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
 	if !ok {
 		return
 	}
-	outcomes, err := reviewthreads.Resolve(r.Context(), reviewthreads.TokenGraphQL(s.githubGraphQL, lease.Token), repository, req.Number,
-		func(thread reviewthreads.Thread) (reviewthreads.Acceptance, string) {
-			acceptance, reason := reviewthreads.Resolution(thread, apps)
-			if acceptance == "" || acceptance == reviewthreads.ReviewersAcceptanceOfABot {
-				return acceptance, reason
-			}
-			return "", string(acceptance) + ", which the implementer's or the merger's legion threads resolve closes: the daemon resolves only a bot's thread the Legion reviewer accepted"
-		})
-	// The daemon reads as the implement App, which GitHub shows the implementer's own drafts in a
-	// pending review; the reviewer is told only how many threads hold one, never which or whose.
-	answer := ThreadsResolveResponse{Threads: outcomes[:0]}
+	pullRequest := fmt.Sprintf("%s#%d", repository, req.Number)
+	outcomes, err := reviewthreads.Resolve(r.Context(), reviewthreads.TokenGraphQL(s.githubGraphQL, lease.Token), repository, req.Number, req.Threads)
 	for _, outcome := range outcomes {
-		if outcome.LeftOpen == reviewthreads.PendingDraft {
-			answer.Withheld++
-			continue
+		if outcome.Reason == "" {
+			s.log.Info("api: resolved a review thread for the reviewer", "issue", grant.Issue, "pull_request", pullRequest, "thread", outcome.Thread)
 		}
-		if outcome.Resolved != "" {
-			s.log.Info("api: resolved a review thread for the reviewer", "issue", grant.Issue, "pull_request", fmt.Sprintf("%s#%d", repository, req.Number),
-				"thread", outcome.URL, "by", string(outcome.Resolved))
-		}
-		answer.Threads = append(answer.Threads, outcome)
 	}
+	answer := ThreadsResolveResponse{Threads: outcomes}
+	var foreign *reviewthreads.NotOnPullRequest
 	var refused *reviewthreads.Refused
-	if errors.As(err, &refused) {
-		answer.Refused = &ThreadRefusal{URL: refused.URL, Error: refused.Err.Error()}
-	} else if err != nil {
+	switch {
+	case errors.As(err, &foreign):
+		writeFailure(w, http.StatusBadRequest, "THREAD_NOT_ON_PULL_REQUEST", fmt.Sprintf("%s: not review threads of %s, so nothing was resolved", strings.Join(foreign.Threads, ", "), pullRequest))
+		return
+	case errors.As(err, &refused):
+		answer.Refused = &ThreadRefusal{Thread: refused.Thread, Error: refused.Err.Error()}
+	case err != nil:
 		writeFailure(w, http.StatusBadGateway, "THREADS_READ_FAILED", err.Error())
 		return
 	}

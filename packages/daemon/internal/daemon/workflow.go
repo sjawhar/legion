@@ -85,8 +85,8 @@ type workflowRuntime struct {
 	githubAPI string
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
-	// nothing about it. appLogins holds it beside the implement App's, keyed by App role, as every
-	// tree role's launch is told them (specs.appLogins).
+	// nothing about it. appLogins holds it beside the implement App's, keyed by App role, so a
+	// push's author can be read as one Legion App or the other.
 	reviewAppLogin string
 	appLogins      map[appauth.AppRole]string
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
