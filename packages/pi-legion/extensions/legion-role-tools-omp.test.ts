@@ -57,10 +57,10 @@ async function runJj(jj: string, args: readonly string[]): Promise<void> {
  */
 async function toolsPane(
   binary: string,
-  role: Role,
-  root: boolean,
+  pane: { readonly role: Role; readonly root: boolean },
   replies: readonly Reply[]
 ): Promise<LegionPane> {
+  const { role, root } = pane;
   const issue = root ? TREE : "TOOLS-2";
   return runLegionPane(
     binary,
@@ -144,7 +144,7 @@ test.skipIf(omp === undefined && !onActions)(
   "a root architect runs jj log, reads /proc/self/cgroup, and writes, reads and edits a file; only jj undo is refused",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await toolsPane(omp, "architect", true, [
+    const pane = await toolsPane(omp, { role: "architect", root: true }, [
       [call("bash", { command: "jj log" })],
       [call("bash", { command: "cat /proc/self/cgroup" })],
       ...SCRATCH_TURNS,
@@ -162,7 +162,7 @@ test.skipIf(omp === undefined && !onActions)(
   "a reviewer writes, reads and edits a file; only jj undo is refused",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await toolsPane(omp, "reviewer", false, SCRATCH_TURNS);
+    const pane = await toolsPane(omp, { role: "reviewer", root: false }, SCRATCH_TURNS);
     await expectOnlyControlRefused(pane, 4);
   },
   120_000
@@ -172,7 +172,7 @@ test.skipIf(omp === undefined && !onActions)(
   "a merger writes, reads and edits a file; only jj undo is refused",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await toolsPane(omp, "merger", false, SCRATCH_TURNS);
+    const pane = await toolsPane(omp, { role: "merger", root: false }, SCRATCH_TURNS);
     await expectOnlyControlRefused(pane, 4);
   },
   120_000

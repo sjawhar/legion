@@ -297,7 +297,7 @@ export function messageStream(blocks: readonly Block[], id: string): string {
  * block around the question, which pi-envoy adds for `ctx.runEphemeralTurn` — so the stand-in
  * answers it distinctly and nothing about it reaches the transcript.
  */
-export function isSelfCheck(request: Request): boolean {
+function isSelfCheck(request: Request): boolean {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
   return JSON.stringify(messages.at(-1) ?? null).includes("<btw>");
 }

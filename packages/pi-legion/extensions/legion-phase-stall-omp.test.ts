@@ -2,10 +2,12 @@ import { afterEach, expect, test } from "bun:test";
 import {
   type Cleanup,
   type LegionPane,
+  type LegionPaneOptions,
   type Reply,
   type Request,
   runLegionPane,
 } from "@legion/pi-shared/test/omp-harness";
+import { PHASE_STALL_ENTRY } from "../src/phase-stall";
 
 // The phase-stall follow-up on the real Oh My Pi (src/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
@@ -54,25 +56,13 @@ function toolNames(request: Request): string[] {
   );
 }
 
-/** How one pane differs from the implementer pane the phase-stall cases run. */
-interface PaneOptions {
-  /**
-   * False drops every `LEGION_*` variable, so the pane is an ordinary session: the Legion
-   * extension stays inert and the Envoy extension's run-end ask nudge is not excluded.
-   */
-  readonly legion?: boolean;
+/** How one pane differs from the implementer pane the phase-stall cases run: the runner's
+ * `legion`, `quietMs` and `selfCheck`, and the stand-in's open-ask snapshot. */
+interface PaneOptions extends Pick<LegionPaneOptions, "legion" | "quietMs" | "selfCheck"> {
   /** Configures Dispatch against the stand-in, whose open-ask snapshot answers with this count. */
   readonly openAsks?: number;
   /** The held ask questions the stand-in returns in the session's open-ask snapshot. */
   readonly openAskQuestions?: readonly string[];
-  /**
-   * Settle when the gateway has answered nothing for this long, instead of at the host's
-   * terminal `agent_end`. A `triggerTurn` steer sent from `agent_end` starts its continuation
-   * after that frame, so the terminal frame is not the end of the run's provider traffic.
-   */
-  readonly quietMs?: number;
-  /** The one word the gateway answers the run-end self-check with. */
-  readonly selfCheck?: string;
 }
 
 /**
@@ -126,7 +116,7 @@ async function stallPane(
     },
     cleanup
   );
-  return { ...pane, phaseEntries: () => pane.transcriptEntries("legion-phase-stall") };
+  return { ...pane, phaseEntries: () => pane.transcriptEntries(PHASE_STALL_ENTRY) };
 }
 
 test.skipIf(omp === undefined && !onActions)(
