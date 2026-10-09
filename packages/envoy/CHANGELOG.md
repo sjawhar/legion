@@ -121,6 +121,18 @@
 
 ### Changed
 
+- Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
+  only the person its request names: the broker reads the service from the signed request, opens
+  its record with the approver `anyone` and ignores any `login_hint` it carries, and the decision,
+  the credential's chain re-check, the pending list, the machine-login list and its revoke all
+  follow that service, so a login a daemon starts while still naming one person is anyone's to
+  decide, and so is one a broker before this change opened naming a person. Every signed-in
+  person lists and revokes every service's login, each row naming who approved it (`approved_by`),
+  and Dispatch's machine-login page calls the list **Machine logins**. A person's own machine login
+  is unchanged: only the person it names decides it, and a person's login naming no one, or
+  `anyone`, is refused `400 REQUEST_INVALID` before any record opens. A service's login and a
+  person's spend separate rate-limit buckets (`service:<name>`, `person:<login>`) (LEGION-664).
+
 - An upload's kind is read from its bytes, never from the type its client declares: it is an
   `image` only when `http.DetectContentType` reads its bytes as a PNG, JPEG, GIF or WebP, the
   pictures a model is shown, and its `mime` is then the type its bytes are, whatever was declared

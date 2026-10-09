@@ -9,7 +9,7 @@ A machine that runs agent sessions directly needs `agent-secrets-helper`, a per-
 holds each session's key, and a **machine login**: a credential, approved by the machine's
 operator (the person whose agents it runs), that lets the helper enroll that operator's sessions.
 Legion's daemon logs itself in the same way when it enrolls Kubernetes pods; it prints its code in
-its log, and you approve it as below.
+its log, and anyone signed in to Dispatch approves it as below.
 
 ## 1. Install and start the helper
 
@@ -56,19 +56,22 @@ As the operator the login names, open Dispatch's **Enter machine login code** pa
 (`/credentials/machine`; the Inbox's **Machine login** row links there), type the code, and click
 **Look up**. Dispatch shows the machine's host name, the credential's lifetime, and the sentence
 "Approving lets `<host>` start agent sessions as you." Approve only if the code is the one your
-terminal shows. A machine login can only be selected by its code: no link approves one. Once you
-approve it, the machine is listed under **Your machine logins** on the same page, where you can
+terminal shows. A machine login can only be selected by its code: no link approves one, and only
+the person the login names may approve a person's machine. Once you approve it, the machine is
+listed under **Machine logins** on the same page, where you can
 [revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login).
 
-A Legion daemon's login names its service, so the sentence reads "Approving lets
-`legion-daemon on <host>` start worker pods as `legion-daemon`, not as you: no secret of yours
-reaches its pods unless you approve the request for it." A pod has no operator, so its requests for
-your secrets come to you for approval. When the broker binds `legion-daemon` to the service account
-its pods run as (`BROKER_SERVICES`), each of its pods running as that account gets every secret
-`legion-daemon` owns at once, with no further approval
+A Legion daemon's login names its service, so anyone signed in to Dispatch may approve it: it waits
+in every signed-in person's Inbox, and whoever has the code from the daemon's log types it in. The
+sentence reads "Approving lets `legion-daemon on <host>` start worker pods as `legion-daemon`, not
+as you: no secret of yours reaches its pods unless you approve the request for it." A pod has no
+operator, so its requests for your secrets come to you for approval. When the broker binds
+`legion-daemon` to the service account its pods run as (`BROKER_SERVICES`), each of its pods
+running as that account gets every secret `legion-daemon` owns at once, with no further approval
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)). Approve a
-service's login only if you run that service. The login you approve is listed under
-**Your machine logins** as `legion-daemon on <host>`, and revoking it ends every pod it enrolled.
+service's login only if the code matches the one its service printed. The login is listed under
+**Machine logins** as `legion-daemon on <host>` for everyone signed in, with who approved it, and
+anyone's revoke ends every pod it enrolled.
 
 Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval

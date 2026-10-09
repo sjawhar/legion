@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -24,15 +25,29 @@ func insertRecord(t *testing.T, svc *Service, kind, approver string) string {
 }
 
 // mintApprovedCredential mints a launcher credential as machine.Service.ApplyDecision does once
-// approver approves a machine login: from a launcher_credential record naming approver, with
-// approver its operator for a person's own machine, or no operator for a service's login.
-func mintApprovedCredential(t *testing.T, svc *Service, approver string, service *string, host string) Credential {
+// approvedBy approves a machine login: from a launcher_credential record naming approvedBy for a
+// person's own machine, with approvedBy its operator, or naming anyone for a service's login, with
+// no operator; and an approved event recording approvedBy as the login that decided it.
+func mintApprovedCredential(t *testing.T, svc *Service, approvedBy string, service *string, host string) Credential {
 	t.Helper()
-	var operator *string
-	if service == nil {
-		operator = &approver
+	operator, approver := &approvedBy, approvedBy
+	if service != nil {
+		operator, approver = nil, record.AnyoneApprover
 	}
-	return mintCredentialFrom(t, svc, operator, service, host, insertRecord(t, svc, "launcher_credential", approver))
+	return mintDecidedCredential(t, svc, operator, service, host, approver, approvedBy)
+}
+
+// mintDecidedCredential mints a launcher credential from a launcher_credential record naming
+// approver, with an approved event recording approvedBy, and returns it.
+func mintDecidedCredential(t *testing.T, svc *Service, operator, service *string, host, approver, approvedBy string) Credential {
+	t.Helper()
+	recordID := insertRecord(t, svc, "launcher_credential", approver)
+	cred := mintCredentialFrom(t, svc, operator, service, host, recordID)
+	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into credential_request_events (record_id, event, login, credential_id, actor)
+		values ($1,'approved',$2,$3,$4)`, recordID, approvedBy, cred.ID, "human:"+approvedBy); err != nil {
+		t.Fatalf("insert the approved event: %v", err)
+	}
+	return cred
 }
 
 // insertLiveGrant writes a granted request and its live grant under enrollmentID directly (grant
@@ -132,13 +147,13 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 	}
 }
 
-// TestOnlyTheApproverRevokesAMachineLogin: another person, an empty name, and another person
-// revoking a service's login someone else approved are each ErrNotApprover, an unknown id is
-// ErrNoCredential, and none of them ends anything. A person's list holds the credentials they
-// approved that can still reach a secret, a service's login among them, never another person's:
-// an expired login is listed, marked expired, while a session it enrolled still runs (a session
-// renews with its own key, past its login's expiry), and an expired one with no session is not.
-// Revoking the expired login ends that session and takes it off the list.
+// TestOnlyTheApproverRevokesAMachineLogin: another person and an empty name revoking a person's
+// machine login are each ErrNotApprover, an unknown id is ErrNoCredential, and none of them ends
+// anything. A person's list holds the credentials they approved that can still reach a secret and
+// every service's login, whoever approved it, never another person's machine: an expired login is
+// listed, marked expired, while a session it enrolled still runs (a session renews with its own
+// key, past its login's expiry), and an expired one with no session is not. Revoking the expired
+// login ends that session and takes it off the list.
 func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
@@ -176,8 +191,8 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	if want := []row{{stale.ID, true}, {service.ID, false}, {ada.ID, false}}; !slices.Equal(got, want) {
 		t.Fatalf("LiveCredentials(ada) = %v, want the expired login whose box still runs (expired), the service login she approved, then her live devbox: %v", got, want)
 	}
-	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{bob.ID}) {
-		t.Fatalf("LiveCredentials(bob) = %v, want his own alone", got)
+	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{service.ID, bob.ID}) {
+		t.Fatalf("LiveCredentials(bob) = %v, want the service login ada approved, then his own", got)
 	}
 
 	for _, tc := range []struct {
@@ -186,7 +201,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	}{
 		{"another person", ada.ID.String(), "bob@example.com", ErrNotApprover},
 		{"no one", ada.ID.String(), "  ", ErrNotApprover},
-		{"another person, a service's login", service.ID.String(), "bob@example.com", ErrNotApprover},
+		{"the sentinel, a service's login", service.ID.String(), " Anyone ", ErrNotApprover},
 		{"another person, an expired login", stale.ID.String(), "bob@example.com", ErrNotApprover},
 		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
 	} {
@@ -254,12 +269,13 @@ func TestAnExpiredLoginLeavesTheListOnceItsLastSessionEnds(t *testing.T) {
 	}
 }
 
-// TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled: a service's login, which has no
-// operator, is listed for the person who approved it and revoked by them alone, and revoking it
-// ends every pod it enrolled — each pod's grants revoked and pending requests cancelled in the
-// approver's name, its lease no longer renewable — while a pod another service login enrolled goes
-// on. The audit row names the service and both pods.
-func TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
+// TestAnyoneRevokesAServiceLoginAndEveryPodItEnrolled: a service's login, which has no operator, is
+// listed for every person, whoever approved it, naming who did, and any person revokes it, carol,
+// who approved neither, among them, while the sentinel revokes nothing. Revoking it ends every pod
+// it enrolled — each pod's grants revoked and pending requests cancelled in the revoker's name, its
+// lease no longer renewable — while a pod another service login enrolled goes on. The audit row
+// names the revoker, the service and both pods.
+func TestAnyoneRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 	issuer, key := withPodVerifier(t, svc)
@@ -281,19 +297,43 @@ func TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
 	elsewhere := pod(other, "pod-2", "implementer-g1")
 	grant := insertLiveGrant(t, svc, implementer.ID)
 	pending := insertPendingRequest(t, svc, reviewer.ID)
-	creds, err := svc.LiveCredentials(ctx, "ada@example.com")
-	if err != nil || len(creds) != 1 || creds[0].ID != daemon.ID || creds[0].Host != "cluster" || creds[0].Service == nil || *creds[0].Service != "legion-daemon" {
-		t.Fatalf("LiveCredentials(ada) = %+v, %v; want the legion-daemon login on cluster she approved", creds, err)
+	type row struct{ ID, Host, Service, ApprovedBy string }
+	listed := func(person string) []row {
+		t.Helper()
+		creds, err := svc.LiveCredentials(ctx, person)
+		if err != nil {
+			t.Fatalf("LiveCredentials(%s): %v", person, err)
+		}
+		rows := make([]row, len(creds))
+		for i, c := range creds {
+			if c.Service == nil {
+				t.Fatalf("LiveCredentials(%s) lists %+v, a person's machine, want services' logins alone", person, c)
+			}
+			rows[i] = row{c.ID.String(), c.Host, *c.Service, c.ApprovedBy}
+		}
+		return rows
+	}
+	both := []row{
+		{other.ID.String(), "other-cluster", "legion-daemon", "bob@example.com"},
+		{daemon.ID.String(), "cluster", "legion-daemon", "ada@example.com"},
+	}
+	for _, person := range []string{"ada@example.com", "bob@example.com", " Carol@Example.com "} {
+		if got := listed(person); !slices.Equal(got, both) {
+			t.Fatalf("LiveCredentials(%s) = %+v, want both services' logins, each naming who approved it: %+v", person, got, both)
+		}
+	}
+	if got := listed(" Anyone "); len(got) != 0 {
+		t.Fatalf("LiveCredentials(the sentinel) = %+v, want none: no login is anyone", got)
 	}
 
-	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "bob@example.com"); !errors.Is(err, ErrNotApprover) {
-		t.Fatalf("RevokeCredential by bob, who approved another login = %v, want ErrNotApprover", err)
+	if err := svc.RevokeCredential(ctx, daemon.ID.String(), " Anyone "); !errors.Is(err, ErrNotApprover) {
+		t.Fatalf("RevokeCredential by the sentinel = %v, want ErrNotApprover", err)
 	}
 	if _, live, err := svc.Lookup(ctx, implementer.ID.String()); err != nil || !live {
-		t.Fatalf("Lookup(implementer pod) after bob's refused revoke = live %v, %v; want live", live, err)
+		t.Fatalf("Lookup(implementer pod) after the sentinel's refused revoke = live %v, %v; want live", live, err)
 	}
-	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "ada@example.com"); err != nil {
-		t.Fatalf("RevokeCredential by ada, who approved it: %v", err)
+	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "carol@example.com"); err != nil {
+		t.Fatalf("RevokeCredential by carol, who approved neither login: %v", err)
 	}
 
 	for _, e := range []Enrollment{implementer, reviewer} {
@@ -308,40 +348,37 @@ func TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
 		t.Fatalf("Lookup(the other login's pod) = live %v, %v; want it still live", live, err)
 	}
 	var revokedBy *string
-	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_by from grants where id=$1`, grant).Scan(&revokedBy); err != nil || revokedBy == nil || *revokedBy != "human:ada@example.com" {
-		t.Fatalf("grant revoked_by = %v (%v), want human:ada@example.com", revokedBy, err)
+	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_by from grants where id=$1`, grant).Scan(&revokedBy); err != nil || revokedBy == nil || *revokedBy != "human:carol@example.com" {
+		t.Fatalf("grant revoked_by = %v (%v), want human:carol@example.com", revokedBy, err)
 	}
-	if state, by, _, event := requestState(t, svc, pending); state != "cancelled" || by != "human:ada@example.com" || event != "cancelled by human:ada@example.com" {
-		t.Fatalf("pending request after the revoke: state=%s decided_by=%s record event=%q, want cancelled by human:ada@example.com", state, by, event)
+	if state, by, _, event := requestState(t, svc, pending); state != "cancelled" || by != "human:carol@example.com" || event != "cancelled by human:carol@example.com" {
+		t.Fatalf("pending request after the revoke: state=%s decided_by=%s record event=%q, want cancelled by human:carol@example.com", state, by, event)
 	}
 	var service string
 	var ended int
 	if err := svc.Store.Pool.QueryRow(ctx, `select detail->>'service', jsonb_array_length(detail->'enrollments') from audit
-		where kind='launcher_credential.revoked' and actor='human:ada@example.com' and detail->>'credential_id'=$1`, daemon.ID.String()).Scan(&service, &ended); err != nil {
+		where kind='launcher_credential.revoked' and actor='human:carol@example.com' and detail->>'credential_id'=$1`, daemon.ID.String()).Scan(&service, &ended); err != nil {
 		t.Fatalf("read the launcher_credential.revoked audit row: %v", err)
 	}
 	if service != "legion-daemon" || ended != 2 {
 		t.Fatalf("audit row names service %q and %d enrollments, want legion-daemon and 2", service, ended)
 	}
-	if got := liveCredentialIDs(t, svc, "ada@example.com"); len(got) != 0 {
-		t.Fatalf("LiveCredentials(ada) after the revoke = %v, want none", got)
-	}
-	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{other.ID}) {
-		t.Fatalf("LiveCredentials(bob) = %v, want the login he approved, untouched", got)
+	if got := listed("ada@example.com"); !slices.Equal(got, both[:1]) {
+		t.Fatalf("LiveCredentials(ada) after the revoke = %+v, want the other login alone, untouched: %+v", got, both[:1])
 	}
 }
 
-// TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt: who may list and revoke a credential is
-// the approver of the launcher_credential record it was minted from, and nothing else — not its
-// operator column (a credential whose operator is ada but whose record bob approved, a shape the
-// broker never mints), not a record of another kind that names ada, and not a credential with no
-// record at all. None of the three is ada's to list or revoke; the first is bob's, and the other
-// two, minted from no launcher_credential record, are no machine login anyone may revoke
-// (ErrNoCredential).
+// TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt: who may list and revoke a person's
+// credential is the approver of the launcher_credential record it was minted from, and nothing
+// else — not its operator column (a credential whose operator is ada but whose record bob
+// approved, a shape the broker never mints), not a record of another kind that names ada, and not
+// a credential with no record at all. None of the three is ada's to list or revoke; the first is
+// bob's, and the other two, minted from no launcher_credential record, are no machine login anyone
+// may revoke (ErrNoCredential).
 func TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	bobs := mintCredentialFrom(t, svc, str("ada@example.com"), nil, "bobs-record", insertRecord(t, svc, "launcher_credential", "bob@example.com"))
+	bobs := mintDecidedCredential(t, svc, str("ada@example.com"), nil, "bobs-record", "bob@example.com", "bob@example.com")
 	secret := mintCredentialFrom(t, svc, str("ada@example.com"), nil, "secret-record", insertRecord(t, svc, "agent_secret", "ada@example.com"))
 	unbacked := mintCredential(t, svc, str("ada@example.com"), nil, "no-record")
 

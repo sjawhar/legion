@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -27,6 +28,7 @@ type wireLauncherCredential struct {
 	CredentialID string    `json:"credential_id"`
 	Host         string    `json:"host"`
 	Service      *string   `json:"service"`
+	ApprovedBy   string    `json:"approved_by"`
 	IssuedAt     time.Time `json:"issued_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	Expired      bool      `json:"expired"`
@@ -165,12 +167,13 @@ func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
 	}
 }
 
-// TestAnApproverRevokesTheServiceLoginTheyApproved: the Legion daemon's service login, which has
-// no operator, is listed for the person who approved it, named by its service, and for no one
-// else; another person's revoke is refused and ends nothing; the approver's revoke ends it and
-// every pod it enrolled: each pod's renew and grant values are refused, its launcher enrolls no
-// pod more, it leaves the approver's list, and the audit row names the service and both pods.
-func TestAnApproverRevokesTheServiceLoginTheyApproved(t *testing.T) {
+// TestAnyoneRevokesAServiceLogin: the Legion daemon's service login, which has no operator, is
+// listed for every signed-in person, named by its service and by the person who approved it; the
+// sentinel's revoke is refused and ends nothing; a second person's revoke, bob's, who approved
+// nothing, ends it and every pod it enrolled: each pod's renew and grant values are refused, its
+// launcher enrolls no pod more, it leaves everyone's list, and the audit row names bob, the service
+// and both pods.
+func TestAnyoneRevokesAServiceLogin(t *testing.T) {
 	ts := newTestServer(t)
 	credentialID, launcherKey := ts.mintServiceLauncherCredential(t)
 	podUID := uuid.NewString()
@@ -206,18 +209,17 @@ func TestAnApproverRevokesTheServiceLoginTheyApproved(t *testing.T) {
 		return ts.session(t, pod.key, pod.enrollmentID, http.MethodPost, "/v1/grants/"+grants[slot]+"/values", nil)
 	}
 
-	logins := ts.machineLogins(t, testApprover)
-	if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "cluster.example" ||
-		logins[0].Service == nil || *logins[0].Service != "legion-daemon" {
-		t.Fatalf("machine logins of %s = %+v, want legion-daemon's login on cluster.example", testApprover, logins)
-	}
-	if logins := ts.machineLogins(t, "bob@example.com"); len(logins) != 0 {
-		t.Fatalf("machine logins of bob@example.com = %+v, want none: he approved nothing", logins)
+	for _, person := range []string{testApprover, "bob@example.com"} {
+		logins := ts.machineLogins(t, person)
+		if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "cluster.example" ||
+			logins[0].Service == nil || *logins[0].Service != "legion-daemon" || logins[0].ApprovedBy != testApprover {
+			t.Fatalf("machine logins of %s = %+v, want legion-daemon's login on cluster.example, approved by %s", person, logins, testApprover)
+		}
 	}
 
 	revokePath := "/v1/launcher-credentials/" + credentialID + "/revoke-by-approver"
-	if status, body := ts.ui(t, http.MethodPost, revokePath, map[string]any{"approver": "bob@example.com"}); status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
-		t.Fatalf("revoke by another person = %d %s, want 403 NOT_APPROVER", status, body)
+	if status, body := ts.ui(t, http.MethodPost, revokePath, map[string]any{"approver": " Anyone "}); status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+		t.Fatalf("revoke by the sentinel = %d %s, want 403 NOT_APPROVER", status, body)
 	}
 	for slot, pod := range pods {
 		if status, body := renew(pod); status != http.StatusOK {
@@ -228,8 +230,8 @@ func TestAnApproverRevokesTheServiceLoginTheyApproved(t *testing.T) {
 		}
 	}
 
-	if status, body := ts.ui(t, http.MethodPost, revokePath, map[string]any{"approver": testApprover}); status != http.StatusOK || decode[stateBody](t, body).State != "revoked" {
-		t.Fatalf("revoke by the person who approved it = %d %s, want 200 revoked", status, body)
+	if status, body := ts.ui(t, http.MethodPost, revokePath, map[string]any{"approver": "bob@example.com"}); status != http.StatusOK || decode[stateBody](t, body).State != "revoked" {
+		t.Fatalf("revoke by bob, who approved nothing = %d %s, want 200 revoked", status, body)
 	}
 	for slot, pod := range pods {
 		if status, body := renew(pod); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "PROOF_INVALID" {
@@ -242,8 +244,10 @@ func TestAnApproverRevokesTheServiceLoginTheyApproved(t *testing.T) {
 	if status, body, _ := enrollPod("tester-g1"); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
 		t.Fatalf("enroll a pod after the revoke = %d %s, want 401 LAUNCHER_INVALID", status, body)
 	}
-	if logins := ts.machineLogins(t, testApprover); len(logins) != 0 {
-		t.Fatalf("machine logins of %s after the revoke = %+v, want none", testApprover, logins)
+	for _, person := range []string{testApprover, "bob@example.com"} {
+		if logins := ts.machineLogins(t, person); len(logins) != 0 {
+			t.Fatalf("machine logins of %s after the revoke = %+v, want none", person, logins)
+		}
 	}
 	var actor, service string
 	var ended int
@@ -251,8 +255,61 @@ func TestAnApproverRevokesTheServiceLoginTheyApproved(t *testing.T) {
 		where kind='launcher_credential.revoked' and detail->>'credential_id'=$1`, credentialID).Scan(&actor, &service, &ended); err != nil {
 		t.Fatalf("read the launcher_credential.revoked audit row: %v", err)
 	}
-	if actor != "human:"+testApprover || service != "legion-daemon" || ended != 2 {
-		t.Fatalf("audit row: actor %s, service %s, %d enrollments; want human:%s, legion-daemon, 2", actor, service, ended, testApprover)
+	if actor != "human:bob@example.com" || service != "legion-daemon" || ended != 2 {
+		t.Fatalf("audit row: actor %s, service %s, %d enrollments; want human:bob@example.com, legion-daemon, 2", actor, service, ended)
+	}
+}
+
+// TestAServiceLoginWaitsInEveryonesPendingList: a pending service login, the Legion daemon's,
+// whatever person its login_hint names, is in every signed-in person's pending list, which is how
+// whoever reads its code finds it waiting; a person's pending machine login is in theirs alone.
+func TestAServiceLoginWaitsInEveryonesPendingList(t *testing.T) {
+	ts := newTestServer(t)
+	start := func(loginHint, service, host string) string {
+		t.Helper()
+		compact, err := record.Sign(newSigningKey(t), ts.URL, []record.AuthorizationDetail{
+			{Type: "launcher_credential", Identifier: host, Service: service},
+		}, "", loginHint, time.Now())
+		if err != nil {
+			t.Fatalf("record.Sign: %v", err)
+		}
+		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+		if status != http.StatusAccepted {
+			t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
+		}
+		code := decode[struct {
+			Code string `json:"code"`
+		}](t, body).Code
+		_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+		return decode[wireRecord](t, body).RecordID
+	}
+	daemon := start("", "legion-daemon", "cluster.example")
+	hinted := start(testApprover, "legion-daemon", "other-cluster.example")
+	personal := start(testApprover, "", "example-host-devbox")
+	pendingOf := func(person string) []string {
+		t.Helper()
+		status, body := ts.ui(t, http.MethodGet, "/v1/pending?approver="+url.QueryEscape(person), nil)
+		if status != http.StatusOK {
+			t.Fatalf("GET /v1/pending?approver=%s = %d: %s", person, status, body)
+		}
+		var ids []string
+		for _, p := range decode[struct {
+			Pending []wirePendingEntry `json:"pending"`
+		}](t, body).Pending {
+			ids = append(ids, p.RecordID)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	sorted := func(ids ...string) []string {
+		slices.Sort(ids)
+		return ids
+	}
+	if got, want := pendingOf(testApprover), sorted(daemon, hinted, personal); !slices.Equal(got, want) {
+		t.Fatalf("pending of %s = %v, want both services' logins and their own machine's: %v", testApprover, got, want)
+	}
+	if got, want := pendingOf("bob@example.com"), sorted(daemon, hinted); !slices.Equal(got, want) {
+		t.Fatalf("pending of bob@example.com = %v, want both services' logins and nothing of %s's: %v", got, testApprover, want)
 	}
 }
 
