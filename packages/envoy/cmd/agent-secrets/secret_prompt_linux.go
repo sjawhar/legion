@@ -17,8 +17,13 @@ const (
 	ioctlGetTermios      = unix.TCGETS  // read the terminal's settings
 	ioctlSetTermios      = unix.TCSETS  // set them, keeping its unread input
 	ioctlSetTermiosFlush = unix.TCSETSF // set them and discard its unread input
-	disabledControlByte  = 0            // Linux's _POSIX_VDISABLE
 )
+
+// discardInput discards what the terminal holds unread (TCFLSH TCIFLUSH, the kernel's
+// tty_ioctl.c), as the kernel's own signal handling would under ISIG.
+func discardInput(fd int) error {
+	return unix.IoctlSetInt(fd, unix.TCFLSH, unix.TCIFLUSH)
+}
 
 // processGroupOrphaned reports whether this process's group is orphaned, by the kernel's own rule
 // (kernel/exit.c, will_become_orphaned_pgrp): no member but a zombie has a parent in another group

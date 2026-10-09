@@ -531,7 +531,7 @@ func TestPromptJobStopDuringQuietWindowDoesNotHang(t *testing.T) {
 func TestPromptJobStopDiscardsQueuedInputWithoutLeaking(t *testing.T) {
 	s := newPromptShell(t)
 	s.start(false, false)
-	// A single write exercises the kernel's input flush without a scheduling gap.
+	// A single write exercises the prompt's input flush without a scheduling gap.
 	s.send("head\x1a")
 	s.wait("Stopped")
 	s.out.Reset()
@@ -547,6 +547,47 @@ func TestPromptJobStopDiscardsQueuedInputWithoutLeaking(t *testing.T) {
 	s.send("headtail\r")
 	s.wait("RETURNED <nil> MATCH=true")
 	s.noShellValue("head", "tail")
+}
+
+// Ctrl-Z discards whatever follows it in the same write, as a fast typist's or a paste's keys
+// arrive: the prompt stops with the entry refused, and none of it reaches the shell.
+func TestPromptJobStopKeyDiscardsWhatFollowsIt(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, false)
+	s.send("partone\x1aparttwo\r")
+	s.wait("Stopped")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("fg\r")
+	s.wait("Nothing was stored. Press Enter")
+	s.send("\r")
+	s.wait("RETURNED nothing was stored:")
+	s.wait("MATCH=false EMPTY=true")
+	s.noShellValue("partone", "parttwo")
+}
+
+// A signal key inside a bracketed paste is pasted text, not a keypress: the prompt refuses it as a
+// control byte and discards the paste through its end, in one write or with the rest arriving
+// later, so none of the paste reaches the shell.
+func TestPromptJobSignalKeyInsideAPasteDrainsThroughItsEnd(t *testing.T) {
+	for _, key := range []string{"\x03", "\x1a", "\x1c"} {
+		for _, gap := range []time.Duration{0, 300 * time.Millisecond} {
+			t.Run(fmt.Sprintf("%x/%s", key, gap), func(t *testing.T) {
+				s := newPromptShell(t)
+				s.start(false, false)
+				head, tail := "\x1b[200~pastehead"+key, "pastetail\r\x1b[201~"
+				if gap == 0 {
+					s.send(head + tail)
+				} else {
+					s.send(head)
+					time.Sleep(gap)
+					s.send(tail)
+				}
+				s.wait(fmt.Sprintf("RETURNED the control byte 0x%02x cannot be typed at the prompt", key[0]))
+				s.noShellValue("pastehead", "pastetail")
+			})
+		}
+	}
 }
 
 // A prompt started with & whose shell then exits has no shell to bring it forward, though the

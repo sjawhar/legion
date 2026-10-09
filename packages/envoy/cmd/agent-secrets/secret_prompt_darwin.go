@@ -10,8 +10,14 @@ const (
 	ioctlGetTermios      = unix.TIOCGETA  // read the terminal's settings
 	ioctlSetTermios      = unix.TIOCSETA  // set them, keeping its unread input
 	ioctlSetTermiosFlush = unix.TIOCSETAF // set them and discard its unread input
-	disabledControlByte  = 0xff           // Darwin's _POSIX_VDISABLE
 )
+
+// discardInput discards what the terminal holds unread (TIOCFLUSH with FREAD, 1 in XNU's
+// sys/fcntl.h; bsd/kern/tty.c), as the kernel's own signal handling would under ISIG. It has not
+// been exercised on a Darwin machine.
+func discardInput(fd int) error {
+	return unix.IoctlSetPointerInt(fd, unix.TIOCFLUSH, 1)
+}
 
 // processGroupOrphaned reports whether this process's group is orphaned: its job-control count,
 // which XNU keeps per group and reads as orphaned at zero (bsd/kern/tty.c), is 0. No shell can
