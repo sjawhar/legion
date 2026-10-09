@@ -127,7 +127,9 @@ func (s *promptShell) start(wrapper bool, background bool) {
 	if background {
 		s.wait("PROMPT_STARTING")
 	} else {
-		s.wait("\x1b[?2004h")
+		// The label shows once the prompt holds the terminal in its own mode: a stop
+		// before it discards nothing, so each test's stop comes after it.
+		s.wait("Value for DEMO_KEY: ")
 	}
 	s.out.Reset()
 }
@@ -298,11 +300,9 @@ func TestPromptJobStopBeforeTheLabelKeepsTheEntry(t *testing.T) {
 		}
 	}
 	s.send("kill -TSTP %1\r")
-	for deadline := time.Now().Add(5 * time.Second); processState(t, s.pid) != "T"; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("prompt did not stop")
-		}
-	}
+	// The job is in the background, so bash never takes the terminal back for it, and
+	// fg does not resume a job bash has not yet seen stop: wait for its job table.
+	s.jobStopped()
 	s.waitForeground(s.bash.Process.Pid)
 	s.out.Reset()
 	s.send("fg\r")
@@ -310,6 +310,23 @@ func TestPromptJobStopBeforeTheLabelKeepsTheEntry(t *testing.T) {
 	s.send("headtail\r")
 	s.wait("RETURNED <nil> MATCH=true")
 	s.noShellValue("head", "tail")
+}
+
+// jobStopped waits until bash's job table shows job 1 stopped: fg sends SIGCONT only to a
+// job bash has already seen stop.
+func (s *promptShell) jobStopped() {
+	s.t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		s.out.Reset()
+		s.send("jobs %1\r")
+		s.wait("PROMPT$ ")
+		if strings.Contains(s.out.String(), "Stopped") {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("bash never saw the job stop: %q", s.out.String())
+		}
+	}
 }
 
 // A prompt whose process group is orphaned (the subshell that started it has exited) can
