@@ -638,8 +638,8 @@ func TestSearchRejectsInvalidQueries(t *testing.T) {
 	}
 }
 
-// dispatch_search refuses a query over contracts.SearchQueryMax UTF-16 units before sending it;
-// the server holds the same line in the same unit, so a query the tool accepts is never refused
+// `dispatch search` refuses a query over contracts.SearchQueryMax UTF-16 units before sending it;
+// the server holds the same line in the same unit, so a query the command accepts is never refused
 // here, and a longer one from any other client is refused by name.
 func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 	handler := newTestHandler(t)

@@ -1,7 +1,7 @@
 # Authentication and the HTTP API
 
-`skill://dispatch` sends you here when you set up a Dispatch token, or need a route the tools do
-not cover.
+`skill://dispatch` sends you here when you set up a Dispatch token, or need a route the `dispatch`
+commands do not cover.
 
 ## Agent authentication
 
@@ -19,7 +19,7 @@ is the callback registered on the sign-in pool's app client
 
 ### Finding a route
 
-The tools cover the everyday surface. For anything else, ask the server: `GET /api/v1` (no
+The `dispatch` commands cover the everyday surface. For anything else, ask the server: `GET /api/v1` (no
 credential) returns every route as `{method, path, auth, description}` sorted by path — `auth`
 is `public`, `any` (a human or a bearer), `human` (a bearer gets `403 HUMAN_ONLY`), or `bearer`.
 A path Dispatch does not serve under `/api` or `/v1` answers
@@ -33,7 +33,7 @@ every issue your filters match. Walking the pages with the next `offset` is exac
 listing does not change: an issue that enters or leaves what the filters match, or whose status or
 rank changes, between two reads shifts rows across a page boundary, and one issue comes back twice
 and another never, even when you stop at `total`. The unpaged array is the only exact set one read
-gives. `cursor` is `400 INVALID_QUERY`. `dispatch_issues` pages for you.
+gives. `cursor` is `400 INVALID_QUERY`. `dispatch issues` pages for you.
 The event logs page with `after` or `before` and `limit`, and `GET /api/v1/search` takes a `limit`
 of at most 50 and has no next page. Every other route answers without paging and ignores a paging
 parameter.

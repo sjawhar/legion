@@ -55,6 +55,7 @@ import {
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
+import { commandLine, commandName } from "./dispatch-command";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import {
   type DispatchHost,
@@ -184,6 +185,11 @@ const triageAdviceShown = new Set<string>();
 
 export function resetAdviceMemory(): void {
   triageAdviceShown.clear();
+}
+
+/** The triage keys this process has shown, so a short-lived host can carry them across calls. */
+export function adviceMemory(): Set<string> {
+  return triageAdviceShown;
 }
 
 // Appended where a spec is created or sent to a human for approval; it never blocks the write.
@@ -825,7 +831,7 @@ const refGrammarProblem =
   "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
   "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
   "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
-  "for dispatch_doc_read); a dashboard URL on this Dispatch server is accepted too";
+  "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 
 const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 
@@ -878,7 +884,7 @@ async function resolveOwnerArguments(
       // read names one, and by the ref alone.
       if (tool !== "dispatch_doc_read") {
         problems.push(
-          `ref ${refText} names a picture in a conversation on the Agents page; only dispatch_doc_read reads one`
+          `ref ${refText} names a picture in a conversation on the Agents page; only dispatch doc-read reads one`
         );
       }
       if (args.issue !== undefined || args.project !== undefined || args.artifact !== undefined) {
@@ -1739,7 +1745,7 @@ async function readUploadedFile(
   const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number} serves its bytes.`;
   const tooLarge = (mime: string, bytes: number): DispatchToolResult => ({
     text:
-      `${oversizePictureText(artifact.name, bytes)}, so dispatch_doc_read cannot show this ` +
+      `${oversizePictureText(artifact.name, bytes)}, so dispatch doc-read cannot show this ` +
       `uploaded ${mime} picture (version ${number}${of}). ${bytesRoute}`,
     details,
   });
@@ -1775,7 +1781,7 @@ async function readUploadedFile(
     return {
       text:
         `${artifact.name} is an uploaded ${file.mime} file (version ${number}${of}, ${size}) that is not ` +
-        `UTF-8 text, so dispatch_doc_read cannot show it. ${bytesRoute}`,
+        `UTF-8 text, so dispatch doc-read cannot show it. ${bytesRoute}`,
       details,
     };
   }
@@ -1818,7 +1824,7 @@ async function refuseOpenDecisionBlocks(
   const stillOpen = (named: string, state: string): string => {
     const next =
       state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`;
+    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
   };
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
@@ -1858,9 +1864,9 @@ async function refuseOpenDecisionBlocks(
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(
     [
-      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
+      `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
     ].join("\n")
   );
 }
@@ -1918,11 +1924,11 @@ async function refuseRemovingOpenDecisionBlocks(
       : [`${open.length} decision blocks whose asks are`, "questions"];
   throw new Error(
     [
-      `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+      `dispatch ${commandName(tool)} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
       ...open.map(
         (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
       ),
-      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
     ].join("\n")
   );
 }
@@ -2063,7 +2069,7 @@ export async function executeDispatchTool(
               issue.message.startsWith("issue is required unless in_reply_to")))
         )
     );
-    problems.push(...formatZodIssues(issues, schema));
+    problems.push(...formatZodIssues(issues, schema, input.tool));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
   const pictures =
@@ -2083,13 +2089,13 @@ export async function executeDispatchTool(
       return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
     }
     const sessionId = input.sessionId?.trim();
-    if (!sessionId) throw new Error("host session id is required for dispatch_open_asks");
+    if (!sessionId) throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
-    if (!sessionId) throw new Error("host session id is required for dispatch_whoami");
+    if (!sessionId) throw new Error("host session id is required for dispatch whoami");
     const client = dispatchClient();
     const identity = await client.whoami();
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
@@ -2223,7 +2229,7 @@ export async function executeDispatchTool(
               const href = new URL(candidate.href, configUrl).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
             }),
-            "Reference the existing issue, or call dispatch_issue again with force: true after reading it.",
+            "Reference the existing issue, or run dispatch issue again with --force after reading it.",
           ].join("\n"),
           details: { duplicates: candidates },
         };
@@ -2382,7 +2388,7 @@ export async function executeDispatchTool(
           // server that no longer matches this contract, worth saying rather than papering over.
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
+        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: [text, notSubscribed(issueTopic(issueKey))].join("\n"),
@@ -2786,7 +2792,7 @@ export async function executeDispatchTool(
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false },
           };
         }
-        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
+        const readBack = `${commandLine("dispatch_read", { message: inReplyTo })} reads the conversation back.`;
         const parent = reply.in_reply_to ?? undefined;
         const follows = parent === inReplyTo ? undefined : parent;
         return {
@@ -3055,7 +3061,7 @@ export async function executeDispatchTool(
     }
     case "dispatch_follow": {
       const sessionId = input.sessionId?.trim();
-      if (!sessionId) throw new Error("host session id is required for dispatch_follow");
+      if (!sessionId) throw new Error("host session id is required for dispatch follow");
       const ask = await resolveAskArgument(input.tool, args, client, sessionId);
       const action = stringArg(args, "action");
       if (action === "unfollow") {
@@ -3084,7 +3090,7 @@ export async function executeDispatchTool(
       };
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
-        if (!sessionId) throw new Error("host session id is required for dispatch_read({message})");
+        if (!sessionId) throw new Error("host session id is required for dispatch read --message");
         const thread = await client.getMessageThread(messageIdOf(message) as string, sessionId);
         const issueKey = thread.message.issue_key;
         const [pictures, graph] = await Promise.all([
@@ -3261,7 +3267,7 @@ async function resolveExistingIssue(
     if (dispatchAnswered(error, 404)) {
       throw new Error(
         `no Dispatch issue is linked to ${issueReference}; create it first with ` +
-          `dispatch_issue({ external: "${issueReference}", ... })`
+          `${commandLine("dispatch_issue", { external: issueReference })} --project <key> --title <title>`
       );
     }
     throw error;

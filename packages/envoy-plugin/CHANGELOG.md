@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Agents reach Dispatch through the `dispatch` command (LEGION-588). The `shell.env` hook puts
+  the plugin's `bin/dispatch` first on every shell command's `PATH` and sets `DISPATCH_HOST`,
+  `DISPATCH_SESSION_ID` and `DISPATCH_SESSION_TITLE`; the package ships `bin/` and builds the CLI
+  into `dist/dispatch.js`, and `dist/THIRD_PARTY_NOTICES` covers both bundles.
+
+### Removed
+
+- The twenty-one native `dispatch_*` tools.
+
 ### Added
 
 - The packaged skills gain `dispatch-brainstorming` (LEGION-475), which OpenCode finds on the

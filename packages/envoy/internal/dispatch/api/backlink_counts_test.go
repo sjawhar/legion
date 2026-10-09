@@ -404,7 +404,7 @@ func requireArtifactEventNames(t *testing.T, handler http.Handler, path, artifac
 
 // Every path that writes a document version appends its own artifact.version event, and each has
 // to name what the new markdown moved: the edits endpoint (both its unnamed snapshot and its
-// named version, the route dispatch_doc_edit calls) and accepting a suggestion.
+// named version, the route `dispatch doc-edit` calls) and accepting a suggestion.
 func TestDocumentWritePathsNameChangedTargets(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")

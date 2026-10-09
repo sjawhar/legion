@@ -329,7 +329,7 @@
   it was copied from, read-only, and names it and its document in the server-owned `copied_from`
   and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
   copied block, answered and resolved ones included. Of several matching asks the earliest asked
-  is the source, whichever wording it matched on. `dispatch_request_approval`'s refusal and the
+  is the source, whichever wording it matched on. `dispatch request-approval`'s refusal and the
   dashboard's decision card name the source, its document and its state from those attributes. A
   copy whose text is changed, or an id no ask of the owner indexes, still opens one, and so do a
   source's copies once its block leaves its document: settlement of the source retracts its ask

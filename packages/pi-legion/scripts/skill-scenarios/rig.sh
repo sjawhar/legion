@@ -40,7 +40,7 @@
 # the scenario's scored rule deleted from its skills, never committed. measure-before-ask is the
 # instrument: gate 2 lives in the dispatch skill alone, and its ablate arm scores below the head.
 # ask-on-message and tester-proof are controls: their rules also live in dispatch-first and
-# dispatch_ask's description, and in the tester role prompt, so ablate scores as the head does
+# `dispatch ask --help`, and in the tester role prompt, so ablate scores as the head does
 # and they cannot detect a lost skill rule. A new scenario is an instrument only once an ablate
 # arm has scored lower on it.
 #
