@@ -353,7 +353,7 @@ func TestANoticeHeldForAnAbsentArchitectArrivesInOrderOnceItReturns(t *testing.T
 			attempts, delivered, outboxRows(t, pool))
 	}
 	for _, row := range []int{1, 2, 3} {
-		if got := strings.Count(logged.String(), fmt.Sprintf("msg=\"outbox notice waits for its architect\" row=%d ", row)); got != 1 {
+		if got := strings.Count(logged.String(), fmt.Sprintf("msg=\"outbox row waits\" row=%d kind=notice ", row)); got != 1 {
 			t.Fatalf("held notice row %d was logged %d times over 3 ticks, want once:\n%s", row, got, logged.String())
 		}
 	}
@@ -502,7 +502,7 @@ func TestANoticeForAnOperatorSuspendedRootIsHeldUntilItHoldsItsRoleAgain(t *test
 		}
 		clock = clock.Add(2 * time.Minute)
 	}
-	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 1 || strings.Count(logged.String(), "msg=\"outbox notice waits for its architect\"") != 1 {
+	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 1 || strings.Count(logged.String(), "msg=\"outbox row waits\" row=1 kind=notice ") != 1 {
 		t.Fatalf("while the suspended root holds no role: delivered %+v, %d rows, log %q; want the row held, logged once", delivered, outboxRows(t, pool), logged.String())
 	}
 	publisher.setAbsent()

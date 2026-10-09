@@ -2,7 +2,9 @@
 package config
 
 import (
+	"maps"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -108,6 +110,68 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 	}
 	if cfg.TrustedProxyHeader != "X-Forwarded-For" {
 		t.Fatalf("TrustedProxyHeader = %q, want X-Forwarded-For", cfg.TrustedProxyHeader)
+	}
+}
+
+// TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
+// name=<service-account subject> entries, none when unset. A name is one a machine login's service
+// can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a subject is a Kubernetes
+// service account's (system:serviceaccount:<namespace>:<name>), the only subject a pod's projected
+// token can carry. An entry with no "=", an empty side, an invalid name or subject, or a name given
+// twice refuses to start naming the entry, since the broker could never serve that service a secret
+// or would have to pick one of two subjects.
+func TestLoadReadsTheRegisteredServices(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServiceAccounts != nil {
+		t.Fatalf("ServiceAccounts = %v, want nil when BROKER_SERVICES is unset", cfg.ServiceAccounts)
+	}
+
+	e := validEnv()
+	e["BROKER_SERVICES"] = " example-service=system:serviceaccount:example:example-sa\tother-service=system:serviceaccount:other:other-sa\n"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"example-service": "system:serviceaccount:example:example-sa",
+		"other-service":   "system:serviceaccount:other:other-sa",
+	}
+	if !maps.Equal(cfg.ServiceAccounts, want) {
+		t.Fatalf("ServiceAccounts = %v, want %v", cfg.ServiceAccounts, want)
+	}
+
+	for _, bad := range []string{
+		"other-service",
+		"=system:serviceaccount:other:other-sa",
+		"other-service=",
+		"Other-Service=system:serviceaccount:other:other-sa",
+		"other_service=system:serviceaccount:other:other-sa",
+		"ada@example.com=system:serviceaccount:other:other-sa",
+		"shared=system:serviceaccount:other:other-sa",
+		strings.Repeat("a", 65) + "=system:serviceaccount:other:other-sa",
+		"other-service=other-sa",
+		"other-service=system:serviceaccount:other",
+		"other-service=system:serviceaccount:Other:other-sa",
+		"example-service=system:serviceaccount:example:another-sa",
+	} {
+		e := validEnv()
+		e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa " + bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_SERVICES with %q: err = %v, want a refusal naming BROKER_SERVICES and the entry", bad, err)
+		}
+	}
+
+	// One service account bound to two names would make a pod on it whichever service its login
+	// claims, and a login's service name is the machine's own claim, so each account proves one
+	// service only.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "a=system:serviceaccount:x:y b=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") ||
+		!strings.Contains(err.Error(), "system:serviceaccount:x:y") || !strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
+		t.Errorf("BROKER_SERVICES binding one account to two names: err = %v, want a refusal naming the account and both names", err)
 	}
 }
 

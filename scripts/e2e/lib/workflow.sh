@@ -342,6 +342,47 @@ smoke_main_leftovers() {
   gh api "repos/$repo/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
 }
+# merge_when_clean REPO PR MERGE_FLAG... merges a pull request only once GitHub's own
+# mergeStateStatus reads CLEAN under the repository's rulesets, rather than racing a required
+# status check that can still be queued well after review and CI otherwise read ready: GitHub
+# refuses the merge outright ("Repository rule violations found... Required status check \"gate\"
+# is queued.") when a required check (this project's `gate`, fail-on-demand.yml, which runs on
+# both push and pull_request) is still queued — the pull_request run can settle while the
+# push-event run it also requires stays queued through an Actions outage and is cancelled, which
+# the merge call itself is the wrong place to discover. Bounded at 300s: the project's own required
+# checks ordinarily settle within seconds of the pull request's head existing, and a timeout names
+# the actual mergeStateStatus and every check that is not a completed success, not only that time
+# ran out. --match-head-commit holds the merge to the head this call last read, so a push between
+# the poll and the merge is refused by its own sha instead of silently merging a later one. Each
+# gh call carries its own timeout (rig.sh's until_true house rule: a poll that never returns would
+# hold the wait past its bound), and a failed read counts as not yet clean rather than ending the
+# whole run through the caller's ERR trap. Two separate things to keep failing quietly: `read` on
+# an empty or truncated process substitution (the poll's gh call failed or was killed by its own
+# timeout) itself returns non-zero, which `set -e` does not exempt, so the read is followed by its
+# own `|| state=""`; and under `set -E` the process substitution's subshell inherits the caller's
+# ERR trap too, which would otherwise print a false "CHECK ... FAIL: line N exited ..." line for
+# every failed or timed-out poll even though the run carries on (and may still pass) — the `|| true`
+# inside the substitution keeps that subshell's own exit status 0, so nothing fires there. The
+# `|| echo` inside the timeout failure message's diagnostic read needs no such guard: it is already
+# the left side of a `||`, which is exempt whether or not it is in a process substitution.
+merge_when_clean() {
+  local repo_name=$1 pr=$2
+  shift 2
+  local started=$SECONDS beat=$SECONDS polls=0 state="" head_sha=""
+  note "waiting up to 300s for $repo_name#$pr's merge state to read CLEAN under its ruleset"
+  while ((SECONDS - started < 300)); do
+    polls=$((polls + 1))
+    read -r state head_sha < <(timeout 60 gh -R "$repo_name" pr view "$pr" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | @tsv' || true) || state=""
+    [ "$state" = CLEAN ] && break
+    if ((SECONDS - beat >= 60)); then
+      beat=$SECONDS
+      note "still waiting for $repo_name#$pr's merge state to read CLEAN: poll $polls, $((SECONDS - started))s of 300s, now ${state:-unknown}"
+    fi
+    sleep 0.5
+  done
+  [ "$state" = CLEAN ] || fail "timed out after $((SECONDS - started))s ($polls polls) waiting for $repo_name#$pr to clear its ruleset: mergeStateStatus is ${state:-unknown}; unsettled checks: $(timeout 60 gh -R "$repo_name" pr view "$pr" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" or .status != "COMPLETED") | {name: (.name // .context), workflow: .workflowName, status, conclusion}]' || echo "(could not be read)")"
+  gh -R "$repo_name" pr merge "$pr" --match-head-commit "$head_sha" "$@"
+}
 # smoke_pr_mergeable PR: GitHub would merge the smoke repository's pull request PR now. The smoke
 # main requires the `gate` check, which has not started when a pull request is created, and GitHub
 # refuses a merge while it is queued or running: the pull request reads BLOCKED until it passes,

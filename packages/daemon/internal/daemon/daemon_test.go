@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -259,22 +260,23 @@ type stopped struct{}
 func (stopped) Stop() bool { return true }
 
 // built is what the daemon handed the runtime it built: the connection directory, the address
-// every pane's shim dials, and the workflow's App tokens.
+// every pane's shim dials, the workflow's App tokens, and the store it reads.
 type built struct {
 	mu      sync.Mutex
 	conns   runtime.Conns
 	address string
 	apps    appauth.Tokens
+	store   *store.Store
 }
 
 // fakeRuntime is a daemon whose runtime is rt — the fake, or a test's runtime built over it: the
 // real stream listener, store, and machines, with nothing launched for real.
 func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, conns runtime.Conns, address string, apps appauth.Tokens, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
-			record.conns, record.address, record.apps = conns, address, apps
+			record.conns, record.address, record.apps, record.store = listener, address, apps, st
 			return rt, nil
 		},
 		clock:  stillClock{},

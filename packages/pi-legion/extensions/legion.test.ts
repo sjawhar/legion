@@ -44,6 +44,9 @@ const natsConnections: {
   /** The connection dies: every subscription's iterator ends, as nats.js ends them. */
   readonly drop: () => void;
 }[] = [];
+/** One ordered log of two kinds of event a test cares about seeing in order: `sendUserMessage`
+ * (createPi's stub pushes here too) and `subscribe:<subject>` (below). Reset in beforeEach. */
+const eventOrder: string[] = [];
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
@@ -71,6 +74,7 @@ mock.module("nats", () => ({
       isClosed: () => connection.closed,
       publish: () => undefined,
       subscribe: (subject: string) => {
+        eventOrder.push(`subscribe:${subject}`);
         connection.subjects.push(subject);
         const ended = Promise.withResolvers<void>();
         endings.push(ended.resolve);
@@ -102,11 +106,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 // The extension modules must load after their OMP and NATS host dependencies are mocked. The
 // Envoy entry is the sibling plugin's, reached by path: these panes run both, as a Legion pane does.
 const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy");
-const {
-  default: legionExtension,
-  setLegionBootstrapExitForTests,
-  CODE_TOOL_REFUSAL,
-} = await import("./legion");
+const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -142,6 +142,7 @@ const environmentKeys = [
   "ENVOY_NATS_URL",
   "ENVOY_URL",
   "LEGION_CONTROLLER",
+  "LEGION_CONTROLLER_START_MESSAGE",
   "LEGION_CONTROLLER_SECRET",
   "LEGION_DAEMON_URL",
   "LEGION_BOOT_TOKEN",
@@ -212,6 +213,7 @@ afterEach(async () => {
   // test's bootstrapped session would make the next test's transcript look like a subagent's.
   resetEnvoyPluginInterfaceForTests();
   natsConnections.splice(0);
+  eventOrder.length = 0;
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
@@ -245,6 +247,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
+  readonly sentUserMessages: string[];
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
   readonly title: HostTitle;
@@ -255,6 +258,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
+  const sentUserMessages: string[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
   const activeTools = ["read", "task", "wait"];
@@ -283,7 +287,15 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       discriminatedUnion: () => ({}),
     },
     sendMessage: (message) => sentMessages.push(message),
-    sendUserMessage: () => undefined,
+    sendUserMessage: (content) => {
+      if (typeof content !== "string") {
+        throw new Error(
+          "createPi's sendUserMessage stub tracks string content only; no legion.test.ts fixture call sends ContentBlock[] (images)"
+        );
+      }
+      sentUserMessages.push(content);
+      eventOrder.push("sendUserMessage");
+    },
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },
@@ -316,7 +328,17 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   // `bindEnvoy: false` lets a test bind legion.ts before envoy.ts, so the two extensions'
   // handlers for one session event run in the opposite order to the manifest's.
   if (options.bindEnvoy !== false) envoyExtension(pi as never);
-  return { commands, handlers, tools, sentMessages, entries, activeTools, title, pi };
+  return {
+    commands,
+    handlers,
+    tools,
+    sentMessages,
+    sentUserMessages,
+    entries,
+    activeTools,
+    title,
+    pi,
+  };
 }
 
 /** One SessionManager per pane, exactly as OMP hands it out: `/new` mutates the manager the
@@ -1086,7 +1108,7 @@ describe("Legion OMP extension", () => {
   test.each([
     ["implementer", "REPO-43"],
     ["architect", "REPO-42"],
-  ] as const)("refuses a subagent's operation-log rewrite and `legion handoff complete` in the %s pane while its other calls stay ungated", async (role, issue) => {
+  ] as const)("refuses a subagent's operation-log rewrite in the %s pane while its other calls stay ungated", async (role, issue) => {
     const { childFile } = await createSubagentTranscriptPaths();
     const pane = await bootPane({
       role,
@@ -1097,8 +1119,8 @@ describe("Legion OMP extension", () => {
     const { toolCall, context } = pane;
 
     // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
-    // log, as the parent that spawned it (a root architect's included) -- the one gate that
-    // binds a subagent.
+    // log, as the parent that spawned it (a root architect's included), so the pane rule binds
+    // the subagent too.
     await expect(
       toolCall(
         {
@@ -1112,20 +1134,7 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });
-    // A subagent has no legion tool, and a handoff from its bash would complete the parent's
-    // phase where the phase stall cannot see it (a root architect has no phase to complete, but
-    // the rule binds its pane the same way).
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: `call-sub-${role}-handoff`,
-          input: { command: "legion handoff complete --summary done" },
-        },
-        context
-      )
-    ).resolves.toEqual({ block: true, reason: expect.stringContaining("`legion` tool") });
-    // Every other gate stays off: the call passes, and no grant or daemon route is touched.
+    // A subagent's other calls pass, and no grant or daemon route is touched.
     await expect(
       toolCall(
         {
@@ -1315,38 +1324,6 @@ describe("Legion OMP extension", () => {
     expect(pane.tools.slice(toolsBeforeBoot).map((tool) => tool.name)).toEqual(["legion"]);
     expect(pane.activeTools).toContain("legion");
   });
-  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining, other commands, and `legion handoff complete`", async () => {
-    const { toolCall, context } = await bootPane({ role: "architect" });
-    const denied = "the architect delegates all code work to phase workers";
-    const isAllowed = async (command: string): Promise<boolean> => {
-      const result = await toolCall(
-        { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
-        context
-      );
-      return !(typeof result === "object" && result !== null && "block" in result && result.block);
-    };
-
-    expect(await isAllowed("legion gh -- pr view 1")).toBe(true);
-    expect(await isAllowed("legion state")).toBe(true);
-    // A sub-architect's handoffs are the legion tool's actions, never a bash command.
-    expect(await isAllowed("legion handoff complete --summary x")).toBe(false);
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "call-chained",
-          input: { command: "echo hi && legion gh" },
-        },
-        context
-      )
-    ).resolves.toEqual({ block: true, reason: denied });
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-non-legion", input: { command: "rm -rf x" } },
-        context
-      )
-    ).resolves.toEqual({ block: true, reason: denied });
-  });
   test("leaves the repository-scoped jj config untouched at worker boot: identity is the pane's environment, not config", async () => {
     // Every issue workspace is a workspace of one shared clone, and `--repo` config is one file
     // for all of them: a boot that wrote its identity there would set the author for every other
@@ -1361,9 +1338,6 @@ describe("Legion OMP extension", () => {
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
-  test("gates code-mutation tools for architect, merger, and reviewer only", () => {
-    expect(Object.keys(CODE_TOOL_REFUSAL).sort()).toEqual(["architect", "merger", "reviewer"]);
-  });
   // Every pane but the root architect's is on a child issue, a sub-architect's included; the root
   // architect's issue is its tree's.
   test.each([
@@ -1374,92 +1348,46 @@ describe("Legion OMP extension", () => {
     ["merger", "REPO-43"],
     ["architect", "REPO-43"],
     ["architect", "REPO-42"],
-  ] as const)("lets the %s on %s launch a `task` subagent and refuses code tools only where its role does", async (role, issue) => {
+  ] as const)("lets the %s on %s use every tool, and refuses only an operation-log rewrite", async (role, issue) => {
     const { toolCall, context } = await bootPane({
       role,
       issue,
-      sessionId: `ses_${role}_${issue}`,
+      sessionId: `ses_${role}_${issue}_tools`,
     });
-    const codeTools = ["edit", "write", "apply_patch"];
-    for (const toolName of [...codeTools, "task", "wait"]) {
-      const reason = codeTools.includes(toolName) ? CODE_TOOL_REFUSAL[role] : undefined;
+    const calls: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      { toolName: "edit", input: { path: "scratch.txt", oldText: "a", newText: "b" } },
+      { toolName: "write", input: { path: "scratch.txt", content: "x" } },
+      { toolName: "apply_patch", input: { patch: "*** Begin Patch\n*** End Patch" } },
+      { toolName: "bash", input: { command: "jj log" } },
+      { toolName: "bash", input: { command: "echo hi && legion state" } },
+      { toolName: "task", input: { prompt: "look around" } },
+      { toolName: "wait", input: {} },
+    ];
+    const refusedByMistake: string[] = [];
+    for (const [index, call] of calls.entries()) {
       const result = await toolCall(
-        { toolName, toolCallId: `call-${role}-${issue}-${toolName}`, input: {} },
+        { ...call, toolCallId: `call-${role}-${issue}-tools-${index}` },
         context
       );
-      if (reason === undefined) expect(result).toBeUndefined();
-      else expect(result).toEqual({ block: true, reason });
-    }
-  });
-  test("allows writes into Oh My Pi through the mutation gate but still blocks real file writes", async () => {
-    const blockedReason = (role: LegionRole): string =>
-      role === "merger"
-        ? "the merger only verifies and reports"
-        : role === "reviewer"
-          ? "the reviewer edits no code; its only commits are its review handoffs, made via bash"
-          : "the architect delegates all code work to phase workers";
-    const passedByMistake: string[] = [];
-
-    for (const role of ["architect", "reviewer", "merger"] as const) {
-      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
-
-      // A write into Oh My Pi -- a tool device (`xd://`), a message to an agent of the process
-      // (`agent://`), job and service control (`proc://`) -- is a tool call, not a file mutation,
-      // and must pass for every gated role, the scheme in any case, as Oh My Pi routes it, a
-      // pasted `read` header wrapper (`[path]`, `[path#XXXX]`) included.
-      for (const path of [
-        "xd://dispatch_ask",
-        "XD://dispatch_doc_edit",
-        "agent://ReviewLens",
-        "[agent://ReviewLens]",
-        "proc://task-3/kill",
-        "Proc://web",
-      ]) {
-        await expect(
-          toolCall(
-            {
-              toolName: "write",
-              toolCallId: `call-${role}-omp-ok`,
-              input: { path, content: "{}" },
-            },
-            context
-          )
-        ).resolves.toBeUndefined();
+      if (result !== undefined) {
+        refusedByMistake.push(`${JSON.stringify(call)} -> ${JSON.stringify(result)}`);
       }
-
-      // A file write is still blocked: a real path, in the `read` header wrapper too, and a
-      // `conflict://` write (it splices its content into a workspace file), bare or behind the
-      // prefix Oh My Pi strips from `<prefix>:conflict://N` before it routes.
-      for (const path of [
-        "/tmp/whatever.ts",
-        "[/tmp/whatever.ts#ABCD]",
-        "conflict://1",
-        "agent://x:conflict://1",
-        "[proc://shell:conflict://2#ABCD]",
-        "XD://y:conflict://3",
-      ]) {
-        const result = await toolCall(
-          { toolName: "write", toolCallId: `call-${role}-fs`, input: { path, content: "x" } },
-          context
-        );
-        if (!Bun.deepEquals(result, { block: true, reason: blockedReason(role) })) {
-          passedByMistake.push(`${role} ${path} -> ${JSON.stringify(result)}`);
-        }
-      }
-
-      // A malformed/missing `path` never qualifies as a tool-device invocation: it is still
-      // treated as a mutation and blocked.
-      await expect(
-        toolCall(
-          { toolName: "write", toolCallId: `call-${role}-bad-path`, input: { path: 42 } },
-          context
-        )
-      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
-      await expect(
-        toolCall({ toolName: "write", toolCallId: `call-${role}-no-path`, input: {} }, context)
-      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
-    expect(passedByMistake).toEqual([]);
+    expect(refusedByMistake).toEqual([]);
+    // The hook is live in this pane: the operation-log rule still answers.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: `call-${role}-${issue}-jj-undo`,
+          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+        },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
   });
   test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
     const { toolCall, context, requests } = await bootPane({
@@ -1605,9 +1533,9 @@ describe("Legion OMP extension", () => {
       );
       // Every pane this loop boots classifies as a phase worker's, a sub-architect's "architect"
       // case included (its issue REPO-43 differs from its tree REPO-42), so the operation-log
-      // guard (judged from the environment, ahead of every role gate) answers before any role
-      // gate. A root architect's pane gets the same guard; see "blocks code tools in a root
-      // architect session" for its precedence against the architect's own bash gate.
+      // guard, judged from the environment, answers. A root architect's pane gets the same
+      // guard; see "lets the %s on %s use every tool, and refuses only an operation-log
+      // rewrite".
       expect(undo).toEqual({
         block: true,
         reason: expect.stringContaining("every Legion issue workspace shares"),
@@ -1658,6 +1586,9 @@ describe("Legion OMP extension", () => {
       { toolName: "bash", input: { command: "bun run dev", name: "web" } },
       { toolName: "write", input: { path: "proc://shell", content: "jj op log" } },
       { toolName: "write", input: { path: "proc://web/kill" } },
+      // A prefixed `conflict://` write is the workspace-file write Oh My Pi routes it to, not a
+      // service's stdin.
+      { toolName: "write", input: { path: "proc://shell:conflict://2", content: "jj undo" } },
       // A file's content is not run, so the plain-text rule leaves it alone.
       { toolName: "write", input: { path: "notes.md", content: "never run jj undo here" } },
     ];
@@ -1685,83 +1616,6 @@ describe("Legion OMP extension", () => {
       context
     );
     for (const phrase of ["write: jj undo", "every Legion issue workspace shares"]) {
-      expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
-    }
-  });
-  test("refuses `legion handoff complete` in a phase worker's bash, eval code, and service stdin, and leaves the shell's write and read alone", async () => {
-    // The phase stall closes only on the tool's handoff_complete; a completion run from bash
-    // would leave it open and draw a follow-up asking the worker to complete again. Writes and
-    // reads leave no phase open, and stdin is the shell's route for a payload past argv's cap.
-    const { toolCall, context, requests } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_implementer_handoff_bash",
-    });
-    const mints = (): number => grantRequests(requests).length;
-    const bash = (command: string) => ({ toolName: "bash", input: { command } });
-    const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
-      bash("legion handoff complete --summary done"),
-      bash('legion "handoff" "complete" --summary done'),
-      bash('"$LEGION_STATE_DIR/bin/legion" handoff complete --summary done'),
-      bash("env LEGION_GRANT=x legion handoff complete --summary done"),
-      bash("bash -lc 'legion handoff complete --summary done'"),
-      {
-        toolName: "eval",
-        input: {
-          language: "py",
-          code: 'subprocess.run(["legion", "handoff", "complete", "--summary", s])',
-        },
-      },
-      {
-        toolName: "write",
-        input: { path: "proc://shell", content: "legion handoff complete --summary done" },
-      },
-    ];
-    const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
-      bash("legion gh -- pr view 7"),
-      bash(`legion handoff write --phase implement --data '{"proof":["ran it"]}'`),
-      bash(
-        "jq '.rounds += [$r]' --argjson r '{}' .legion/test.json | legion handoff write --phase test"
-      ),
-      bash("legion handoff read"),
-      bash('"$LEGION_STATE_DIR/bin/legion" handoff read --phase plan'),
-      bash("legion handoff write --help"),
-      bash("legion state"),
-      bash("legion threads resolve --pr 7 --repo o/r"),
-      // A path through `legion/handoff`, and a message that mentions a handoff, run no handoff.
-      bash("cat packages/daemon/cmd/legion/handoff.go"),
-      bash('jj -R "$LEGION_WORKSPACE" split -m "implement: record handoff" .legion/implement.json'),
-      { toolName: "eval", input: { language: "py", code: 'print(read(".legion/plan.json"))' } },
-      { toolName: "write", input: { path: "proc://shell", content: "legion handoff read" } },
-    ];
-    const mintsBefore = mints();
-    const allowedByMistake: string[] = [];
-    for (const [index, call] of refused.entries()) {
-      const result = await toolCall({ ...call, toolCallId: `call-handoff-${index}` }, context);
-      const blocked =
-        typeof result === "object" && result !== null && "block" in result && result.block === true;
-      if (!blocked) allowedByMistake.push(JSON.stringify(call));
-    }
-    expect(allowedByMistake).toEqual([]);
-    // A refused command never mints a grant: nothing ran, so nothing ran under one.
-    expect(mints()).toBe(mintsBefore);
-    const refusedByMistake: string[] = [];
-    for (const [index, call] of allowed.entries()) {
-      const result = await toolCall({ ...call, toolCallId: `call-handoff-ok-${index}` }, context);
-      if (result !== undefined) {
-        refusedByMistake.push(`${JSON.stringify(call)} -> ${JSON.stringify(result)}`);
-      }
-    }
-    expect(refusedByMistake).toEqual([]);
-    // The refusal names the command and the tool action that does it instead.
-    const named = await toolCall(
-      { ...bash("legion handoff complete --summary done"), toolCallId: "call-handoff-named" },
-      context
-    );
-    for (const phrase of [
-      "legion handoff complete --summary done",
-      "`legion` tool",
-      "handoff_complete",
-    ]) {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
@@ -1984,43 +1838,9 @@ describe("Legion OMP extension", () => {
 
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
   });
-  test("blocks code tools in a root architect session", async () => {
-    const { toolCall, context } = await bootPane({
-      role: "architect",
-      issue: "REPO-42",
-      sessionId: "ses_policy_architect",
-    });
-
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "architect-bash",
-          input: { command: "echo should-not-run" },
-        },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: "the architect delegates all code work to phase workers",
-    });
-    // LEGION-45: the root architect's pane carries the operation-log guard too (judged ahead of
-    // every role gate), so `jj undo` is refused by the shared-log reason, not the architect's
-    // bash gate.
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "architect-bash-jj", input: { command: "jj undo" } },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
-  });
   test("refuses a root architect's own eval or service stdin that spells out an operation-log rewrite", async () => {
-    // Neither `eval` nor a `write` to `proc://` is in the architect's bash-only gate (a `proc://`
-    // write passes the code-tool gate as job control), so the operation-log rule bound to the root
-    // architect's pane is what refuses the architect's own (non-subagent) call.
+    // The operation-log rule bound to the root architect's pane refuses the architect's own
+    // (non-subagent) eval code and service stdin, as it does a phase worker's.
     const { toolCall, context } = await bootPane({
       role: "architect",
       issue: "REPO-42",
@@ -2049,25 +1869,6 @@ describe("Legion OMP extension", () => {
     expect(stdinResult).toEqual({
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
-  });
-  test("admits a root architect's single `legion` bash command, `legion handoff read` included, except `legion handoff complete`", async () => {
-    const { toolCall, context } = await bootPane({
-      role: "architect",
-      issue: "REPO-42",
-      sessionId: "ses_root_architect_handoff",
-    });
-    const bash = (command: string) =>
-      toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context);
-
-    await expect(bash("legion gh -- pr view 1")).resolves.toBeUndefined();
-    await expect(bash("legion state")).resolves.toBeUndefined();
-    // A root architect reads a committed handoff from the root issue's workspace with the shell.
-    await expect(bash("legion handoff read --phase plan")).resolves.toBeUndefined();
-    await expect(bash('legion "handoff" read')).resolves.toBeUndefined();
-    await expect(bash("legion handoff complete --summary x")).resolves.toEqual({
-      block: true,
-      reason: expect.stringContaining("`legion` tool's `handoff_complete`"),
     });
   });
 
@@ -2892,6 +2693,9 @@ async function launchedController(options: {
   readonly order?: "envoy.ts" | "legion.ts";
   /** The daemon's answer to every `/legion/v1/grants`, in place of a minted grant. */
   readonly grant?: () => Response;
+  /** LEGION_CONTROLLER_START_MESSAGE, the text `legion controller start` carries for the
+   * extension to send as the session's first turn; a fixed literal unless a test says otherwise. */
+  readonly startMessage?: string;
   /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
    * replaced by `daemonProject`: `state.json` unless a test names another. */
   readonly stateFixture?: string;
@@ -2900,6 +2704,7 @@ async function launchedController(options: {
   readonly registration: Record<string, unknown>;
   readonly grantFile: string;
   readonly requests: DaemonRequest[];
+  readonly sentUserMessages: string[];
   readonly exits: number[];
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
@@ -2934,6 +2739,8 @@ async function launchedController(options: {
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_PROJECT = project;
   process.env.LEGION_STATE_DIR = stateDir;
+  process.env.LEGION_CONTROLLER_START_MESSAGE =
+    options.startMessage ?? "Legion controller start: follow skill://legion-controller";
   process.env.LEGION_GRANT_FILE = grantFile;
 
   const requests: DaemonRequest[] = [];
@@ -3037,6 +2844,7 @@ async function launchedController(options: {
     registration,
     grantFile,
     requests,
+    sentUserMessages: fixture.sentUserMessages,
     exits,
     tools: fixture.tools,
     commands: fixture.commands,
@@ -3081,11 +2889,166 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
   });
 
+  // LEGION-392's race: Oh My Pi's own positional-argument first message can lose the session's one
+  // first-turn slot to an Envoy notice. The extension now sends the start message itself, right
+  // after the role claim and before the live wake subscription opens (claim() in
+  // controller-session.ts: claimEnvoyRole, then pi.sendUserMessage, then subscribeLegionNotice —
+  // no await between the send and the claim it follows, so nothing scheduled after the claim can
+  // run first), so nothing can race it.
+  test("sends LEGION_CONTROLLER_START_MESSAGE as the session's first turn once its claim succeeds, before the controller-topic subscribe opens", async () => {
+    const topic = "notifications.legion.omp.controller";
+    const controller = await launchedController({
+      sessionId: "ses_controller_start",
+      startMessage: "Legion controller start: follow skill://legion-controller's start procedure",
+    });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_start")
+    );
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller's start procedure",
+    ]);
+    // The real ordering guarantee: the send precedes the subscribe that opens the live wake
+    // channel a notice could otherwise race it on.
+    expect(eventOrder.indexOf("sendUserMessage")).toBeGreaterThanOrEqual(0);
+    expect(eventOrder.indexOf(`subscribe:${topic}`)).toBeGreaterThan(
+      eventOrder.indexOf("sendUserMessage")
+    );
+  });
+
+  // The start message is read and validated before anything that mutates daemon-side state
+  // (registerController, which replaces the running controller's session; claimEnvoyRole, which
+  // takes its role): a missing value refuses here, leaving the previous controller, if any, still
+  // running and still registered.
+  test("a launched claim with LEGION_CONTROLLER_START_MESSAGE unset refuses and makes no /legion/v1/claims/register request", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_no_start_message" });
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_no_start_message")
+      )
+    ).rejects.toThrow("LEGION_CONTROLLER_START_MESSAGE is required for Legion");
+
+    expect(
+      controller.requests.filter((request) => request.path === "/legion/v1/claims/register")
+    ).toEqual([]);
+    expect(controller.sentUserMessages).toEqual([]);
+  });
+
+  // startMessageSent, not controllerSessionID, gates the send: a claim that throws after sending
+  // (here, the controller-topic subscribe) never reaches the controllerSessionID assignment at
+  // the end of claim(), so a guard keyed on controllerSessionID would send a second time on retry.
+  // Forcing the subscribe itself to throw (rather than a connect envoy.ts's own session_start
+  // handler retries quietly in the background) needs the same technique the subscription-opening
+  // tests below use: close the connection envoy.ts already opened eagerly, from the
+  // registration's own callback, so ensureConnection() inside subscribe() dials again — only then
+  // does a rejected dial reach subscribeNotice uncaught.
+  test("a claim whose controller-topic subscribe throws, then retried, sends one start message in total", async () => {
+    let subscribeAttempts = 0;
+    const controller = await launchedController({
+      sessionId: "ses_controller_subscribe_retry",
+      register: () => {
+        const live = natsConnections.find(
+          (candidate) => candidate.name === "omp-ses_controller_subscribe_retry"
+        );
+        if (live !== undefined) live.closed = true;
+        natsConnectGates.set("omp-ses_controller_subscribe_retry", async () => {
+          subscribeAttempts += 1;
+          if (subscribeAttempts === 1) throw new Error("nats: connection refused");
+        });
+        return undefined;
+      },
+    });
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_subscribe_retry")
+      )
+    ).rejects.toThrow("nats: connection refused");
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+
+    // Retried in the same session and process: /legion-claim-controller re-enters claim()
+    // directly, as a lost-claim recovery would.
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_subscribe_retry"));
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
+  // Reading LEGION_CONTROLLER_START_MESSAGE is gated on `launched` (a `legion controller start`
+  // launch, never a hand-started takeover), checked on a process that has made no prior claim at
+  // all: `startMessageSent` alone would not catch a dropped `launched &&` here, since it starts
+  // `false` the same way a genuine first launch does.
+  test("a hand-started takeover with no prior claim in this process sends no start message of its own", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_takeover_only" });
+    // No session_start: this process's controllerSession has made no claim yet. A hand-started
+    // takeover carries no controller marker.
+    delete process.env.LEGION_CONTROLLER;
+    delete process.env.LEGION_ROLE;
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_takeover_only"));
+
+    expect(controller.sentUserMessages).toEqual([]);
+  });
+
+  test("a hand-started takeover sends no start message of its own: the operator's own session speaks for itself", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_takeover_pane" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_takeover_pane")
+    );
+    delete process.env.LEGION_CONTROLLER;
+    delete process.env.LEGION_ROLE;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_takeover_hand"));
+
+    // One send, from the fresh launch; the hand-started takeover added none.
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
+  test("a session switch (/new, /resume) does not resend the start message: only a fresh process launch does", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_switch_before" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_switch_before")
+    );
+    await controller.handlers.get("session_switch")?.(
+      {},
+      controller.context("ses_controller_switch_after", "/tmp/ses_controller_switch_after.jsonl")
+    );
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
   // `controller: daemon`: the pod carries its launch's boot token, never a capability fetched over
   // the operator's bearer. The session registers with that token and, holding the role and the
   // topic, reports ready, which is when the daemon hands it the start message. The state it reads
   // first is the daemon's own while that daemon holds the controller's claim (internal/projection's
-  // golden), which the plugin's strict client parses.
+  // golden), which the plugin's strict client parses. The pod carries no
+  // LEGION_CONTROLLER_START_MESSAGE, and the session sends no start message of its own: the
+  // daemon's delivery at ready is its one start message.
   test("a controller the daemon launched registers with its boot token, then reports ready once it holds the role", async () => {
     const controller = await launchedController({
       sessionId: "ses_controller_pod",
@@ -3094,6 +3057,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
     await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
     try {
       await controller.handlers.get("session_start")?.(
@@ -3127,6 +3091,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ]);
     const paths = controller.requests.map((request) => request.path);
     expect(paths.indexOf("/v1/roles/set")).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
+    expect(controller.sentUserMessages).toEqual([]);
     expect(controller.exits).toEqual([]);
   });
 

@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 func architect() api.SpawnRequest {
@@ -864,18 +865,19 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.LaunchFailureLimit = 1
 	rt := fake.NewRuntime()
-	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
+	// The tree's root first: its spawn opens the operator tree its workers bind to.
+	root := d.spawn(architect())
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	planner := architect()
 	planner.Issue, planner.Role = "LEGION-4", claim.RolePlanner
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError {
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError || !strings.Contains(string(body), "tmux refused") {
 		t.Fatalf("spawn of the claim meant to fail = %d; body %s", status, body)
 	}
 	project, _ := claim.ProjectToken(cfg.Project)
 	failed, _ := claim.NewToken(project, "LEGION-4", claim.RolePlanner)
-	root := d.spawn(architect())
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
 	suspended := d.spawn(worker)
@@ -1031,6 +1033,9 @@ func streamEventTypes(t *testing.T) []string {
 	return sealed
 }
 
+// putClaim stores c as every claim the daemon stores is: a claim of an admitted tree, bound to the
+// tree's open lifecycle epoch. No workflow issue backs these trees, so their authority is the
+// operator's, as the lifecycle migration gives a tree it finds only claims of.
 func putClaim(t *testing.T, cfg config.Config, c supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -1042,7 +1047,10 @@ func putClaim(t *testing.T, cfg config.Config, c supervise.Claim) {
 	if _, err := st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := st.PutClaim(ctx, c); err != nil {
+	if _, err := st.OpenTreeLifecycle(ctx, c.Project, c.Tree, treelifecycle.AuthorityOperator); err != nil {
+		t.Fatalf("admit the tree of %s: %v", c.Token, err)
+	}
+	if _, err := st.AdmitClaim(ctx, c); err != nil {
 		t.Fatalf("put %s: %v", c.Token, err)
 	}
 }

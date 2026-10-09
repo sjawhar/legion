@@ -31,6 +31,7 @@ legion start --config legion.yaml --check-config
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay. Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -54,7 +55,15 @@ legion start --config legion.yaml --check-config
   - the probe pod cannot mount the providers Secret (`… cannot mount the providers Secret
     legion-<project>-providers …`): create the Secret with every key `provider_keys` names;
   - the image names another NATS user than the daemon's seed: put the agents' seed in the providers
-    Secret's `NATS_NKEY_SEED` key.
+    Secret's `NATS_NKEY_SEED` key;
+  - `capability <name> is missing: <detail>` in the quoted log: the image lacks a tool the capability
+    check looks for (`chromium`, a language server, `go`, …), or an operator pod env such as
+    `PUPPETEER_EXECUTABLE_PATH` names one that does not run. Rebuild the image from a commit whose
+    Dockerfile carries it, or fix the variable; the worker-image workflow fails the same way on an
+    image that lacks one;
+  - `Succeeded without checking the capability list (its legion CLI predates the check)`: the image's
+    `legion` is older than this daemon's capability check. Build the image from this daemon's
+    commit.
 
   A model key that fails at boot refuses the boot even when the cause is a passing network blip,
   since the probe cannot tell the two apart. Start the daemon again once the cause is gone.
@@ -197,11 +206,11 @@ legion status <KEY> backlog --config legion.yaml --operator-token-file operator-
 legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
 ```
 
-To see why the launches failed, read the pod's logs:
+To see why the launches failed, read the failed role's container log in the issue's pod:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY>
-kubectl -n legion logs <pod> -c worker
+kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
@@ -221,7 +230,7 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
   Nothing is registered before a refusal, so every later attempt refuses the same way until the
   repository is fixed. Run the commands it names from a shell in one of the tree's running pods
-  (`kubectl -n legion exec -it <pod> -c worker -- sh`).
+  (`kubectl -n legion exec -it <pod> -c architect -- sh`).
 - **The tree volume was lost.** The daemon logs
   `supervise: the tree volume was lost with the session; relaunching a fresh session`. The agent
   comes back as a new session in a new workspace, which holds `.legion/<issue>/workspace-recovered.json`

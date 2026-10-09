@@ -26,12 +26,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -108,7 +110,7 @@ type overrides struct {
 	gate func(ctx context.Context) error
 	// probe stands in for the worker image probe when runtime is replaced under kubernetes: nil is
 	// none. With the Agent Sandbox runtime, the probe is always the real one.
-	probe func(ctx context.Context, rt runtime.Runtime) error
+	probe func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
@@ -166,10 +168,25 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 
 	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 	defer cancelBoot()
+	// The cluster's refusals run before the store opens, so before any schema write, image probe or
+	// reconcile: Agent Sandbox must be installed, and no per-claim Sandbox of the layout before issue
+	// pods may remain. The claims' half of that layout fence runs once the store opens, before it
+	// migrates.
+	if plan.clusterCheck != nil {
+		if err := plan.clusterCheck(boot); err != nil {
+			return err
+		}
+	}
 
 	st, err := store.Open(boot, cfg.PostgresDSN)
 	if err != nil {
 		return err
+	}
+	if plan.claimsCheck != nil {
+		if err := plan.claimsCheck(boot, st); err != nil {
+			st.Close()
+			return err
+		}
 	}
 	applied, err := st.Migrate(boot)
 	if err != nil {
@@ -245,7 +262,8 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		return err
 	}
 	if plan.probe != nil {
-		if err := plan.probe(ctx, s.runtime); err != nil {
+		report, err := plan.probe(ctx, s.runtime)
+		if err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
@@ -256,13 +274,22 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			}
 			return err
 		}
+		s.imageReport, s.probed = report, true
 		// The probe waits out a cold node and an image pull, which the boot budget does not bound,
 		// as it does not bound the plugin gate: the work after the probe has a budget of its own.
 		var cancelAfterProbe context.CancelFunc
 		boot, cancelAfterProbe = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterProbe()
+	} else if plan.modelFallback != nil {
+		// The tmux counterpart of the probe's model-fallback mark, read from the host's Oh My Pi
+		// under the gate's environment now that the gate has passed.
+		s.imageReport.ModelFallback = plan.modelFallback(ctx)
 	}
+	// The deployment's capability report (LEGION-578, "The check"): a gap is logged here, shown in
+	// `legion state` and named to the controller on every tick, and never refused.
+	s.reportCapabilities()
 	if workflow != nil {
+		workflow.admission.ReportCapabilities(s.reportCapabilities)
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers. Both wait out
@@ -431,10 +458,24 @@ type plan struct {
 	// no host Oh My Pi, and for a replaced runtime without one.
 	gate func(ctx context.Context) error
 	// probe proves the runtime's worker image once the runtime is built and before the boot is
-	// recorded; nil under tmux, and for a replaced runtime without one.
-	probe       func(ctx context.Context, rt runtime.Runtime) error
-	clock       supervise.Clock
-	orphanSweep time.Duration
+	// recorded, answering what its OK line reported of the image; nil under tmux, and for a
+	// replaced runtime without one.
+	probe func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
+	// clusterCheck is the Kubernetes runtime's refusals before the store opens: Agent Sandbox's
+	// install check, then the census of per-claim Sandboxes (sandbox.CensusLegacyIssueSandboxes).
+	// Nil under tmux, and for a replaced runtime.
+	clusterCheck func(ctx context.Context) error
+	// claimsCheck is the Kubernetes runtime's refusal once the store has opened, before it
+	// migrates: no stored claim may still carry a per-claim Sandbox locator of the layout before
+	// issue pods (store.HasLegacySandboxClaims). Nil under tmux, and for a replaced runtime.
+	claimsCheck func(ctx context.Context, st *store.Store) error
+	// modelFallback reads, once the gate has passed, whether the host's Oh My Pi falls back to
+	// another model (capabilities.ReadModelFallback), as the probe's OK line reports it for a pod:
+	// "on", "off", or "" when the read failed, which it logs and never refuses. nil under
+	// kubernetes, whose probe reports it, and for a replaced runtime.
+	modelFallback func(ctx context.Context) string
+	clock         supervise.Clock
+	orphanSweep   time.Duration
 	// controllerRetry is the controller keeper's first wait before it retries a failed controller.
 	controllerRetry time.Duration
 	// stopBudget is how long the stop waits for the daemon's own work once it begins (stopBudget).
@@ -449,12 +490,12 @@ type plan struct {
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
-// conns the stream listener, stream the address every agent's shim dials, tokens the workflow's
-// App tokens, nil without a workflow, and removable the tree's candidate function
-// (removableWorkspaces), which needs sup — created before this is called (openSupervision) — so
-// it cannot be built inside the factory itself; a runtime that does not provision workspaces in
-// its own pods ignores it.
-type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
+// listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
+// workflow's App tokens (nil without a workflow), st the store the runtime reads, and removable the
+// tree's candidate function (removableWorkspaces), which needs sup — created before this is called
+// (openSupervision) — so it cannot be built inside the factory itself; a runtime that does not
+// provision workspaces in its own pods ignores it.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -558,6 +599,15 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			roleReferences: p.roleReferences,
 			log:            log,
 		}.verify
+		image := capabilities.Image{Launch: omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), Env: environPairs(env), WorkDir: cfg.StateDir}
+		p.modelFallback = func(ctx context.Context) string {
+			state, err := capabilities.ReadModelFallback(ctx, image)
+			if err != nil {
+				log.Warn("the daemon could not read whether the host's Oh My Pi falls back to another model; the model-fallback capability is reported as not read", "error", err)
+				return ""
+			}
+			return state
+		}
 		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
 	}
 	return nil
@@ -568,9 +618,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
-		opts.StreamAddress, opts.Conns = streamAddress, conns
+		opts.StreamAddress, opts.Conns = streamAddress, listener
 		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
@@ -619,6 +669,16 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
+	// imageReport is what the worker image's passed probe reported of the image, from its OK
+	// line (bootprobe.ImageReport); under tmux, the model-fallback mark alone, read by
+	// plan.modelFallback. probed is whether the probe passed (kubernetes), so the image rows of the
+	// capability report read present.
+	imageReport bootprobe.ImageReport
+	probed      bool
+	// reportedGaps are the open capabilities the last report logged (reportCapabilities), under
+	// reportMu: the tick's reads and boot's run on different goroutines.
+	reportMu     sync.Mutex
+	reportedGaps []string
 
 	cancel       context.CancelFunc
 	cancelStream context.CancelFunc
@@ -629,6 +689,64 @@ type supervision struct {
 	halted   chan struct{}
 	stopBy   time.Time
 	haltOnce sync.Once
+}
+
+// Deployment is the deployment's capabilities as the configuration alone states them
+// (capabilities.Deployment): the decisions, the runtime, whether a broker is configured, and the
+// roles whose pods reserve no CPU and memory (config.RoleResources.Reserved) — every workflow
+// role, and the controller's when the daemon launches it. What boot learns (the broker login, the
+// probe, model fallback) is the supervision's to add (supervision.deployment); `legion start
+// --check-config` reports from this alone.
+func Deployment(cfg config.Config) capabilities.Deployment {
+	d := capabilities.Deployment{Decided: cfg.Capabilities.Decided, Runtime: cfg.Runtime.Name}
+	k := cfg.Runtime.Kubernetes
+	if k == nil {
+		return d
+	}
+	d.AgentSecrets = k.AgentSecrets != nil
+	roles := claim.Roles
+	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
+		roles = append(slices.Clone(roles), claim.RoleController)
+	}
+	for _, role := range roles {
+		if !k.Resources[role].Reserved() {
+			d.RolesWithoutResources = append(d.RolesWithoutResources, role)
+		}
+	}
+	return d
+}
+
+// deployment is Deployment with what this boot learned: the broker login's state, whether the
+// image passed its probe, and the model-fallback mark the probe or the gate read.
+func (s *supervision) deployment() capabilities.Deployment {
+	d := Deployment(s.cfg)
+	if s.plan.secretsLogin != nil {
+		d.SecretsLogin = s.plan.secretsLogin.LoginStatus().State
+	}
+	d.Probed, d.ModelFallback = s.probed, s.imageReport.ModelFallback
+	return d
+}
+
+// reportCapabilities names the deployment capabilities with no decision, in the table's order, and
+// logs the report whenever that set differs from the one last logged: once at boot, and again from
+// a controller tick that finds it changed (admit.Admission.ReportCapabilities asks only when the
+// tick queues a wake: a controller is registered and no tick notice is pending) — the broker's
+// login reaching issued is the one change a running daemon sees — so a gap is logged at boot and
+// at the first tick after a change, never on every tick, and never between ticks.
+func (s *supervision) reportCapabilities() []string {
+	d := s.deployment()
+	open := d.Open()
+	names := make([]string, len(open))
+	for i, name := range open {
+		names[i] = string(name)
+	}
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	if !slices.Equal(names, s.reportedGaps) {
+		d.Log(s.log)
+		s.reportedGaps = names
+	}
+	return names
 }
 
 // shimAddress is the address every agent's shim dials: the listener's bound address, or, when
@@ -678,7 +796,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, removableWorkspaces(st.Pool(), record.NewStore(), sup))
+	rt, err := p.newRuntime(supervising, listener, dial, apps, st, removableWorkspaces(st.Pool(), record.NewStore(), sup))
 	if err != nil {
 		cancel()
 		cancelStream()
@@ -957,6 +1075,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			admissionCap: cfg.AdmissionCap,
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
+			deployment:   s.deployment,
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -974,6 +1093,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:             tokens,
 		GitHubOwner:        githubOwner(cfg),
 		Grants:             grants,
+		Releaser:           s.supervisor.deps.Runtime,
+		Trees:              st,
 		ClaimReady:         claimReadyHook(keeper, claimReady),
 	})
 
@@ -1022,6 +1143,9 @@ type source struct {
 	// secretsLogin is the daemon's own agent-secrets machine login client (newSecretsLogin), read
 	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
 	secretsLogin *agentsecrets.Client
+	// deployment is the deployment's capabilities as this boot knows them (supervision.deployment),
+	// whose report the state carries.
+	deployment func() capabilities.Deployment
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1083,6 +1207,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		login := s.secretsLogin.LoginStatus()
 		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: login.State, Code: login.Code}
 	}
+	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
 	return state, nil
 }
 

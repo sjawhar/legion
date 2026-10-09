@@ -1,0 +1,177 @@
+{
+  "completed": "2026-10-08T03:27:37.970284074Z",
+  "concerns": [
+    "sjawhar/legion#1752 (LEGION-462) is DIRTY against main and rewrites manifest.go and podsafety; Part 1 touches one line of manifest.go and narrows podsafety without renaming, so either side resolves the conflict quickly, but the implementer must forward-merge main if #1752 lands first.",
+    "Image size and pull time grow (Chromium, Go, Python, language servers); the registration deadline is 360 s; the plan requires the before/after size and a measured cold-node launch in docs/kubernetes.md and does not change the deadline blind.",
+    "Dropping --no-extensions without un-installing pi-envoy/pi-legion from the omp profile would load each plugin twice (the profile symlinks them); Task 4 couples the two changes and adds a tools-registered-once test.",
+    "api.State gains a field; if the plugin's LegionState zod reader is strict, the daemon API contract version moves with it (packages/pi-legion/AGENTS.md 'Daemon contract').",
+    "The in-repo capability table may cite LEGION-* issues only (root AGENTS.md: no deployment-repository project key in the tree)."
+  ],
+  "decisionsForArchitect": [
+    "The split: Part 1 now as the root's PR, Part 2 as a child after LEGION-462 closes (recommended); alternatives are the root implementer waiting on #1752 and forward-merging, or #1752's lane taking the token mount.",
+    "Enforcement of 'Legion never merges' once legion gh refuses nothing: prompt, skills and each repository's branch rules only; sjawhar/legion-smoke's ruleset requires the gate check and the plan did not read whether it requires a review (human decision to carry).",
+    "The grant stays as the daemon's own lifecycle credential (departure 2); the spec's 'grant hook and grant file go' sentence should say the hook and the pane-wide file go.",
+    "Who runs Stage 4a/4b for Part 1: a devbox operator on the PR's image digest; the implementer names the runs it needs in its handoff."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "answer": "Part 2 and LEGION-462's own supersession, already relayed to its lane (dispatch://LEGION-462 comment #40); the architect decides whether #1752 is rescoped before merge or a child re-cuts it (decision 1).",
+        "finding": "The per-issue volume ruling overturns LEGION-462's approved design under an open 100-file PR (#1752)."
+      },
+      {
+        "answer": "Departure 2: the grant stays as the claim's credential for the daemon's lifecycle routes, passed per call to the one process that needs it (LEGION_GRANT env on the legion tool's child; threads_resolve as a tool operation; the controller mints from its controller secret); only the per-bash hook and the pane-wide file go, in Part 2.",
+        "finding": "Deleting the grant file removes the only authentication the in-pod CLI has for non-GitHub daemon calls (handoff complete, threads resolve, status, READY checks)."
+      },
+      {
+        "answer": "Part 2 names the replacement: an inline git credential helper reading the mounted token file, GH_CONFIG_DIR hosts.yml for gh; the init container keeps its provisioning token.",
+        "finding": "legion push is kept but its credential path (legion credential, the gh shim) is deleted."
+      },
+      {
+        "answer": "Task 4 stops installing the two plugins into the profile, keeps them explicit (a repository cannot disable an explicit path), and adds a tools-registered-once test.",
+        "finding": "Dropping --no-extensions will load the Legion and Envoy plugins twice (profile symlinks plus explicit --extension)."
+      },
+      {
+        "answer": "The capability table names a check site per row: image probe, live (Stage 4b capabilities-live), deployment report, or withheld with its citation.",
+        "finding": "Most of the 'What done means' list cannot be asserted in the probe the spec extends (the probe pod has no checkout, claim or registration)."
+      },
+      {
+        "answer": "Task 7: legion.yaml capabilities.decided.\u003cname\u003e, api.State.capabilities with the contracts mirror, the controller's existing tick payload gains openCapabilities; no new notice kind or synthetic issue key.",
+        "finding": "A deployment-gap report has no place to live in state, notices or config."
+      },
+      {
+        "answer": "The probe pod runs omp config get retry.modelFallback --json under the operator's PI_CONFIG_FILES (measured to print the effective value) and reports model-fallback=on|off on its OK line; the daemon records the gap from that.",
+        "finding": "The daemon cannot read retry.modelFallback; it is a file mounted into pods."
+      },
+      {
+        "answer": "Part 2 (departure 4): rewrite every 20 minutes and on relaunch, non-subPath directory mount, the relaunch writes the token key as part of the Secret.",
+        "finding": "Hourly Secret writes race the kubelet's refresh and the relaunch reconciler; subPath mounts never refresh."
+      },
+      {
+        "answer": "Part 2: the daemon writes and refreshes the same token file per pane under the state directory (0600), as it writes other \u003cNAME\u003e_FILE secrets; no second credential path.",
+        "finding": "The tmux runtime gets no equivalent of the mount."
+      },
+      {
+        "answer": "Task 1 deletes the role gate only; the pane rules (jj operation-log, bash handoff complete) stay, since they are pane-kind rules protecting shared state and Sami's answer named the role refusals; the architect may restate it in the spec.",
+        "finding": "'Every tool refusal applied by role is deleted' has two readings: role gate only, or the pane rules too."
+      },
+      {
+        "answer": "Decision 2 for the architect to carry to Sami; Part 1 removes the refusal as ruled and keeps the rule in the merger's prompt and skills.",
+        "finding": "After the merge refusal goes, only a skill sentence stops a merge on a repository without branch protection (the smoke repository)."
+      },
+      {
+        "answer": "Task 8: the worker shim, which outlives registration, warms the index in the background after starting omp; the grep fallback stays in the tester's and reviewer's prompts; the check asserts the tool is present at probe time and the index initialized in the live check.",
+        "finding": "Nothing can build the CodeGraph index in a pod, and the registration deadline is the wrong bound for it."
+      },
+      {
+        "answer": "Measured in this pod: chrome-headless-shell renders and fetches under gVisor once 47 Debian packages' libraries are present; Task 3 bakes Chromium and the libraries into the image so no pod downloads.",
+        "finding": "The browser capability rests on two unmeasured things: Chromium under gVisor and the download cost per pod."
+      },
+      {
+        "answer": "Task 4 drops the flag from the load and agents probes too (argv parity, run from a scratch directory); the session-storage probe keeps its flags; goldens regenerate; the argv test inverts with the flag re-added as its control.",
+        "finding": "The boot gate and both probes replicate the pod argv and would silently stop certifying it."
+      },
+      {
+        "answer": "Part 2 / LEGION-462's supersession; Part 1 reports a role without requests and limits as a deployment gap and sets them in the example legion.yaml (decision 1 names the volume question).",
+        "finding": "Per-pod reservations contradict why requests were left off, and the per-role config shape."
+      },
+      {
+        "answer": "A declared table in internal/capabilities with one cited ruling per withheld row (LEGION-* keys only), printed on every probe run as present, withheld (dispatch://…) or reported.",
+        "finding": "Where does the probe read the list of capabilities a written decision withholds?"
+      },
+      {
+        "answer": "Departure 1 (MCP proven by a live fixture, not by the flag) and departure 4 (non-subPath mount, 20-minute period); re-measurement of .omp/commands and .mcp.json is the capabilities-live check.",
+        "finding": "Two spec claims are unsupported: --no-extensions stopping MCP servers and commands; 'Kubernetes refreshes the mounted file on its own' for subPath mounts."
+      },
+      {
+        "answer": "Task 3 places every tool outside HOME on the image PATH and records image size and the measured cold-node launch time against the 360 s deadline.",
+        "finding": "Python, Go, curl/wget and LSP servers need a home the pod's mounts do not shadow, and a pull-time budget."
+      }
+    ]
+  },
+  "independentTasks": 4,
+  "issue": "LEGION-578",
+  "parts": {
+    "part1RootPullRequest": [
+      "Narrowed by the architect on 2026-10-08 (dispatch://LEGION-578/comment/38d3fcaa-1152-4d05-9609-a255413cd529 and its envoy message to the implementer): the root's pull request carries the image additions, the capability check, the deployment-gap report, the example operator route's fallback setting and their docs, and nothing else. Tasks 1 (role gates) and 2 (legion gh refusals) are LEGION-630's and LEGION-631's; Tasks 4 (--no-extensions, the profile install), 6 (podsafety) and 8 (the shim's CodeGraph warm-up, Stage 4b capabilities-live) are LEGION-629's; the GitHub token mounts are LEGION-631's and the per-issue pod LEGION-462's/LEGION-632's. No Part 2 child is created by this implementer; those children exist.",
+      "Task 3 worker image: python3, Go toolchain at go.work's version, gopls, typescript-language-server, pyright, curl, wget, Chromium and its libraries, each outside HOME on the image PATH and run by the image's own gate; pull-time budget recorded in docs/kubernetes.md",
+      "Task 5 legion probe-image checks the declared capability table (internal/capabilities), prints it, exits 1 naming a missing capability; OK-line marks capabilities=checked and model-fallback=on|off; probe.go judge requires the mark; negative controls in probe_image_test.go, probe_test.go and the Go live harness",
+      "Task 7 deployment gaps (secrets, resource-limits, model-fallback) reported: log line with the legion.yaml capabilities.decided line, api.State.capabilities (+ legion-api.ts mirror and fixtures), the controller's tick payload; never a refusal to start; example legion.yaml sets every role's requests and limits",
+      "Task 9 deploy/kubernetes/operator-route/overlay.yml retry.modelFallback: true",
+      "Task 10 (narrowed) docs, AGENTS.md, the controller skill and the solution note for Tasks 3, 5, 7 and 9 only; check-private-names over every text change",
+      "Task 11 simplify pass, PR body with proofs, implement handoff"
+    ],
+    "part2ChildAfterLegion462": "GitHub credential cutover: per-role App token file (Secret key per role container, non-subPath, 0440; a per-pane 0600 file on tmux) rewritten every 20 minutes and on relaunch; GH_CONFIG_DIR hosts.yml and an inline git credential helper read it; subagents inherit it; the grant hook, grant file, gh shim, LEGION_GH_PATH/GIT_PATH/JJ_PATH pins, legion credential, /gh-token, /git-credential, /provisioning-credential and legion gh go; the grant stays as the claim's credential for the daemon's lifecycle routes, passed per call (LEGION_GRANT env on the legion tool's child; a threads_resolve tool operation for the reviewer; the controller's status mints from its controller secret); Stage 4b credential-separation check; LEGION-462's per-issue volume, reservation and node spread."
+  },
+  "phase": "plan",
+  "planDocument": "dispatch://LEGION-578/artifact/plan-md (version 1)",
+  "planReview": {
+    "rounds": 1,
+    "verdict": "approved"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the shared workspace, legion push, the PR body and proof rules (references/pr-body.md) every implementer proof follows",
+      "ce-simplify-code: the simplify pass over the diff before completion",
+      "dispatch: every Dispatch write (the PR body's Dispatch: line aside, any message or comment on LEGION-578)"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the review round and thread disposal",
+      "thermonuclear-deep-review: the diff touches a probe gate, a settings fence and the gh refusal path",
+      "thermonuclear-code-quality: a new package (internal/capabilities) and a growing probe command"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md says what the tester verifies and how its own proof and the test.json handoff are recorded; the red-test rule",
+      "dispatch: any comment or message the tester posts on the issue"
+    ]
+  },
+  "routingHints": {
+    "complexity": "large",
+    "estimatedImplementers": 1
+  },
+  "schemaVersion": 1,
+  "specDepartures": [
+    {
+      "evidence": "omp://extension-loading.md: '--no-extensions governs extension factories and OMP extension-package sibling roots; … Skills, MCP servers, tools, prompts, and rules owned by other discovery subsystems retain their own enable/disable controls.'",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The flag is dropped for extensions, hooks and installed profile plugins; MCP is proven by a live fixture in Stage 4b, since Oh My Pi's documentation says the flag never governed MCP discovery.",
+      "spec": "'A repository's extensions, hooks and commands: the same --no-extensions stops them', and MCP servers in .mcp.json 'unproven'."
+    },
+    {
+      "evidence": "cmd/legion/handoff.go:308, threads.go:111-118, status.go:36-43 and readychecks.go:46 read the grant; internal/api/credentials.go mints one only to a party holding the registered session's secret, which the extension holds and the shell does not; no other caller credential exists for those routes.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The per-bash-command hook and the pane-wide LEGION_GRANT_FILE go (Part 2); the grant mechanism stays as the claim's credential for the daemon's own lifecycle routes (handoff complete, the architect's operations, the reviewer's thread resolution, the controller's status write), minted per call and passed to the one process that needs it, never for GitHub.",
+      "spec": "'What goes: the grant hook and grant file in the Legion extension'."
+    },
+    {
+      "evidence": "The spec keeps PI_CONFIG_DIR and OMP_SESSION_STORAGE; sjawhar/legion#1752 adds internal/podsafety/turnscope.yml (+26) and edits podsafety.go (+26/-10), so the overlay mechanism is where that pod mechanic lives and a rename would collide across #1752's files.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The four restriction settings (compaction.remoteEndpoint, memory.backend, images.urls.enabled, dev.autoqa) and the two restriction variables (OTEL_SDK_DISABLED, PI_AUTO_QA) go; the Apply/PI_CONFIG_FILES mechanism and the two reserved session-storage variables stay, and the package and --pod-safety flag keep their names in Part 1.",
+      "spec": "'the overlay goes: a repository's settings apply in a pod as in any session, and the operator's overlay keeps outranking them.'"
+    },
+    {
+      "evidence": "An installation token lasts one hour (appauth.Manager refreshes within a 5-minute window); the kubelet propagates a Secret change after its sync period and never through a subPath mount (docs/kubernetes.md:1029); relaunch.go:348-355 recreates the claim's Secret wholesale.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "Part 2 rewrites the token every 20 minutes and on relaunch, mounts the Secret as a directory (never subPath), and refills the key when the relaunch recreates the Secret.",
+      "spec": "'the daemon writes each role's current App token into that role's own Secret mount once an hour (the token lasts an hour, and Kubernetes refreshes the mounted file on its own)'."
+    },
+    {
+      "evidence": "Measured 2026-10-08 in this planner's pod (runtimeClassName gvisor, current worker image): chrome-headless-shell 155.0.8059.39 with Debian trixie's libraries extracted under a scratch root rendered a local page, ran its JavaScript and fetched https://example.com, with and without --no-sandbox.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The browser is an image addition: Chromium and its 47-package library closure baked into the worker image, no per-pod download.",
+      "spec": "The browser is 'missing, with no decision that withholds it'; the audit doubted a headless browser could run in a gVisor pod."
+    }
+  ],
+  "taskCount": 11,
+  "workflowRecommendation": "Part 1 is the root's pull request now (Tasks 1-11). Part 2 (GitHub token mounts per role container, hourly refresh, removal of the grant hook/file, gh shim, path pins, legion credential and the token routes; LEGION-462's per-issue volume and reservation) is a child the architect creates and releases after LEGION-462 closes, since its design exists only in that layout and its files are sjawhar/legion#1752's. Stage 4a and 4b runs for Part 1 need a devbox operator on the pull request's image digest; a pod has no cluster credentials."
+}

@@ -24,9 +24,16 @@ related_issues:
 
 # A Worker Pod Ships No go or tmux
 
-- The worker image has no `go`, no `tmux`, no `curl`, no sudo. Provision both under `$HOME` in
-  user space with the recipe below, pinned to the `go` line of `packages/daemon-go/go.mod` and
-  the image's Debian release; a proof whose output says `SKIP` proved nothing.
+> **2026-10-08 (LEGION-578).** The worker image built from LEGION-578 onward ships `go` and
+> `gofmt` at go.work's version (`/opt/go`, linked at `/usr/local/bin/go`), `curl` and `wget`, and
+> `legion probe-image` refuses an image without them, so the Go half of the recipe below applies only
+> to a pod on an earlier image: on the current image, `go version` answers from `PATH`, and the
+> download below is not needed. The image still ships no `tmux`; the tmux half stands as written.
+
+- The worker image built before LEGION-578 has no `go`, no `curl` and no `wget`; no image has
+  `tmux` or sudo. Provision what the pod lacks under `$HOME` in user space with the recipe below,
+  pinned to the `go` line of `packages/daemon-go/go.mod` and the image's Debian release; a proof
+  whose output says `SKIP` proved nothing.
 - Bind tmux's shared libraries with a wrapper script on `PATH`, never `LD_LIBRARY_PATH` in the
   environment: the tmux runtime starts its server under `paneEnvAllowList`
   (`internal/runtime/tmux/environment.go:22-41`), which passes `PATH` and drops `LD_LIBRARY_PATH`.
@@ -39,8 +46,8 @@ related_issues:
 
 ## The recipe (worker image at Debian 13 trixie, `go 1.26.8`)
 
-Download with `bun` (the image has it; it has no `curl`). Write the downloader with the `write`
-tool if the pane refuses a heredoc.
+Download with `bun` (every image has it; one built before LEGION-578 has no `curl`). Write the
+downloader with the `write` tool if the pane refuses a heredoc.
 
 ```ts
 // $HOME/tools/fetch.ts — argv: url path url path …
