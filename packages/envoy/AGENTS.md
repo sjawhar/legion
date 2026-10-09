@@ -2004,7 +2004,7 @@ disable. It joins the signal watcher before restoring. A terminating signal that
 another process group holds the terminal (after Ctrl-Z and `bg`) skips the restore, which would
 stop the job until `fg`, and ends the CLI by that signal; bash resets its own terminal when a job
 dies by a signal. It reads the settings it restores only once its process group holds the
-terminal (`holdTerminal`): a prompt started with `&` waits behind the shell's line editor, whose
+terminal (`whenHeld`): a prompt started with `&` waits behind the shell's line editor, whose
 settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
 editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
 orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
@@ -2013,9 +2013,13 @@ discards, ends the wait with exit 2 naming the pipe command. The watcher handles
 SIGTERM, SIGHUP and SIGTSTP; signals whose
 kernel disposition is SIG_IGN remain ignored. Their tty control characters are disabled and
 consumed by the reader instead, since even an ignored tty signal would flush unread input.
-SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. On SIGTSTP,
-`stopBy` re-raises the stop and the watcher sends the reader a resume token without touching the
-terminal. The reader reapplies its current mode on resume or EINTR; one poll waits for input or a
+SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. The watcher
+(`promptWatch`) writes each signal's number as one byte to a pipe the reader polls with the
+terminal, so an event and its wake-up are one byte, taken only by `next`; it never touches the
+terminal. On SIGTSTP it writes the byte first, then `stopBy` re-raises the stop, holding a lock
+until the process resumes, so the reader's baseline read and label never run in a prompt a stop
+has sent to the background (`whileHeld`). The reader reapplies its current mode on resume or
+EINTR; one poll waits for input or a
 watcher event and also times the quiet window. Reads never block. NOFLSH is cleared: leaving
 unread secret bytes in the tty queue at a stop would let bash read them. The kernel reports no
 count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader

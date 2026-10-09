@@ -47,21 +47,14 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	if err := disableCoreDumps(); err != nil {
 		return nil, err
 	}
-	wake, notify, err := os.Pipe()
+	watch, ignoredControls, err := watchPromptSignals()
 	if err != nil {
 		return nil, err
 	}
-	defer wake.Close()
-	defer notify.Close()
-	var stopping sync.Mutex
-	events, stop, ignoredControls, err := watchPromptSignals(notify, &stopping)
-	if err != nil {
-		return nil, err
-	}
-	tty := promptTerminal{fd: fd, wake: int(wake.Fd()), events: events, stopping: &stopping, wait: -1, onStop: onStop}
+	tty := promptTerminal{fd: fd, watch: watch, wait: -1, onStop: onStop}
 	var saved *unix.Termios // nil until the reader holds the terminal: nothing to restore before
 	defer func() {
-		pending := stop()
+		pending := watch.stop()
 		if pending.sig != 0 && !promptStopSignal(pending.sig) {
 			tty.death = pending.sig
 		}
@@ -93,33 +86,43 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			endByPromptSignal(tty.death)
 		}
 	}()
-	if saved, err = tty.holdTerminal(); err != nil {
+	// The settings the reader restores are read only once its group holds the terminal: a
+	// prompt started in the background waits behind the shell's line editor, whose settings
+	// are not the ones fg hands back.
+	if err := tty.whenHeld(func() (err error) {
+		saved, err = unix.IoctlGetTermios(fd, ioctlGetTermios)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	tty.current = *saved
+	mode := *saved
 	// Keep the kernel's signal flush: NOFLSH would leave unread secret bytes for
 	// bash when a stop gives it the foreground. Every caught stop invalidates the entry.
-	tty.current.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.NOFLSH
-	tty.current.Lflag |= unix.ISIG
+	mode.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.NOFLSH
+	mode.Lflag |= unix.ISIG
 	var ignoredKeys [3]byte
 	for i, cc := range ignoredControls {
 		if key := saved.Cc[cc]; key != 0 && key != 0xff {
 			ignoredKeys[i] = key
 			// Even an ignored tty signal flushes input. Disable its tty character
 			// and let the reader consume it without flushing the value.
-			tty.current.Cc[cc] = disabledControlByte
+			mode.Cc[cc] = disabledControlByte
 		}
 	}
 	// Poll owns both waits. Reads themselves never block, including after resume.
-	tty.current.Cc[unix.VMIN], tty.current.Cc[unix.VTIME] = 0, 0
-	if err := tty.apply(); err != nil {
+	mode.Cc[unix.VMIN], mode.Cc[unix.VTIME] = 0, 0
+	tty.current = &mode
+	// The label shows once the reader holds the terminal in its own mode. A stop before it
+	// discards nothing: nothing has been typed for the entry yet.
+	if err := tty.whenHeld(func() error {
+		if prompt != nil {
+			prompt()
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	if prompt != nil {
-		if err := tty.show(prompt); err != nil {
-			return nil, err
-		}
-	}
+	tty.stopped, tty.notice = false, false
 	r := promptReader{ignored: ignoredKeys, special: func(c byte, index int) bool {
 		v := saved.Cc[index]
 		return v != 0 && v != 0xff && c == v
@@ -168,34 +171,32 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 }
 
 type promptTerminal struct {
-	fd       int
-	current  unix.Termios
-	wake     int
-	events   <-chan promptSignal
-	stopping *sync.Mutex // held by the watcher across every stop it makes (whileHeld)
-	death    syscall.Signal
-	wait     int // poll timeout in milliseconds; -1 until the line ends
-	stopped  bool
-	onStop   func()
-	resumed  bool
-	notice   bool
-	applied  bool // whether t.current and bracketed paste are already in effect
+	fd      int
+	current *unix.Termios // the reader's own mode; nil until it has read the settings it restores
+	watch   *promptWatch
+	death   syscall.Signal
+	wait    int // poll timeout in milliseconds; -1 until the line ends
+	stopped bool
+	onStop  func()
+	// mayBeBackground is set at the first stop or resume and never cleared: the reader may
+	// since have been put in the background, so it holds the terminal again before each poll.
+	mayBeBackground bool
+	notice          bool
+	applied         bool // whether t.current and bracketed paste are already in effect
 }
 
-// apply is a no-op once the terminal already carries t.current and bracketed
-// paste: a stop-then-resume can reach here through more than one path for the
-// very same kernel event (the watcher's own channel delivery, and a bare
-// EINTR on whichever other blocked syscall that same resume also woke), and
-// neither termios nor paste mode is touched by a stop or a resume by
-// themselves, so repeating the ioctl and the paste-on write would only be
-// redundant, and visibly so over a real terminal. signal clears applied the
-// moment it records a new stop, so the next genuine resume still reapplies.
+// apply is a no-op once the terminal already carries t.current and bracketed paste: one resume
+// can reach here more than once (the watcher's event, and an EINTR on whichever other blocked
+// syscall the same resume woke), and neither termios nor paste mode is touched by a stop or a
+// resume by themselves, so repeating the ioctl and the paste-on write would only be redundant,
+// and visibly so over a real terminal. signal clears applied the moment it records a new stop,
+// so the next genuine resume still reapplies.
 func (t *promptTerminal) apply() error {
 	if t.applied {
 		return nil
 	}
 	for {
-		err := unix.IoctlSetTermios(t.fd, ioctlSetTermios, &t.current)
+		err := unix.IoctlSetTermios(t.fd, ioctlSetTermios, t.current)
 		if errors.Is(err, unix.EINTR) {
 			if err := t.waitForeground(); err != nil {
 				return err
@@ -241,107 +242,58 @@ func (t *promptTerminal) signal(event promptSignal) error {
 		t.death = event.sig
 		return fmt.Errorf("value prompt ended by %s", event.sig)
 	}
-	t.resumed = true
+	t.mayBeBackground = true
 	return nil
 }
 
-// holdTerminal waits until this process's group holds the terminal, then answers its
-// settings, which the reader restores at its end. A prompt started in the background
-// waits behind the shell's line editor, whose settings are not the ones fg hands back,
-// so it reads them only once the shell has handed it the terminal, and never in a
-// prompt a stop has sent back to the background since (whileHeld).
-func (t *promptTerminal) holdTerminal() (*unix.Termios, error) {
+// whenHeld runs f once this process's group holds the terminal, in the reader's own mode once it
+// has one, with every event the watcher has reported taken and no stop begun since (whileHeld). A
+// prompt started in the background, or sent there by a stop and bg, waits here for fg.
+func (t *promptTerminal) whenHeld(f func() error) error {
 	for {
 		if err := t.settle(); err != nil {
-			return nil, err
-		}
-		var saved *unix.Termios
-		held, err := t.whileHeld(func() (err error) {
-			saved, err = unix.IoctlGetTermios(t.fd, ioctlGetTermios)
-			return err
-		})
-		if err != nil {
-			return nil, err
-		}
-		if held {
-			return saved, nil
-		}
-	}
-}
-
-// show calls prompt, to show the label, once the reader holds the terminal in its own
-// mode. A stop before the label discards nothing: the reader waits for fg, reapplies
-// its mode, and shows the label then.
-func (t *promptTerminal) show(prompt func()) error {
-	for {
-		held, err := t.whileHeld(func() error {
-			prompt()
-			return nil
-		})
-		if err != nil || held {
 			return err
 		}
-		if err := t.settle(); err != nil {
-			return err
+		if t.current != nil {
+			if err := t.apply(); err != nil {
+				return err
+			}
 		}
-		if err := t.apply(); err != nil {
+		if held, err := t.whileHeld(f); err != nil || held {
 			return err
 		}
 	}
 }
 
-// settle waits until this process's group holds the terminal with every stop and resume
-// the watcher has reported taken. A stop taken here, before the label shows, discards
-// nothing: nothing has been typed for the entry yet.
+// settle waits until this process's group holds the terminal with every event the watcher has
+// reported taken.
 func (t *promptTerminal) settle() error {
 	for {
 		if err := t.waitForeground(); err != nil {
 			return err
 		}
-		pending, err := t.wakePending()
-		if err != nil {
-			return err
-		}
-		if !pending {
-			t.stopped, t.notice = false, false
-			return nil
-		}
-		t.drainWake()
-		if err := t.signal(<-t.events); err != nil {
+		if took, err := t.nextEvent(0); err != nil || !took {
 			return err
 		}
 	}
 }
 
-// whileHeld runs f only while this process's group holds the terminal and no stop has
-// begun since the reader last took one, and reports whether it ran. The watcher holds
-// t.stopping across every stop it makes and writes the stop's wake byte before it, so f
-// never runs in a prompt such a stop has sent to the background: either the byte is
-// already there, or the stop waits for f. A stop no handler sees (SIGSTOP) is not held
-// off; the foreground check narrows it to the moment between that check and f.
+// whileHeld runs f only while this process's group holds the terminal and no stop has begun since
+// the reader last took an event, and reports whether it ran. The watcher writes a stop's event
+// before the stop and holds t.watch.stopping until the stop is over, so f never runs in a prompt
+// such a stop has sent to the background: either the event is already there, or the stop waits
+// for f. A stop no handler sees (SIGSTOP) is not held off; the foreground check narrows it to the
+// moment between that check and f.
 func (t *promptTerminal) whileHeld(f func() error) (bool, error) {
-	t.stopping.Lock()
-	defer t.stopping.Unlock()
-	if pending, err := t.wakePending(); err != nil || pending {
+	t.watch.stopping.Lock()
+	defer t.watch.stopping.Unlock()
+	if pending, err := t.watch.ready(0); err != nil || pending {
 		return false, err
 	}
 	if held, err := t.holdsTerminal(); err != nil || !held {
 		return false, err
 	}
 	return true, f()
-}
-
-// wakePending reports whether the watcher has written a wake byte the reader has not
-// taken yet.
-func (t *promptTerminal) wakePending() (bool, error) {
-	fds := []unix.PollFd{{Fd: int32(t.wake), Events: unix.POLLIN}}
-	for {
-		n, err := unix.Poll(fds, 0)
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
-		return n > 0, err
-	}
 }
 
 // holdsTerminal reports whether this process's group holds the terminal, by a read-only
@@ -386,12 +338,6 @@ func (t *promptTerminal) holdsTerminal() (bool, error) {
 // terminal only after this has independently confirmed foreground with a
 // read-only ioctl of its own, which never triggers that stop.
 func (t *promptTerminal) waitForeground() error {
-	var retry *time.Ticker
-	defer func() {
-		if retry != nil {
-			retry.Stop()
-		}
-	}()
 	for {
 		held, err := t.holdsTerminal()
 		if err != nil {
@@ -408,42 +354,27 @@ func (t *promptTerminal) waitForeground() error {
 		} else if orphaned {
 			return errNoForeground
 		}
-		// fg need not send SIGCONT to a job that bg already left running.
-		// A timed wake covers that handoff; signals still wake us immediately.
-		if retry == nil {
-			retry = time.NewTicker(50 * time.Millisecond)
-		}
-		select {
-		case event := <-t.events:
-			t.drainWake()
-			if err := t.signal(event); err != nil {
-				return err
-			}
-		case <-retry.C:
+		// fg need not send SIGCONT to a job that bg already left running, so the
+		// wait rechecks every 50 ms; an event ends it at once.
+		if _, err := t.nextEvent(50); err != nil {
+			return err
 		}
 	}
 }
 
-// drainWake reads the one wake-pipe byte the watcher wrote for an event this
-// call already consumed directly from t.events, bypassing readTerminal's own
-// drain. The watcher guarantees exactly one byte per event, written before
-// posting it (a stop signal, so the reader never touches the terminal while
-// it takes effect) or just after (every other signal), so this always has
-// one to read, immediately or a moment later; left undrained, it would wake
-// a later, unrelated readTerminal call into waiting for an event that already
-// came and went.
-func (t *promptTerminal) drainWake() {
-	var token [1]byte
-	_, _ = unix.Read(t.wake, token[:])
+// nextEvent takes the watcher's next event, if one comes within timeout milliseconds, and records
+// it (signal). Every event the reader acts on comes through here.
+func (t *promptTerminal) nextEvent(timeout int) (bool, error) {
+	event, took, err := t.watch.next(timeout)
+	if err != nil || !took {
+		return false, err
+	}
+	return true, t.signal(event)
 }
 
-func (t *promptTerminal) resume() error {
-	if err := t.waitForeground(); err != nil {
-		return err
-	}
-	if err := t.apply(); err != nil {
-		return err
-	}
+// noticeStop tells the person, once the reader holds the terminal again, that a stop discarded
+// the entry.
+func (t *promptTerminal) noticeStop() error {
 	if t.notice {
 		t.notice = false
 		if t.onStop != nil {
@@ -454,47 +385,20 @@ func (t *promptTerminal) resume() error {
 }
 
 func (t *promptTerminal) read(buf []byte) (int, error) {
+	event := false
 	for {
-		select {
-		case event := <-t.events:
-			t.drainWake()
-			if err := t.signal(event); err != nil {
-				return 0, err
-			}
-			if err := t.resume(); err != nil {
-				return 0, err
-			}
-		default:
-		}
-		if t.resumed {
-			if err := t.waitForeground(); err != nil {
+		// An event, perhaps a stop about to take effect, is taken before the terminal is
+		// touched again, and once a stop or resume has come the reader may have been put
+		// in the background since: either way it goes on only once it holds the terminal
+		// in its own mode.
+		if event || t.mayBeBackground {
+			if err := t.whenHeld(t.noticeStop); err != nil {
 				return 0, err
 			}
 		}
-		n, err := readTerminal(t.fd, t.wake, buf, t.wait)
-		if errors.Is(err, unix.EINTR) {
-			if err := t.resume(); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		if n == -2 {
-			// The watcher's wake pipe fired: either it already posted a
-			// processed event, or it is about to stop the process and woke
-			// us first so we never race a read against that stop. Either
-			// way, wait for the event it posts rather than polling the
-			// terminal again, since the terminal may become unsafe to touch
-			// (backgrounded) before that event arrives.
-			event := <-t.events
-			if err := t.signal(event); err != nil {
-				return 0, err
-			}
-			if err := t.resume(); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		if n < 0 && err == nil {
+		n, err := readTerminal(t.fd, t.watch.fd, buf, t.wait)
+		event = n == -2
+		if event || errors.Is(err, unix.EINTR) || (n == -1 && err == nil) {
 			continue
 		}
 		return n, err
@@ -632,11 +536,10 @@ func onlyLineEndings(b []byte) bool {
 	return true
 }
 
-// readTerminal waits for input, a watcher event or the quiet window's end. A
-// result of -1 means retry (input gone before read); -2 means the watcher's
-// wake pipe fired and the caller must wait for its processed event on t.events
-// before touching the terminal again, since a stop may be about to take effect.
-// Tests wrap it to place signals and hang-ups at these boundaries.
+// readTerminal waits for input, a watcher event or the quiet window's end. A result of -1 means
+// retry (input gone before read); -2 means the watcher has an event the reader must take before it
+// touches the terminal again, since a stop may be about to take effect. Tests wrap it to place
+// signals and hang-ups at these boundaries.
 var readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
 	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}, {Fd: int32(wake), Events: unix.POLLIN}}
 	n, err := unix.Poll(fds, timeout)
@@ -644,9 +547,7 @@ var readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
 		return 0, err
 	}
 	if fds[1].Revents != 0 {
-		var token [1]byte
-		_, err := unix.Read(wake, token[:])
-		return -2, err
+		return -2, nil
 	}
 	n, err = unix.Read(fd, buf)
 	if errors.Is(err, unix.EAGAIN) || (n == 0 && err == nil && fds[0].Revents&unix.POLLHUP == 0) {
@@ -660,18 +561,30 @@ type promptSignal struct {
 	err error
 }
 
-// watchPromptSignals never changes the terminal. The pipe wakes the reader when
-// the channel carries a resume or death signal. Cancellation joins the watcher,
-// so no late resume can race the reader's final restore. It holds stopping across
-// every stop it makes, so the reader can keep a stop off its baseline read and label.
-func watchPromptSignals(wake *os.File, stopping *sync.Mutex) (<-chan promptSignal, func() promptSignal, []int, error) {
-	// SIGCONT is a wake only; SIGTTIN and SIGTTOU retain their default actions.
+// promptWatch is the prompt's signal watcher. It never changes the terminal: for each signal it
+// writes one byte, the signal's number, to the wake pipe, so an event and the wake-up that
+// announces it are one thing, taken only by next. A stop's byte is written before the stop, under
+// stopping, which the watcher holds until the process resumes: the reader can keep a stop off its
+// baseline read and label (whileHeld), and a reader that takes the byte waits the stop out.
+type promptWatch struct {
+	fd           int // the wake pipe's read end, polled with the terminal
+	wake, notify *os.File
+	signals      chan os.Signal
+	done, joined chan struct{}
+	stopping     sync.Mutex
+	stopErr      error // why a stop failed, written under stopping
+}
+
+// watchPromptSignals starts the watcher. SIGCONT is a wake only; SIGTTIN and SIGTTOU retain their
+// default actions, and a signal whose kernel disposition is SIG_IGN stays ignored, its terminal
+// control character answered in ignoredControls.
+func watchPromptSignals() (*promptWatch, []int, error) {
 	watched := []os.Signal{syscall.SIGCONT}
 	var ignoredControls []int
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGTSTP} {
 		ignored, err := promptSignalIgnored(sig)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		if !ignored {
 			watched = append(watched, sig)
@@ -686,81 +599,107 @@ func watchPromptSignals(wake *os.File, stopping *sync.Mutex) (<-chan promptSigna
 			}
 		}
 	}
-	signals := make(chan os.Signal, 8)
-	events := make(chan promptSignal, 8)
-	done, joined := make(chan struct{}), make(chan struct{})
-	var pending promptSignal // written by the watcher, read only after joined
-	signal.Notify(signals, watched...)
-	go func() {
-		defer close(joined)
-		for {
-			select {
-			case sig := <-signals:
-				event := promptSignal{sig: sig.(syscall.Signal)}
-				earlyWoke := false
-				if promptStopSignal(sig) {
-					stopping.Lock()
-					// Wake the reader out of any poll/read on the tty before the
-					// real stop begins: a poll already in flight can report the
-					// tty ready for a reason unrelated to real input (the signal's
-					// own queue flush), and a read issued on that stale readiness
-					// can be caught mid-syscall by the group-stop this is about to
-					// cause, then re-raise SIGTTIN once bg leaves it backgrounded.
-					// Waking it onto the pipe first makes it retry instead and
-					// wait for this event, rather than touching the terminal.
-					_, _ = wake.Write([]byte{1})
-					earlyWoke = true
-					event.err = stopBy(event.sig)
-					// On Darwin stopBy must clear os/signal's handler bookkeeping
-					// before Notify can reinstall it. On Linux it is still installed.
-					signal.Notify(signals, sig)
-					stopping.Unlock()
-				}
-				select {
-				case events <- event:
-					if !earlyWoke {
-						_, _ = wake.Write([]byte{1})
-					}
-				case <-done:
-					if event.sig != syscall.SIGCONT {
-						pending = event
-					}
-					return
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-	return events, func() promptSignal {
-		close(done)
-		<-joined
-		signal.Stop(signals)
-		// A death arriving at the read's end still takes effect after restoration,
-		// including one Notify queued but the watcher did not receive.
-		for len(events) != 0 {
-			event := <-events
-			if event.sig == syscall.SIGCONT {
+	wake, notify, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	w := &promptWatch{fd: int(wake.Fd()), wake: wake, notify: notify, signals: make(chan os.Signal, 8),
+		done: make(chan struct{}), joined: make(chan struct{})}
+	signal.Notify(w.signals, watched...)
+	go w.run()
+	return w, ignoredControls, nil
+}
+
+func (w *promptWatch) run() {
+	defer close(w.joined)
+	for {
+		select {
+		case s := <-w.signals:
+			sig := s.(syscall.Signal)
+			if !promptStopSignal(sig) {
+				_, _ = w.notify.Write([]byte{byte(sig)})
 				continue
 			}
-			if event.err != nil {
-				pending.err = event.err
+			w.stopping.Lock()
+			// The byte goes first, so the reader never touches the terminal while the stop
+			// takes effect: a poll in flight can report the terminal ready for the stop's own
+			// input flush, and a read on that readiness can be caught mid-syscall by the
+			// stop, then raise SIGTTIN once bg leaves the job in the background.
+			_, _ = w.notify.Write([]byte{byte(sig)})
+			if err := stopBy(sig); err != nil && w.stopErr == nil {
+				w.stopErr = err
 			}
-			if pending.sig == 0 || !promptStopSignal(event.sig) {
-				pending.sig = event.sig
-			}
+			// On Darwin stopBy must clear os/signal's handler bookkeeping before Notify can
+			// reinstall it. On Linux it is still installed.
+			signal.Notify(w.signals, sig)
+			w.stopping.Unlock()
+		case <-w.done:
+			return
 		}
-		for len(signals) != 0 {
-			sig := (<-signals).(syscall.Signal)
-			if sig == syscall.SIGCONT {
-				continue
-			}
-			if pending.sig == 0 || !promptStopSignal(sig) {
-				pending.sig = sig
-			}
+	}
+}
+
+// ready reports whether the watcher has an event the reader has not taken, waiting up to timeout
+// milliseconds for one.
+func (w *promptWatch) ready(timeout int) (bool, error) {
+	fds := []unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLIN}}
+	for {
+		n, err := unix.Poll(fds, timeout)
+		if errors.Is(err, unix.EINTR) {
+			continue
 		}
-		return pending
-	}, ignoredControls, nil
+		return n > 0, err
+	}
+}
+
+// next takes the watcher's next event, if one comes within timeout milliseconds. A stop's event is
+// answered only once the stop is over, with its failure if it failed.
+func (w *promptWatch) next(timeout int) (promptSignal, bool, error) {
+	if ready, err := w.ready(timeout); err != nil || !ready {
+		return promptSignal{}, false, err
+	}
+	var b [1]byte
+	if _, err := unix.Read(w.fd, b[:]); err != nil {
+		return promptSignal{}, false, err
+	}
+	event := promptSignal{sig: syscall.Signal(b[0])}
+	if promptStopSignal(event.sig) {
+		w.stopping.Lock()
+		event.err, w.stopErr = w.stopErr, nil
+		w.stopping.Unlock()
+	}
+	return event, true, nil
+}
+
+// stop joins the watcher, so no late resume can race the reader's final restore, and answers
+// what the reader has not taken: a death arriving at the read's end, which still takes effect
+// after restoration, including one Notify queued but the watcher did not receive; else a stop.
+func (w *promptWatch) stop() promptSignal {
+	close(w.done)
+	<-w.joined
+	signal.Stop(w.signals)
+	defer w.wake.Close()
+	defer w.notify.Close()
+	var pending promptSignal
+	note := func(sig syscall.Signal) {
+		if sig != syscall.SIGCONT && (pending.sig == 0 || !promptStopSignal(sig)) {
+			pending.sig = sig
+		}
+	}
+	for {
+		event, took, err := w.next(0)
+		if err != nil || !took {
+			break
+		}
+		if event.err != nil {
+			pending.err = event.err
+		}
+		note(event.sig)
+	}
+	for len(w.signals) != 0 {
+		note((<-w.signals).(syscall.Signal))
+	}
+	return pending
 }
 
 func promptStopSignal(sig os.Signal) bool {
