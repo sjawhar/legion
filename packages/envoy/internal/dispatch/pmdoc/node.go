@@ -115,11 +115,11 @@ func validateNode(n *Node, depth int) error {
 		if !markTypes[m.Type] {
 			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
 		}
-		if err := attrNestingError("mark", m.Type, m.Attrs); err != nil {
+		if err := attrNestingError("mark", m.Type, m.Attrs, maxMarkAttrNesting); err != nil {
 			return err
 		}
 	}
-	if err := attrNestingError("node", n.Type, n.Attrs); err != nil {
+	if err := attrNestingError("node", n.Type, n.Attrs, maxNodeAttrNesting); err != nil {
 		return err
 	}
 	for _, child := range n.Children {

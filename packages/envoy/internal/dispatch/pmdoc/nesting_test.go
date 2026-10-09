@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	expectedMaxNesting       = 100
-	expectedMaxInlineNesting = 100
-	expectedMaxTreeDepth     = 1_000
-	expectedMaxAttrNesting   = 100
+	expectedMaxNesting         = 100
+	expectedMaxInlineNesting   = 100
+	expectedMaxTreeDepth       = 1_000
+	expectedMaxNodeAttrNesting = 100
+	expectedMaxMarkAttrNesting = 99
 )
 
 // A markdown document opens at most 100 blocks inside one another, however the nesting is written:
@@ -329,7 +330,7 @@ func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
 	// textLevel-2, and the paragraph level textLevel-1.
 	chain := func(textLevel int) *Node {
 		text := &Node{Type: "text", Text: "a", Marks: []Mark{{
-			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": nestedValue(expectedMaxAttrNesting)},
+			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": nestedValue(expectedMaxMarkAttrNesting)},
 		}}}
 		node := &Node{Type: "paragraph", Children: []*Node{text}}
 		for range textLevel - 2 {
@@ -443,54 +444,145 @@ func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 	})
 }
 
-// An attribute's value nests at most 100 arrays and objects, on a node or a mark. A crafted client
-// writes a mark's attributes as JSON, which ygo decodes as deep as encoding/json reads, so Read
-// meets the bound on the live document as Validate does on a tree.
+// An attribute's value nests at most 100 arrays and objects on a node and 99 on a mark, whose
+// attributes ygo stores as one more map. A crafted client writes a mark's attributes as JSON, which
+// ygo decodes as deep as encoding/json reads, so Read meets the bound on the live document as
+// Validate does on a tree. That document is built from the update such a client sends: from
+// v1.51.1 ygo's own YText writers panic on a value past its 100 levels, so only an update can put
+// one there.
 func TestAttributesNestedPastTheBoundAreOutsideTheSchema(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		nesting int
-		want    error
-	}{
-		{name: "at the bound", nesting: expectedMaxAttrNesting},
-		{name: "past the bound", nesting: expectedMaxAttrNesting + 1, want: ErrSchema},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			value := nestedValue(test.nesting)
-			check := func(what string, err error) {
-				t.Helper()
-				if test.want == nil && err != nil {
-					t.Fatalf("%s nesting %d: %v, want it valid", what, test.nesting, err)
-				}
-				if test.want != nil && (!errors.Is(err, test.want) || !strings.Contains(err.Error(), fmt.Sprintf("more than %d arrays", expectedMaxAttrNesting))) {
-					t.Fatalf("%s nesting %d: %v, want ErrSchema naming the bound", what, test.nesting, err)
-				}
-			}
-			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": value}, Children: []*Node{{Type: "text", Text: "a"}}}}}
-			check("a node attribute", node.Validate())
-			mark := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
-				Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "https://example.com", "nested": value}}},
-			}}}}}
-			check("a mark attribute", mark.Validate())
-
-			ydoc := crdt.New()
-			fragment := ydoc.GetXmlFragment("prosemirror")
-			ydoc.Transact(func(txn *crdt.Transaction) {
-				paragraph := crdt.NewYXmlElement("paragraph")
-				fragment.InsertElement(txn, 0, paragraph)
-				text := crdt.NewYXmlText()
-				paragraph.InsertText(txn, 0, text)
-				text.Insert(txn, 0, "a", crdt.Attributes{"link": map[string]any{"href": "https://example.com", "nested": value}})
-			})
-			// The value the live document holds is the one ygo decodes from the update a client sends.
-			update := crdt.EncodeStateAsUpdateV1(ydoc, nil)
-			received := crdt.New()
-			if err := crdt.ApplyUpdateV1(received, update, nil); err != nil {
-				t.Fatalf("apply the client's update: %v", err)
-			}
-			_, err := Read(received.GetXmlFragment("prosemirror"))
-			check("a live mark attribute", err)
+	check := func(t *testing.T, what string, nesting, bound int, err error) {
+		t.Helper()
+		if nesting <= bound && err != nil {
+			t.Fatalf("%s nesting %d: %v, want it valid", what, nesting, err)
+		}
+		if nesting > bound && (!errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), fmt.Sprintf("more than %d arrays", bound))) {
+			t.Fatalf("%s nesting %d: %v, want ErrSchema naming the bound", what, nesting, err)
+		}
+	}
+	for _, nesting := range []int{expectedMaxNodeAttrNesting, expectedMaxNodeAttrNesting + 1} {
+		t.Run(fmt.Sprintf("a node attribute nesting %d", nesting), func(t *testing.T) {
+			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": nestedValue(nesting)}, Children: []*Node{{Type: "text", Text: "a"}}}}}
+			check(t, "a node attribute", nesting, expectedMaxNodeAttrNesting, node.Validate())
 		})
+	}
+	for _, nesting := range []int{expectedMaxMarkAttrNesting, expectedMaxMarkAttrNesting + 1} {
+		t.Run(fmt.Sprintf("a mark attribute nesting %d", nesting), func(t *testing.T) {
+			check(t, "a mark attribute", nesting, expectedMaxMarkAttrNesting, linkedText(nestedValue(nesting)).Validate())
+			_, err := Read(liveLinkedText(t, nestedValue(nesting)).GetXmlFragment("prosemirror"))
+			check(t, "a live mark attribute", nesting, expectedMaxMarkAttrNesting, err)
+		})
+	}
+}
+
+// linkedText is a document of one paragraph whose text carries a link holding nested as an
+// attribute.
+func linkedText(nested any) *Node {
+	return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
+		Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: linkAttrs(nested)}},
+	}}}}}
+}
+
+func linkAttrs(nested any) Attrs {
+	return Attrs{"href": "https://example.com", "nested": nested}
+}
+
+// liveLinkedText is the live document a crafted client makes of linkedText(nested): a paragraph's
+// text, then the update that links it with nested, which ygo's own writers would refuse past their
+// bound.
+func liveLinkedText(t *testing.T, nested any) *crdt.Doc {
+	t.Helper()
+	writer := crdt.New()
+	fragment := writer.GetXmlFragment("prosemirror")
+	writer.Transact(func(txn *crdt.Transaction) {
+		paragraph := crdt.NewYXmlElement("paragraph")
+		fragment.InsertElement(txn, 0, paragraph)
+		text := crdt.NewYXmlText()
+		paragraph.InsertText(txn, 0, text)
+		text.Insert(txn, 0, "a", nil)
+	})
+	received := crdt.New()
+	if err := crdt.ApplyUpdateV1(received, crdt.EncodeStateAsUpdateV1(writer, nil), nil); err != nil {
+		t.Fatalf("apply the client's text: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(received, docstest.NestedLinkUpdate(t, writer, nested), nil); err != nil {
+		t.Fatalf("apply the client's link: %v", err)
+	}
+	return received
+}
+
+// Every writer that hands ygo a value it checks for depth - Update's ApplyDelta for new text, its
+// Format for marks on text it keeps, its element attributes, and MarkRange's Format - writes a
+// value at the schema's bound and refuses one past it as outside the schema, before ygo sees it.
+// From v1.51.1 ygo panics on a value past its own bound, which a mark at 100 levels inside its
+// attributes map was, and an element attribute past it is one ygo writes but no peer can read back.
+func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
+	heading := func(text *Node, attrs Attrs) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: attrs, Children: []*Node{text}}}}
+	}
+	plainText := func() *Node { return &Node{Type: "text", Text: "a"} }
+	linked := func(nesting int) *Node {
+		return &Node{Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: linkAttrs(nestedValue(nesting))}}}
+	}
+	level := func(nested any) Attrs { return Attrs{"level": float64(1), "nested": nested} }
+	for _, test := range []struct {
+		name  string
+		bound int
+		// write writes a value nesting nesting deep into a fresh document, in one transaction.
+		write func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error
+	}{
+		{"Update inserting marked text", expectedMaxMarkAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
+			return Update(txn, fragment, heading(linked(nesting), level(nil)))
+		}},
+		{"Update marking text it keeps", expectedMaxMarkAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
+			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
+				t.Fatalf("write the unmarked text: %v", err)
+			}
+			return Update(txn, fragment, heading(linked(nesting), level(nil)))
+		}},
+		{"Update writing a node attribute", expectedMaxNodeAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
+			return Update(txn, fragment, heading(plainText(), level(nestedValue(nesting))))
+		}},
+		{"Update changing a node attribute", expectedMaxNodeAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
+			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
+				t.Fatalf("write the heading: %v", err)
+			}
+			return Update(txn, fragment, heading(plainText(), level(nestedValue(nesting))))
+		}},
+		{"MarkRange", expectedMaxMarkAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
+			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
+				t.Fatalf("write the text: %v", err)
+			}
+			return MarkRange(txn, fragment, Range{From: 1, To: 2}, Mark{Type: "link", Attrs: linkAttrs(nestedValue(nesting))})
+		}},
+	} {
+		for _, nesting := range []int{test.bound, test.bound + 1} {
+			t.Run(fmt.Sprintf("%s nesting %d", test.name, nesting), func(t *testing.T) {
+				doc := crdt.New()
+				fragment := doc.GetXmlFragment("prosemirror")
+				var err error
+				doc.Transact(func(txn *crdt.Transaction) { err = test.write(t, txn, fragment, nesting) })
+				if nesting > test.bound {
+					if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), fmt.Sprintf("more than %d arrays", test.bound)) {
+						t.Fatalf("write nesting %d: %v, want ErrSchema naming the bound", nesting, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("write nesting %d: %v, want it written", nesting, err)
+				}
+				// What ygo wrote is what a peer reads back and what the document holds.
+				received := crdt.New()
+				if err := crdt.ApplyUpdateV1(received, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+					t.Fatalf("a peer applies the write: %v", err)
+				}
+				for name, document := range map[string]*crdt.Doc{"the writer": doc, "a peer": received} {
+					if _, err := Read(document.GetXmlFragment("prosemirror")); err != nil {
+						t.Fatalf("%s reads the write back: %v", name, err)
+					}
+				}
+			})
+		}
 	}
 }
 
