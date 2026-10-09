@@ -556,8 +556,9 @@ merger_summary() {
 }
 # merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
 # made any of the ways lib/omp-tool-calls.jq's calls counts (the tool, a write to its xd:// device,
-# or eval code calling tool.<name>(...)): any envoy_publish, and a bash call that runs `dispatch
-# message` (runs_dispatch) with a body (--body, or --body-file - with a here-document) opening READY.
+# eval code calling tool.<name>(...), or eval code calling the generic tool.write(...) naming that
+# device): any envoy_publish, and a bash call that runs `dispatch message` (runs_dispatch) with a
+# body (--body, or --body-file - with a here-document) opening READY.
 merger_self_posted() {
   local f
   f=$(claim_session_file "$1" merger) || return 1

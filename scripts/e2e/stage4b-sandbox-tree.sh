@@ -3225,9 +3225,9 @@ until_true 300 "the controller's report message on $report" report_posted
 # last preceding message entry is an assistant message with stopReason `stop`, a turn that had
 # genuinely finished. A start turn that ends in an unretried error fails the check. The report's
 # call is the controller's first call that runs `dispatch message --issue <report>` through bash, by
-# any of the three ways Oh My Pi gives the model to call bash (lib/omp-tool-calls.jq's
-# runs_dispatch): the bash tool itself, a write to its xd://bash device, or eval code whose string
-# literal is the command.
+# any of the ways Oh My Pi gives the model to call bash (lib/omp-tool-calls.jq's runs_dispatch): the
+# bash tool itself, a write to its xd://bash device, eval code calling tool.bash(...), or eval code
+# calling the generic tool.write(...) naming xd://bash, where a string literal is the command.
 # Only the assistant's own calls count, so a tool result that quotes the command (a skill file) or a
 # message on another issue is not the report's call.
 # report_after_tick succeeds at the first session whose report call came on such a turn, and
@@ -3254,7 +3254,7 @@ report_after_tick() {
   done
   case $verdicts in
   *busy*) echo "the controller's first report message was not posted on a turn a tick started while it was idle" ;;
-  *) echo "no session of the controller holds a call running dispatch message --issue $report: the bash tool, a write to xd://bash, or eval code whose string literal runs it" ;;
+  *) echo "no session of the controller holds a call running dispatch message --issue $report: the bash tool, a write to xd://bash, or eval code calling tool.bash or tool.write whose string literal runs it" ;;
   esac
   return 1
 }

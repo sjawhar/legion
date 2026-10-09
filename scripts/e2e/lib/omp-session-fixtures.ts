@@ -1,7 +1,8 @@
 // An Oh My Pi session transcript's entries, built as Oh My Pi writes them, for the tests of the live
-// proofs' readers that omp-tool-calls.jq serves. Oh My Pi gives the model three ways to call a
-// tool, and a reader must count each: the tool itself, a write to its xd://<name> device whose
-// content is the arguments' JSON, and eval code that calls tool.<name>(...).
+// proofs' readers that omp-tool-calls.jq serves. Oh My Pi gives the model four ways to call a tool,
+// and a reader must count each: the tool itself, a write to its xd://<name> device whose content is
+// the arguments' JSON, eval code that calls tool.<name>(...), and eval code that calls the generic
+// tool.write(...) naming that device.
 
 export type Entry = Record<string, unknown>;
 export type Call = Record<string, unknown>;
@@ -24,12 +25,22 @@ export const deviceCall = (name: string, args: Record<string, unknown>): Call =>
 export const evalCall = (code: string): Call =>
   toolCall("eval", { language: "js", title: "post", code });
 
-/** The three surfaces of one bash call running COMMAND. */
+/** The four surfaces of one bash call running COMMAND. In both eval forms the command is a string
+ * literal of the code, escaped once, as the model writes it. */
 export const bashTool = (command: string): Call => toolCall("bash", { command });
 export const bashDevice = (command: string): Call => deviceCall("bash", { command });
 export const bashEval = (command: string): Call =>
   evalCall(`await tool.bash({ command: ${JSON.stringify(command)} });`);
-export const bashSurfaces = { tool: bashTool, device: bashDevice, eval: bashEval } as const;
+export const bashEvalWrite = (command: string): Call =>
+  evalCall(
+    `await tool.write({ path: "xd://bash", content: JSON.stringify({ command: ${JSON.stringify(command)} }), i: "Run" });`
+  );
+export const bashSurfaces = {
+  tool: bashTool,
+  device: bashDevice,
+  eval: bashEval,
+  evalWrite: bashEvalWrite,
+} as const;
 
 const turn = (stopReason: string, calls: Call[]): Entry => ({
   type: "message",
