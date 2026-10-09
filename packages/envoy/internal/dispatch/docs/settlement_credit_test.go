@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -972,6 +973,134 @@ func (tx cancelAfterCommitTx) Commit(ctx context.Context) error {
 		tx.cancel()
 	}
 	return err
+}
+
+// pausedCommitTx runs before and after on either side of its transaction's commit.
+type pausedCommitTx struct {
+	pgx.Tx
+	before, after func()
+}
+
+func (tx pausedCommitTx) Commit(ctx context.Context) error {
+	tx.before()
+	err := tx.Tx.Commit(ctx)
+	tx.after()
+	return err
+}
+
+// A version's commit holds its room's state lock from before its transaction commits until it has
+// marked the in-flight credits it listed consumed (commitConsuming), so a reader of those credits
+// under that lock - as an append queued behind the document's advisory lock reads its credit
+// (UpdateCredit.take) - sees a credit consumed exactly when the version that listed it is
+// committed in Postgres: never consumed before the commit lands, never still pending once it has.
+// The commit pauses on each side of its Postgres commit for the reader to take a reading, which
+// the lock keeps it from taking.
+func TestAVersionsCreditIsConsumedExactlyWhenItsCommitLands(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n")
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	state := service.lockState(artifactID)
+	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: map[string]model.Actor{actorKey(bob): bob}}
+	state.inflight[record.seq] = record
+	capture := captureAuthors(state, nil, nil, nil)
+	service.unlockState(artifactID, state)
+	t.Cleanup(func() {
+		state.mu.Lock()
+		delete(state.inflight, record.seq)
+		service.unlockState(artifactID, state)
+	})
+
+	ctx := context.Background()
+	number := nextVersionNumber(t, service.store, artifactID)
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the version: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, $4)
+	`, artifactID, number, "First.\n", []model.Actor{bob}); err != nil {
+		t.Fatalf("insert the version: %v", err)
+	}
+
+	// phase is where the commit stands: 1 about to commit, 2 committed, 3 returned. The reader
+	// reads it under the state lock with the credit and the version row.
+	type reading struct {
+		phase               int32
+		consumed, committed bool
+	}
+	var phase atomic.Int32
+	var readingsMu sync.Mutex
+	var readings []reading
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			state.mu.Lock()
+			read := reading{phase: phase.Load(), consumed: record.consumed}
+			err := service.store.Pool.QueryRow(ctx, `
+				select exists(select 1 from artifact_versions where artifact_id = $1 and number = $2)
+			`, artifactID, number).Scan(&read.committed)
+			state.mu.Unlock()
+			if err != nil {
+				t.Errorf("read whether the version committed: %v", err)
+				return
+			}
+			readingsMu.Lock()
+			readings = append(readings, read)
+			readingsMu.Unlock()
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	// awaitReading moves the commit to at and waits, up to wait, for the reader to take a reading
+	// there; it reports whether one was taken.
+	awaitReading := func(at int32, wait time.Duration) bool {
+		phase.Store(at)
+		deadline := time.Now().Add(wait)
+		for time.Now().Before(deadline) {
+			readingsMu.Lock()
+			taken := slices.ContainsFunc(readings, func(read reading) bool { return read.phase == at })
+			readingsMu.Unlock()
+			if taken {
+				return true
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return false
+	}
+	paused := pausedCommitTx{
+		Tx:     tx,
+		before: func() { awaitReading(1, 250*time.Millisecond) },
+		after:  func() { awaitReading(2, 250*time.Millisecond) },
+	}
+	if err := service.commitConsuming(ctx, paused, []roomCapture{{room: artifactID, capture: capture}}, nil); err != nil {
+		t.Fatalf("commit the version: %v", err)
+	}
+	if !awaitReading(3, 10*time.Second) {
+		t.Fatal("the reader took no reading once the commit returned")
+	}
+	close(stop)
+	<-done
+
+	readingsMu.Lock()
+	defer readingsMu.Unlock()
+	for _, read := range readings {
+		switch {
+		case read.consumed && !read.committed:
+			t.Errorf("phase %d: the reader saw the credit consumed before the version that listed it reached Postgres", read.phase)
+		case read.committed && !read.consumed:
+			t.Errorf("phase %d: the reader saw the credit still pending after the version that listed it reached Postgres", read.phase)
+		}
+	}
+	if last := readings[len(readings)-1]; !last.consumed || !last.committed {
+		t.Fatalf("last reading = %+v, want the credit consumed by the committed version", last)
+	}
 }
 
 func writeAskBeforeClose(t *testing.T, service *Service, artifactID string, actor model.Actor) {
