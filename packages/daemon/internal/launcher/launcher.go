@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // Config is the role-private launcher configuration. Token is read from the role-private
@@ -245,13 +247,16 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	}
 	m.mu.Unlock()
 	env := mergeEnv(os.Environ(), command.Env)
+	recreated := false
 	if command.ResumeFile != "" {
-		if err := resumable(env, command.ResumeFile); err != nil {
+		var err error
+		if recreated, err = resumable(env, command.ResumeFile); err != nil {
 			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
 		}
 	}
+	env = mergeEnv(env, []string{shimwire.WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
 	dir, err := m.writeFiles(command)
 	if err != nil {
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
@@ -401,32 +406,57 @@ const resumeLookupTimeout = 30 * time.Second
 // Oh My Pi will, by the storage the child's environment names: the session table when
 // OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres), through the
 // URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the tree volume.
-func resumable(env []string, file string) error {
+//
+// It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
+// session was last written: provisioning recorded its creation later than that write
+// (workspace.Created), so the agent's last turns ran in a workspace that is gone and this one holds
+// only what was pushed. A workspace with no record, or a child with no workspace (the controller),
+// was not.
+func resumable(env []string, file string) (recreated bool, err error) {
+	written, err := sessionWritten(env, file)
+	if err != nil {
+		return false, err
+	}
+	dir := envValue(env, "LEGION_WORKSPACE")
+	if dir == "" {
+		return false, nil
+	}
+	created, ok, err := workspace.Created(dir)
+	if err != nil {
+		return false, fmt.Errorf("resume session %s: %v", file, err)
+	}
+	return ok && written.Before(created), nil
+}
+
+// sessionWritten is when the session a resume names was last written, from where the child's Oh My
+// Pi keeps it (resumable), refusing a session nothing holds.
+func sessionWritten(env []string, file string) (time.Time, error) {
 	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
-		if _, err := os.Stat(file); err != nil {
-			return fmt.Errorf("resume session file %s: %v", file, err)
+		info, err := os.Stat(file)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("resume session file %s: %v", file, err)
 		}
-		return nil
+		return info.ModTime(), nil
 	}
 	dsnFile := strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable))
 	if dsnFile == "" {
-		return fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+		return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
 	defer cancel()
 	conn, err := ompsessions.Connect(ctx, dsnFile)
 	if err != nil {
-		return fmt.Errorf("resume session %s: %v", file, err)
+		return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
 	}
 	defer conn.Close(context.Background())
-	found, err := ompsessions.Exists(ctx, conn, file)
+	written, found, err := ompsessions.Written(ctx, conn, file)
 	if err != nil {
-		return fmt.Errorf("resume session %s: %v", file, err)
+		return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
 	}
 	if !found {
-		return fmt.Errorf("resume session %s: the session table holds no such session", file)
+		return time.Time{}, fmt.Errorf("resume session %s: the session table holds no such session", file)
 	}
-	return nil
+	return written, nil
 }
 
 // envValue is name's value in env, the last entry naming it, "" when none does.

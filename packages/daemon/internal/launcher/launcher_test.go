@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
@@ -365,4 +366,91 @@ func TestStartRefusesAMissingResumeFile(t *testing.T) {
 	}
 	published(t, marker)
 	g.stop(8)
+}
+
+// toldRecreated starts generation with env (resuming resume, "" for none), returns the
+// WorkspaceRecreatedVariable value its child was started with, and stops it.
+func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
+	g.t.Helper()
+	told := filepath.Join(g.t.TempDir(), "told")
+	command := shimwire.LauncherStart{
+		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
+		Argv: []string{"/bin/sh", "-c", `printf '%s' "$` + shimwire.WorkspaceRecreatedVariable + `" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
+		Env:  append([]string{"TOLD=" + told}, env...), ResumeFile: resume,
+	}
+	if got := g.start(command); !got.OK {
+		g.t.Fatalf("start of generation %d = %#v", generation, got)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if body, err := os.ReadFile(told); err == nil {
+			g.stop(generation)
+			return string(body)
+		}
+		if time.Now().After(deadline) {
+			g.t.Fatalf("generation %d's child never said what it was told", generation)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// newWorkspace is a directory shaped as a workspace for the creation record (workspace.Created).
+func newWorkspace(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// A resumed generation is told whether its workspace (LEGION_WORKSPACE) was recreated since its
+// session was last written, which the shim reports to the daemon: "true" once provisioning's
+// creation record is later than the session file's last write, "false" when it is earlier or there
+// is none. A fresh generation resumes nothing and is told "false", and so is every generation
+// whatever the container's own environment says, so no other value reaches the shim. A record that
+// is not an instant refuses the start, naming it, before anything runs.
+func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t *testing.T) {
+	t.Setenv(shimwire.WorkspaceRecreatedVariable, "true")
+	g := newRig(t)
+	session := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(session, written, written); err != nil {
+		t.Fatal(err)
+	}
+	dir := newWorkspace(t)
+	env := []string{"LEGION_WORKSPACE=" + dir}
+
+	if got := g.toldRecreated(1, env, session); got != "false" {
+		t.Errorf("a resume in a workspace with no creation record was told %q, want false", got)
+	}
+	if err := workspace.RecordCreated(dir, written.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.toldRecreated(2, env, session); got != "false" {
+		t.Errorf("a resume in a workspace created before its session's last write was told %q, want false", got)
+	}
+	if err := workspace.RecordCreated(dir, written.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.toldRecreated(3, env, session); got != "true" {
+		t.Errorf("a resume in a workspace created after its session's last write was told %q, want true", got)
+	}
+	if got := g.toldRecreated(4, env, ""); got != "false" {
+		t.Errorf("a fresh generation was told %q, want false", got)
+	}
+	if got := g.toldRecreated(5, nil, session); got != "false" {
+		t.Errorf("a resume with no workspace was told %q, want false", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, ".jj", "legion-created"), []byte("soon\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refused := g.start(shimwire.LauncherStart{ID: "start-6", Generation: 6, Argv: []string{"/bin/true"}, Env: env, ResumeFile: session})
+	if refused.OK || !strings.Contains(refused.Error, filepath.Join(dir, ".jj", "legion-created")) {
+		t.Errorf("a resume in a workspace whose creation record is no instant = %#v, want a refusal naming it", refused)
+	}
 }

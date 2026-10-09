@@ -263,6 +263,10 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
+	message := d.message()
+	if m.workspaceRecreated {
+		message = workspaceRecreatedNotice(m.claim.Issue) + message
+	}
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
 	if seq := conn.Sequence(); seq > m.sentThrough {
 		m.sentThrough = seq
@@ -272,7 +276,7 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 		err := m.adopt(role, loc)
 		if err == nil {
 			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-			err = conn.Prompt(sending, d.ID, d.message())
+			err = conn.Prompt(sending, d.ID, message)
 			cancel()
 		}
 		var ev Event = PromptAcked{Claim: token, Generation: generation, DeliveryID: d.ID}
@@ -316,6 +320,7 @@ func (m *Machine) confirm(ctx context.Context) error {
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
+	m.workspaceRecreated = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
 	return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p))
 }
@@ -368,6 +373,17 @@ func (m *Machine) promptFailed(ctx context.Context, why string, read bool) error
 const interruptedTask = "Your previous turn on this task was interrupted when your process died. " +
 	"Before repeating anything, check what that turn already did in your workspace and on the " +
 	"issue's branch, then continue the task.\n\n"
+
+// workspaceRecreatedNotice begins the first task an agent is sent after it resumed its session in a
+// workspace recreated since the session was last written (Machine.workspaceRecreated): a tree's
+// volume deleted or lost while its sessions were kept elsewhere. Provisioning built the workspace
+// from the issue's branch as pushed, main when nothing was, so what the session remembers doing
+// there may be gone.
+func workspaceRecreatedNotice(issue string) string {
+	return "Your workspace was recreated since your last turn: it holds what was pushed to legion/" + issue +
+		" (main if nothing was), and anything you had not pushed is gone. Before you continue, check " +
+		"the workspace against what you remember doing and re-read your last handoff.\n\n"
+}
 
 // interrupted takes back the pending task whose turn the claim's dead process was running, so the
 // relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,

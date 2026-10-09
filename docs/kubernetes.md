@@ -400,10 +400,24 @@ told `LEGION_EXPECT_TREE_VOLUME` for a session, and the controller's pod is not 
 `LEGION_RESUME_SESSION_FILE`. So a claim resumed on a new volume (a tree drained or suspended, its
 volume deleted, then resumed or re-admitted) provisions its workspace from the issue's pushed
 branch (`legion/<issue>`, or `main` when none was pushed) and continues its own session; anything
-it had not pushed is gone with the old volume, and nothing yet tells the agent so. For the same
-reason a child issue re-admitted as a root of its own keeps its roles' sessions under `postgres`
-(`Machine.Retree`, which drops them only under a runtime that keeps sessions on the tree's volume,
-`SessionsOnVolume`).
+it had not pushed is gone with the old volume. For the same reason a child issue re-admitted as a
+root of its own keeps its roles' sessions under `postgres` (`Machine.Retree`, which drops them only
+under a runtime that keeps sessions on the tree's volume, `SessionsOnVolume`).
+
+Such an agent is told so before its next task. Provisioning records when it created a workspace,
+in the workspace's own `.jj/legion-created`, which jj never snapshots (`workspace.RecordCreated`).
+At every resume the role's launcher compares that record with when the session was last written:
+the row's `mtime_ms` under `postgres`, which Oh My Pi moves on every write and `legion sessions
+import` sets to the copied file's, and the file's own under `pvc`. A workspace created after that
+write starts the generation with `LEGION_WORKSPACE_RECREATED=true`; every other generation gets
+`false`, whatever the container's environment says, and so does a resume into a workspace with no
+record (one provisioned before the record was kept). The worker shim says so in its hello until Oh
+My Pi starts a turn, so a redial to a restarted daemon before that turn says it again and one after
+it does not, and the daemon sends the claim's next task behind one paragraph: `Your workspace was
+recreated since your last turn: it holds what was pushed to legion/<KEY> (main if nothing was), and
+anything you had not pushed is gone. …` (`workspaceRecreatedNotice`, `internal/supervise`), until a
+turn of that task starts. A creation record that is not one RFC 3339 instant in a regular file
+refuses the resume, naming the file, since every agent of the tree can write the volume.
 
 The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
 volume projects another session store than a pod created now would — one created before
@@ -447,7 +461,8 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
    of the worker image per tree, on the Legion pool under gVisor, mounting the earlier release's
    tree volume (`tree-legion-<project token>-<root issue>-architect`) read-only at `/legion` and
    the URL key, printing the import's lines, then deleted. It exits 1 when any tree's import did,
-   and names a tree whose volume is gone.
+   names a tree whose volume is gone, and names every claim that records a session and belongs to
+   no tree, which it leaves to `--claim` below.
 
    For each claim of that tree it reads the recorded session file from the volume (its path below
    the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads
@@ -472,7 +487,9 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
    **The daemon-launched controller** (`controller: daemon`) belongs to no tree: copy its session
    from its own volume, `tree-legion-<project token>-controller` in the earlier release, mounted at
    `/legion`, with `--claim legion-<project token>-controller --tree-volume /legion` in place of
-   `--tree`.
+   `--tree`. The script does that in one pod with `--claim legion-<project token>-controller --pvc
+   tree-legion-<project token>-controller` ahead of its other arguments, and refuses a claim the
+   list does not name before it creates anything.
 5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
    tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
    under SQL storage, where a file store starts it fresh. With the daemon still stopped, mark each

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // Under SQL session storage (the runtime's session_store postgres: OMP_SESSION_STORAGE=sql and
@@ -75,5 +76,37 @@ func TestStartUnderSQLStorageRefusesAResumeWithNoURLFile(t *testing.T) {
 	command.ResumeFile = "/sessions/absent.jsonl"
 	if got := g.start(command); got.OK || !strings.Contains(got.Error, "OMP_SESSION_STORAGE is sql and OMP_SESSION_SQL_DSN_FILE names no file") {
 		t.Fatalf("start = %#v, want the refusal naming OMP_SESSION_SQL_DSN_FILE", got)
+	}
+}
+
+// Under SQL storage a session's last write is the table's mtime_ms, which Oh My Pi moves on every
+// write and `legion sessions import` sets to the copied file's: a resumed generation whose workspace
+// provisioning recorded creating after that is told so, and one whose workspace is older is not.
+func TestAResumeUnderSQLStorageIsToldWhetherItsWorkspaceWasRecreatedSinceTheTableWroteItsSession(t *testing.T) {
+	_, dsnFile := testpg.DSNFile(t, "legion_launcher_recreated_test")
+	g := newRig(t)
+	sessionFile := filepath.Join(t.TempDir(), "sessions", "2026-10-08T12-00-00-000Z_0002.jsonl")
+	written := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	conn, err := ompsessions.Connect(context.Background(), dsnFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if _, err := ompsessions.Import(context.Background(), conn, sessionFile, []byte("{}\n"), written); err != nil {
+		t.Fatal(err)
+	}
+	dir := newWorkspace(t)
+	env := []string{"LEGION_WORKSPACE=" + dir, ompsessions.StorageVariable + "=" + ompsessions.SQLStorage, ompsessions.DSNFileVariable + "=" + dsnFile}
+	if err := workspace.RecordCreated(dir, written.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.toldRecreated(1, env, sessionFile); got != "false" {
+		t.Errorf("a resume in a workspace older than the table's last write was told %q, want false", got)
+	}
+	if err := workspace.RecordCreated(dir, written.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.toldRecreated(2, env, sessionFile); got != "true" {
+		t.Errorf("a resume in a workspace recreated after the table's last write was told %q, want true", got)
 	}
 }

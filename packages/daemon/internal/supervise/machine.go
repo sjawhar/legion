@@ -330,6 +330,12 @@ type Machine struct {
 	// to the shim over the claim's current connection.
 	identity       *heldIdentity
 	enrollmentSent bool
+	// workspaceRecreated is a shim's hello saying its agent resumed a session in a workspace
+	// recreated since the session was last written, and has had no turn since: the next task is
+	// sent behind workspaceRecreatedNotice until a turn of it starts (confirm). It is memory only: a
+	// shim says it again in every hello until its agent's first turn, a redial to a restarted daemon
+	// included, and says nothing once that turn has run.
+	workspaceRecreated bool
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
 	// goroutines counts sends whose outcome has not been handled yet; idle wakes Wait.
@@ -412,6 +418,11 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		}
 		m.identity = &heldIdentity{incarnation: m.claim.Locator.Incarnation, AgentSecretsIdentity: identity}
 		m.enrollmentSent = false
+	}
+	if hello, ok := ev.(StreamHello); ok && hello.WorkspaceRecreated && !m.workspaceRecreated {
+		m.log.Info("supervise: the agent resumed in a workspace recreated since its session was last written; its next task tells it so",
+			"claim", m.claim.Token, "generation", hello.Generation)
+		m.workspaceRecreated = true
 	}
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]
@@ -758,6 +769,7 @@ func (m *Machine) relaunchFresh(ctx context.Context) error {
 // claim expects no session until a new agent registers, and its launches recreate the workspace.
 func (m *Machine) loseSession() {
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
+	m.workspaceRecreated = false
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the

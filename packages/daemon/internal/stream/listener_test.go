@@ -407,6 +407,18 @@ func TestAHello2WithoutAnIdentityRegistersWithNone(t *testing.T) {
 	}
 }
 
+// A hello2 saying its agent resumed in a recreated workspace reports that with the registration,
+// which the supervisor turns into a notice ahead of the agent's next task.
+func TestAHello2FromARecreatedWorkspaceReportsIt(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := dial(t, h.listener.Addr())
+	p.send(shimwire.Hello2{BootToken: testToken, WorkspaceRecreated: true})
+	p.expect(shimwire.TypeHelloAck)
+	if event := h.next(); event != (Hello{Claim: testClaim, Generation: testGeneration, WorkspaceRecreated: true}) {
+		t.Fatalf("event = %#v, want Hello{%s, %d} saying the workspace was recreated", event, testClaim, testGeneration)
+	}
+}
+
 func TestAV1HelloIsRefusedByName(t *testing.T) {
 	h := startListener(t, harnessOptions{})
 	p := dial(t, h.listener.Addr())

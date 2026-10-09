@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // The readers below are the command's refusals, each one naming the flag and the path or value at
@@ -136,4 +138,20 @@ func ReadAgentSecretsFlags(set map[string]bool, keyDir, tokenFile, binary string
 		return nil, fmt.Errorf("--agent-secrets-bin %s is not executable (mode %s)", binary, info.Mode())
 	}
 	return &AgentSecrets{KeyDir: keyDir, TokenFile: tokenFile, Binary: binary}, nil
+}
+
+// ReadWorkspaceRecreated reads shimwire.WorkspaceRecreatedVariable, the role launcher's word on
+// whether this generation resumes a session in a workspace recreated since the session was last
+// written: false when unset, as in a tmux pane, which no launcher starts, and a value that is no
+// boolean is refused, naming the variable. lookup is the shim's environment.
+func ReadWorkspaceRecreated(lookup func(string) (string, bool)) (bool, error) {
+	value, set := lookup(shimwire.WorkspaceRecreatedVariable)
+	if !set {
+		return false, nil
+	}
+	recreated, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false, got %q", shimwire.WorkspaceRecreatedVariable, value)
+	}
+	return recreated, nil
 }

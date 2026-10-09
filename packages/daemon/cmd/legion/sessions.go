@@ -178,7 +178,7 @@ func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim
 		if c.SessionFile == "" {
 			continue
 		}
-		found, err := ompsessions.Exists(ctx, conn, c.SessionFile)
+		_, found, err := ompsessions.Written(ctx, conn, c.SessionFile)
 		if err != nil {
 			return nil, err
 		}

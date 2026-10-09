@@ -303,7 +303,7 @@ func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration
 func superviseEvent(ev stream.Event) (supervise.Event, error) {
 	switch ev := ev.(type) {
 	case stream.Hello:
-		hello := supervise.StreamHello{Claim: ev.Claim, Generation: ev.Generation}
+		hello := supervise.StreamHello{Claim: ev.Claim, Generation: ev.Generation, WorkspaceRecreated: ev.WorkspaceRecreated}
 		if ev.AgentSecrets != nil {
 			hello.AgentSecrets = &supervise.AgentSecretsIdentity{Thumbprint: ev.AgentSecrets.Thumbprint, PodToken: ev.AgentSecrets.PodToken}
 		}

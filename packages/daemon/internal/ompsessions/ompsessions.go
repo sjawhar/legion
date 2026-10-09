@@ -3,7 +3,7 @@
 // the release .omp-pin names): it creates and migrates omp_session_files and
 // omp_session_files_parts when it starts, keys a session by the path its file would have had (the
 // session file a claim records), and reads a session as the row's content followed by its parts in
-// offset order. Legion reads it to hold a resume to a session the table holds (Exists, the role
+// offset order. Legion reads it to hold a resume to a session the table holds (Written, the role
 // launcher's check), and seeds it once from the files sessions were kept in before (Import,
 // `legion sessions import`).
 package ompsessions
@@ -77,18 +77,20 @@ func Connect(ctx context.Context, dsnFile string) (*pgx.Conn, error) {
 	return conn, nil
 }
 
-// Exists reports whether the table holds a session at path. A database no Oh My Pi has opened has
-// no table yet, and so holds none.
-func Exists(ctx context.Context, conn *pgx.Conn, path string) (bool, error) {
-	var found bool
-	err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM omp_session_files WHERE path = $1)", path).Scan(&found)
-	if isUndefinedTable(err) {
-		return false, nil
+// Written is when the session the table holds at path was last written: the row's mtime_ms, which
+// Oh My Pi sets on every write, an append included, and Import sets to the copied file's. ok is false
+// when the table holds no such session; a database no Oh My Pi has opened has no table yet, and so
+// holds none.
+func Written(ctx context.Context, conn *pgx.Conn, path string) (at time.Time, ok bool, err error) {
+	var mtime int64
+	err = conn.QueryRow(ctx, "SELECT mtime_ms FROM omp_session_files WHERE path = $1", path).Scan(&mtime)
+	if isUndefinedTable(err) || errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("look up session %s: %w", path, err)
+		return time.Time{}, false, fmt.Errorf("look up session %s: %w", path, err)
 	}
-	return found, nil
+	return time.UnixMilli(mtime), true, nil
 }
 
 // Read is the session the table holds at path as Oh My Pi reads it (readFull): the row's content,

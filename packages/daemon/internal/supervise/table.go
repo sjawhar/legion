@@ -23,10 +23,13 @@ import (
 type RuntimeObservation struct{ Observation runtime.Observation }
 
 // StreamHello is the shim connecting with this claim's boot token, resolved to its generation.
+// WorkspaceRecreated is the shim's word that its agent resumed a session in a workspace recreated
+// since the session was last written and has had no turn since (Machine.workspaceRecreated).
 type StreamHello struct {
-	Claim        claim.Token
-	Generation   uint64
-	AgentSecrets *AgentSecretsIdentity
+	Claim              claim.Token
+	Generation         uint64
+	AgentSecrets       *AgentSecretsIdentity
+	WorkspaceRecreated bool
 }
 
 // StreamTurnStart is the agent's turn starting. Oh My Pi's own agent_start carries no delivery id;

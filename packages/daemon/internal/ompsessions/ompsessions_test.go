@@ -127,22 +127,23 @@ func TestImportDropsPartsAPathWithNoRowLeft(t *testing.T) {
 	}
 }
 
-// Exists is the launcher's check: no session in a database no Oh My Pi has opened, the copied one
-// once copied, and no other.
-func TestExistsFindsOnlyASessionTheTableHolds(t *testing.T) {
+// Written is the launcher's check: no session in a database no Oh My Pi has opened, the copied one
+// once copied, at the mtime it was copied with to the millisecond mtime_ms keeps, and no other.
+func TestWrittenFindsOnlyASessionTheTableHoldsAndWhenItWasWritten(t *testing.T) {
 	conn := connect(t)
 	ctx := context.Background()
-	if found, err := Exists(ctx, conn, sessionPath); err != nil || found {
-		t.Fatalf("Exists before any table = %t, %v; want false", found, err)
+	if _, found, err := Written(ctx, conn, sessionPath); err != nil || found {
+		t.Fatalf("Written before any table = %t, %v; want false", found, err)
 	}
-	if _, err := Import(ctx, conn, sessionPath, []byte(session), time.Now()); err != nil {
+	mtime := time.Date(2026, 10, 8, 12, 0, 0, 123456789, time.UTC)
+	if _, err := Import(ctx, conn, sessionPath, []byte(session), mtime); err != nil {
 		t.Fatal(err)
 	}
-	if found, err := Exists(ctx, conn, sessionPath); err != nil || !found {
-		t.Errorf("Exists of the copied session = %t, %v; want true", found, err)
+	if at, found, err := Written(ctx, conn, sessionPath); err != nil || !found || !at.Equal(mtime.Truncate(time.Millisecond)) {
+		t.Errorf("Written of the copied session = %v, %t, %v; want %v", at, found, err, mtime.Truncate(time.Millisecond))
 	}
-	if found, err := Exists(ctx, conn, sessionPath+".other"); err != nil || found {
-		t.Errorf("Exists of another session = %t, %v; want false", found, err)
+	if _, found, err := Written(ctx, conn, sessionPath+".other"); err != nil || found {
+		t.Errorf("Written of another session = %t, %v; want false", found, err)
 	}
 }
 
@@ -154,7 +155,7 @@ func TestImportRefusesContentNoTextValueHolds(t *testing.T) {
 			if _, err := Import(context.Background(), conn, sessionPath, content, time.Now()); err == nil {
 				t.Fatal("Import succeeded, want a refusal")
 			}
-			if found, _ := Exists(context.Background(), conn, sessionPath); found {
+			if _, found, _ := Written(context.Background(), conn, sessionPath); found {
 				t.Error("a refused copy wrote the row")
 			}
 		})

@@ -94,11 +94,21 @@ type AgentSecretsHello struct {
 
 // Hello2 authenticates a reverse-dialed shim: its first line, carrying the boot token the daemon
 // minted for the pane or pod, and the pod's identity when the shim was started with
-// --agent-secrets-key-dir (a tmux pane never is, and sends none).
+// --agent-secrets-key-dir (a tmux pane never is, and sends none). WorkspaceRecreated says the
+// agent resumed a session in a workspace recreated since the session was last written, which its
+// launcher found (WorkspaceRecreatedVariable) and the agent has not had a turn since: the daemon
+// tells it so ahead of its next task.
 type Hello2 struct {
-	BootToken    string             `json:"bootToken"`
-	AgentSecrets *AgentSecretsHello `json:"agentSecrets,omitempty"`
+	BootToken          string             `json:"bootToken"`
+	AgentSecrets       *AgentSecretsHello `json:"agentSecrets,omitempty"`
+	WorkspaceRecreated bool               `json:"workspaceRecreated,omitempty"`
 }
+
+// WorkspaceRecreatedVariable is how a role launcher tells the worker shim it starts whether that
+// generation resumes a session in a workspace recreated since the session was last written: "true"
+// or "false", set on every generation it starts, so no value from the container's environment
+// reaches the shim. The shim reports it in its hello (Hello2.WorkspaceRecreated).
+const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
 
 // AgentSecretsEnrollment hands the shim the broker's enrollment id for this pod generation; the
 // shim writes it beside the key (`<key dir>/enrollment`, what `agent-secrets` reads) and starts
