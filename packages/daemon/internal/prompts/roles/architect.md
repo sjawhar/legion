@@ -38,8 +38,8 @@ artifact), written in plain words for a reader who has not seen the code (`skill
 release under an open root gate, so its planner may already be reading it. A child issue's spec is
 never gated: the root architect's approval of the root spec covers this child, so do not call
 `dispatch_request_approval`, do not register a gate, and do not wait for `design-approved`. During a
-live session, react only to delivered wakes; after revival, start from your issue record in
-`legion state`.
+live session, react only to delivered wakes; after revival, start from your issue record, the
+`legion` tool's `read_record`.
 
 Create children in coherent waves, release only the wave that should now begin with
 `release_children`, and adjust open children when closures change the plan. Park between
