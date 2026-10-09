@@ -786,13 +786,11 @@ func agentBusy(reason string) bool {
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
-// an earlier daemon). Any other turn is a foreign one, and confirms nothing. Either way the agent
-// has had a turn, so a recreated workspace goes untold from here on, the shim's own rule: a first
-// turn the daemon did not send carries no notice, and no later task is sent behind one.
+// an earlier daemon). Any other turn is a foreign one, and confirms nothing. Either way Handle has
+// already ended a recreated workspace's notice, which no turn after the hello carries.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
-	m.workspaceRecreated = false
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst

@@ -332,10 +332,10 @@ type Machine struct {
 	enrollmentSent bool
 	// workspaceRecreated is a shim's hello saying its agent resumed a session in a workspace
 	// recreated since the session was last written, and has had no turn since: the next task is
-	// sent behind workspaceRecreatedNotice until the agent's first turn starts, whoever sent it
-	// (turnStarted), as the shim stops saying it at that turn. It is memory only: a shim says it
-	// again in every hello until its agent's first turn, a redial to a restarted daemon included,
-	// and says nothing once that turn has run.
+	// sent behind workspaceRecreatedNotice until the agent's first turn starts, whoever sent it and
+	// whatever state the claim is in (Handle), as the shim stops saying it at that turn. It is
+	// memory only: a shim says it again in every hello until its agent's first turn, a redial to a
+	// restarted daemon included, and says nothing once that turn has run.
 	workspaceRecreated bool
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
@@ -424,6 +424,12 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		m.log.Info("supervise: the agent resumed in a workspace recreated since its session was last written; its next task tells it so",
 			"claim", m.claim.Token, "generation", hello.Generation)
 		m.workspaceRecreated = true
+	}
+	// A turn of any kind, in any state, is the agent's first since the hello: the shim stops saying
+	// the workspace was recreated at it, so nothing sent after it carries the notice, whether the
+	// table acts on the turn or ignores it (one an Envoy delivery starts before the claim is ready).
+	if _, ok := ev.(StreamTurnStart); ok {
+		m.workspaceRecreated = false
 	}
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]

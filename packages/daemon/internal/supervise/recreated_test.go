@@ -68,6 +68,27 @@ func TestATurnTheDaemonDidNotSendEndsTheRecreatedNotice(t *testing.T) {
 	}
 }
 
+// A turn that starts before the claim is ready — one an Envoy delivery triggers while the agent is
+// registered and has had no task — is the agent's first turn all the same: the table ignores it,
+// but the shim stops saying the workspace was recreated there, so the first task sent after it
+// carries no notice.
+func TestATurnBeforeReadyEndsTheRecreatedNotice(t *testing.T) {
+	h := newHarness(t)
+	h.launch()
+	h.conns.Register(h.token, h.conn)
+	h.must(StreamHello{Claim: h.token, Generation: h.generation(), WorkspaceRecreated: true})
+	h.register()
+	h.wantState(StateRegistered)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.wantState(StateRegistered)
+	h.ready()
+
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
+	if sent := h.wantPrompts(1)[0]; sent.Message != "implement the plan" {
+		t.Errorf("the task after a turn the agent ran before it was ready was sent as %q, want it alone", sent.Message)
+	}
+}
+
 // A hello that says nothing of the workspace adds no notice: the ordinary resume, the fresh agent,
 // and a tmux pane, whose shim no launcher starts.
 func TestATaskAfterAnOrdinaryHelloCarriesNoNotice(t *testing.T) {

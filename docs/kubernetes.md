@@ -508,8 +508,10 @@ launches starts a fresh session.
    '<path>'`) and run the import again.
 5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
    tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
-   under SQL storage, where a file store starts it fresh. With the daemon still stopped, mark each
-   lost in the daemon's own database:
+   under SQL storage, where a file store starts it fresh. Run this step even when step 4 printed
+   no `missing` line: it is where the claims list is checked against the stopped daemon's own
+   database (below), which no other step does. With the daemon still stopped, mark each lost in
+   the daemon's own database:
 
    ```sh
    legion sessions import --dsn-file <url file> --claims claims.json --mark-lost --daemon-dsn-file <file holding the daemon's postgres_dsn>
