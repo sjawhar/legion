@@ -156,11 +156,14 @@ func (d Deployment) image(row Capability) (string, string) {
 	}
 }
 
-// liveDetail is a live row's detail as CheckImage renders it: the check still to run, its issue,
-// the summary. Nothing in the daemon runs a live check yet, so the row says the check is pending
-// rather than passed.
+// liveDetail is a live row's detail as CheckImage renders it: where the proof lives, its issue,
+// the summary. A live row's check is the Stage 4b live proof the operator lane runs against a
+// running pod (scripts/e2e/README.md: its `repository-tools`, `full-agent` and `github-credential`
+// checkpoints), recorded on the issue the ruling names; nothing in the daemon reads a live
+// result, so the row renders `live` from the table and never `present` — the sentence names where
+// the proof lives and that gap, so the row is never read as a check the daemon made.
 func liveDetail(row Capability) string {
-	check := "to be proved by a live check against a running pod"
+	check := "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon"
 	if row.Ruling != "" {
 		check += " (" + row.Ruling + ")"
 	}

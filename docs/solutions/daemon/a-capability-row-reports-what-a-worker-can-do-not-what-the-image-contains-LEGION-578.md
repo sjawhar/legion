@@ -1,5 +1,5 @@
 ---
-title: "A capability row reports what a worker can do, not what the image contains: tooling the image carries but no process loads is installed, never present, and a check nothing runs is pending, never passed"
+title: "A capability row reports what a worker can do, not what the image contains: tooling the image carries but no process loads is installed, never present, and a check the daemon does not make names who makes it, never a verdict"
 category: daemon
 tags:
   - capabilities
@@ -29,8 +29,9 @@ related_issues:
   delivers it (`Capability.Awaits`). Render it on every surface the row appears on — the probe's
   table line and `legion state --json`'s row — and keep the gate's refusal as it was: an image
   lacking the tooling is still `missing` and still fails the build.
-- A row whose check nothing in the tree runs yet says so: `to be proved by a live check against a
-  running pod (<issue>)`, never `checked live`. A site label is not a verdict.
+- A row the daemon cannot check says who proves it: `proved against a running pod by the Stage 4b
+  live proof (scripts/e2e/README.md), never by the daemon (<issue>)`, never `checked live`. A site
+  label is not a verdict.
 - When the launch changes (the pod lane loads profile plugins), the `Awaits` sentence goes and the
   row reads `present`; that edit belongs to the change that alters the launch, not to the one that
   wrote the row.
