@@ -44,8 +44,10 @@ ARG MISE_VERSION=v2026.8.12
 # command reports a good signature from release key 24853EC9F655CE80B48E6C3A8B81C9D17413A06D
 # (published at https://mise.jdx.dev/gpg-key.pub, and at keys.openpgp.org by the same fingerprint).
 ARG MISE_SHA256=0c782233b97745fd3ed317ba3acbfd7d256e6268470373757f0cc48d57bb87e6
-# Sami's jj fork: what the dogfood daemon runs on the devbox; same 0.45 line as the jj-lib inside OMP.
-ARG JJ_TOOL=github:sjawhar/jj@0.45.1-sami.20260910-043938
+# Sami's jj fork: what the dogfood daemon runs on the devbox. Its 0.46 line reads and writes the
+# repositories the jj-lib 0.45 inside OMP also opens, as the devbox already runs them; this release
+# marks the paths a sparse workspace leaves out skip-worktree in its Git index, so git agrees with jj.
+ARG JJ_TOOL=github:sjawhar/jj@0.46.0-sami.20261008-234600
 ARG GH_TOOL=gh@2.98.0
 # go.work's `go` line: the Go stage builds in workspace mode, and the golang image's GOTOOLCHAIN=local
 # fails the build if go.work moves past this.
@@ -327,7 +329,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE
 
 # ------------------------------------------------------------------------------------------------
-# runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
+# runtime: debian:trixie-slim for its git (2.47; jj's git backend needs >= 2.42 — bookworm and
 # bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built or
 # fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
 FROM debian:trixie-slim

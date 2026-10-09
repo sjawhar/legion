@@ -124,11 +124,10 @@ What each part is for:
   at its starting commit. A workspace that already exists keeps its patterns. A worker that needs a
   left-out path runs `jj sparse set --add <path>` in its own workspace. jj does not record a file
   written outside the patterns, so the role prompt tells each worker to add a path before writing
-  under it. git lists every left-out file as deleted (jj rewrites the colocated worktree's index on
-  each commit operation, so git's own sparse checkout would not hold), so a worker never runs
-  `git add -A` or `git commit` in its workspace and records changes with jj. A path that a later
-  commit adds beside a left-out one is not checked out until a worker adds it. `.legion`, where
-  handoffs are written, cannot be left out.
+  under it. The worker image's jj marks each left-out path skip-worktree in the workspace's Git
+  index, so `git status` does not list it as deleted; a worker still records changes with jj, never
+  `git add -A` or `git commit`. A path that a later commit adds beside a left-out one is not
+  checked out until a worker adds it. `.legion`, where handoffs are written, cannot be left out.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
