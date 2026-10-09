@@ -334,9 +334,10 @@ run's `pr-blocked`, production-check `phase-finished` and `worker-died` are each
 architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
-fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
-loop before Stage 7, so the reviewer, as its Go prompt says and with no approval sent by the proof, approves a head that still carries `.legion/`, and
-without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+fixture pull request, and the run checks that `main` carries none: retro's last commit removes the
+run's own `.legion/<issue>/` before `READY`, so a proof merge carries only its retro learnings, and
+the cleanup removes those and any `.legion/` a merge from before that rule left, so the next run
+starts from a base carrying no other issue's files.
 The smoke `main` requires the `gate` check, which has not started when the fixture pull request is
 created, and GitHub refuses a merge before it passes, so the cleanup first waits up to 600 s, named
 in the transcript, for the pull request's merge state to read `CLEAN`, `UNSTABLE` or `HAS_HOOKS`

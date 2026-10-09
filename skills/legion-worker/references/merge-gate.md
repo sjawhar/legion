@@ -5,15 +5,15 @@ approval, the implementer recording the production check, or the merger building
 path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head →
-retro → the merger's READY → the human merge → the implementer's production check. No role
-removes `.legion/` before the merge: the approved head carries it. The daemon strips whatever
-`.legion/` main still carries from the next issue's branch before any of its roles start
-(dispatch://LEGION-565), so that tree's own merge carries the removal onto the default branch; no
-operator sweep follows. After the approval, only retro's `docs/solutions/` commit leaves it
-standing on its own (*Retro*, below). A conflict-forced merge goes back to the reviewer for a
-confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
-`skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change to the head
-voids it.
+retro → the merger's READY → the human merge → the implementer's production check. The approved
+head carries the issue's handoffs, `.legion/<issue>/`; retro's last commit removes them from the
+head a human merges (dispatch://LEGION-605), since a squash merge carries every file of that head
+onto the default branch and nothing there reads a handoff, and READY refuses a head that still
+carries them. After the approval, only retro's commits leave it standing on their own: those that
+change only `docs/solutions/`, and that removal (*Retro*, below). A conflict-forced merge goes back
+to the reviewer for a confirmation or a new round, as the fingerprint decides (*The reviewer*,
+below, and `skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change to
+the head voids it.
 
 ## The reviewer
 
@@ -63,15 +63,16 @@ review posted without a completion leaves the issue in reviewing until you finis
 
 ## Retro
 
-- **Retro's commit does not void the reviewer's approval.** After the reviewer approves the
-  head, retro commits its learnings under `docs/solutions/` on top of it; that commit
-  stays, the approval stands, and the tree goes to the merger — never back to the tester or
-  reviewer. Anything else above the approved head does void it, and the merger tells the
-  architect the head must return to review instead of completing. A conflict-forced rebase
-  after retro moves those documents with the branch; retro never re-runs.
+- **Retro's commits do not void the reviewer's approval.** After the reviewer approves the
+  head, retro commits its learnings under `docs/solutions/` on top of it, then, as the one final
+  commit, the removal of `.legion/<issue>/`, and pushes both with one `legion push`, so one CI run
+  covers them; those commits stay, the approval stands, and the tree goes to the merger — never
+  back to the tester or reviewer. Anything else above the approved head does void it, and the
+  merger tells the architect the head must return to review instead of completing. A
+  conflict-forced rebase after retro moves those commits with the branch; retro never re-runs.
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
-  each class of path, read by a required check), retro recomputes for the whole diff at its commit
+  each class of path, read by a required check), retro recomputes for the whole diff at its head
   and writes into the live body before `legion push` (`skill://legion-retro`), since the merger
   reports a stale body rather than rewriting it. A body edit changes no commit, so the approval
   stands.
@@ -85,7 +86,10 @@ review posted without a completion leaves the issue in reviewing until you finis
   First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
-  with `'~docs/solutions'` appended, which must print nothing. *The READY packet* is
+  with the one fileset `'~(docs/solutions | .legion/<KEY>)'` appended, which must print nothing
+  (jj unions separate path arguments, so two of them leave nothing out). READY itself refuses a
+  head that still carries `.legion/<KEY>/`; the merger tells the architect, which has it move the
+  issue back to `retro`. *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
   `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with

@@ -71,6 +71,80 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 	}
 }
 
+// A merger's READY names the head a human merges, and a squash merge carries every file of that
+// head onto the default branch: the issue's own handoffs, .legion/<issue>/, must be gone from it
+// (retro's last commit removes them; dispatch://LEGION-605). READY reads the head's tree on GitHub
+// and is refused, naming the head and the directory, while it still holds .legion/<issue>/, whether
+// or not the base branch requires any check, and posted once GitHub answers that the head has none.
+// A read GitHub fails leaves the head unknown, and READY is refused naming the read.
+func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *testing.T) {
+	const (
+		head          = "c0de0000000000000000000000000000000000ff"
+		listing       = `[{"name":"implement.json","path":".legion/THIS-1/implement.json","type":"file"}]`
+		notFound      = `{"message":"Not Found","status":"404"}`
+		requiresCI    = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`
+		stillCarries  = `head c0de00000000 of pull request #42 still carries .legion/THIS-1/`
+		unprotected   = `{"name":"main","protected":false}`
+		readRefused   = `GET /contents/.legion/THIS-1 with 500`
+		serverFailure = `{"message":"Server Error"}`
+	)
+	for _, tc := range []struct {
+		name, rules  string
+		handoffs     int
+		handoffsBody string
+		refusal      string
+	}{
+		{"a head that still carries them", requiresCI, http.StatusOK, listing, stillCarries},
+		{"a head that still carries them, on a base requiring no check", `[]`, http.StatusOK, listing, stillCarries},
+		{"a head retro removed them from", requiresCI, http.StatusNotFound, notFound, ""},
+		{"a head whose tree GitHub fails to read", requiresCI, http.StatusInternalServerError, serverFailure, readRefused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := "/repos/acme/widgets"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case repo + "/pulls/42":
+					_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"},"base":{"ref":"main"},"mergeable_state":"clean"}`))
+				case repo + "/contents/.legion/THIS-1":
+					if ref := r.URL.Query().Get("ref"); ref != head {
+						t.Errorf("the handoffs were read at ref %q, want the pull request's head %s", ref, head)
+					}
+					w.WriteHeader(tc.handoffs)
+					_, _ = w.Write([]byte(tc.handoffsBody))
+				case repo + "/rules/branches/main":
+					_, _ = w.Write([]byte(tc.rules))
+				case repo + "/branches/main":
+					_, _ = w.Write([]byte(unprotected))
+				case repo + "/commits/" + head + "/check-runs":
+					_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]}`))
+				case repo + "/commits/" + head + "/status":
+					_, _ = w.Write([]byte(`{"statuses":[]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			workspace := t.TempDir()
+			t.Setenv("LEGION_ROLE", "merger")
+			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			bodies := handoffDaemon(t, phase.Merging)
+			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
+			if tc.refusal == "" {
+				if code != 0 || len(*bodies) != 1 {
+					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "READY refused: ") || !strings.Contains(errb.String(), tc.refusal) {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want it refused naming %q and nothing posted", code, *bodies, errb.String(), tc.refusal)
+			}
+		})
+	}
+}
+
 // A ruleset can also require a workflow to succeed (rule type workflows), which GitHub judges by
 // that workflow's run for the pull request's head. The rule shapes are a live repository's: a
 // workflows rule for its review workflow, a required_status_checks rule for one aggregator check,

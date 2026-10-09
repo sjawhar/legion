@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -18,26 +22,33 @@ import (
 // githubRemote is a GitHub repository's clone URL as a workspace's origin names it.
 var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?/?$`)
 
-// readyChecks refuses a READY whose head GitHub will not merge for its checks: every check the
-// base branch requires - its rulesets' required status checks and its branch protection's - must
-// have succeeded on the pull request's head, and every workflow its rulesets require must have a
-// run for the head that succeeded (requiredchecks.Required, requiredchecks.Workflows), judged by
-// the rule the workflow's checks verdict judges by too (classify.Judge). A head reports none of
-// them when its push skipped CI when it should not have (legion push's rule), or when the pull
-// request conflicts with its base, since GitHub starts no pull_request run for a pull request it
-// cannot merge; it is refused here, naming the head, the check or workflow, and the conflict once
-// GitHub shows it, rather than left for GitHub to block the human merge. A required workflow
-// another repository defines (an organization ruleset can require one) never matches a run here,
-// since a run is matched in the repository that defines the workflow and belongs to the one it ran
-// for; its refusal names that repository instead.
+// readyChecks refuses a READY whose head GitHub will not merge for its checks, or whose merge would
+// carry the issue's handoffs onto the base branch. The head must not hold .legion/<issue>/, which
+// retro's last commit removes (dispatch://LEGION-605): a squash merge carries every file of the head,
+// and nothing on the base branch reads a handoff. Then every check the base branch requires - its
+// rulesets' required status checks and its branch protection's - must have succeeded on the pull
+// request's head, and every workflow its rulesets require must have a run for the head that
+// succeeded (requiredchecks.Required, requiredchecks.Workflows), judged by the rule the workflow's
+// checks verdict judges by too (classify.Judge). A head reports none of them when its push skipped
+// CI when it should not have (legion push's rule), or when the pull request conflicts with its base,
+// since GitHub starts no pull_request run for a pull request it cannot merge; it is refused here,
+// naming the head, the check or workflow, and the conflict once GitHub shows it, rather than left for
+// GitHub to block the human merge. A required workflow another repository defines (an organization
+// ruleset can require one) never matches a run here, since a run is matched in the repository that
+// defines the workflow and belongs to the one it ran for; its refusal names that repository instead.
 //
-// A base branch that requires nothing has nothing to refuse, and READY is published. It says so
-// on stdout rather than reading like a head whose every required check was read and passed: a
-// private repository on the free plan can define no ruleset, so this is the ordinary state of the
-// smoke sandbox, and a merger there has no check-based gate on the head at all.
+// A base branch that requires no check has no check to refuse, and READY is published once the head
+// carries no handoffs. It says so on stdout rather than reading like a head whose every required
+// check was read and passed: a private repository on the free plan can define no ruleset, so this is
+// the ordinary state of the smoke sandbox, and a merger there has no check-based gate on the head at
+// all.
 func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout io.Writer) error {
+	key, err := resolveIssue()
+	if err != nil {
+		return err
+	}
 	if issue.PullRequest == nil || issue.PullRequest.Number <= 0 {
-		return fmt.Errorf("the daemon records no pull request for %s", os.Getenv("LEGION_ISSUE"))
+		return fmt.Errorf("the daemon records no pull request for %s", key)
 	}
 	repository, err := workspaceRepository(workspace)
 	if err != nil {
@@ -69,6 +80,14 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", issue.PullRequest.Number), &pull); err != nil {
 		return err
 	}
+	head := pull.Head.SHA
+	if len(head) > 12 {
+		head = head[:12]
+	}
+	number := issue.PullRequest.Number
+	if err := headCarriesNoHandoffs(ctx, github, key, pull.Head.SHA); err != nil {
+		return fmt.Errorf("head %s of pull request #%d %w", head, number, err)
+	}
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
 	if err != nil {
 		return err
@@ -89,11 +108,6 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			return err
 		}
 	}
-	head := pull.Head.SHA
-	if len(head) > 12 {
-		head = head[:12]
-	}
-	number := issue.PullRequest.Number
 	// refusal is READY's refusal for one required check or workflow's standing on the head, nil when
 	// it succeeded there.
 	refusal := func(check classify.Standing, what, missing string) error {
@@ -123,6 +137,23 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 		}
 	}
 	return nil
+}
+
+// headCarriesNoHandoffs is nil when GitHub answers that head holds no .legion/<issue>/, the issue's
+// own handoff directory (handoffFile with no name): the contents read of that path at head answers
+// 404. Otherwise it names what stands: the directory still there, or the read GitHub failed, which
+// leaves the head unknown.
+func headCarriesNoHandoffs(ctx context.Context, github githubrest.Client, issue, head string) error {
+	dir := filepath.ToSlash(handoffFile(issue, ""))
+	err := github.Get(ctx, "/contents/"+dir+"?ref="+url.QueryEscape(head), nil)
+	var answer *githubrest.Answer
+	switch {
+	case errors.As(err, &answer) && answer.Status == http.StatusNotFound:
+		return nil
+	case err != nil:
+		return fmt.Errorf("could not be read for %s/: %w", dir, err)
+	}
+	return fmt.Errorf("still carries %s/, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", dir)
 }
 
 // workspaceRepository is the GitHub repository the workspace's origin names.
