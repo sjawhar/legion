@@ -9,13 +9,17 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -28,8 +32,18 @@ type Config struct {
 	// BROKER_DATABASE_URL, BROKER_DATABASE_PASSWORD: the Postgres connection URL. Required. The
 	// broker applies its own migrations at startup. A literal ${BROKER_DATABASE_PASSWORD} in the
 	// URL is replaced with BROKER_DATABASE_PASSWORD, URL-escaped; setting either without the
-	// other is refused.
+	// other is refused. A URL that names a user and no password and whose host is an Amazon RDS
+	// endpoint (one ending in .rds.amazonaws.com) signs in by RDS IAM authentication: each new
+	// connection signs in with an auth token the broker mints for that user and host from the
+	// AWS SDK's default credentials and region, which need rds-db:connect on the database user.
+	// Such a URL must name that one host, with sslmode=verify-full and sslrootcert naming the
+	// RDS CA bundle (the broker image ships it at /etc/ssl/rds/global-bundle.pem), or the broker
+	// refuses to start, since a token is a password to the database for 15 minutes. Any other
+	// passwordless URL, such as a local Postgres's trust sign-in, connects as given.
 	DatabaseURL string
+	// DatabaseIAM is whether the broker signs in to DatabaseURL with RDS IAM auth tokens: the URL
+	// names a user, no password and an RDS endpoint host, and verifies that host.
+	DatabaseIAM bool
 	// BROKER_PUBLIC_URL: the broker's own address as its callers reach it, an absolute URL with no
 	// path. Required. Every signed proof and request object names it, so a client's
 	// AGENT_SECRETS_URL must be exactly this.
@@ -145,6 +159,68 @@ func substituteDatabasePassword(rawURL string, getenv func(string) string) (stri
 	}
 }
 
+// rdsHostSuffix ends every Amazon RDS endpoint's host name, the hosts RDS IAM auth tokens sign in
+// to.
+const rdsHostSuffix = ".rds.amazonaws.com"
+
+// databaseIAM reports whether databaseURL signs in by RDS IAM auth tokens: a postgres:// URL that
+// names a user and no password (in its user info or its query, as pgx reads both) and whose host
+// is an RDS endpoint. Such a URL is refused, naming the host and never the URL, unless pgx reads
+// it as that one host alone, verified: sslmode=verify-full, which checks the server's certificate
+// and that it names the host, against the roots sslrootcert names. sslmode=require encrypts and
+// verifies nothing (pgx sets InsecureSkipVerify), and verify-ca checks no name, so either would
+// hand a 15-minute password to whoever answers on the path. Every other URL connects as given.
+func databaseIAM(databaseURL string) (bool, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		return false, nil
+	}
+	query := parsed.Query()
+	if parsed.User.Username() == "" && query.Get("user") == "" {
+		return false, nil
+	}
+	if _, hasPassword := parsed.User.Password(); hasPassword || query.Has("password") {
+		return false, nil
+	}
+	var host string
+	for _, named := range append(strings.Split(parsed.Host, ","), strings.Split(query.Get("host"), ",")...) {
+		hostname := named
+		if h, _, err := net.SplitHostPort(named); err == nil {
+			hostname = h
+		}
+		if strings.HasSuffix(strings.ToLower(hostname), rdsHostSuffix) {
+			host = hostname
+			break
+		}
+	}
+	if host == "" {
+		return false, nil
+	}
+	refuse := func(why string) (bool, error) {
+		return false, fmt.Errorf("BROKER_DATABASE_URL signs in to %s by RDS IAM token, a password to the database for 15 minutes, so it must verify that host: name it alone, with sslmode=verify-full and sslrootcert naming the RDS CA bundle (the broker image ships it at /etc/ssl/rds/global-bundle.pem); %s", host, why)
+	}
+	conn, err := pgconn.ParseConfig(databaseURL)
+	if err != nil {
+		// A ParseConfigError's own text quotes the URL; what it wraps says what was wrong.
+		var parseErr *pgconn.ParseConfigError
+		if errors.As(err, &parseErr) && errors.Unwrap(parseErr) != nil {
+			err = errors.Unwrap(parseErr)
+		} else {
+			err = errors.New("its connection settings do not parse")
+		}
+		return refuse("pgx cannot read it: " + err.Error())
+	}
+	switch {
+	case len(conn.Fallbacks) > 0 || !strings.EqualFold(conn.Host, host):
+		return refuse("it names another host too")
+	case conn.TLSConfig == nil || conn.TLSConfig.InsecureSkipVerify || conn.TLSConfig.ServerName != conn.Host:
+		return refuse("its sslmode is not verify-full")
+	case conn.TLSConfig.RootCAs == nil:
+		return refuse("it names no sslrootcert")
+	}
+	return true, nil
+}
+
 func Load(getenv func(string) string) (Config, error) {
 	for _, removed := range removedVars {
 		if getenv(removed.name) != "" {
@@ -173,6 +249,9 @@ func Load(getenv func(string) string) (Config, error) {
 		if strings.TrimSpace(req.value) == "" {
 			return Config{}, fmt.Errorf("%s is required", req.name)
 		}
+	}
+	if cfg.DatabaseIAM, err = databaseIAM(cfg.DatabaseURL); err != nil {
+		return Config{}, err
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
 		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
