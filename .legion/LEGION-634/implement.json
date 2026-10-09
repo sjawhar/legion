@@ -1,0 +1,60 @@
+{
+  "completed": "2026-10-09T08:33:10.371786579Z",
+  "deviations": [
+    "The plan's no-copy grep cannot print nothing as written: its `claims/register` alternative matches the phase-stall test's pre-existing assertion on the paths the pane called (and the new shell case's identical assertion); the route-definition form `pathname === \"/legion/v1/claims/register\"` prints nothing — recorded in proof 2",
+    "isSelfCheck is not exported from the harness (the plan's T2 listed it among the exports): after the hoist nothing outside omp-harness.ts calls it, and LegionPane.turns()/selfChecks() cover its use",
+    "The stall test's local PaneOptions extends Pick\u003cLegionPaneOptions, legion|quietMs|selfCheck\u003e instead of re-declaring the three fields with copied doc comments (simplify pass)"
+  ],
+  "filesChanged": [
+    "packages/pi-legion/tsconfig.json",
+    "packages/pi-shared/test/omp-harness.ts",
+    "packages/pi-legion/extensions/legion-role-tools-omp.test.ts",
+    "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts",
+    "skills/legion-worker/SKILL.md",
+    "packages/pi-legion/AGENTS.md",
+    "packages/pi-shared/AGENTS.md",
+    "packages/pi-envoy/AGENTS.md",
+    "packages/daemon/internal/prompts/roles/mechanics/headless.md",
+    "packages/pi-legion/CHANGELOG.md"
+  ],
+  "issue": "LEGION-634",
+  "openQuestions": [
+    "The architect may strike the fourth document (packages/pi-envoy/AGENTS.md:286, one clause: `installs no tool gate` → `mints no grant and is held to the pane rule`), included so pi-legion/AGENTS.md's `The full account …` sentence does not cite a bullet that contradicts the pane rule; the plan's section 9 reports it the same way"
+  ],
+  "phase": "implement",
+  "proof": [
+    {
+      "command": "cd packages/pi-legion \u0026\u0026 bunx tsc --noEmit --listFilesOnly | grep -c legion-role-tools-omp.test.ts; bunx tsc --noEmit; echo exit=$?",
+      "criterion": "1. tsc sees legion-role-tools-omp.test.ts: CI's Typecheck pi-legion step (bunx tsc --noEmit in packages/pi-legion) type-checks the real-Oh-My-Pi role-tools test",
+      "headSha": "fac2164dc6e817adca3bb268f66e0a334a8d3fe4",
+      "negativeControl": "appended `const probe: number = \"x\";` to extensions/legion-role-tools-omp.test.ts: bunx tsc --noEmit printed `extensions/legion-role-tools-omp.test.ts(419,7): error TS2322: Type 'string' is not assignable to type 'number'.` and exited 2; jj restore of the file, exit 0 again; the probe was never committed",
+      "observed": "grep -c printed 1 (0 at main: only the phase-stall file was in the program); bunx tsc --noEmit exit=0",
+      "surface": "bunx tsc --noEmit in packages/pi-legion, the command CI's Typecheck pi-legion step runs (.github/workflows/envoy-and-contracts.yaml), run locally in the worker pod"
+    },
+    {
+      "command": "cd packages/pi-legion \u0026\u0026 /opt/omp/bin/omp --version \u0026\u0026 LEGION_TEST_OMP=/opt/omp/bin/omp bun test; grep -n -E 'function runPane\\(|function isSelfCheck\\(|serveStandin\\(|writeStandinProfile\\(|spawnRpc\\(|#!/bin/sh|claims/register' packages/pi-legion/extensions/*-omp.test.ts; grep -n -E 'function runPane\\(|function isSelfCheck\\(|serveStandin\\(|writeStandinProfile\\(|spawnRpc\\(|#!/bin/sh|pathname === \"/legion/v1/claims/register\"' packages/pi-legion/extensions/*-omp.test.ts",
+      "criterion": "2. Both Legion omp tests run through the harness's runLegionPane, no copy of the runner remains, and the pi-legion suite passes on the pinned Oh My Pi",
+      "headSha": "fac2164dc6e817adca3bb268f66e0a334a8d3fe4",
+      "negativeControl": "in every role-tools pane the scripted `jj -R \"$LEGION_WORKSPACE\" undo` is refused with `every Legion issue workspace shares` as the model-visible tool result (the control assertion in all three cases: the tool_call hook is live on the hoisted runner); the same no-copy grep run on main@origin's two test files prints the duplicated runner lines in both",
+      "observed": "omp/18.6.0; 193 pass, 0 fail, 697 expect() calls across 14 files (the two omp files alone: 8 pass in 52.7 s: 3 role-tools panes, 5 phase-stall panes). The plan's no-copy grep prints one line, legion-phase-stall-omp.test.ts's pre-existing assertion toEqual([\"/legion/v1/claims/register\", …]) on the paths the pane called (the route's name in an expected value, not its definition); the same grep with the last alternative made the route definition `pathname === \"/legion/v1/claims/register\"` prints nothing. packages/pi-shared: bun test 18 pass, tsc clean; pi-envoy's dispatch-first-omp.test.ts (imports the harness) 2 pass on the real binary; both no-cross-import tests pass",
+      "surface": "the real Oh My Pi binary /opt/omp/bin/omp (omp/18.6.0, CI's install-omp pin) in --mode rpc, each pane spawned by runLegionPane in packages/pi-shared/test/omp-harness.ts with both plugin entries from this checkout against the stand-in daemon, listener and gateway"
+    },
+    {
+      "command": "grep -rn -F -f old.txt skills/legion-worker/SKILL.md packages/pi-legion/AGENTS.md packages/pi-envoy/AGENTS.md packages/daemon/internal/prompts/roles/mechanics/headless.md (old.txt: `because the issue has already left your phase`, `reaches the phase stall below, which then sends its one follow-up`, `not the \\`legion handoff\\` shell command, ends your phase`, `installs no tool gate`); grep -c HANDOFF_ALREADY_RECORDED and grep -c '60 seconds' per file; wc -l skills/legion-worker/SKILL.md; cd packages/pi-legion \u0026\u0026 bun test src/skills-guard.test.ts; cd packages/daemon \u0026\u0026 go test -count=1 ./internal/prompts/...; bunx biome check .; bash .github/scripts/check-private-names.sh; cd packages/pi-legion \u0026\u0026 LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts",
+      "criterion": "3. The three documents (and the adjacent pi-envoy clause) say what a shell legion handoff complete and a task subagent can do and how the phase-stall reminder then behaves; biome and the daemon's prompt structural tests pass",
+      "headSha": "fac2164dc6e817adca3bb268f66e0a334a8d3fe4",
+      "negativeControl": "the sibling case in the same file, where the second turn is a real `legion` handoff_complete tool call: its legionLog carries the same command and grant but its phaseEntries end {state:closed} — against the shell case's [open, quiet], so the pair shows that the tool call, and not the shell command, is what the extension's phase stall sees",
+      "observed": "old-clause grep: no output (all four files hit at main); HANDOFF_ALREADY_RECORDED: SKILL.md 2, pi-legion/AGENTS.md 1, headless.md 1; `60 seconds`: SKILL.md 3, headless.md 1; SKILL.md 498 lines (493 before; the guard fails at 500); skills-guard 6 pass; go test ./internal/prompts/... ok; biome 885 files, no errors (20 pre-existing warnings, 4 infos); check-private-names clean (3724 files); the phase-stall suite 5 pass, the new case among them: the stand-in daemon served register, ready, grants (the bash minted a grant: nothing refused it), legionLog = [\"handoff complete --summary Shell proof done.\", \"grant stall-grant-1\"], three turns, the follow-up's turn names handoff_complete and not `written as text`, phaseEntries = [{state:open},{state:quiet}] and never closed",
+      "surface": "the documents themselves (fixed-string greps for the old clauses and the new statements, the skills guard, the Go prompt structural tests) and the real Oh My Pi pane for the documents' first claim: the new phase-stall case whose scripted bash runs `legion handoff complete --summary 'Shell proof done.'`"
+    }
+  ],
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1865",
+  "schemaVersion": 1,
+  "subPlanningNeeded": false,
+  "trickyParts": [
+    "skills/legion-worker/SKILL.md had a 5-line budget (the skills guard fails at 500 lines): the subagent sentence took 4, so the Completion section's second paragraph was folded into the rewritten first one, every rule kept; the file is 498 lines",
+    "headless.md keeps the tested literal `op: \"handoff_complete\"` and its stay-in-session line, names no agent=\"…\" and no capitalised Inspect",
+    "runLegionPane reads contracts/fixtures/daemon-api/register.json inside the runner, not at module scope, since pi-envoy's dispatch-first-omp.test.ts imports the harness too; toolResultsIn is rewritten with plain narrowing so @legion/pi-shared gains no zod dependency",
+    "The ce-simplify-code pass applied four findings (PHASE_STALL_ENTRY in place of the literal, PaneOptions picks three fields from LegionPaneOptions, toolsPane takes {role, root} by name, isSelfCheck module-private) and skipped two (roleToken from @legion/contracts would add a dependency to pi-shared; memoising the 188-byte fixture read); both omp tests and both packages' tsc/biome re-run on the applied head"
+  ]
+}
