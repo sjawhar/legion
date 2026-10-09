@@ -356,6 +356,45 @@ func TestPromptJobOrphanedBackgroundPromptRefuses(t *testing.T) {
 	s.wait("SHELL_ALIVE")
 }
 
+// A signal that ends the prompt while it waits in the background, after Ctrl-Z and bg, ends it by
+// that signal at once, without fg: the terminal is the shell's then, and a restore from the
+// background would stop the job until fg.
+func TestPromptJobSignalInTheBackgroundEndsItWithoutFg(t *testing.T) {
+	for _, tc := range []struct{ signal, report string }{{"TERM", "Terminated"}, {"HUP", "Hangup"}} {
+		t.Run(tc.signal, func(t *testing.T) {
+			s := newPromptShell(t)
+			s.start(false, false)
+			s.send("\x1a")
+			s.wait("Stopped")
+			s.wait("PROMPT$ ")
+			s.out.Reset()
+			s.send("bg\r")
+			s.wait("PROMPT$ ")
+			s.waitForeground(s.bash.Process.Pid)
+			s.out.Reset()
+			s.send("kill -" + tc.signal + " %1\r")
+			// bash reaps a job that ends; one a restore stopped stays in /proc in state T.
+			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+				stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", s.pid))
+				if os.IsNotExist(err) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the prompt was still there 5 s after SIG%s in the background: %q; terminal: %q", tc.signal, stat, s.out.String())
+				}
+			}
+			s.pid = 0
+			// bash prints a background job's end before its next prompt.
+			s.send("printf 'SHELL_%s\\n' ALIVE\r")
+			s.wait("SHELL_ALIVE\r\n")
+			s.wait(tc.report)
+			if strings.Contains(s.out.String(), "Exit") || strings.Contains(s.out.String(), "RETURNED") {
+				t.Fatalf("the job ended by exiting, not by SIG%s: %q", tc.signal, s.out.String())
+			}
+		})
+	}
+}
+
 // processState is the state letter /proc gives process pid ("T" while stopped).
 func processState(t *testing.T, pid int) string {
 	t.Helper()
@@ -394,7 +433,7 @@ func TestPromptJobFastForegroundDoesNotRestopOrExposeValue(t *testing.T) {
 			s.send("\x1a")
 			// Queue fg at the first stopped thread, without waiting for all of the
 			// job's threads or bash to reclaim the terminal.
-			for deadline := time.Now().Add(5 * time.Second); processState(t, s.pid) != "T"; {
+			for deadline := time.Now().Add(5 * time.Second); processState(t, s.pid) != "T"; time.Sleep(time.Millisecond) {
 				if time.Now().After(deadline) {
 					t.Fatal("prompt did not stop")
 				}
@@ -515,7 +554,7 @@ func TestPromptHangupRestoresAndAbortCannotDumpTheValue(t *testing.T) {
 			dir := t.TempDir()
 			cmd := exec.Command("bash", "-c",
 				`ulimit -c "$(ulimit -Hc)" && exec env --default-signal=HUP,TERM,ABRT "$0" -test.run='^TestPromptSignalHelper$'`,
-				os.Args[0])
+				testBinary(t))
 			cmd.Dir = dir
 			cmd.Env = append(os.Environ(), "AGENT_SECRETS_PROMPT_HELPER=1", "GOTRACEBACK=crash")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty

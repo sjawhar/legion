@@ -2000,9 +2000,11 @@ Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 value
 on either path.
 
 The reader alone changes the terminal, including its final flushing restore and bracketed-paste
-disable. It joins the signal watcher before restoring, and does not restore a terminal another
-process group owns. It reads the settings it restores only once its process group holds the
-terminal (`holdTerminal`): a prompt started with `&` waits behind the shell's line editor, whose
+disable. It joins the signal watcher before restoring. A terminating signal that arrives while
+another process group holds the terminal (after Ctrl-Z and `bg`) skips the restore, which would
+stop the job until `fg`, and ends the CLI by that signal; bash resets its own terminal when a job
+dies by a signal. It reads the settings it restores only once its process group holds the
+terminal (`whenHeld`): a prompt started with `&` waits behind the shell's line editor, whose
 settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
 editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
 orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
@@ -2011,9 +2013,13 @@ discards, ends the wait with exit 2 naming the pipe command. The watcher handles
 SIGTERM, SIGHUP and SIGTSTP; signals whose
 kernel disposition is SIG_IGN remain ignored. Their tty control characters are disabled and
 consumed by the reader instead, since even an ignored tty signal would flush unread input.
-SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. On SIGTSTP,
-`stopBy` re-raises the stop and the watcher sends the reader a resume token without touching the
-terminal. The reader reapplies its current mode on resume or EINTR; one poll waits for input or a
+SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. The watcher
+(`promptWatch`) writes each signal's number as one byte to a pipe the reader polls with the
+terminal, so an event and its wake-up are one byte, taken only by `next`; it never touches the
+terminal. On SIGTSTP it writes the byte first, then `stopBy` re-raises the stop, holding a lock
+until the process resumes, so the reader's baseline read and label never run in a prompt a stop
+has sent to the background (`whileHeld`). The reader reapplies its current mode on resume or
+EINTR; one poll waits for input or a
 watcher event and also times the quiet window. Reads never block. NOFLSH is cleared: leaving
 unread secret bytes in the tty queue at a stop would let bash read them. The kernel reports no
 count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
@@ -2023,15 +2029,16 @@ own terminal while the job is stopped. On Linux the stop is sent to the watcher'
 `tgkill` under `runtime.LockOSThread`, with SIG_DFL installed and the saved action restored.
 Darwin sends the stop to the process and reinstalls Go's handler through `signal.Ignore` and
 `signal.Notify`; its stop/resume behavior remains unverified on Darwin.
-After a terminating signal the reader restores, then re-raises it: SIGHUP, SIGINT, SIGQUIT and
-SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the kernel default, not Go's
+After a terminating signal the reader restores, when its group holds the terminal, then re-raises
+it: SIGHUP, SIGINT, SIGQUIT and SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the
+kernel default, not Go's
 goroutine dump. Core dumps are disabled once, before the first value byte is read, for the rest
 of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
 `secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with
 `&` (the restored settings are compared with those bash hands a foreground job, and the label with
 the terminal's owner and echo when it is printed), a stop before the label, an orphaned group,
-ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
-restoration.
+SIGTERM and SIGHUP after `bg`, ignored SIGTSTP wrappers, quiet-window stops, refusal draining,
+shell history and terminal restoration.
 
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
