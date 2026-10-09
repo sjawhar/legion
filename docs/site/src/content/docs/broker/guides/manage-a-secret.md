@@ -112,11 +112,12 @@ forward, for example because it was started from a subshell that has since exite
 nothing and exits 2, naming the command that pipes the value in.
 
 The hidden prompt is available on Linux and macOS for amd64 and arm64. Builds for other targets
-refuse an interactive value with exit 2, naming the command that pipes the value in. On macOS,
-the stop and resume path, the discard of unread input at Ctrl-Z, and the two checks behind the
-refusal of a command started with `&` (an orphaned process group, and a shell that has exited)
-have not been run on a macOS machine. They are built and checked for macOS, and read from its
-kernel source, but not exercised.
+refuse an interactive value with exit 2, naming the command that pipes the value in. None of the
+prompt's macOS-specific code has run on a macOS machine: that includes the stop and resume path,
+the discard of unread input at Ctrl-Z, the two checks behind the refusal of a command started with
+`&` (an orphaned process group, and a shell that has exited), keeping an inherited ignored signal
+ignored, and disabling core dumps. It is built and checked for macOS, and read from its kernel
+source, but not exercised.
 
 ## Which sign-in may do what
 
