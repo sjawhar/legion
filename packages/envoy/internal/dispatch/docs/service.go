@@ -543,17 +543,18 @@ func New(deps Deps) *Service {
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
-	// The rooms, and ygo's check of each update the service broadcasts (Server.BroadcastUpdate),
-	// decode under maxUpdateItems, the queue every decode of document bytes takes (see
+	// The rooms decode under maxUpdateItems, the queue every decode of document bytes takes (see
 	// maxUpdateItems). It is also the most a room's peers can park in it, about ten times ygo's
-	// default; bounding what one peer's update can do to a room is LEGION-487.
+	// default; bounding what one peer's update can do to a room is LEGION-487. ygo's check of each
+	// update the service broadcasts (Server.BroadcastUpdate) takes no pending queue: the room has
+	// already applied the update (reearth/ygo#268, in the pinned fork).
 	srv.MaxPendingItems = maxUpdateItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
 	// Apply on a room no peer is in returns (reearth/ygo#269, in the pinned fork). Eager eviction,
 	// ygo's default, evicts the room the moment its last peer leaves, even while
-	// a Server.Apply is inside its callback on that room (reearth/ygo v1.49.5,
-	// provider/websocket/peer.go:477-504 checks peers alone): the callback's write then lands on
+	// a Server.Apply is inside its callback on that room (sjawhar/ygo v1.51.3-sami.1,
+	// provider/websocket/peer.go:496-580 checks peers alone): the callback's write then lands on
 	// the evicted room and reaches the store only through its retiring persistence worker, while
 	// the next access has already loaded the store without it and serves, and takes, the next
 	// write on a state missing the first. The two writes, each made from the same document, merge
@@ -564,9 +565,12 @@ func New(deps Deps) *Service {
 	// checks peers alone too (Server.CloseRoom), and the service still calls it to close an
 	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
 	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
-	// stranded persistence, on the committing goroutine (persistence.go:126-163). The service's
-	// CloseRoom waits for a repair's commit (roomServer), so a repair never meets it; a published
-	// write's suppression slot is finished before ygo's persistence observer runs
+	// stranded persistence, on the committing goroutine: the room's doc.OnUpdate observer, which
+	// loadRoom registers (provider/websocket/server.go:1784-1826) and which runs on the goroutine
+	// that committed once the commit has released the document's lock (crdt/doc.go:647-652), calls
+	// persistStranded (persistence.go:126-164) after the room's persistence worker retires. The
+	// service's CloseRoom waits for a repair's commit (roomServer), so a repair never meets it; a
+	// published write's suppression slot is finished before ygo's persistence observer runs
 	// (onLoadDocument), so that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
 

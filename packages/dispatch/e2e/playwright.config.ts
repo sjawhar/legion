@@ -160,12 +160,13 @@ export default defineConfig({
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
     // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
-    // rule rests on each engine dispatching a closed select's `change` in the key's own task, and
-    // deep links meet each engine's chunk cancellation and the margin hold's frame and scroll order.
-    // So those three specs also run in WebKit.
+    // rule rests on each engine dispatching a closed select's `change` in the key's own task, deep
+    // links meet each engine's chunk cancellation and the margin hold's frame and scroll order,
+    // and IndexedDB-backed document recovery must run in the engines people use. So those specs
+    // also run in WebKit.
     {
       name: "webkit",
-      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker|offline-edits)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -179,11 +180,12 @@ export default defineConfig({
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // and the issue picker's keyboard-step rule rests on the engine's select dispatch, so those two
-    // specs also run in Firefox, and the whole deep-links spec for the reason given above.
+    // the issue picker's keyboard-step rule rests on the engine's select dispatch, and offline
+    // document recovery owns browser storage. Those specs, and the whole deep-links spec, run in
+    // Firefox too.
     {
       name: "firefox",
-      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
     {

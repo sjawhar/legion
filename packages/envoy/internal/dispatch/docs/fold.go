@@ -26,21 +26,22 @@ import (
 // that applies a load included.
 //
 // A document parks an update whose dependencies have not arrived, and a delete of an item it does
-// not hold, and its encoding carries neither, so when the document parked anything stateThrough
-// merges the encoding with each stored update's structs past the document's state vector and with
-// every stored update's deletes, for a room that loads the state to park them again.
+// not hold. ygo's encoding of the document carries both (upstream since v1.51.0), and when the
+// document parked anything stateThrough also merges in each stored update's structs past the
+// document's state vector and every stored update's deletes, as it did while ygo's encoding
+// carried neither; a room that loads the state parks them again.
 //
 // The state is kept only when it reads back as the document that made it: decoded into a fresh
 // document, it must make the same state vector. That catches a re-encoding that renumbers or drops
-// a client's clocks, as at ygo v1.49.6-sami.3, whose decoder integrated the items after a skipped
-// clock range and so encoded them at lower clocks; v1.50.1-sami.2's decoder parks them instead. It
-// does not catch a re-encoding that keeps every clock and moves text, such as a lost right origin:
+// a client's clocks, as a decoder that integrated the items after a skipped clock range would, at
+// lower clocks; ygo parks them (upstream since v1.51.0, reearth/ygo#257). It does not catch a
+// re-encoding that keeps every clock and moves text, such as a lost right origin:
 // TestACompactedDocumentKeepsItsOrderThroughLaterUpdates guards that on each ygo bump. A state that
-// reads back otherwise, or a log the fold's document cannot apply (one parking more than ygo's
-// pending queue holds), is not used: stateThrough returns the stored updates merged whole, as they
-// were read before it folded them, and Compact, which calls foldThrough itself, leaves them as
-// stored. The merge of a log the fold cannot apply is what a load of it decodes and refuses
-// (ErrDocumentUnloadable), which offers its rebuild.
+// reads back otherwise, or a log the fold's document cannot apply (one parking more than its
+// pending queue, maxUpdateItems, holds), is not used: stateThrough returns the stored updates
+// merged whole, as they were read before it folded them, and Compact, which calls foldThrough
+// itself, leaves them as stored. The merge of a log the fold cannot apply is what a load of it
+// decodes and refuses (ErrDocumentUnloadable), which offers its rebuild.
 //
 // A log of one update is returned as stored: compaction leaves the state as one update, and a
 // document's first update deletes nothing an earlier one inserted.
