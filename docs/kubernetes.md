@@ -400,7 +400,10 @@ told `LEGION_EXPECT_TREE_VOLUME` for a session, and the controller's pod is not 
 `LEGION_RESUME_SESSION_FILE`. So a claim resumed on a new volume (a tree drained or suspended, its
 volume deleted, then resumed or re-admitted) provisions its workspace from the issue's pushed
 branch (`legion/<issue>`, or `main` when none was pushed) and continues its own session; anything
-it had not pushed is gone with the old volume, and nothing tells the agent so.
+it had not pushed is gone with the old volume, and nothing yet tells the agent so. For the same
+reason a child issue re-admitted as a root of its own keeps its roles' sessions under `postgres`
+(`Machine.Retree`, which drops them only under a runtime that keeps sessions on the tree's volume,
+`SessionsOnVolume`).
 
 The variables are a generation's, but the URL file's mount is the pod's: a pod created before
 `postgres` was turned on has no such file, and Oh My Pi refuses to start on it. Turn the setting on
@@ -409,30 +412,69 @@ or off only with no pod running, after the copy below.
 ### Copying file sessions before turning it on
 
 A deployment whose sessions are files on its tree volumes copies each one into the table once,
-while those volumes still exist and before any agent writes the same session under SQL storage:
+while those volumes still exist, after the last write to any of them and before any agent writes
+the same session under SQL storage. The order below is what keeps a copy current: nothing checks,
+at a resume, that a row still matches the file it was copied from, so a session written after its
+copy would resume from the older row without a word. Do not drain the deployment by lowering the
+linger instead: a closed tree's cleanup deletes its volume, and with it any session not yet copied.
 
-1. Tell every agent to push its work, then stop every claim so nothing writes its file again
-   (`legion claims suspend`, or drain each tree).
-2. Save the claims: `legion claims list --json --operator-token-file <file> > claims.json`. The
-   daemon of any release prints the list this command reads.
-3. Where a tree's volume is mounted and the session database is reachable — for example a one-off
-   pod of the worker image that mounts the tree volume's claim at `/legion` and the providers
-   Secret's URL key — run:
+1. **Stop every writer, keeping the linger as it is.** Tell every agent to push its work, then
+   suspend every claim (`legion claims suspend`) until each tree is at a pushed boundary: no pod
+   running and no claim recording a locator (`legion claims list --json`, every `locator` absent).
+2. **Save the claims and stop the daemon at once.** `legion claims list --json
+   --operator-token-file <file> > claims.json` (the daemon of any release prints the list this
+   command reads), then scale the daemon to 0 straight away, so nothing launches, resumes, or
+   cleans up a tree from here on.
+3. **Copy every tree.** Where a tree's volume is mounted and the session database is reachable, run,
+   for each tree the list names:
 
    ```sh
    legion sessions import --dsn-file <url file> --claims claims.json --tree <ROOT ISSUE> --tree-volume /legion
    ```
+
+   `scripts/sessions-import-pods.sh <claims.json> <namespace> <worker image@sha256> <project>
+   <url secret> <url key> [--context <context>]` runs it for every tree the list names: one pod
+   of the worker image per tree, on the Legion pool under gVisor, mounting the earlier release's
+   tree volume (`tree-legion-<project token>-<root issue>-architect`) read-only at `/legion` and
+   the URL key, printing the import's lines, then deleted. It exits 1 when any tree's import did,
+   and names a tree whose volume is gone.
 
    For each claim of that tree it reads the recorded session file from the volume (its path below
    the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads
    the recorded path itself) and writes it as one row keyed by that recorded path: the whole file
    as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh
    My Pi reads a row an older release of it wrote. It creates the two tables with Oh My Pi's own
-   statements when the database has none. It prints one line per claim — `copied`, `copied before
-   (identical …)`, `recorded no session`, `failed` (a file the volume does not hold) or `refused` (the
-   table already holds that session with other content, which it leaves as it is) — then a count
-   of each, and exits 1 when any claim failed or was refused. Run again, it copies nothing twice.
-4. Turn `session_store: postgres` on and resume or re-admit the claims.
+   statements when the database has none. It prints one line per claim of the tree — `copied`,
+   `copied before (identical …)`, `recorded no session`, `failed` (a file the volume does not hold)
+   or `refused` (the table already holds that session with other content, which it leaves as it
+   is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded
+   session the table does not hold, then a count of each. It exits 1 on any `failed` or `refused`,
+   or a `missing` of the tree it was asked to copy; another tree's `missing` is reported only.
+4. **Copy every tree again.** Each run must print only `copied before` or `recorded no session`
+   for its tree's claims, and the last one `missing 0`. A `copied` here means a session changed
+   after step 3: a writer was still running, so go back to step 1. A `refused` means the table
+   holds other content for that session: either an agent wrote it under SQL storage, or a copy
+   from another file landed there. Find out which before going on. The table is the newer one
+   only when an agent wrote it. To copy the file over a row that is not newer, delete that row
+   and its parts (`DELETE FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM
+   omp_session_files WHERE path = '<path>'`) and run the import again.
+5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
+   tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
+   under SQL storage, where a file store starts it fresh. With the daemon still stopped, mark each
+   lost in the daemon's own database:
+
+   ```sh
+   legion sessions import --dsn-file <url file> --claims claims.json --mark-lost --daemon-dsn-file <file holding the daemon's postgres_dsn>
+   ```
+
+   It copies nothing. For every claim of the list whose recorded session the table lacks, it
+   clears the claim's session and session file and marks its workspace lost, as the daemon marks a
+   claim whose volume was lost, but only while the claim still records that session file. It
+   prints `marked lost` or `failed to mark lost` per claim, then a count, and exits 1 on any
+   failure. Each such claim starts a fresh session in a workspace recovered from its issue's
+   branch.
+6. **Only then delete the old Sandboxes and their volumes**, dump the daemon's database (`pg_dump`
+   with its `postgres_dsn`), and deploy with `session_store: postgres`.
 
 ### The image guard
 

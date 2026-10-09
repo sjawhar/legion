@@ -9,7 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
@@ -82,12 +85,13 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	architect := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T12-00-00-000Z_0001.jsonl"
 	tester := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T13-00-00-000Z_0002.jsonl"
 	lost := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T14-00-00-000Z_0003.jsonl"
+	other := agentSessions + "/other/2026-10-08T15-00-00-000Z_0004.jsonl"
 	r := newSessionsImportRig(t, []map[string]string{
 		{"token": "legion-legion-legion-1-tester", "tree": "LEGION-1", "sessionFile": tester, "state": "working"},
 		{"token": "legion-legion-legion-1-architect", "tree": "LEGION-1", "sessionFile": architect},
 		{"token": "legion-legion-legion-1-planner", "tree": "LEGION-1", "sessionFile": ""},
 		{"token": "legion-legion-legion-1-reviewer", "tree": "LEGION-1", "sessionFile": lost},
-		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": agentSessions + "/other/2026-10-08T15-00-00-000Z_0004.jsonl"},
+		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": other},
 	})
 	r.write(architect, "{\"type\":\"session\",\"id\":\"0001\"}\n")
 	r.write(tester, "{\"type\":\"session\",\"id\":\"0002\"}\n{\"type\":\"message\"}\n")
@@ -101,14 +105,16 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 		"legion-legion-legion-1-planner recorded no session: nothing to copy\n",
 		"legion-legion-legion-1-reviewer failed " + lost + ": read the session file: ",
 		"legion-legion-legion-1-tester copied " + tester + " (50 bytes, sha256 ",
-		"legion sessions import: copied 2, copied before 0, nothing recorded 1, failed 1\n",
+		"legion-legion-legion-1-reviewer missing " + lost + ": the session table holds no such session (tree LEGION-1)\n",
+		"legion-legion-legion-2-architect missing " + other + ": the session table holds no such session (tree LEGION-2)\n",
+		"legion sessions import: copied 2, copied before 0, nothing recorded 1, failed 1, missing 2\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("first import printed\n%s\nwant a line containing %q", out, want)
 		}
 	}
-	if strings.Contains(out, "legion-legion-legion-2") {
-		t.Errorf("--tree LEGION-1 touched another tree's claim:\n%s", out)
+	if strings.Contains(out, "legion-legion-legion-2-architect copied") || strings.Contains(out, "legion-legion-legion-2-architect failed") {
+		t.Errorf("--tree LEGION-1 copied another tree's claim:\n%s", out)
 	}
 	if held, ok := r.held(tester); !ok || held != "{\"type\":\"session\",\"id\":\"0002\"}\n{\"type\":\"message\"}\n" {
 		t.Errorf("the table holds %q (%t) for the tester, want its file", held, ok)
@@ -117,8 +123,8 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	r.write(lost, "{\"type\":\"session\",\"id\":\"0003\"}\n")
 	code, out, _ = r.run("--tree", "LEGION-1")
 	if code != 0 || !strings.Contains(out, "legion-legion-legion-1-architect copied before "+architect+" (identical, 31 bytes") ||
-		!strings.Contains(out, "legion sessions import: copied 1, copied before 2, nothing recorded 1, failed 0\n") {
-		t.Fatalf("second import = %d:\n%s\nwant the two copied before, the found one copied, exit 0", code, out)
+		!strings.Contains(out, "legion sessions import: copied 1, copied before 2, nothing recorded 1, failed 0, missing 1\n") {
+		t.Fatalf("second import = %d:\n%s\nwant the two copied before, the found one copied, the other tree's still missing, exit 0", code, out)
 	}
 
 	r.write(architect, "{\"type\":\"session\",\"id\":\"0001\"}\n{\"type\":\"message\",\"written\":\"after the copy\"}\n")
@@ -128,6 +134,71 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	}
 	if held, _ := r.held(architect); held != "{\"type\":\"session\",\"id\":\"0001\"}\n" {
 		t.Errorf("after the refusal the table holds %q for the architect, want what it held", held)
+	}
+}
+
+// --mark-lost copies nothing and marks, in the stopped daemon's own database, each claim whose
+// recorded session the table lacks as the daemon marks a claim whose volume was lost: no session,
+// no session file, its workspace lost. A claim the table holds, and one whose record no longer
+// names that session, are left as they are.
+func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
+	copied := agentSessions + "/--a--/2026-10-08T12-00-00-000Z_0001.jsonl"
+	gone := agentSessions + "/--b--/2026-10-08T12-00-00-000Z_0002.jsonl"
+	moved := agentSessions + "/--c--/2026-10-08T12-00-00-000Z_0003.jsonl"
+	r := newSessionsImportRig(t, []map[string]string{
+		{"token": "legion-legion-legion-1-architect", "tree": "LEGION-1", "sessionFile": copied},
+		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": gone},
+		{"token": "legion-legion-legion-3-architect", "tree": "LEGION-3", "sessionFile": moved},
+	})
+	r.write(copied, "{\"type\":\"session\",\"id\":\"0001\"}\n")
+	if code, out, _ := r.run("--tree", "LEGION-1"); code != 0 || !strings.Contains(out, "missing 2\n") {
+		t.Fatalf("import = %d:\n%s\nwant two claims of other trees missing, exit 0", code, out)
+	}
+	daemonDSN, daemonDSNFile := testpg.DSNFile(t, "legion_sessions_mark_test")
+	st, err := store.Open(context.Background(), daemonDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		token       legionclaim.Token
+		issue, file string
+	}{
+		{"legion-legion-legion-1-architect", "LEGION-1", copied},
+		{"legion-legion-legion-2-architect", "LEGION-2", gone},
+		{"legion-legion-legion-3-architect", "LEGION-3", moved + ".newer"},
+	} {
+		if err := st.PutClaim(context.Background(), supervise.Claim{Token: c.token, Project: "legion", Tree: c.issue, TreeEpoch: 1, Issue: c.issue,
+			Role: legionclaim.RoleArchitect, Generation: 2, State: supervise.StateSuspended, Session: "ses-" + c.issue, SessionFile: c.file}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "sessions", "import", "--dsn-file", r.dsnFile, "--claims", r.claims, "--mark-lost", "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
+	for _, want := range []string{
+		"legion-legion-legion-2-architect marked lost: the session table holds no " + gone,
+		"legion-legion-legion-3-architect failed to mark lost: the daemon's database holds no such claim recording " + moved,
+		"legion sessions import: marked lost 1, failed 1\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("--mark-lost printed\n%s\nwant a line containing %q", out.String(), want)
+		}
+	}
+	if code != 1 {
+		t.Errorf("--mark-lost = %d, want 1 for the claim it could not mark", code)
+	}
+	stored, err := st.Claims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range stored {
+		lost := c.Token == "legion-legion-legion-2-architect"
+		if lost != (c.Session == "" && c.SessionFile == "" && c.WorkspaceLost) {
+			t.Errorf("claim %s: session %q, session file %q, workspace lost %t; want it marked lost %t", c.Token, c.Session, c.SessionFile, c.WorkspaceLost, lost)
+		}
 	}
 }
 

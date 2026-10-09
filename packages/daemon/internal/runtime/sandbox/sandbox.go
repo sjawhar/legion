@@ -567,6 +567,11 @@ func (r *Runtime) checkLocator(loc runtime.Locator) error {
 // tree volume, and the tree volume goes with the tree's root claim.
 func (r *Runtime) ProvisionsWorkspaces() bool { return true }
 
+// SessionsOnVolume is true unless the runtime keeps sessions in its session database
+// (Options.SessionDSNKey): a file session is on its tree's volume, which another tree's pods never
+// mount.
+func (r *Runtime) SessionsOnVolume() bool { return r.sessionDSNKey == "" }
+
 // Suspend ends only the recorded role process. It never changes the issue Sandbox operating mode:
 // every other resident role shares that pod and stays reachable until its own explicit stop or
 // issue-level lifecycle effect. A recorded process its pod or launcher shows already ended — the

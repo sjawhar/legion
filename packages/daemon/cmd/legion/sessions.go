@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
 // sessionsCommands is `legion sessions`, the operator's hand on Oh My Pi's session database
@@ -26,7 +27,7 @@ func runSessions(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	return runSubcommand(ctx, "sessions", sessionsCommands, args, stdout, stderr)
 }
 
-const sessionsImportUsage = "usage: legion sessions import --dsn-file <file> --claims <file|-> [--tree <KEY>] [--tree-volume <dir>]"
+const sessionsImportUsage = "usage: legion sessions import --dsn-file <file> --claims <file|-> ([--tree <KEY>] [--tree-volume <dir>] | --mark-lost --daemon-dsn-file <file>)"
 
 // importedClaim is what `legion sessions import` reads of one claim `legion claims list --json`
 // prints: its token, tree and recorded session file. Every other member is the daemon's and
@@ -44,28 +45,52 @@ type importedClaim struct {
 // when given, and copies each claim's session file into the table whose URL --dsn-file holds,
 // under the path the claim recorded, which is the key Oh My Pi resumes the claim's session by
 // (ompsessions.Import). The file is read at that path, or, with --tree-volume, from the tree volume
-// mounted there (sandbox.SessionOnVolume). It prints one line per claim, then a count of each
-// outcome, and exits 1 when any claim's session could not be copied: a file it cannot read, or a
-// session the table already holds with other content. A rerun copies nothing twice: a session the
-// table already holds byte for byte is reported as copied before.
+// mounted there (sandbox.SessionOnVolume). It prints one line per claim it copies, then one line
+// for every claim of the whole list, whatever --tree says, whose recorded session the table does
+// not hold (missingSessions), then a count of each outcome. It exits 1 when any claim's session
+// could not be copied (a file it cannot read, or a session the table already holds with other
+// content) or a recorded session of the claims it was asked to copy is missing from the table; a
+// missing one of another tree is reported and leaves the exit as it is. A rerun copies nothing
+// twice: a session the table already holds byte for byte is reported as copied before.
+//
+// With --mark-lost it copies nothing: it reports every claim whose recorded session the table does
+// not hold and marks each lost in the daemon's own database (--daemon-dsn-file), as the daemon marks
+// a claim whose tree volume was lost (supervise's loseSession): no session, no session file, its
+// workspace lost. Under SQL storage such a claim would otherwise fail every launch, its launcher
+// finding no row to resume; marked, it starts a fresh session in a workspace recovered from its
+// issue's branch, as file storage starts it once its volume is gone. Run it with the daemon that
+// owns that database stopped, since a running daemon holds its claims in memory and writes them
+// back. Only a claim still recording the session the list says is marked.
 func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sessions import", sessionsImportUsage, stderr)
 	dsnFile := flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)")
 	claimsFile := flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)")
 	tree := flags.String("tree", "", "copy the sessions of this tree's claims alone")
 	treeVolume := flags.String("tree-volume", "", "read each session from the tree volume mounted here rather than at its recorded path")
+	markLost := flags.Bool("mark-lost", false, "copy nothing; mark each claim whose session the table lacks lost in the daemon's database")
+	daemonDSNFile := flags.String("daemon-dsn-file", "", "with --mark-lost, file holding the stopped daemon's own postgres_dsn")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
-	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "legion sessions import: unexpected argument %q\n%s\n", flags.Arg(0), sessionsImportUsage)
+	usage := func(format string, args ...any) int {
+		fmt.Fprintf(stderr, "legion sessions import: "+format+"\n%s\n", append(args, sessionsImportUsage)...)
 		return 2
+	}
+	if flags.NArg() != 0 {
+		return usage("unexpected argument %q", flags.Arg(0))
 	}
 	for _, required := range []struct{ name, value string }{{"dsn-file", *dsnFile}, {"claims", *claimsFile}} {
 		if required.value == "" {
-			fmt.Fprintf(stderr, "legion sessions import: --%s is required\n%s\n", required.name, sessionsImportUsage)
-			return 2
+			return usage("--%s is required", required.name)
 		}
+	}
+	switch {
+	case *markLost && *daemonDSNFile == "":
+		return usage("--mark-lost needs --daemon-dsn-file, the database whose claims it marks")
+	case !*markLost && *daemonDSNFile != "":
+		return usage("--daemon-dsn-file is read only with --mark-lost")
+	case *markLost && (*tree != "" || *treeVolume != ""):
+		return usage("--mark-lost copies nothing, so it takes neither --tree nor --tree-volume")
 	}
 	claims, err := readImportedClaims(*claimsFile)
 	if err != nil {
@@ -78,6 +103,9 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 		return 1
 	}
 	defer conn.Close(context.Background())
+	if *markLost {
+		return markLostSessions(ctx, conn, claims, *daemonDSNFile, stdout, stderr)
+	}
 
 	counts := map[string]int{}
 	for _, c := range claims {
@@ -106,12 +134,87 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 			counts["copied before"]++
 		}
 	}
+	missing, err := missingSessions(ctx, conn, claims)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
+		return 1
+	}
+	missingHere := 0
+	for _, c := range missing {
+		fmt.Fprintf(stdout, "%s missing %s: the session table holds no such session (tree %s)\n", c.Token, c.SessionFile, c.Tree)
+		if *tree == "" || c.Tree == *tree {
+			missingHere++
+		}
+	}
+	counts["missing"] = len(missing)
 	var summary []string
-	for _, outcome := range []string{"copied", "copied before", "nothing recorded", "failed"} {
+	for _, outcome := range []string{"copied", "copied before", "nothing recorded", "failed", "missing"} {
 		summary = append(summary, fmt.Sprintf("%s %d", outcome, counts[outcome]))
 	}
 	fmt.Fprintf(stdout, "legion sessions import: %s\n", strings.Join(summary, ", "))
-	if counts["failed"] > 0 {
+	if counts["failed"] > 0 || missingHere > 0 {
+		return 1
+	}
+	return 0
+}
+
+// missingSessions are the claims of the list, every tree's, that record a session the table does
+// not hold: under SQL storage each would fail every launch until it is copied or marked lost.
+func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim) ([]importedClaim, error) {
+	var missing []importedClaim
+	for _, c := range claims {
+		if c.SessionFile == "" {
+			continue
+		}
+		found, err := ompsessions.Exists(ctx, conn, c.SessionFile)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			missing = append(missing, c)
+		}
+	}
+	return missing, nil
+}
+
+// markLostSessions is --mark-lost: every claim whose recorded session the table lacks is marked lost
+// in the daemon's database, by token and only while it still records that session file.
+func markLostSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim, daemonDSNFile string, stdout, stderr io.Writer) int {
+	missing, err := missingSessions(ctx, conn, claims)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
+		return 1
+	}
+	daemonDSN, err := ompsessions.ReadDSN(daemonDSNFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
+		return 1
+	}
+	daemon, err := pgx.Connect(ctx, daemonDSN)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions import: the daemon's database: %v\n", store.ConnectError(daemonDSN, err))
+		return 1
+	}
+	defer daemon.Close(context.Background())
+	marked, failed := 0, 0
+	for _, c := range missing {
+		tag, err := daemon.Exec(ctx, "UPDATE claims SET session = '', session_file = '', workspace_lost = true WHERE token = $1 AND session_file = $2",
+			c.Token, c.SessionFile)
+		switch {
+		case err != nil:
+			fmt.Fprintf(stdout, "%s failed to mark lost: %v\n", c.Token, err)
+			failed++
+		case tag.RowsAffected() == 0:
+			fmt.Fprintf(stdout, "%s failed to mark lost: the daemon's database holds no such claim recording %s\n", c.Token, c.SessionFile)
+			failed++
+		default:
+			fmt.Fprintf(stdout, "%s marked lost: the session table holds no %s, so it starts a fresh session in a workspace recovered from its issue's branch\n",
+				c.Token, c.SessionFile)
+			marked++
+		}
+	}
+	fmt.Fprintf(stdout, "legion sessions import: marked lost %d, failed %d\n", marked, failed)
+	if failed > 0 {
 		return 1
 	}
 	return 0
