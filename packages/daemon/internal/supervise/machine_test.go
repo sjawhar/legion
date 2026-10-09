@@ -802,9 +802,8 @@ func TestReleasingAnUncertainLaunchWritesNothingUntilItsLaunchDoes(t *testing.T)
 	}
 	h.start(uncertain)
 
-	released, err := h.m.ReleaseUncertainLaunch()
-	if err != nil || !released {
-		t.Fatalf("release = %v, %v; want released", released, err)
+	if !h.m.ReleaseUncertainLaunch() {
+		t.Fatal("the uncertain launch was not released")
 	}
 	h.store.fail("PutClaim", errBoom)
 	if err := h.handle(RequestSpawn{Claim: testToken}); err == nil {

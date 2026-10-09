@@ -940,12 +940,7 @@ func (s *supervision) launchUnfinished(tokens []claim.Token) {
 		if !ok {
 			continue
 		}
-		released, err := m.ReleaseUncertainLaunch()
-		if err != nil {
-			s.log.Error("supervise: release an uncertain launch", "claim", token, "error", err)
-			continue
-		}
-		if !released {
+		if !m.ReleaseUncertainLaunch() {
 			c := m.Claim()
 			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
 			continue
@@ -1108,7 +1103,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	group.Go(func() error {
 		<-serving.Done()
 		s.log.Info("legion daemon stopping", "project", cfg.Project, "claims", s.supervisor.count(),
-			"deciding", len(s.supervisor.inDecision()), "cause", context.Cause(serving).Error())
+			"deciding", s.supervisor.decidingCount(), "cause", context.Cause(serving).Error())
 		s.halt()
 		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
 		defer cancel()

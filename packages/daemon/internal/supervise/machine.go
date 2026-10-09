@@ -452,14 +452,14 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // memory only: the launch that follows writes it, as its next generation launching, in its first
 // write. A stop between the two leaves the store holding launch_uncertain, which the next boot
 // reconciles and relaunches, never a claim stored queued with no process that nothing launches.
-func (m *Machine) ReleaseUncertainLaunch() (bool, error) {
+func (m *Machine) ReleaseUncertainLaunch() bool {
 	m.mu.Lock()
 	defer m.unlock()
 	if m.claim.State != StateLaunchUncertain || m.claim.Locator != nil {
-		return false, nil
+		return false
 	}
 	m.claim.State = StateQueued
-	return true, nil
+	return true
 }
 
 // StartedBy records the outbox row of the start being run against this claim, so a stop written
@@ -518,9 +518,7 @@ func (c Claim) ServingRun() uint64 {
 func (m *Machine) Claim() Claim {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	c := copyClaim(m.claim)
-	c.SuspensionHeld = m.held != nil
-	return c
+	return m.current()
 }
 
 // View is a copy of the claim as the machine last published it: as its latest decision left it, or
@@ -531,11 +529,17 @@ func (m *Machine) View() Claim {
 	return copyClaim(*m.view.Load())
 }
 
+// current is a copy of the claim as the machine holds it now, with what only memory holds. The
+// caller holds mu.
+func (m *Machine) current() Claim {
+	c := copyClaim(m.claim)
+	c.SuspensionHeld, c.Stopping = m.held != nil, m.stopping
+	return c
+}
+
 // publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
 func (m *Machine) publish() {
-	c := copyClaim(m.claim)
-	c.SuspensionHeld = m.held != nil
-	c.Stopping = m.stopping
+	c := m.current()
 	m.view.Store(&c)
 }
 
@@ -840,10 +844,8 @@ func (m *Machine) release(ctx context.Context) error {
 // counterpart for a claim that goes on — and lets the stopped process go, for the next launch of
 // the same session to wait out. A suspension that fails leaves the claim holding its process.
 func (m *Machine) suspendProcess(ctx context.Context) error {
-	stopped := m.stoppingProcess()
-	err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator)
-	stopped()
-	if err != nil {
+	defer m.stoppingProcess()()
+	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 		return err
 	}
 	m.letGo()

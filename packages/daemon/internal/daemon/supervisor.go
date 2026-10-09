@@ -43,11 +43,11 @@ type supervisor struct {
 	stopped  bool
 	feeding  sync.WaitGroup
 	// supervised counts the machines, which are never removed, and deciding is each claim whose
-	// machine is handling an event from its inbox now, with the event's type. Both are read without
-	// mu, which Create holds through a store write, so the stop's log lines never wait on Postgres.
+	// machine is handling an event from its inbox now, with that event. Both are read without mu,
+	// which Create holds through a store write, so the stop's log lines never wait on Postgres.
 	supervised atomic.Int64
 	decidingMu sync.Mutex
-	deciding   map[claim.Token]string
+	deciding   map[claim.Token]supervise.Event
 }
 
 // member is one claim's machine, the queue its events wait in, and the tree the claim is of.
@@ -61,7 +61,7 @@ func newSupervisor(ctx context.Context, st *store.Store, project, stateDir strin
 	return &supervisor{
 		ctx: ctx, store: st, project: project, stateDir: stateDir, log: log,
 		restored: make(chan struct{}),
-		machines: map[claim.Token]*member{}, deciding: map[claim.Token]string{},
+		machines: map[claim.Token]*member{}, deciding: map[claim.Token]supervise.Event{},
 	}
 }
 
@@ -190,7 +190,7 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 func (s *supervisor) decide(token claim.Token, ev supervise.Event) {
 	s.decidingMu.Lock()
 	defer s.decidingMu.Unlock()
-	s.deciding[token] = fmt.Sprintf("%T", ev)
+	s.deciding[token] = ev
 }
 
 func (s *supervisor) decided(token claim.Token) {
@@ -206,10 +206,17 @@ func (s *supervisor) inDecision() []string {
 	defer s.decidingMu.Unlock()
 	busy := make([]string, 0, len(s.deciding))
 	for token, ev := range s.deciding {
-		busy = append(busy, fmt.Sprintf("%s (%s)", token, ev))
+		busy = append(busy, fmt.Sprintf("%s (%T)", token, ev))
 	}
 	slices.Sort(busy)
 	return busy
+}
+
+// decidingCount is how many claims' machines are handling an event from their inbox now.
+func (s *supervisor) decidingCount() int {
+	s.decidingMu.Lock()
+	defer s.decidingMu.Unlock()
+	return len(s.deciding)
 }
 
 // post queues ev for the claim's machine. An event for a claim the daemon does not supervise, or
