@@ -69,7 +69,12 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // launch sets would reach the agent's container twice, and one that places Oh My Pi's sessions
 // would move them off the tree volume; a volume name would be in the pod twice; a mount at, under,
 // or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool runs from hides it or
-// is hidden by it. A provider key must name a variable nothing else in the pod sets, since the shim
+// is hidden by it; and a mount at, under, or above the agents' state home (xdgStateHome), under
+// which every role's agent has a state home of its own (roleStateHome), would have every role's
+// shim refuse to start naming the directory it could not make — the shim makes Oh My Pi's profile
+// directory under the role's state home before Oh My Pi starts (podsafety.EnsureStateHome), which a
+// read-only or foreign mount there refuses — at launch rather than here, at `--check-config`. A
+// provider key must name a variable nothing else in the pod sets, since the shim
 // refuses one its own environment names and would replace one Oh My Pi's environment gains after
 // (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod sets (shim.ReadProviderEnv);
 // and it must not read a providers secret's key, which the shim would export into Oh My Pi's
@@ -99,6 +104,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	}{
 		{legionMountPaths(), "Legion mounts in every pod", "Legion's"},
 		{imageOwned, "the worker image owns", "the image's"},
+		{[]string{xdgStateHome}, "every role's agent keeps its Oh My Pi state under", "the agents' state home"},
 	}
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {

@@ -16,11 +16,11 @@ import (
 
 // CheckPod refuses, naming both, an operator variable the runtime, the worker image, or every
 // launch sets, or one that places Oh My Pi's sessions; a volume Legion names; a mount at, under, or
-// above a path Legion mounts, the image owns, or a tool runs from; a provider key naming any
-// variable already set in the agent's environment, or whose pointer is; and a provider key reading
-// a providers secret's key, which would export that secret into Oh My Pi's environment. It passes the Go live
-// harnesses' operator pod, and an operator's own settings overlay and a baseline variable it may
-// override.
+// above a path Legion mounts, the image owns, a tool runs from, or the agents' state home; a
+// provider key naming any variable already set in the agent's environment, or whose pointer is;
+// and a provider key reading a providers secret's key, which would export that secret into Oh My
+// Pi's environment. It passes the Go live harnesses' operator pod, and an operator's own settings
+// overlay and a baseline variable it may override.
 func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	mountAt := func(path string) Pod {
 		return Pod{
@@ -35,6 +35,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which the worker image owns: a mount may be neither at, under, nor above one of the image's"
 		}
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
+	}
+	overlapsStateHome := func(path string) string {
+		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps /home/legion/.local/state, which every role's agent keeps its Oh My Pi state under: a mount may be neither at, under, nor above one of the agents' state home"
 	}
 	keyNames := func(name, who string) string {
 		return "provider_keys names " + name + ", which " + who + ": a provider key must name a variable nothing else in the pod sets"
@@ -96,6 +99,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a mount above the image's gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/gh", true)},
 		{name: "a mount at the image's jj", pod: mountAt("/usr/local/bin/jj"), want: overlaps("/usr/local/bin/jj", "/usr/local/bin/jj", true)},
 		{name: "a mount at the image's git", pod: mountAt("/usr/bin/git"), want: overlaps("/usr/bin/git", "/usr/bin/git", true)},
+		{name: "a mount at the agents' state home", pod: mountAt("/home/legion/.local/state"), want: overlapsStateHome("/home/legion/.local/state")},
+		{name: "a mount under the agents' state home", pod: mountAt("/home/legion/.local/state/tester"), want: overlapsStateHome("/home/legion/.local/state/tester")},
+		{name: "a mount above the agents' state home", pod: mountAt("/home/legion/.local"), want: overlapsStateHome("/home/legion/.local")},
 		{name: "a provider key the runtime sets", keys: map[string]string{"PATH": "search_path"}, want: keyNames("PATH", byRuntime)},
 		{name: "a provider key the image sets", keys: map[string]string{"HOME": "home"}, want: keyNames("HOME", byImage)},
 		{name: "a provider key whose pointer the runtime sets", keys: map[string]string{"DISPATCH_TOKEN": "dispatch"},

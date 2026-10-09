@@ -132,32 +132,38 @@ func removed(environ []string, name string) []string {
 // `logs`, `browser-profiles`, `reports`, `terminal-sessions`; sessions are data-class) hang under
 // `$XDG_STATE_HOME/omp/profiles/<profile>` for a named profile and `$XDG_STATE_HOME/omp` for the
 // default one, but only when that directory already exists when Oh My Pi starts; otherwise they
-// fall back to the config root (`$HOME/$PI_CONFIG_DIR/profiles/<profile>`, as ompdirs.ProfileRoot
+// fall back to the config root (`$HOME/$PI_CONFIG_DIR/profiles/<profile>`, as ompdirs.StateRoot
 // ports it), and a state home the pod set to keep one role's browser broker lock apart from its
-// siblings' (sandbox.roleStateHome) changes nothing. The profile is OMP_PROFILE where environ
-// defines it, else PI_PROFILE, as Oh My Pi reads them (ompdirs.NormalizeProfile); a name Oh My Pi
-// would refuse is refused here. With XDG_STATE_HOME unset or empty nothing is made: Oh My Pi reads
-// no state home then.
+// siblings' (sandbox.roleStateHome) changes nothing. The directory is the one ompdirs answers
+// (ompdirs.StateRootCandidate), so the shim and the port cannot drift: the profile is OMP_PROFILE
+// where environ defines it, else PI_PROFILE, as Oh My Pi reads them, and a name Oh My Pi would
+// refuse is refused here. With XDG_STATE_HOME unset or empty nothing is made: Oh My Pi reads no
+// state home then. Once made, ompdirs.StateRoot over environ, in the working directory the shim's
+// Oh My Pi inherits, must answer that directory; where it answers another — an honoured
+// PI_CODING_AGENT_DIR elsewhere turns Oh My Pi's XDG lookup off — this refuses, naming both, rather
+// than let the shim make a directory Oh My Pi ignores while every role's broker takes one lock name.
 func EnsureStateHome(environ []string) error {
 	env := lookup(environ)
-	stateHome := env["XDG_STATE_HOME"]
-	if stateHome == "" {
+	dir, ok, err := ompdirs.StateRootCandidate(env)
+	if err != nil {
+		return fmt.Errorf("pod safety: no state directory to make under XDG_STATE_HOME=%s: %w", env["XDG_STATE_HOME"], err)
+	}
+	if !ok {
 		return nil
-	}
-	requested, set := env["OMP_PROFILE"]
-	if !set {
-		requested = env["PI_PROFILE"]
-	}
-	profile, valid := ompdirs.NormalizeProfile(requested)
-	if !valid {
-		return fmt.Errorf("pod safety: Oh My Pi refuses the profile %q; no state directory to make under %s", requested, stateHome)
-	}
-	dir := filepath.Join(stateHome, "omp")
-	if profile != "" {
-		dir = filepath.Join(dir, "profiles", profile)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("pod safety: make Oh My Pi's state directory %s: %w", dir, err)
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("pod safety: the working directory Oh My Pi starts in: %w", err)
+	}
+	root, _, err := ompdirs.StateRoot(env, workDir)
+	if err != nil {
+		return fmt.Errorf("pod safety: %w", err)
+	}
+	if root != dir {
+		return fmt.Errorf("pod safety: Oh My Pi would keep its state under %s, not under %s, the directory made under XDG_STATE_HOME: the state home changes nothing (an honoured PI_CODING_AGENT_DIR elsewhere turns Oh My Pi's XDG lookup off)", root, dir)
 	}
 	return nil
 }

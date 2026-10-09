@@ -1535,8 +1535,12 @@ issue's pod (every role container of it alike) and the image probe's.
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
-  Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
-  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an
+  Legion mounts, the image owns, or a tool runs from, or the agents' state home
+  (`/home/legion/.local/state`, under which every role's agent keeps its Oh My Pi state in a
+  directory of its own: the role's shim makes Oh My Pi's profile directory there before Oh My Pi
+  starts, so a mount there would have every role refuse to start at launch rather than here).
+  `legion start --check-config` runs the same check.
+  [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
   and how `pod` and `provider_keys` compose.

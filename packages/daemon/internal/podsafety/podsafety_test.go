@@ -2,6 +2,8 @@ package podsafety
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
@@ -193,7 +196,9 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 // EnsureStateHome makes the directory Oh My Pi resolves its state root to under XDG_STATE_HOME —
 // `omp/profiles/<profile>` for the profile OMP_PROFILE (else PI_PROFILE) names, `omp` for the
 // default profile — since Oh My Pi reads the variable only where that directory already exists;
-// with no state home it makes nothing, and it refuses a path it cannot make, naming it.
+// with no state home it makes nothing, it refuses a path it cannot make, naming it, and it refuses
+// an environment under which Oh My Pi would root its state elsewhere than the directory it made,
+// naming both.
 func TestEnsureStateHomeMakesOhMyPisStateRootUnderTheStateHome(t *testing.T) {
 	for name, tc := range map[string]struct {
 		environ func(stateHome string) []string
@@ -267,6 +272,14 @@ func TestEnsureStateHomeMakesOhMyPisStateRootUnderTheStateHome(t *testing.T) {
 			t.Errorf("a refused profile made %v", entries)
 		}
 	})
+	t.Run("an agent directory elsewhere turns the state home off", func(t *testing.T) {
+		home, stateHome := t.TempDir(), t.TempDir()
+		err := EnsureStateHome([]string{"XDG_STATE_HOME=" + stateHome, "HOME=" + home, "PI_CODING_AGENT_DIR=" + filepath.Join(home, "elsewhere")})
+		made, read := filepath.Join(stateHome, "omp"), filepath.Join(home, ".omp")
+		if err == nil || !strings.Contains(err.Error(), made) || !strings.Contains(err.Error(), read) {
+			t.Fatalf("EnsureStateHome = %v, want a refusal naming %s and %s", err, made, read)
+		}
+	})
 }
 
 // On the pinned Oh My Pi, a repository whose .omp/config.yml turns remote compaction on reads it
@@ -319,6 +332,65 @@ func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
 			}
 			if setting.Value != tc.want {
 				t.Errorf("compaction.remoteEndpoint reads %q, want %q", setting.Value, tc.want)
+			}
+		})
+	}
+}
+
+// The pinned Oh My Pi roots its state under the state home only where the shim made the profile's
+// directory under it: with EnsureStateHome applied, `omp models list` (which writes a log; `omp
+// config get` writes none) logs under `$XDG_STATE_HOME/omp/profiles/legion/logs` and the config
+// root's profile gets no `logs`; without it, the log lands under `$HOME/.omp/profiles/legion/logs`
+// and the state home stays empty. Either way ompdirs.StateRoot answers the root the log landed
+// under, so the port, the shim and the binary agree on the rule.
+func TestThePinnedOhMyPiRootsItsStateUnderTheStateHomeOnlyWhereTheShimMadeTheProfileDirectory(t *testing.T) {
+	omp := testbin.OMP(t)
+	for name, ensured := range map[string]bool{
+		"the shim made the profile directory": true,
+		"without the shim":                    false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			home := filepath.Join(dir, "home")
+			testbin.OMPHome(t, omp, home)
+			stateHome := filepath.Join(dir, "state", "tester")
+			if err := os.MkdirAll(stateHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			work := filepath.Join(dir, "work")
+			if err := os.Mkdir(work, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			env := []string{"HOME=" + home, "PATH=/usr/bin:/bin", "OMP_PROFILE=legion", "XDG_STATE_HOME=" + stateHome}
+			if ensured {
+				if err := EnsureStateHome(env); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command(omp, "models", "list")
+			cmd.Dir, cmd.Env = work, env
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("omp models list: %v\n%s", err, out)
+			}
+			underStateHome := filepath.Join(stateHome, "omp", "profiles", "legion")
+			underHome := filepath.Join(home, ".omp", "profiles", "legion")
+			want, other := underStateHome, underHome
+			if !ensured {
+				want, other = underHome, underStateHome
+			}
+			if logs, err := filepath.Glob(filepath.Join(want, "logs", "omp.*.log")); err != nil || len(logs) == 0 {
+				t.Errorf("logs under %s: %v, %v, want Oh My Pi's log there", want, logs, err)
+			}
+			if _, err := os.Stat(filepath.Join(other, "logs")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("stat %s/logs: %v, want none", other, err)
+			}
+			if !ensured {
+				if entries, err := os.ReadDir(stateHome); err != nil || len(entries) != 0 {
+					t.Errorf("the state home holds %v, %v, want nothing without the shim", entries, err)
+				}
+			}
+			if root, _, err := ompdirs.StateRoot(lookup(env), work); err != nil || root != want {
+				t.Errorf("ompdirs.StateRoot = %s, %v, want %s, where the log landed", root, err, want)
 			}
 		})
 	}
