@@ -153,7 +153,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -168,6 +168,10 @@ jobs:
       # that path is the devbox's.
       LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
+      # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
+      # pull a test could fail on.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

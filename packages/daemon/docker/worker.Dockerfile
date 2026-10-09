@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=mirror.gcr.io/docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
 # (called from release.yaml after `legion`, on every head of a pull request against main that touches a file
@@ -95,7 +95,7 @@ ARG PI_CODEGRAPH_VERSION=0.1.1
 
 # ------------------------------------------------------------------------------------------------
 # plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
-FROM oven/bun:${BUN_VERSION}-slim AS plugin
+FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy and pi_legion jobs run. python3/make/g++:
 # native devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
@@ -165,7 +165,7 @@ RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
 # daemon hands to `mise where` on a tmux host. mise itself is checked against MISE_SHA256 before
 # anything extracts or runs it, the same shape the toolchain stage below uses for uv, Node and the AWS
 # CLI; .github/actions/install-jj reads the same pair for the CI runner's own mise.
-FROM debian:bookworm-slim AS tools
+FROM mirror.gcr.io/library/debian:bookworm-slim AS tools
 ARG MISE_VERSION
 ARG MISE_SHA256
 ARG JJ_TOOL
@@ -206,7 +206,7 @@ RUN --mount=type=secret,id=github_token \
 # go.sum to dependency selection — static, so it runs on any base. LEGION_REVISION is the commit the
 # workflow builds; it is linked in so `legion version` names it, and the build refuses without it.
 # The same toolchain builds gopls (static too) for the runtime stage's /usr/local/bin/gopls.
-FROM golang:${GO_VERSION}-alpine AS go
+FROM mirror.gcr.io/library/golang:${GO_VERSION}-alpine AS go
 WORKDIR /src
 # The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
 # its own, before the module files, so neither a source change nor a dependency bump rebuilds it.
@@ -261,7 +261,7 @@ RUN test -n "$LEGION_REVISION" \
 # holds one, which the server prefers. go finds its GOROOT, /opt/go, by resolving the /usr/local/bin/go
 # symlink (cmd/go's findGOROOT tries the executable's own path, then its symlink target), so the image
 # sets no GOROOT; the toolchain step below checks it.
-FROM debian:trixie-slim AS toolchain
+FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
 ARG NODE_VERSION
@@ -416,7 +416,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
 # bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built or
 # fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
-FROM debian:trixie-slim
+FROM mirror.gcr.io/library/debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
