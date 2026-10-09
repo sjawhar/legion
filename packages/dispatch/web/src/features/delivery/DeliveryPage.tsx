@@ -8,13 +8,14 @@ import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
   borderStrong,
+  dragHandleBg,
   surfaceMutedBg,
-  surfaceMutedStrongBg,
   switchOffBg,
   switchOnBg,
   switchThumbBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
+  textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -162,7 +163,7 @@ function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
     <button
       aria-pressed={mode === value}
       className={`h-8 px-3 text-sm font-medium first:rounded-l-md last:rounded-r-md ${
-        mode === value ? `${surfaceMutedStrongBg} ${textPrimaryOnCanvas}` : textSecondaryOnCanvas
+        mode === value ? `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}` : textSecondaryOnCanvas
       }`}
       onClick={() => onChange(value)}
       type="button"
@@ -173,7 +174,7 @@ function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
   return (
     <fieldset aria-label="View" className={`mr-4 flex rounded-md border ${borderStrong}`}>
       {item("timeline", "Timeline")}
-      <span aria-hidden="true" className={`w-px ${surfaceMutedStrongBg}`} />
+      <span aria-hidden="true" className={`w-px ${dragHandleBg}`} />
       {item("list", "List")}
     </fieldset>
   );
@@ -270,7 +271,7 @@ export function DeliveryPage(): ReactNode {
     setNotConfigured(!notConfigured);
   }
   return (
-    <section className="flex h-full flex-col gap-3">
+    <section className="flex flex-col gap-3 xl:h-[calc(100dvh-3rem)]">
       <header className="flex flex-wrap items-center justify-between gap-2">
         <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
       </header>
@@ -344,17 +345,19 @@ export function DeliveryPage(): ReactNode {
                     onChange={(filters) => setState({ ...state, filters })}
                   />
                 </div>
-                <div className="flex min-w-0 flex-1 flex-col">
+                <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col">
                   {state.view.mode === "timeline" ? (
                     <Timeline
                       colorBy={state.view.colorBy}
                       colorScale={colorScale}
-                      onBrush={(window) =>
-                        setState({ ...state, brush: { start: window.from, end: window.to } })
-                      }
+                      components={data.components}
+                      filters={state.filters}
+                      lanes={state.view.lanes}
+                      onBrush={(brush) => setState({ ...state, brush })}
                       onSelect={setSelection}
                       prs={shownPRs}
                       runs={data.runs}
+                      window={activeWindow}
                     />
                   ) : (
                     <PRList
