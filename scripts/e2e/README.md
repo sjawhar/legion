@@ -363,7 +363,7 @@ to remove; the trap closes the fixture pull request if it is still open and dele
 From the proof's merge until that cleanup passes, the run holds the smoke `main`: an exclusive
 `flock` on `/tmp/legion-e2e-smoke-main.<owner>-<repo>.lock`, shared by every Stage 3 and Stage 4b
 run on the box (`hold_smoke_main` in `lib/workflow.sh`). Another run's merge inside that window
-adds the same `.legion/` paths and GitHub refuses it as unmergeable. A run that finds the lock
+adds the same paths and GitHub refuses it as unmergeable. A run that finds the lock
 held names the holder, says every minute how long it has waited, and fails after 45 minutes
 naming it. The lock is on an open descriptor, so a holder that dies or is killed frees it with no
 stale lock left behind.
