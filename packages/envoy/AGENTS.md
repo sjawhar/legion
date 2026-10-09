@@ -2286,9 +2286,13 @@ lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`
 pending, the request and, if granted, its grant are written with no record; a request needing
 approval writes the request row and a `credential_requests` record together, and an identical
 concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
-one. The enrollment lock, taken before any request or grant row, means a request racing the sweep
-or a revoke writes nothing on an enrollment that ended after `Create` first read it (`401
-PROOF_INVALID`, as for one that had ended before). A pending request leaves `pending` without a
+one. `Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
+`GET /v1/requests/{id}`, read from `credential_requests.approver`, the column
+`PendingForApprover` lists by, never re-evaluated from the current policy), so the asking session
+names whose list holds it; a request with no record answers null. The enrollment lock, taken
+before any request or grant row, means a request racing the sweep or a revoke writes nothing on an
+enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as for one that had ended
+before). A pending request leaves `pending` without a
 human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an
 enrollment's end): one statement moves the request rows and writes each one's audit row and its
 record's terminal event.

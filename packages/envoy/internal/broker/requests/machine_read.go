@@ -144,12 +144,16 @@ func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, reque
 	return nil
 }
 
+// Get reads one request by id. Its Approver is the approver column of its credential-request
+// record, the column PendingForApprover lists the record by, so the request names exactly the
+// person whose list shows it; a request with no record has none.
 func (m *Machine) Get(ctx context.Context, id string) (Request, error) {
 	var r Request
 	var enrollmentID string
-	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id,
+	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id, cr.approver,
 		(select g.id::text from grants g where g.request_id=r.id and g.revoked_at is null limit 1)
-		from requests r where r.id=$1`, id).Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.GrantID)
+		from requests r left join credential_requests cr on cr.id = r.record_id where r.id=$1`, id).
+		Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.Approver, &r.GrantID)
 	if err != nil {
 		return Request{}, err
 	}
