@@ -1,23 +1,39 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { DeliverySettings, DeliveryTimelineResponse } from "../../api/types";
+import type { DeliveryPR, DeliverySettings, DeliveryTimelineResponse } from "../../api/types";
 import { DeliveryPage } from "./DeliveryPage";
 
 // The list view, so the page renders without the timeline chart, whose library needs a canvas.
 const DELIVERY_URL =
   "/delivery?mode=list&from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
 
+const emptyCounts = {
+  repo: {},
+  parent_agent: {},
+  session: {},
+  issue: {},
+  priority: {},
+  component: {},
+  author: {},
+  rework: {},
+  deployed: {},
+};
+
 const emptyTimeline: DeliveryTimelineResponse = {
+  color_counts: { repo: {}, author: {}, priority: {}, component: {}, parent_agent: {} },
+  components: {},
+  facet_counts: emptyCounts,
   freshness: {
     last_error: null,
     last_event_at: null,
     last_reconcile_at: null,
     unfetchable_count: 0,
   },
+  issue_titles: {},
   prs: [],
   runs: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
@@ -66,7 +82,7 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     expect(
       await screen.findByRole("heading", { name: "Set up the delivery timeline" })
     ).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     // The timeline's DELIVERY_NOT_CONFIGURED already says no record is stored: the form's fields
     // are there at once, empty, with no read of the record and no loading line.
@@ -90,7 +106,7 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     });
     fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
 
-    expect(await screen.findByText("No PRs match the current filters.")).toBeDefined();
+    expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
     expect(putDeliverySettings).toHaveBeenCalledTimes(1);
     expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
@@ -125,7 +141,7 @@ test("a refetch of the unconfigured timeline, as tab focus starts, keeps the set
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
       "acme/widgets"
     );
-    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
     expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
 
     refetch.reject(notConfigured);
@@ -134,7 +150,7 @@ test("a refetch of the unconfigured timeline, as tab focus starts, keeps the set
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
       "acme/widgets"
     );
-    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();
@@ -169,8 +185,8 @@ test("a configured timeline renders with no setup form", async () => {
   try {
     renderPage();
 
-    expect(await screen.findByText("No PRs match the current filters.")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Show timeline" })).toBeDefined();
+    expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
     await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(1));
     expect(getDeliverySettings).not.toHaveBeenCalled();
@@ -192,6 +208,87 @@ test("any other timeline failure keeps the page and offers Retry, not the setup 
     expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
     expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+const listedPR: DeliveryPR = {
+  additions: 12,
+  author: "octocat",
+  components: ["ACME/api"],
+  created_at: "2024-06-01T00:00:00Z",
+  deletions: 3,
+  deploy_run: null,
+  deployed_at: null,
+  deployed_status: "waiting",
+  first_commit_at: null,
+  id: "acme/widgets#1",
+  issue: "ACME-1",
+  issue_title: "Ship widgets",
+  merged_at: "2024-06-01T01:00:00Z",
+  number: 1,
+  parent_agent: null,
+  partial: false,
+  priority: "P0",
+  repo: "acme/widgets",
+  rework: false,
+  sessions: [],
+  title: "feat: a waiting widget",
+  unfetchable_reason: null,
+  url: "https://github.com/acme/widgets/pull/1",
+};
+
+test("the facet column offers each value with its count, sends a pick to the server and keeps the view in the URL", async () => {
+  const timeline: DeliveryTimelineResponse = {
+    ...emptyTimeline,
+    components: { "ACME/api": { parent: null, title: "Public API" } },
+    facet_counts: {
+      ...emptyCounts,
+      component: { "ACME/api": 1 },
+      issue: { "ACME-1": 1 },
+      priority: { P0: 1, __no_issue__: 3 },
+      repo: { "acme/other": 5, "acme/widgets": 1 },
+    },
+    issue_titles: { "ACME-1": "Ship widgets" },
+    prs: [listedPR],
+  };
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(timeline);
+
+  try {
+    renderPage();
+
+    expect(await screen.findByText("1 PRs in current filter/window")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Repository" }).textContent).toBe("Any repository");
+    fireEvent.click(screen.getByRole("button", { name: "Priority" }));
+    const priorityOptions = within(screen.getByRole("listbox", { name: "Priority options" }));
+    const options = priorityOptions.getAllByRole("option").map((option) => option.textContent);
+    expect(options).toEqual(["No issue3", "P01"]);
+    fireEvent.click(priorityOptions.getByRole("option", { name: /^P0/ }));
+
+    await waitFor(() =>
+      expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+        expect.objectContaining({ priority: ["P0"], repo: [] })
+      )
+    );
+    expect(screen.getByRole("button", { name: "Priority" }).textContent).toBe("1 selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dispatch issue" }));
+    expect(screen.getByRole("option", { name: /ACME-1 — Ship widgets/ })).toBeDefined();
+
+    const colorBy = screen.getByLabelText("Color merges by") as HTMLSelectElement;
+    expect([...colorBy.options].map((option) => option.textContent)).toEqual([
+      "Repository",
+      "Author",
+      "Priority",
+      "Component",
+      "Parent agent",
+    ]);
+    fireEvent.change(colorBy, { target: { value: "component" } });
+    expect(colorBy.value).toBe("component");
+    // The list's dot follows the colour-by facet, and the row reads its issue with its priority.
+    expect(screen.getByText("ACME-1 · P0")).toBeDefined();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();

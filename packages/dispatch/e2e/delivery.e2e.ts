@@ -106,16 +106,16 @@ test("the delivery timeline shows seeded merges and deploys, filters by facet, a
   expect(chartBox?.height).toBeGreaterThan(0);
 
   // Switch to the list view, where both seeded PRs show as rows.
-  await page.getByRole("button", { name: "Show list" }).click();
+  await page.getByRole("button", { name: "List", exact: true }).click();
   await expect(page.getByText("feat: a shipped widget")).toBeVisible();
   await expect(page.getByText("feat: a waiting widget")).toBeVisible();
 
   // The Repository facet narrows the list server-side; acme/widgets is the only repository
   // seeded, so selecting it is a no-op on the result but proves the picker and the facet
-  // round-trip to the server run. MultiSelect's trigger is a button named for the facet (plus an
-  // optional " · N" selection count); its popover exposes each option with role "option".
-  await page.getByRole("button", { name: /^Repository( · \d+)?$/ }).click();
-  await page.getByRole("option", { exact: true, name: "acme/widgets" }).click();
+  // round-trip to the server run. The trigger reads "Any repository" until a pick; each option
+  // carries its count.
+  await page.getByRole("button", { name: "Repository", exact: true }).click();
+  await page.getByRole("option", { name: "acme/widgets 2" }).click();
   await page.keyboard.press("Escape");
   await expect(page.getByText("feat: a shipped widget")).toBeVisible();
   await expect(page.getByText("feat: a waiting widget")).toBeVisible();
@@ -240,8 +240,8 @@ test("an unconfigured Delivery page sets itself up from its form and then shows 
       path: testInfo.outputPath("delivery-after-save.png"),
       fullPage: true,
     });
-    await page.getByRole("button", { name: "Show list" }).click();
-    await expect(page.getByText("No PRs match the current filters.")).toBeVisible();
+    await page.getByRole("button", { name: "List", exact: true }).click();
+    await expect(page.getByText("No PRs in the current filter/window.")).toBeVisible();
     expect(
       await sql(
         `SELECT deploy_repo || ' ' || array_to_string(population_authors, ',') || ' ' || array_to_string(excluded_repos, ',') FROM delivery_settings`
