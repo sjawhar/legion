@@ -715,6 +715,20 @@ export const switchThumbBg = "bg-white";
  * selects a window, fixed in both schemes and purely decorative. */
 export const brushBand = "border-sky-400/70 bg-sky-400/15";
 
+/** The delivery charts' bar fills: neutral where no target exists, met/missed against one, the
+ *  faint p90 behind a median, the stub drawn on a day with nothing to measure, and the dashed
+ *  target line. One token per role so the panel and the Pipeline page share one scale. */
+export const chartBar = {
+  neutral: "fill-sky-500 dark:fill-sky-400",
+  met: "fill-emerald-500 dark:fill-emerald-400",
+  missed: "fill-rose-500 dark:fill-rose-400",
+  neutralFaint: "fill-sky-200 dark:fill-sky-900",
+  metFaint: "fill-emerald-200 dark:fill-emerald-900",
+  missedFaint: "fill-rose-200 dark:fill-rose-900",
+  empty: "fill-slate-300 dark:fill-slate-600",
+  targetLine: "stroke-slate-500 dark:stroke-slate-300",
+} as const;
+
 // ---------------------------------------------------------------------------------------------
 // Sizing-agnostic composites the components import directly
 // ---------------------------------------------------------------------------------------------
