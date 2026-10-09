@@ -109,7 +109,7 @@ related_issues:
 Commit the documentation on the existing issue branch. Do not create a replacement branch or
 bookmark. Then commit the removal of the issue's handoffs as the one final commit, touching
 nothing else, when the head still holds them:
-`cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/$LEGION_ISSUE" ]; then rm -r -- ".legion/$LEGION_ISSUE" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/$LEGION_ISSUE/ before READY" ".legion/$LEGION_ISSUE"; fi`.
+`cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before READY" ".legion/${LEGION_ISSUE:?}"; fi`.
 A retro that commits no learning makes that commit alone; a retro after an earlier removal with no
 handoff written since has nothing to remove and makes none (a split of an absent path would leave
 an empty commit).
@@ -199,8 +199,9 @@ Before returning, verify all of the following:
   paths at the retro head, written back before that head's push, and each line that affirms work
   affirms work you did; or the instructions derive nothing.
 - Both proofs were read, and any gap in either is recorded as a learning.
-- Retro wrote no handoff, and its last commit, pushed, removed `.legion/<issue>/` and nothing else:
-  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r <head> "root:.legion/$LEGION_ISSUE"`
+- Retro wrote no handoff, and when the head held `.legion/<issue>/`, its last commit, pushed,
+  removed it and nothing else:
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r <head> "root:.legion/${LEGION_ISSUE:?}"`
   prints nothing (`root:` names the path from the repository root, so a run from another directory
   cannot print nothing by failing).
 - The fresh-eyes analysis was considered alongside the implementer's context.
