@@ -3,12 +3,14 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const copiedAsksDocument = "Context\n\n" +
@@ -72,13 +74,34 @@ func requireCopiedStates(t *testing.T, service *Service, document string, want .
 	}
 }
 
+// documentAddress is the address settlement names a copy's source document by (refs.ArtifactRef).
+func documentAddress(t *testing.T, service *Service, document string) string {
+	t.Helper()
+	var issueKey *string
+	var project, slug, kind string
+	var primary bool
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select issue_key, coalesce(project_key, ''), slug, kind, is_primary from artifacts where id = $1
+	`, document).Scan(&issueKey, &project, &slug, &kind, &primary); err != nil {
+		t.Fatalf("read the source document's address: %v", err)
+	}
+	return refs.ArtifactRef(issueKey, project, nil, slug, kind, primary)
+}
+
+// copiedFrom is the attributes a copy carries naming source, the ask copied from, on document.
+func copiedFrom(t *testing.T, service *Service, source, document string) string {
+	t.Helper()
+	return `copied_from="` + source + `" copied_from_document="` + documentAddress(t, service, document) + `"`
+}
+
 // copiedSourceStates are the openers of a copy of copiedAsksDocument showing the states
-// copiedAskSource leaves its sources in, each naming its source ask.
-func copiedSourceStates(asks map[string]string) []string {
+// copiedAskSource leaves its sources on original in, each naming its source ask and document.
+func copiedSourceStates(t *testing.T, service *Service, original string, asks map[string]string) []string {
+	t.Helper()
 	return []string{
-		`:::ask{#copy-answered urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-08T12:00:00Z" selected="[&#x22;Yes&#x22;]" copied_from="` + asks["copy-answered"] + `"}`,
-		`:::ask{#copy-resolved urgency="med" multiple="false" state="resolved" copied_from="` + asks["copy-resolved"] + `"}`,
-		`:::ask{#copy-open urgency="med" multiple="false" state="open" copied_from="` + asks["copy-open"] + `"}`,
+		`:::ask{#copy-answered urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-08T12:00:00Z" selected="[&#x22;Yes&#x22;]" ` + copiedFrom(t, service, asks["copy-answered"], original) + `}`,
+		`:::ask{#copy-resolved urgency="med" multiple="false" state="resolved" ` + copiedFrom(t, service, asks["copy-resolved"], original) + `}`,
+		`:::ask{#copy-open urgency="med" multiple="false" state="open" ` + copiedFrom(t, service, asks["copy-open"], original) + `}`,
 	}
 }
 
@@ -95,7 +118,7 @@ func TestADocumentCopiedOnItsIssueShowsItsSourcesAsksAndOpensNone(t *testing.T) 
 	if count := asksOn(t, service, copied); count != 0 {
 		t.Fatalf("the copy opened %d asks, want none", count)
 	}
-	requireCopiedStates(t, service, copied, copiedSourceStates(asks)...)
+	requireCopiedStates(t, service, copied, copiedSourceStates(t, service, original, asks)...)
 
 	region := "us-east-1"
 	answer, _ := json.Marshal(model.AskAnswer{User: "bob", Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)})
@@ -108,7 +131,7 @@ func TestADocumentCopiedOnItsIssueShowsItsSourcesAsksAndOpensNone(t *testing.T) 
 	})
 	settleCurrentGeneration(t, service, copied)
 	requireCopiedStates(t, service, copied,
-		`:::ask{#copy-open urgency="med" multiple="false" state="answered" answered_by="bob" answered_at="2026-10-09T09:00:00Z" selected="[]" answer="us-east-1" copied_from="`+asks["copy-open"]+`"}`)
+		`:::ask{#copy-open urgency="med" multiple="false" state="answered" answered_by="bob" answered_at="2026-10-09T09:00:00Z" selected="[]" answer="us-east-1" `+copiedFrom(t, service, asks["copy-open"], original)+`}`)
 	if count := asksOn(t, service, copied); count != 0 {
 		t.Fatalf("the copy opened %d asks after its source was answered, want none", count)
 	}
@@ -207,7 +230,7 @@ func TestCopiedAskSourcesAreTheDocumentOwnersOwn(t *testing.T) {
 	if count := asksOn(t, service, copied); count != 0 {
 		t.Fatalf("the project copy opened %d asks, want none", count)
 	}
-	requireCopiedStates(t, service, copied, copiedSourceStates(asks)...)
+	requireCopiedStates(t, service, copied, copiedSourceStates(t, service, original, asks)...)
 
 	elsewhere := createIssueDocument(t, service.store, 2, "# Elsewhere")
 	seedServiceText(t, service, elsewhere, copiedAsksDocument)
@@ -285,7 +308,7 @@ func TestACopyOpensItsOwnAskWhenItsOpenSourceLeavesItsDocument(t *testing.T) {
 	copied := createIssueDocument(t, service.store, 1, "# Copy")
 	seedServiceText(t, service, copied, copiedAsksDocument)
 	settleCurrentGeneration(t, service, copied)
-	requireCopiedStates(t, service, copied, copiedSourceStates(asks)...)
+	requireCopiedStates(t, service, copied, copiedSourceStates(t, service, original, asks)...)
 	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
 		tree.Children = tree.Children[:3]
 		return tree
@@ -295,7 +318,7 @@ func TestACopyOpensItsOwnAskWhenItsOpenSourceLeavesItsDocument(t *testing.T) {
 	if count := asksOn(t, service, copied); count != 1 {
 		t.Fatalf("the copy holds %d asks, want only the open block's own", count)
 	}
-	requireCopiedStates(t, service, copied, copiedSourceStates(asks)[:2]...)
+	requireCopiedStates(t, service, copied, copiedSourceStates(t, service, original, asks)[:2]...)
 }
 
 // Of two asks under one block id asking the same thing, a copy shows the earlier asked: here an
@@ -332,7 +355,7 @@ func TestACopyOfTwoMatchingAsksShowsTheEarlierAsked(t *testing.T) {
 		t.Fatalf("the copy opened %d asks, want none", count)
 	}
 	requireCopiedStates(t, service, copied,
-		`:::ask{#tie urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-08T12:00:00Z" selected="[]" answer="eu-west-1" copied_from="`+earlier+`"}`)
+		`:::ask{#tie urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-08T12:00:00Z" selected="[]" answer="eu-west-1" `+copiedFrom(t, service, earlier, original)+`}`)
 }
 
 // A copy taken before its source was reworded asks what the source asked then, which the source's
@@ -353,5 +376,126 @@ func TestACopyOfASourcesEarlierWordingShowsItsStateAndOpensNoAsk(t *testing.T) {
 	if count := asksOn(t, service, copied); count != 0 {
 		t.Fatalf("the copy of the earlier wording opened %d asks, want none", count)
 	}
-	requireCopiedStates(t, service, copied, copiedSourceStates(asks)...)
+	requireCopiedStates(t, service, copied, copiedSourceStates(t, service, original, asks)...)
+}
+
+// pendingSettlements counts the documents that owe a settlement no settlement has committed.
+func pendingSettlements(t *testing.T, service *Service) int {
+	t.Helper()
+	var count int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_settlements_pending`).Scan(&count); err != nil {
+		t.Fatalf("count pending settlements: %v", err)
+	}
+	return count
+}
+
+// Three copies of one open ask whose block then leaves its document share one ask: retracting the
+// source settles every copy, the first to settle opens the block's own ask, and the other two are
+// copies of that ask and name it, never the retracted source, so the question waits in one place in
+// one person's Inbox. Which copy settles first is not fixed, so the test names none.
+func TestThreeCopiesOfARetractedAskShareTheOneAskTheFirstOpens(t *testing.T) {
+	service, original := newTestService(t)
+	shared := ":::ask{#shared urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	seedServiceText(t, service, original, "Context\n\n"+shared)
+	settleCurrentGeneration(t, service, original)
+	var source string
+	if err := service.store.Pool.QueryRow(context.Background(), `select id::text from asks where block_artifact_id = $1`, original).Scan(&source); err != nil {
+		t.Fatalf("read the source ask: %v", err)
+	}
+	copies := make([]string, 3)
+	for index := range copies {
+		copies[index] = createIssueDocument(t, service.store, 1, "# Copy")
+		seedServiceText(t, service, copies[index], shared)
+		settleCurrentGeneration(t, service, copies[index])
+		requireCopiedStates(t, service, copies[index], `copied_from="`+source+`"`)
+	}
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = tree.Children[:1]
+		return tree
+	})
+	settleCurrentGeneration(t, service, original)
+
+	var open []string
+	var shown map[string]string
+	pending := -1
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		open = openAsksUnder(t, service, "shared")
+		shown = map[string]string{}
+		for _, copy := range copies {
+			text, err := service.Text(context.Background(), copy)
+			if err != nil {
+				t.Fatalf("read a copy: %v", err)
+			}
+			shown[copy] = text
+		}
+		pending = pendingSettlements(t, service)
+		if len(open) == 1 && pending == 0 && sharesOneAsk(t, service, copies, open[0], shown) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("open asks under shared = %v, pending settlements = %d, want one open ask on a copy that the other two name, none pending; copies:\n%v", open, pending, shown)
+}
+
+// sharesOneAsk reports whether opener, a copy holding the block's one open ask, is one of copies
+// and every other copy names that ask in copied_from and never the retracted source.
+func sharesOneAsk(t *testing.T, service *Service, copies []string, opener string, shown map[string]string) bool {
+	t.Helper()
+	if !slices.Contains(copies, opener) {
+		return false
+	}
+	var ask string
+	if err := service.store.Pool.QueryRow(context.Background(), `select id::text from asks where block_artifact_id = $1 and block_id = 'shared'`, opener).Scan(&ask); err != nil {
+		t.Fatalf("read the copy's own ask: %v", err)
+	}
+	for _, copy := range copies {
+		if copy == opener {
+			if strings.Contains(shown[copy], "copied_from") {
+				return false
+			}
+			continue
+		}
+		if !strings.Contains(shown[copy], `copied_from="`+ask+`"`) || asksOn(t, service, copy) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// The earliest asked match is the source whichever wording it matched on: ask A asks a question
+// first and is reworded twice, ask B is asked later and reworded into A's first wording, and a copy
+// asking that wording is a copy of A, though only B asks it now.
+func TestACopyNamesTheEarliestAskedMatchThoughALaterAskAsksItsWordingNow(t *testing.T) {
+	service, original := newTestService(t)
+	service.settle = time.Hour
+	block := func(question string) string {
+		return ":::ask{#tie urgency=\"med\" multiple=\"false\"}\n" + question + "\n:::\n"
+	}
+	seedServiceText(t, service, original, block("Question X?"))
+	settleCurrentGeneration(t, service, original)
+	editLiveTree(t, service, original, replaceRun("Question X?", "Question Y?"))
+	settleCurrentGeneration(t, service, original)
+	editLiveTree(t, service, original, replaceRun("Question Y?", "Question W?"))
+	settleCurrentGeneration(t, service, original)
+	var earlier string
+	if err := service.store.Pool.QueryRow(context.Background(), `select id::text from asks where block_artifact_id = $1`, original).Scan(&earlier); err != nil {
+		t.Fatalf("read the earlier ask: %v", err)
+	}
+	later := createIssueDocument(t, service.store, 1, "# Later")
+	seedServiceText(t, service, later, block("Question Z?"))
+	settleCurrentGeneration(t, service, later)
+	editLiveTree(t, service, later, replaceRun("Question Z?", "Question X?"))
+	settleCurrentGeneration(t, service, later)
+	var question string
+	if err := service.store.Pool.QueryRow(context.Background(), `select question from asks where block_artifact_id = $1 and state = 'open'`, later).Scan(&question); err != nil || question != "Question X?" {
+		t.Fatalf("the later document's own ask asks %q (%v), want A's first wording", question, err)
+	}
+	copied := createIssueDocument(t, service.store, 1, "# Copy")
+	seedServiceText(t, service, copied, block("Question X?"))
+	settleCurrentGeneration(t, service, copied)
+	if count := asksOn(t, service, copied); count != 0 {
+		t.Fatalf("the copy opened %d asks, want none", count)
+	}
+	requireCopiedStates(t, service, copied, `:::ask{#tie urgency="med" multiple="false" state="open" `+copiedFrom(t, service, earlier, original)+`}`)
 }

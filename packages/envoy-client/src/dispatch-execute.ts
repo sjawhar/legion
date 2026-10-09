@@ -1815,49 +1815,45 @@ async function refuseOpenDecisionBlocks(
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
   // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
-  const stillOpen = (named: string, state: string, where: string): string => {
+  const stillOpen = (named: string, state: string): string => {
     const next =
       state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state}${where} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`;
+    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`;
   };
-  const open = await Promise.all(
-    blocks.map(async (block): Promise<string[]> => {
-      const ask = asks.get(block.id);
-      // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
-      // quotes the opener (in code, say) can add an open block but never hide one; a block none of
-      // whose lines carries a state is open.
-      const openers = lines.filter(
-        (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
-      );
-      const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
-      const named =
-        ask === undefined
-          ? `block ${block.id}`
-          : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-      if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
-      if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
-      if (ask !== undefined)
-        return ask.state === "open" ? [named] : [stillOpen(named, ask.state, "")];
-      // A block copied from another document's ask opens none: settlement names that ask in
-      // `copied_from` and shows its state, and the source is where it is answered.
-      const sourceId = openers
-        .map((line) => /\bcopied_from="([^"]+)"/.exec(line)?.[1])
-        .find((id) => id !== undefined);
-      if (sourceId === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
-      const source = (await client.getAsk(sourceId)).ask;
-      const slug = source.block_artifact?.slug;
-      const ref =
-        resolved.issue !== undefined
-          ? `dispatch://${resolved.issue.key}/ask/${source.id}`
-          : slug === undefined
-            ? source.id
-            : `dispatch://${artifact.project}/artifact/${slug}/ask/${source.id}`;
-      const where = slug === undefined ? "the document it was copied from" : slug;
-      const copy = `${named}, a copy of ask ${ref}`;
-      if (source.state === "open") return [`${copy}, which is open on ${where}: answer it there`];
-      return [stillOpen(copy, source.state, ` on ${where}`)];
-    })
-  ).then((judged) => judged.flat());
+  const open = blocks.flatMap((block): string[] => {
+    const ask = asks.get(block.id);
+    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
+    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
+    // whose lines carries a state is open.
+    const openers = lines.filter(
+      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+    );
+    const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+    const named =
+      ask === undefined
+        ? `block ${block.id}`
+        : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+    if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
+    if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
+    if (ask !== undefined) return ask.state === "open" ? [named] : [stillOpen(named, ask.state)];
+    // A block copied from another document's ask opens none: settlement names that ask in
+    // `copied_from`, its document in `copied_from_document`, and writes its state into the block,
+    // which this version shows open, so the source is where it is answered.
+    const attribute = (name: string): string | undefined =>
+      openers
+        .map((line) => new RegExp(`\\b${name}="([^"]+)"`).exec(line)?.[1])
+        .find((value) => value !== undefined);
+    const sourceId = attribute("copied_from");
+    const document = attribute("copied_from_document");
+    if (sourceId === undefined || document === undefined) {
+      return [`${named}, whose ask Dispatch has not opened yet`];
+    }
+    const ref =
+      resolved.issue !== undefined
+        ? `dispatch://${resolved.issue.key}/ask/${sourceId}`
+        : `${document}/ask/${sourceId}`;
+    return [`${named}, a copy of ask ${ref}, which is open on ${document}: answer it there`];
+  });
   if (open.length === 0) return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(

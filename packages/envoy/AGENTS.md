@@ -1499,21 +1499,29 @@ block asks - its question, options, `multiple` and urgency, which a copy carries
 blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
 `block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
 such as `decision` can name unrelated questions on two documents. Where several asks match, the
-earliest asked is the source, so two unrelated asks of one owner under one id asking the same
-thing are one question to a copy. A copy opens no ask: settlement writes its source's state and
-answer into the block and names the source in the server-owned `copied_from`, which an upload
-cannot set (`asUploaded`). The block is read-only there, since the copy has no ask row an answer or
-resolve route could reach and settlement only reads the source's; `dispatch_request_approval`'s
-refusal and the dashboard's decision card name the source from `copied_from`. A copy shows its
+earliest asked is the source, whether it matched on its current wording or an earlier one, so two
+unrelated asks of one owner under one id asking the same thing are one question to a copy. A copy
+opens no ask: settlement writes its source's state and answer into the block, names the source in
+the server-owned `copied_from` and its document's `dispatch://` address (`refs.ArtifactRef`) in
+`copied_from_document`, neither of which an upload can set (`asUploaded`). The block is read-only
+there, since the copy has no ask row an answer or resolve route could reach and settlement only
+reads the source's; `dispatch_request_approval`'s refusal and the dashboard's decision card name
+the source, its document and its state from those attributes, reading no ask. A copy shows its
 source as of its own last settlement, and settles when its own content changes, when a restart
-resumes a settlement it owed, or when settlement retracts its source: a retraction marks owed, and
-arms, the settlement of every other document of the owner whose latest version holds the block
-with no ask of its own under that id (`owedCopiesOfRetracted`), whose next settlement opens the
-block's own ask, so a block pasted elsewhere and then cut, in either order, is open in one place.
-An answer to the source reaches a copy only at the copy's next settlement. A copy whose text is
-changed and an id no ask of the owner indexes open an ask as any new block does (LEGION-651). A
-project document's lookups read `artifacts_project_documents` (migration 0083), an issue
-document's `artifacts_issue_key`; `copied_asks_plan_test.go` holds both.
+resumes a settlement it owed, or when settlement retracts its source: a retraction marks owed (one
+`doc_settlements_pending` upsert for every copy), and arms, the settlement of every other document
+of the owner whose latest version holds the block with no ask of its own under that id
+(`owedCopiesOfRetracted`). The first of those to settle opens the block's own ask, credited to the
+author who wrote the block into it, whom the room keeps owed while the block is a copy; every other
+copy then matches that ask and names it, so copies of one owner share one ask once their source is
+retracted and the question waits in one place, and a block pasted elsewhere and then cut, in either
+order, is open in one place. An answer to the source reaches a copy only at the copy's next
+settlement. A copy whose text is changed and an id no ask of the owner indexes open an ask as any
+new block does (LEGION-651). A project document's lookups read `artifacts_project_documents`
+(migration 0084), an issue document's `artifacts_issue_key`, and the owed copies' latest versions
+`artifact_versions`' unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding
+the owed copies reads, with `LIKE`, the latest markdown of every other document of the owner, so a
+retraction costs in proportion to the owner's markdown bytes.
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
@@ -1568,7 +1576,8 @@ rowspan, or rows the budget ran out partway through. Where a table outside the a
 it first, the check can write span cells the document did not, and the ask is refused unless
 padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
-canonical markdown, and a copy also `copied_from`, the ask it was copied from.
+canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
+from and that ask's document.
 
 ## Critical conventions
 

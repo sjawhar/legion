@@ -432,7 +432,7 @@ Migration `0082_answers_by_person` adds two partial indexes for `GET /api/v1/me/
 the answer's user, and one on `comments` for user replies on asks. Building them takes `SHARE` on
 `events` and `comments`; its census answers `0` because it refuses and rewrites no row.
 
-Migration `0083_artifacts_project_documents` adds the partial index
+Migration `0084_artifacts_project_documents` adds the partial index
 `artifacts_project_documents`, on `artifacts (project_key)` where `issue_key` and `session_id` are
 null: a project's unlinked documents. Settlement of a project document holding an ask block no ask
 of its own indexes reads its project's other documents through it, for the ask the block may be a

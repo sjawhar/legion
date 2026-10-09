@@ -3967,15 +3967,12 @@ describe("executeDispatchTool", () => {
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
-    const requestOver = async (
-      blocks: string[],
-      version4: string[],
-      asks: unknown[],
-      sources: Record<string, unknown> = {}
-    ) => {
+    const requestOver = async (blocks: string[], version4: string[], asks: unknown[]) => {
       const posts: string[] = [];
+      const requests: string[] = [];
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const target = new URL(String(url));
+        requests.push(target.pathname);
         if (target.pathname === "/api/v1/issues/DSP-42") {
           return response({
             key: "DSP-42",
@@ -4003,10 +4000,6 @@ describe("executeDispatchTool", () => {
         }
         // An issue's document lists its asks under the issue: the artifact route refuses it.
         if (target.pathname === "/api/v1/issues/DSP-42/asks") return response(asks);
-        // The ask a copied block names in copied_from, read by its id.
-        const sourceRead = /^\/api\/v1\/asks\/([^/]+)$/.exec(target.pathname);
-        const source = sourceRead === null ? undefined : sources[sourceRead[1] ?? ""];
-        if (source !== undefined) return response({ ask: source, replies: [] });
         if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
           posts.push(target.pathname);
           return response(
@@ -4030,7 +4023,7 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       });
-      return { outcome, posts };
+      return { outcome, posts, requests };
     };
     const blockAsk = (block: string, state: string) => ({
       id: `ask-${block}`,
@@ -4072,16 +4065,9 @@ describe("executeDispatchTool", () => {
       const { outcome, posts } = await requestOver(
         ["b-1"],
         [
-          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source"}\nQuestion of b-1?\n:::',
+          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source" copied_from_document="dispatch://DSP-42/artifact/plan"}\nQuestion of b-1?\n:::',
         ],
-        [],
-        {
-          "ask-source": {
-            ...blockAsk("b-1", "open"),
-            id: "ask-source",
-            block_artifact: { id: "artifact-1", slug: "plan", primary: false },
-          },
-        }
+        []
       );
 
       const refusal = await outcome.then(
@@ -4089,35 +4075,30 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n")[1]).toBe(
-        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on plan: answer it there"
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on dispatch://DSP-42/artifact/plan: answer it there"
       );
       expect(refusal).not.toContain("has not opened yet");
       expect(posts).toEqual([]);
     });
 
-    test("a copied block whose source is answered since the copy settled says to fold the answer in", async () => {
-      const { outcome, posts } = await requestOver(
-        ["b-1"],
-        [
-          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source"}\nQuestion of b-1?\n:::',
-        ],
-        [],
-        {
-          "ask-source": {
-            ...blockAsk("b-1", "answered"),
-            id: "ask-source",
-            block_artifact: { id: "artifact-1", slug: "plan", primary: false },
-          },
-        }
+    test("three copied blocks are named from their attributes without reading one ask", async () => {
+      const copy = (block: string, state: string) =>
+        `:::ask{#${block} urgency="med" multiple="false" state="${state}" copied_from="ask-${block}-source" copied_from_document="dispatch://DSP-42/spec"}\nQuestion of ${block}?\n:::`;
+      const { outcome, posts, requests } = await requestOver(
+        ["b-1", "b-2", "b-3"],
+        [copy("b-1", "open"), copy("b-2", "answered"), copy("b-3", "open")],
+        []
       );
 
       const refusal = await outcome.then(
         () => "",
         (error: Error) => error.message
       );
-      expect(refusal.split("\n")[1]).toBe(
-        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, answered on plan but still open in version 4: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it"
-      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-b-1-source, which is open on dispatch://DSP-42/spec: answer it there",
+        "- block b-3, a copy of ask dispatch://DSP-42/ask/ask-b-3-source, which is open on dispatch://DSP-42/spec: answer it there",
+      ]);
+      expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
       expect(posts).toEqual([]);
     });
 
@@ -4172,22 +4153,11 @@ describe("executeDispatchTool", () => {
           return response({
             number: 2,
             markdown:
-              ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-plan"}\nQuestion of b-1?\n:::',
+              ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-plan" copied_from_document="dispatch://CORE/artifact/plan"}\nQuestion of b-1?\n:::',
           });
         }
         // A project document's own asks: the copy has none.
         if (target.pathname === "/api/v1/artifacts/artifact-notes/asks") return response([]);
-        if (target.pathname === "/api/v1/asks/ask-plan") {
-          return response({
-            ask: {
-              ...blockAsk("b-1", "open"),
-              id: "ask-plan",
-              issue_key: null,
-              block_artifact: { id: "artifact-plan", slug: "plan", primary: false },
-            },
-            replies: [],
-          });
-        }
         if (target.pathname === "/api/v1/artifacts/artifact-notes/approval-requests") {
           posts.push(target.pathname);
           return response({}, 201);
@@ -4208,7 +4178,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n")[1]).toBe(
-        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on plan: answer it there"
+        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on dispatch://CORE/artifact/plan: answer it there"
       );
       expect(posts).toEqual([]);
     });

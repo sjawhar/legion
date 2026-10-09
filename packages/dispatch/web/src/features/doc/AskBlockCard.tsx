@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
@@ -18,8 +17,7 @@ import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { askQuery } from "../refs/reference-target";
-import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
+import { buildReferencePath, itemRoute, parseDispatchReference, shortForm } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
 
@@ -114,7 +112,11 @@ export function AskBlockCard({
               </span>
             ) : null}
             {ask === undefined && !malformed && facts.copiedFrom !== undefined ? (
-              <CopiedFromLink askId={facts.copiedFrom} blockId={facts.blockId} owner={owner} />
+              <CopiedFromLink
+                blockId={facts.blockId}
+                copied={facts.copiedFrom}
+                state={facts.state}
+              />
             ) : null}
           </header>
           {malformed ? (
@@ -146,43 +148,40 @@ export function AskBlockCard({
   );
 }
 
-/** Where a copied block is answered: the document holding the ask settlement names in the
- * block's `copied_from`, linked at that block. An issue's documents link under the issue; a
- * project document's source is another document of the same project. */
+/** Where a copied block is answered: the document settlement names in the block's
+ * `copied_from_document`, linked at the block, and the source's state there, which settlement
+ * wrote into the block. Both come from the block, so the card reads no ask to show them. */
 function CopiedFromLink({
-  askId,
   blockId,
-  owner,
+  copied,
+  state,
 }: {
-  askId: string;
   blockId: string;
-  owner: { project: string; slug: string } | undefined;
+  copied: NonNullable<AskBlockFacts["copiedFrom"]>;
+  state: string;
 }): ReactNode {
-  const source = useQuery(askQuery(askId)).data?.ask;
-  const artifact = source?.block_artifact;
-  let path: string | undefined;
-  if (source !== undefined && artifact !== undefined) {
-    if (source.issue_key !== null) {
-      path = artifact.primary
-        ? buildIssuePath({ key: source.issue_key, kind: "spec" })
-        : buildIssuePath({ key: source.issue_key, kind: "artifact", slug: artifact.slug });
-    } else if (owner !== undefined) {
-      path = buildProjectPath({ kind: "document", project: owner.project, slug: artifact.slug });
-    }
-  }
+  const route = parseDispatchReference(copied.document);
+  const there =
+    state === "open"
+      ? "open there"
+      : state === "answered"
+        ? "answered there"
+        : state === "resolved"
+          ? "resolved there"
+          : "closed there";
   return (
-    <span className="inline-flex items-center gap-x-2" data-dispatch-ask-copied-from={askId}>
+    <span className="inline-flex items-center gap-x-2" data-dispatch-ask-copied-from={copied.ask}>
       <span aria-hidden="true">·</span>
       <span>
         Copied from{" "}
-        {path === undefined || artifact === undefined ? (
+        {route === undefined ? (
           "another document"
         ) : (
-          <Link to={`${path}#b-${encodeURIComponent(blockId)}`}>
-            {artifact.primary ? "the spec" : artifact.slug}
+          <Link to={`${buildReferencePath(route)}#b-${encodeURIComponent(blockId)}`}>
+            {route.kind === "spec" ? "the spec" : shortForm(route)}
           </Link>
         )}
-        , answered there
+        , {there}
       </span>
     </span>
   );

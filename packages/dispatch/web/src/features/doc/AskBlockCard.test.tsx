@@ -24,6 +24,7 @@ const schema = new Schema({
         answered_by: { default: undefined },
         blockId: { default: null },
         copied_from: { default: undefined },
+        copied_from_document: { default: undefined },
         invalid: { default: undefined },
         multiple: { default: false },
         selected: { default: undefined },
@@ -226,54 +227,92 @@ test.each([
   }
 });
 
-test("a block copied from another document's ask links to the document where that ask is answered", async () => {
-  const source: Ask = {
-    ...ask,
-    block_artifact: { id: "artifact-plan", primary: false, slug: "plan" },
-    id: "ask-source",
-  };
+test.each([
+  ["open", "open there"],
+  ["answered", "answered there"],
+  ["resolved", "resolved there"],
+] as const)("a block copied from a %s ask names its source's document and state from its own attributes", (state, there) => {
   const card = renderCard({
     indexed: false,
-    node: askNode({ copied_from: "ask-source", state: "open" }),
-    thread: threadRead(source),
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+      state,
+    }),
   });
   try {
-    const link = await card.header.findByRole("link", { name: "plan" });
+    const link = card.header.getByRole("link", { name: "CORE-1 plan" });
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-b-1");
-    expect(getAsk).toHaveBeenCalledWith("ask-source");
     expect(card.header.getByText(/Copied from/).textContent).toBe(
-      "Copied from plan, answered there"
+      `Copied from CORE-1 plan, ${there}`
     );
     // No ask of its own: no composer, the block's attributes record what its source shows.
     expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
   } finally {
     card.unmount();
   }
 });
 
-test("a project document's copied block links to its source under the project", async () => {
-  const source: Ask = {
-    ...ask,
-    block_artifact: { id: "artifact-plan", primary: false, slug: "plan" },
-    id: "ask-source",
-    issue_key: null,
-  };
+test("a block copied from an issue's spec links to the spec", () => {
   const card = renderCard({
     indexed: false,
-    node: askNode({ copied_from: "ask-source", state: "open" }),
-    owner: { project: "CORE", slug: "notes" },
-    thread: threadRead(source),
+    node: askNode({ copied_from: "ask-source", copied_from_document: "dispatch://CORE-1/spec" }),
   });
   try {
-    const link = await card.header.findByRole("link", { name: "plan" });
+    const link = card.header.getByRole("link", { name: "the spec" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a project document's copied block links to its source under the project", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE/artifact/plan",
+    }),
+    owner: { project: "CORE", slug: "notes" },
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE/plan" });
     expect(link.getAttribute("href")).toBe("/projects/CORE/documents/plan#b-b-1");
   } finally {
     card.unmount();
   }
 });
 
+test("three copied blocks render their sources without reading one ask", () => {
+  const cards = ["open", "answered", "resolved"].map((state) =>
+    renderCard({
+      indexed: false,
+      node: askNode({
+        copied_from: `ask-${state}`,
+        copied_from_document: "dispatch://CORE-1/spec",
+        state,
+      }),
+    })
+  );
+  try {
+    for (const card of cards) {
+      expect(card.header.getByRole("link", { name: "the spec" })).toBeDefined();
+    }
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    for (const card of cards) card.unmount();
+  }
+});
+
 test("a block with an ask of its own names no source, whatever its attributes hold", () => {
-  const card = renderCard({ node: askNode({ copied_from: "ask-source", state: "open" }) });
+  const card = renderCard({
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/spec",
+      state: "open",
+    }),
+  });
   try {
     expect(card.header.queryByText(/Copied from/)).toBeNull();
   } finally {

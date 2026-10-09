@@ -40727,11 +40727,11 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version2.markdown.split(`
 `);
-  const stillOpen = (named, state, where) => {
+  const stillOpen = (named, state) => {
     const next = state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state}${where} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`;
+    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`;
   };
-  const open = await Promise.all(blocks.map(async (block) => {
+  const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
     const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
     const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
@@ -40741,19 +40741,16 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     if (!states.includes("open") && states.some((state) => state !== undefined))
       return [];
     if (ask !== undefined)
-      return ask.state === "open" ? [named] : [stillOpen(named, ask.state, "")];
-    const sourceId = openers.map((line) => /\bcopied_from="([^"]+)"/.exec(line)?.[1]).find((id) => id !== undefined);
-    if (sourceId === undefined)
+      return ask.state === "open" ? [named] : [stillOpen(named, ask.state)];
+    const attribute = (name) => openers.map((line) => new RegExp(`\\b${name}="([^"]+)"`).exec(line)?.[1]).find((value) => value !== undefined);
+    const sourceId = attribute("copied_from");
+    const document = attribute("copied_from_document");
+    if (sourceId === undefined || document === undefined) {
       return [`${named}, whose ask Dispatch has not opened yet`];
-    const source = (await client.getAsk(sourceId)).ask;
-    const slug = source.block_artifact?.slug;
-    const ref = resolved.issue !== undefined ? `dispatch://${resolved.issue.key}/ask/${source.id}` : slug === undefined ? source.id : `dispatch://${artifact.project}/artifact/${slug}/ask/${source.id}`;
-    const where = slug === undefined ? "the document it was copied from" : slug;
-    const copy = `${named}, a copy of ask ${ref}`;
-    if (source.state === "open")
-      return [`${copy}, which is open on ${where}: answer it there`];
-    return [stillOpen(copy, source.state, ` on ${where}`)];
-  })).then((judged) => judged.flat());
+    }
+    const ref = resolved.issue !== undefined ? `dispatch://${resolved.issue.key}/ask/${sourceId}` : `${document}/ask/${sourceId}`;
+    return [`${named}, a copy of ask ${ref}, which is open on ${document}: answer it there`];
+  });
   if (open.length === 0)
     return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;

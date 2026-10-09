@@ -43,6 +43,9 @@ func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 		{"a project document's copy sources", sourcesOfProject, "artifacts", "artifacts_project_documents", []any{blocks, document, projectKey}},
 		{"the copies of an issue document's retracted ask", copiesOnIssue, "artifacts", "artifacts_issue_key", []any{blocks, document, issueKey, patterns}},
 		{"the copies of a project document's retracted ask", copiesOnProject, "artifacts", "artifacts_project_documents", []any{blocks, document, projectKey, patterns}},
+		// The lateral read of each candidate's latest version: its unique (artifact_id, number).
+		{"the latest versions of an issue's copies", copiesOnIssue, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, issueKey, patterns}},
+		{"the latest versions of a project's copies", copiesOnProject, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, projectKey, patterns}},
 		{"what a copied ask asked before an edit", copiedAskContentsQuery, "events", "events_ask_payload_id", []any{[]string{"ask-id"}}},
 	} {
 		t.Run(query.name, func(t *testing.T) {

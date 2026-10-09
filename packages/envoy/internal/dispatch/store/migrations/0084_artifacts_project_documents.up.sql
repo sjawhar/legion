@@ -1,4 +1,4 @@
--- 0083_artifacts_project_documents.up.sql
+-- 0084_artifacts_project_documents.up.sql
 -- A project's unlinked documents: the artifacts with neither an issue nor an agent conversation.
 -- Settlement of a project document looks up the other documents of its project whose asks a copied
 -- ask block may have come from, and the copies of an ask it retracts, on every settlement of a

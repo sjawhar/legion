@@ -33,14 +33,14 @@ func (state askServerState) restore(node *pmdoc.Node) {
 }
 
 // serverRewrite is an ask block whose server attributes settlement repaired to agree with its ask:
-// whether the block is a copy of that ask (copiedAskSources), the attributes as settlement found
-// them, whether the repair wrote an answer, the index of the repair in the reconciliation's
-// repairs, and the index in its events of the block.repaired the repair emitted, or -1 for a new
-// ask's block or a copy, whose repair emits none.
+// the document of that ask when the block is a copy of it, "" otherwise (copiedAskSources), the
+// attributes as settlement found them, whether the repair wrote an answer, the index of the repair
+// in the reconciliation's repairs, and the index in its events of the block.repaired the repair
+// emitted, or -1 for a new ask's block or a copy, whose repair emits none.
 type serverRewrite struct {
 	node   *pmdoc.Node
 	ask    model.Ask
-	copied bool
+	copied string
 	found  askServerState
 	answer bool
 	repair int

@@ -77,12 +77,7 @@ func RewriteApprovalAsk(
 	version int,
 	summary, serverURL string,
 ) (model.Event, error) {
-	previous := model.AskEditPrevious{
-		Question: ask.Question,
-		Options:  ask.Options,
-		Multiple: ask.Multiple,
-		Urgency:  ask.Urgency,
-	}
+	previous := model.NewAskEditPrevious(*ask)
 	quiet := version != ask.Approval.Version && ask.Approval.RequestedVersion < ask.Approval.Version
 	ask.Question = ApprovalQuestion(ask.Approval.Name, version, summary)
 	ask.Approval.Version = version

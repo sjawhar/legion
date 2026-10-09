@@ -313,14 +313,16 @@
 - A document uploaded or seeded with another document's ask blocks, under their block ids and with
   the same question, options, `multiple` and urgency, on the same issue (or the same project for a
   project document) opens no ask for them: each copied block shows the state and answer of the ask
-  it was copied from, read-only, and names it in the server-owned `copied_from`, where settlement
-  had opened a new ask in a person's Inbox for every copied block, answered and resolved ones
-  included. `dispatch_request_approval`'s refusal and the dashboard's decision card name the
-  source and link to its document. A copy whose text is changed, or an id no ask of the owner
-  indexes, still opens one, and so does a copy once its source's block leaves its document:
-  settlement of the source retracts its ask and settles the copy. Migration
-  `0083_artifacts_project_documents` adds the partial index a project document's lookups read
-  (LEGION-651).
+  it was copied from, read-only, and names it and its document in the server-owned `copied_from`
+  and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
+  copied block, answered and resolved ones included. Of several matching asks the earliest asked
+  is the source, whichever wording it matched on. `dispatch_request_approval`'s refusal and the
+  dashboard's decision card name the source, its document and its state from those attributes. A
+  copy whose text is changed, or an id no ask of the owner indexes, still opens one, and so do a
+  source's copies once its block leaves its document: settlement of the source retracts its ask
+  and settles every copy, the first opens one ask, credited to whoever wrote the block into it, and
+  the others name that ask. Migration `0084_artifacts_project_documents` adds the partial index a
+  project document's lookups read (LEGION-651).
 - `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's

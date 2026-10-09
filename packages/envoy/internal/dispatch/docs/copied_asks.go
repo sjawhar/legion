@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // copiedAskSources finds the ask each block of blocks was copied from, keyed by block id, among the
@@ -23,13 +24,13 @@ import (
 // an earlier version (askContentsAsked). A block whose text the copy changes is a new question and
 // opens an ask. An ask settlement retracted because its block left its document is no source: a
 // block cut from one document and pasted into another is the only one left, and opens an ask as any
-// new block does. Of several sources, the earliest asked is the original, since a copy that opened
-// asks of its own before copies were recognised came after it; two unrelated asks of one owner
-// under one id asking the same thing are therefore one question to a copy, the earlier. The copy
-// shows its source's state as of this settlement; answering the source later changes the copy at
-// the copy's next settlement. The rows are read, never locked or written: settlement holds this
-// document's owner row and room lock, and a source's answer route takes the source's ask row
-// before its own document's room.
+// new block does. Of several sources, the earliest asked is the original, whichever wording it
+// matched on, since a copy that opened asks of its own before copies were recognised came after it;
+// two unrelated asks of one owner under one id asking the same thing are therefore one question to
+// a copy, the earlier. The copy shows its source's state as of this settlement; answering the
+// source later changes the copy at the copy's next settlement. The rows are read, never locked or
+// written: settlement holds this document's owner row and room lock, and a source's answer route
+// takes the source's ask row before its own document's room.
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -37,7 +38,7 @@ func copiedAskSources(
 	owner artifactOwner,
 	blocks []askBlock,
 	rows map[string]model.Ask,
-) (map[string]model.Ask, error) {
+) (map[string]copiedSource, error) {
 	var unindexed []string
 	for _, block := range blocks {
 		if _, indexed := rows[block.id]; !indexed {
@@ -53,16 +54,20 @@ func copiedAskSources(
 		return nil, fmt.Errorf("load copied ask sources: %w", err)
 	}
 	defer found.Close()
-	candidates := map[string][]model.Ask{}
+	candidates := map[string][]copiedSource{}
 	for found.Next() {
-		ask, err := ScanAsk(found)
+		var issueKey *string
+		var project, slug, kind string
+		var primary bool
+		ask, err := ScanAsk(found, &issueKey, &project, &slug, &kind, &primary)
 		if err != nil {
 			return nil, fmt.Errorf("scan copied ask source: %w", err)
 		}
 		if settlementRetracted(ask) {
 			continue
 		}
-		candidates[*ask.BlockID] = append(candidates[*ask.BlockID], ask)
+		document := refs.ArtifactRef(issueKey, project, nil, slug, kind, primary)
+		candidates[*ask.BlockID] = append(candidates[*ask.BlockID], copiedSource{ask: ask, document: document})
 	}
 	if err := found.Err(); err != nil {
 		return nil, fmt.Errorf("iterate copied ask sources: %w", err)
@@ -70,35 +75,28 @@ func copiedAskSources(
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	sources := map[string]model.Ask{}
+	// The earliest asked match wins whichever wording it matched on, so an ask's earlier wordings
+	// are read only for the candidates older than a block's first match on its current wording.
 	var earlier []string
 	for _, block := range blocks {
-		for _, ask := range candidates[block.id] {
-			if block.asks(askContentOf(ask)) {
-				sources[block.id] = ask
+		for _, candidate := range candidates[block.id] {
+			if block.asks(model.NewAskEditPrevious(candidate.ask)) {
 				break
 			}
-		}
-		if _, matched := sources[block.id]; !matched {
-			for _, ask := range candidates[block.id] {
-				earlier = append(earlier, ask.ID)
-			}
+			earlier = append(earlier, candidate.ask.ID)
 		}
 	}
-	if len(earlier) == 0 {
-		return sources, nil
+	var asked map[string][]model.AskEditPrevious
+	if len(earlier) > 0 {
+		if asked, err = askContentsAsked(ctx, tx, earlier); err != nil {
+			return nil, err
+		}
 	}
-	asked, err := askContentsAsked(ctx, tx, earlier)
-	if err != nil {
-		return nil, err
-	}
+	sources := map[string]copiedSource{}
 	for _, block := range blocks {
-		if _, matched := sources[block.id]; matched {
-			continue
-		}
-		for _, ask := range candidates[block.id] {
-			if slices.ContainsFunc(asked[ask.ID], block.asks) {
-				sources[block.id] = ask
+		for _, candidate := range candidates[block.id] {
+			if block.asks(model.NewAskEditPrevious(candidate.ask)) || slices.ContainsFunc(asked[candidate.ask.ID], block.asks) {
+				sources[block.id] = candidate
 				break
 			}
 		}
@@ -106,9 +104,17 @@ func copiedAskSources(
 	return sources, nil
 }
 
+// copiedSource is the ask a copied block was copied from and the address of the document it is
+// on (refs.ArtifactRef), which settlement writes into the copy as copied_from and
+// copied_from_document, so a reader names the source and where it is answered without asking.
+type copiedSource struct {
+	ask      model.Ask
+	document string
+}
+
 // ownerDocuments is the predicate on artifacts d that selects owner's documents, and the value it
 // binds as $3: the issue's documents (artifacts_issue_key), or for a project document the
-// project's other unlinked documents (artifacts_project_documents, migration 0083); an agent
+// project's other unlinked documents (artifacts_project_documents, migration 0084); an agent
 // conversation's artifacts belong to neither.
 func ownerDocuments(owner artifactOwner) (string, string) {
 	if owner.IssueKey != nil {
@@ -118,12 +124,13 @@ func ownerDocuments(owner artifactOwner) (string, string) {
 }
 
 // copiedAskSourcesQuery reads the asks of owner's other documents under the block ids $1, the
-// document settled being $2, oldest first, and returns the value it binds as $3: the owner's
+// document settled being $2, oldest first, each followed by its document's issue key, project,
+// slug, kind and whether it is the issue's spec, and returns the value it binds as $3: the owner's
 // documents through their index, then each one's asks through asks_block_id_unique.
 func copiedAskSourcesQuery(owner artifactOwner) (string, string) {
 	documents, ownerKey := ownerDocuments(owner)
 	return `
-		select ` + AskColumns + `
+		select ` + AskColumns + `, d.issue_key, coalesce(d.project_key, ''), d.slug, d.kind, d.is_primary
 		from artifacts d
 		join asks a on a.block_artifact_id = d.id and a.block_id = any($1)
 		where ` + documents + ` and d.id <> $2
@@ -161,8 +168,8 @@ func owedCopiesQuery(owner artifactOwner) (string, string) {
 // question no ask holds until something else settled it: its next settlement skips the retracted
 // source and opens the block's own ask. A document's latest version is read for the block's
 // opener (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for
-// nothing. The pending rows (markSettlementPending) keep the debt across a restart, for the
-// resumption to arm.
+// nothing. The pending rows (markSettlementPending's, written here in one statement however many
+// copies there are) keep the debt across a restart, for the resumption to arm.
 func owedCopiesOfRetracted(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -200,10 +207,16 @@ func owedCopiesOfRetracted(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate copies of retracted asks: %w", err)
 	}
-	for _, copy := range copies {
-		if err := markSettlementPending(ctx, tx, copy); err != nil {
-			return nil, err
-		}
+	if len(copies) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into doc_settlements_pending (artifact_id)
+		select unnest($1::uuid[])
+		on conflict (artifact_id) do update
+		set marked_at = now()
+	`, copies); err != nil {
+		return nil, fmt.Errorf("record the pending settlements of copies of retracted asks: %w", err)
 	}
 	return copies, nil
 }
@@ -211,11 +224,6 @@ func owedCopiesOfRetracted(
 // likeLiteral escapes text for a LIKE pattern, under its default escape character.
 func likeLiteral(text string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(text)
-}
-
-// askContentOf is the text ask asks as it stands.
-func askContentOf(ask model.Ask) model.AskEditPrevious {
-	return model.AskEditPrevious{Question: ask.Question, Options: ask.Options, Multiple: ask.Multiple, Urgency: ask.Urgency}
 }
 
 // asks reports whether block asks exactly what content does.

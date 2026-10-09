@@ -84,7 +84,10 @@ func StripServerOwnedAttrs(doc *Node) {
 }
 
 // SetBlockAttributes replaces named attributes on one typed block. A nil value
-// removes an optional attribute so the canonical directive omits it.
+// removes an optional attribute so the canonical directive omits it. Unlike RetypeBlock, it writes
+// server-owned attributes, since the server is their writer: a caller passes only attribute names
+// the server chose itself, never names taken from a request (a caller's value under a name it
+// chose, such as an answer's text or an edit's urgency, is fine).
 func SetBlockAttributes(doc *Node, blockID string, attributes Attrs) (*Node, error) {
 	if doc == nil || doc.Type != "doc" {
 		return nil, fmt.Errorf("%w: SetBlockAttributes wants a doc", ErrSchema)
