@@ -73,8 +73,11 @@ package api
 // built before 17 acts on a contract this daemon no longer speaks: it looks for the old name and so
 // never learns the volume must already hold the clone, provisioning a lost volume afresh instead of
 // exiting 3, and runs a lock and a removal pass against variables nothing sets; the image probe
-// pairs the daemon with an image built from this contract instead. (This branch first took 16;
-// LEGION-578 landed at 16 first, and pi-legion 8.4.1 declares it with `capabilities` but with the
-// init container's old environment, so a daemon at 16 would pass the gate against an image whose
-// `workspace-init` speaks the other contract. Renumbered, as the same learning says.)
+// pairs the daemon with an image built from this contract instead. Each role's agent is told a
+// state home of its own (`XDG_STATE_HOME=/home/legion/.local/state/<role>`), which the image's
+// shim makes Oh My Pi's profile directory under, so the browser broker's lock is one name per
+// container. (This branch first took 16; LEGION-578 landed at 16 first, and pi-legion 8.4.1
+// declares it with `capabilities` but with the init container's old environment, so a daemon at 16
+// would pass the gate against an image whose `workspace-init` speaks the other contract.
+// Renumbered, as the same learning says.)
 const DaemonAPIVersion = 17

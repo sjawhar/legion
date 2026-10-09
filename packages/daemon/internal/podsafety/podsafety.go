@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 )
 
 // overlay is the settings overlay Apply writes (overlay.yml, which says what each setting holds off).
@@ -123,6 +125,51 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 // removed is environ without its entries for name.
 func removed(environ []string, name string) []string {
 	return slices.DeleteFunc(environ, func(pair string) bool { return strings.HasPrefix(pair, name+"=") })
+}
+
+// EnsureStateHome makes the directory Oh My Pi's state root resolves to under environ's
+// XDG_STATE_HOME, so the variable takes effect. Oh My Pi's state-class directories (`run/daemons`,
+// `logs`, `browser-profiles`, `reports`, `terminal-sessions`; sessions are data-class) hang under
+// `$XDG_STATE_HOME/omp/profiles/<profile>` for a named profile and `$XDG_STATE_HOME/omp` for the
+// default one, but only when that directory already exists when Oh My Pi starts; otherwise they
+// fall back to the config root (`$HOME/$PI_CONFIG_DIR/profiles/<profile>`, as ompdirs.ProfileRoot
+// ports it), and a state home the pod set to keep one role's browser broker lock apart from its
+// siblings' (sandbox.roleStateHome) changes nothing. The profile is OMP_PROFILE where environ
+// defines it, else PI_PROFILE, as Oh My Pi reads them (ompdirs.NormalizeProfile); a name Oh My Pi
+// would refuse is refused here. With XDG_STATE_HOME unset or empty nothing is made: Oh My Pi reads
+// no state home then.
+func EnsureStateHome(environ []string) error {
+	env := lookup(environ)
+	stateHome := env["XDG_STATE_HOME"]
+	if stateHome == "" {
+		return nil
+	}
+	requested, set := env["OMP_PROFILE"]
+	if !set {
+		requested = env["PI_PROFILE"]
+	}
+	profile, valid := ompdirs.NormalizeProfile(requested)
+	if !valid {
+		return fmt.Errorf("pod safety: Oh My Pi refuses the profile %q; no state directory to make under %s", requested, stateHome)
+	}
+	dir := filepath.Join(stateHome, "omp")
+	if profile != "" {
+		dir = filepath.Join(dir, "profiles", profile)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("pod safety: make Oh My Pi's state directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// lookup is environ by name: a name environ defines is present, with its value, "" included.
+func lookup(environ []string) map[string]string {
+	env := make(map[string]string, len(environ))
+	for _, pair := range environ {
+		name, value, _ := strings.Cut(pair, "=")
+		env[name] = value
+	}
+	return env
 }
 
 // WriteReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so

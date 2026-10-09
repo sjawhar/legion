@@ -533,12 +533,13 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 	return env
 }
 
-// The XDG base directories, at the standard offsets from the image's HOME, the same in the
-// workspace-init and main containers. The config home is the pod's shared in-memory volume: jj
-// keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what
-// workspace-init sets there (git.abandon-unreachable-commits false, no repository identity) is
-// what the agent's jj reads. It starts empty in every pod, so nothing an agent wrote reaches
-// workspace-init's jj.
+// The XDG base directories, at the standard offsets from the image's HOME. The config, cache and
+// data homes are the same in the workspace-init and main containers; the state home is
+// xdgStateHome itself in workspace-init and a role's own directory under it in each role container
+// (roleStateHome). The config home is the pod's shared in-memory volume: jj keeps a repository's
+// `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
+// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads. It
+// starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
 const (
 	xdgConfigHome = podHome + "/.config"
 	xdgCacheHome  = podHome + "/.cache"
@@ -546,13 +547,30 @@ const (
 	xdgStateHome  = podHome + "/.local/state"
 )
 
-func xdgEnvironment() []corev1.EnvVar {
+// xdgEnvironment is the four XDG base directories with stateHome as the state home.
+func xdgEnvironment(stateHome string) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
 		{Name: "XDG_CACHE_HOME", Value: xdgCacheHome},
 		{Name: "XDG_DATA_HOME", Value: xdgDataHome},
-		{Name: "XDG_STATE_HOME", Value: xdgStateHome},
+		{Name: "XDG_STATE_HOME", Value: stateHome},
 	}
+}
+
+// roleStateHome is the XDG_STATE_HOME a role's agent is told, `<xdgStateHome>/<role>`: a state home
+// of its own in a pod whose role containers share the network namespace and the workspace path.
+// Oh My Pi keeps its browser broker's lock under its state root
+// (`run/daemons/<hash of the workspace's real path>/broker.pid`), taken as an abstract unix socket
+// named from the lock path, and an abstract socket name is one name across every container of the
+// pod; with one state root the first role's lock would block every other role's broker, and their
+// `browser.open` would fail while `broker.sock` sits on the first container's own filesystem. The
+// shim makes Oh My Pi's profile directory under it before Oh My Pi starts
+// (podsafety.EnsureStateHome), since Oh My Pi reads the variable only where that directory exists.
+// It is a path on the container's own filesystem rather than the role's in-memory state volume
+// (StateDir), so Chromium's `browser-profiles` and Oh My Pi's logs are not charged to the pod's
+// memory.
+func roleStateHome(role claim.Role) string {
+	return xdgStateHome + "/" + string(role)
 }
 
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
@@ -609,7 +627,7 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
 	}
-	return append(env, xdgEnvironment()...)
+	return append(env, xdgEnvironment(xdgStateHome)...)
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
@@ -628,8 +646,10 @@ func (r *Runtime) ProvisionBound() time.Duration {
 // then one per providers secret into the providers mount. None of them repeats another: the runtime
 // refuses a spec naming one of its own (runtimeOwned), and the daemon an operator's variable naming
 // one of the runtime's or a spec's. LEGION_GRANT_FILE names runtime.GrantFile on the state volume,
-// which is empty at start: the extension makes its directory. POD_UID is the pod's own incarnation,
-// from the downward API. The secrets broker is told only to a role that enrolls (enrolledWith).
+// which is empty at start: the extension makes its directory. XDG_STATE_HOME is the role's own
+// (roleStateHome), carried to the role's shim by the start command (launcherCommand's Env). POD_UID
+// is the pod's own incarnation, from the downward API. The secrets broker is told only to a role
+// that enrolls (enrolledWith).
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(r, l, credentialHelper)
@@ -659,7 +679,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
-	env = append(env, xdgEnvironment()...)
+	env = append(env, xdgEnvironment(roleStateHome(spec.Role))...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})

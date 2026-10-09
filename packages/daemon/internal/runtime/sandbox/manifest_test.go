@@ -349,7 +349,8 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
-// nothing an agent wrote reaches workspace-init's jj.
+// nothing an agent wrote reaches workspace-init's jj. The state home is not among the names the two
+// must agree on: each role's agent is told one of its own (TestEachRolesAgentIsToldAStateHomeOfItsOwn).
 func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -357,7 +358,7 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 	pod := podOf(t, r, workerSpec(t))
 	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t))
-	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
 		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
 			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
 		}
@@ -379,6 +380,50 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 		if volume.Name == shared && (volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory) {
 			t.Fatalf("the config home's volume %q is not an in-memory emptyDir: %+v", shared, volume.VolumeSource)
 		}
+	}
+}
+
+// The role containers of one issue pod share the pod's network namespace, the workspace path and
+// the Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named
+// from the lock path under its state root: one state root would make it one name in every
+// container, the first role's lock blocking every other role's broker. So each role's agent is
+// told a XDG_STATE_HOME of its own, `/home/legion/.local/state/<role>`, differing from every other
+// role's, and the controller's agent one by the same rule; workspace-init, which runs alone, keeps
+// the plain state home. The value is a path on the container's own filesystem, mounted from no
+// volume, so Chromium's profiles and Oh My Pi's logs are not charged to the pod's memory.
+func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	told := map[string]claim.Role{}
+	for _, role := range launcherRoles {
+		spec := controllerSpec(t)
+		if role != claim.RoleController {
+			token, err := claim.NewToken("legion", testTree, role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec = testSpec(t, token, role, testTree)
+		}
+		worker := workerOf(t, r, spec)
+		got := envOf(worker)["XDG_STATE_HOME"]
+		if want := xdgStateHome + "/" + string(role); got != want {
+			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, want %q", role, got, want)
+		}
+		if other, taken := told[got]; taken {
+			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, %s's too", role, got, other)
+		}
+		told[got] = role
+		for _, mount := range worker.VolumeMounts {
+			if overlaps(mount.MountPath, got) {
+				t.Errorf("%s's XDG_STATE_HOME %s overlaps volume %q's mount %q; it must be on the container's own filesystem", role, got, mount.Name, mount.MountPath)
+			}
+		}
+	}
+	init := containerNamed(t, podOf(t, r, workerSpec(t)), initContainer)
+	if got := envOf(init)["XDG_STATE_HOME"]; got != xdgStateHome {
+		t.Errorf("workspace-init is told XDG_STATE_HOME=%q, want %q", got, xdgStateHome)
 	}
 }
 

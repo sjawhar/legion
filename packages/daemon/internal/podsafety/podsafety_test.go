@@ -190,6 +190,85 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 	}
 }
 
+// EnsureStateHome makes the directory Oh My Pi resolves its state root to under XDG_STATE_HOME —
+// `omp/profiles/<profile>` for the profile OMP_PROFILE (else PI_PROFILE) names, `omp` for the
+// default profile — since Oh My Pi reads the variable only where that directory already exists;
+// with no state home it makes nothing, and it refuses a path it cannot make, naming it.
+func TestEnsureStateHomeMakesOhMyPisStateRootUnderTheStateHome(t *testing.T) {
+	for name, tc := range map[string]struct {
+		environ func(stateHome string) []string
+		want    string
+	}{
+		"the image's profile": {
+			func(home string) []string { return []string{"XDG_STATE_HOME=" + home, "OMP_PROFILE=legion"} },
+			"omp/profiles/legion",
+		},
+		"PI_PROFILE where OMP_PROFILE is undefined": {
+			func(home string) []string { return []string{"XDG_STATE_HOME=" + home, "PI_PROFILE=work"} },
+			"omp/profiles/work",
+		},
+		"no profile": {
+			func(home string) []string { return []string{"XDG_STATE_HOME=" + home, "HOME=/home/legion"} },
+			"omp",
+		},
+		"an empty OMP_PROFILE, the default profile over PI_PROFILE": {
+			func(home string) []string {
+				return []string{"XDG_STATE_HOME=" + home, "OMP_PROFILE=", "PI_PROFILE=work"}
+			},
+			"omp",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stateHome := filepath.Join(t.TempDir(), "state", "tester")
+			if err := EnsureStateHome(tc.environ(stateHome)); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(stateHome, tc.want))
+			if err != nil {
+				t.Fatalf("%s under the state home: %v", tc.want, err)
+			}
+			if !info.IsDir() || info.Mode().Perm() != 0o700 {
+				t.Errorf("%s is %v, want a directory at mode 0700", tc.want, info.Mode())
+			}
+		})
+	}
+	t.Run("no state home", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, environ := range [][]string{{"OMP_PROFILE=legion", "HOME=" + dir}, {"XDG_STATE_HOME=", "OMP_PROFILE=legion", "HOME=" + dir}} {
+			if err := EnsureStateHome(environ); err != nil {
+				t.Fatalf("%q: %v", environ, err)
+			}
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("with no state home, EnsureStateHome made %v", entries)
+		}
+	})
+	t.Run("a file where the directory should go", func(t *testing.T) {
+		stateHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(stateHome, "omp"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := EnsureStateHome([]string{"XDG_STATE_HOME=" + stateHome, "OMP_PROFILE=legion"})
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(stateHome, "omp", "profiles", "legion")) {
+			t.Fatalf("EnsureStateHome = %v, want an error naming %s", err, filepath.Join(stateHome, "omp", "profiles", "legion"))
+		}
+	})
+	t.Run("a profile Oh My Pi refuses", func(t *testing.T) {
+		stateHome := t.TempDir()
+		err := EnsureStateHome([]string{"XDG_STATE_HOME=" + stateHome, "OMP_PROFILE=../escape"})
+		if err == nil || !strings.Contains(err.Error(), `"../escape"`) {
+			t.Fatalf("EnsureStateHome = %v, want a refusal naming the profile", err)
+		}
+		if entries, _ := os.ReadDir(stateHome); len(entries) != 0 {
+			t.Errorf("a refused profile made %v", entries)
+		}
+	})
+}
+
 // On the pinned Oh My Pi, a repository whose .omp/config.yml turns remote compaction on reads it
 // off under Apply's environment, and an operator overlay named after the baseline reads the
 // operator's own endpoint: the baseline outranks the repository, and the operator outranks it.

@@ -18,7 +18,8 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
 // go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
-// (podsafety.Apply, its overlay written to LEGION_STATE_DIR).
+// (podsafety.Apply, its overlay written to LEGION_STATE_DIR) with Oh My Pi's profile directory
+// made under the role's XDG_STATE_HOME (podsafety.EnsureStateHome).
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
@@ -52,13 +53,24 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 }
 
 // podSafeEnvironment is environ on the pod's baseline, its overlay written to the pod's state
-// directory, which the runtime names as LEGION_STATE_DIR.
+// directory, which the runtime names as LEGION_STATE_DIR, and Oh My Pi's profile directory made
+// under the XDG_STATE_HOME the runtime hands this role, without which Oh My Pi would not read the
+// variable and its browser broker's lock would be the name every role of the pod takes. A
+// directory that cannot be made is a refusal to start, naming it, as a providers key that cannot
+// be read is.
 func podSafeEnvironment(environ []string) ([]string, error) {
 	state := os.Getenv("LEGION_STATE_DIR")
 	if state == "" {
 		return nil, errors.New("--pod-safety needs LEGION_STATE_DIR, the pod's state directory, to write the baseline overlay to")
 	}
-	return podsafety.Apply(environ, state)
+	environ, err := podsafety.Apply(environ, state)
+	if err != nil {
+		return nil, err
+	}
+	if err := podsafety.EnsureStateHome(environ); err != nil {
+		return nil, err
+	}
+	return environ, nil
 }
 
 // workerShimConfig is every refusal the command makes, each before anything is dialled or

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
@@ -127,8 +128,11 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 // podsafety): the baseline overlay on the pod's state volume is PI_CONFIG_FILES' first element,
 // ahead of the operator's; each baseline variable the operator left unset is set, and the
 // operator's own are kept; the shim itself (the agent's parent; the container's PID 1 is its
-// launcher) runs on the operator's value alone. Then the image's Oh My Pi, under the agent's
-// environment, reads remote compaction off in a repository whose .omp/config.yml turns it on.
+// launcher) runs on the operator's value alone; the agent's XDG_STATE_HOME is the architect's own
+// (roleStateHome; the root claim is the architect), and the shim made Oh My Pi's profile directory
+// under it (podsafety.EnsureStateHome) before Oh My Pi started, since Oh My Pi reads the variable
+// only where that directory exists. Then the image's Oh My Pi, under the agent's environment,
+// reads remote compaction off in a repository whose .omp/config.yml turns it on.
 func (r *liveRig) checkPodBaseline() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -155,9 +159,11 @@ func (r *liveRig) checkPodBaseline() error {
 		return err
 	}
 	overlay := path.Join(StateDir, podsafety.OverlayFile)
+	stateHome := roleStateHome(claim.RoleArchitect)
 	want := map[string]string{
 		"PI_CONFIG_FILES":   overlay + ":" + operatorOverlays,
 		"OTEL_SDK_DISABLED": "true", "PI_AUTO_QA": "0", "PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "file",
+		"XDG_STATE_HOME": stateHome,
 	}
 	for name, value := range r.pod.Env {
 		if name != "PI_CONFIG_FILES" {
@@ -170,6 +176,11 @@ func (r *liveRig) checkPodBaseline() error {
 		}
 		note("operator", "/proc/%s/environ (the agent): %s=%s", pid, name, agent[name])
 	}
+	profileDir := path.Join(stateHome, "omp", "profiles", "legion")
+	if _, err := r.exec(root, "test", "-d", profileDir); err != nil {
+		return fmt.Errorf("%s is no directory in the root's container (%v); the shim must make Oh My Pi's profile directory under the role's state home before Oh My Pi starts, or Oh My Pi reads no state home and its broker lock is one name across the pod", profileDir, err)
+	}
+	note("operator", "exec test -d %s: a directory, made by the shim before Oh My Pi started", profileDir)
 	if shim["PI_CONFIG_FILES"] != operatorOverlays {
 		return fmt.Errorf("the shim (pid %s) has PI_CONFIG_FILES=%q, want the operator's %q alone", shimPid, shim["PI_CONFIG_FILES"], operatorOverlays)
 	}

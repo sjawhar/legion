@@ -1039,7 +1039,17 @@ the provisioning token, projected into `workspace-fetch` alone. The operator's v
 join every role container's, and the providers Secret's configured keys when there are any, with its
 `NATS_NKEY_SEED` key when the daemon has a NATS nkey seed. Each role's private and state directories,
 `/tmp` and the XDG config home are in-memory, one set per role so no role's launcher or state
-collides with a sibling's.
+collides with a sibling's. Each role's agent is also told a state home of its own,
+`XDG_STATE_HOME=/home/legion/.local/state/<role>` (`roleStateHome`, `manifest.go`), a path on the
+container's own filesystem mounted from no volume, and its shim makes Oh My Pi's profile directory
+under it, `omp/profiles/legion`, before Oh My Pi starts (`podsafety.EnsureStateHome`; Oh My Pi
+reads the variable only where that directory already exists, falling back to the profile's config
+root otherwise). The role containers share the pod's network namespace, the workspace path and the
+Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named from the
+lock path under its state root — with one state root that name would be the same in every
+container, the first role's lock would block every other role's broker, and their `browser.open`
+would fail (`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's
+own filesystem. `workspace-init`, which runs alone, keeps the plain `/home/legion/.local/state`.
 
 Every container carries a reservation, cpu and memory with request equal to limit: each role
 container its role's (`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init
