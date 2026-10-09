@@ -29,17 +29,17 @@ var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:
 // hold .legion/<issue>/ (headCarries), which retro's last commit removes (dispatch://LEGION-605): a
 // squash merge commits the head merged into the base, and nothing on the base branch reads a
 // handoff. A read GitHub fails is refused as GitHub's failure, to retry, not the head's. Then every
-// check the base branch requires - its
-// rulesets' required status checks and its branch protection's - must have succeeded on the pull
-// request's head, and every workflow its rulesets require must have a run for the head that
-// succeeded (requiredchecks.Required, requiredchecks.Workflows), judged by the rule the workflow's
-// checks verdict judges by too (classify.Judge). A head reports none of them when its push skipped
-// CI when it should not have (legion push's rule), or when the pull request conflicts with its base,
-// since GitHub starts no pull_request run for a pull request it cannot merge; it is refused here,
-// naming the head, the check or workflow, and the conflict once GitHub shows it, rather than left for
-// GitHub to block the human merge. A required workflow another repository defines (an organization
-// ruleset can require one) never matches a run here, since a run is matched in the repository that
-// defines the workflow and belongs to the one it ran for; its refusal names that repository instead.
+// check the base branch requires - its rulesets' required status checks and its branch
+// protection's - must have succeeded on the pull request's head, and every workflow its rulesets
+// require must have a run for the head that succeeded (requiredchecks.Required,
+// requiredchecks.Workflows), judged by the rule the workflow's checks verdict judges by too
+// (classify.Judge). A head reports none of them when its push skipped CI when it should not have
+// (legion push's rule), or when the pull request conflicts with its base, since GitHub starts no
+// pull_request run for a pull request it cannot merge; it is refused here, naming the head, the
+// check or workflow, and the conflict once GitHub shows it, rather than left for GitHub to block the
+// human merge. A required workflow another repository defines (an organization ruleset can require
+// one) never matches a run here, since a run is matched in the repository that defines the workflow
+// and belongs to the one it ran for; its refusal names that repository instead.
 //
 // A base branch that requires no check has no check to refuse, and READY is published once the head
 // carries no handoffs. It says so on stdout rather than reading like a head whose every required
@@ -90,12 +90,12 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 		fmt.Fprintf(stdout, "[handoff] pull request #%d is already merged, so READY was published without reading its head's checks or handoffs\n", number)
 		return nil
 	}
-	dir := filepath.ToSlash(handoffFile(issue.Key, "")) + "/"
+	dir := filepath.ToSlash(handoffFile(issue.Key, ""))
 	switch carries, err := headCarries(ctx, github, dir, pull.Head.SHA); {
 	case err != nil:
-		return fmt.Errorf("GitHub's read of %s at head %s of pull request #%d failed, so whether the head still carries it is unknown: complete again; this is GitHub's failure, not the head's: %w", dir, head, number, err)
+		return fmt.Errorf("GitHub's read of %s/ at head %s of pull request #%d failed, so whether the head still carries it is unknown: complete again; this is GitHub's failure, not the head's: %w", dir, head, number, err)
 	case carries:
-		return fmt.Errorf("head %s of pull request #%d still carries %s, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", head, number, dir)
+		return fmt.Errorf("head %s of pull request #%d still carries %s/, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", head, number, dir)
 	}
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
 	if err != nil {
@@ -152,7 +152,7 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 // contents read of that path at head answers 404 when it does not. Any other failure of the read is
 // an error, which leaves the answer unknown.
 func headCarries(ctx context.Context, github githubrest.Client, dir, head string) (bool, error) {
-	err := github.Get(ctx, "/contents/"+strings.TrimSuffix(dir, "/")+"?ref="+url.QueryEscape(head), nil)
+	err := github.Get(ctx, "/contents/"+dir+"?ref="+url.QueryEscape(head), nil)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
 		return false, nil

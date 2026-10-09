@@ -121,8 +121,7 @@ moves the issue to `implementing` and interrupts your turn, and the implementer 
 that turn has ended. Do not resume the interrupted work afterward.
 
 On every start, and especially after revival or re-creation, read the issue and then the
-committed predecessor handoffs in lifecycle order, with the `legion` tool's `handoff_read`, from
-`$LEGION_WORKSPACE/.legion/<issue>/`:
+committed predecessor handoffs in lifecycle order, with the `legion` tool's `handoff_read`:
 
 1. `architect.json`
 2. `plan.json`

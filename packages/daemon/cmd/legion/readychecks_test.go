@@ -120,6 +120,9 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 					w.WriteHeader(tc.handoffs)
 					_, _ = w.Write([]byte(tc.handoffsBody))
 				case repo + "/rules/branches/main":
+					if tc.merged {
+						t.Errorf("READY read the required checks of a merged pull request")
+					}
 					_, _ = w.Write([]byte(tc.rules))
 				case repo + "/branches/main":
 					_, _ = w.Write([]byte(unprotected))
