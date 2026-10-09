@@ -196,6 +196,48 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
+test.skipIf(omp === undefined && !onActions)(
+  "a shell `legion handoff complete` runs and completes nothing the extension can see: the settle still gets the follow-up",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await stallPane(omp, [
+      [
+        {
+          type: "tool_use",
+          name: "bash",
+          input: {
+            i: "Completing from the shell",
+            command: "legion handoff complete --summary 'Shell proof done.'",
+          },
+        },
+      ],
+      [{ type: "text", text: "Completed from the shell." }],
+      [{ type: "text", text: "WAITING: the phase was completed from the shell." }],
+    ]);
+
+    // The bash call minted a grant like any other credentialed command: nothing refused it.
+    expect(
+      pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
+    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
+    // The CLI ran with that grant (the stand-in logs `$*`: the quotes were the shell's).
+    expect(await pane.legionLog()).toEqual([
+      "handoff complete --summary Shell proof done.",
+      "grant stall-grant-1",
+    ]);
+    const turns = pane.turns();
+    // Three turns: the bash one, the reply to its result, and the follow-up's.
+    expect(turns).toHaveLength(3);
+    // The extension saw no completion and asked for the tool call; the reply was not
+    // tool-call-shaped text.
+    expect(userText(turns[2] as Request)).toContain("handoff_complete");
+    expect(userText(turns[2] as Request)).not.toContain("written as text");
+    // Never closed: only the `legion` tool's own handoff_complete closes the stall
+    // (src/handoff-actions.ts calls onPhaseCompleted from the tool alone); WAITING quieted it.
+    expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);
+  },
+  120_000
+);
+
 // The run-end ask nudge (extensions/envoy.ts) is a hidden side-turn self-check whose
 // WAITING verdict — and nothing else — buys one steered turn. Two host behaviours carry it, and
 // only the real binary can say either: an ephemeral call is served as a Messages request over a
