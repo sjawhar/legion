@@ -281,6 +281,53 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
+// The state's capability report (contract 16): the golden carries a decided row with the operator's
+// reason and an open row with the legion.yaml line that records a decision, beside the present,
+// installed (codegraph: the image carries the tooling, a pod's agent awaits the launch that loads
+// it), live and withheld rows, and the report is never absent from a state.
+test("the state golden carries the deployment's capability report", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+
+  const rows = Object.fromEntries(state.capabilities.map((row) => [row.name, row]));
+  expect(rows.secrets).toEqual({
+    name: "secrets",
+    status: "decided",
+    detail: "runtime.kubernetes.agent_secrets is not configured",
+    decision:
+      "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret",
+  });
+  expect(rows["resource-limits"]).toEqual({
+    name: "resource-limits",
+    status: "open",
+    detail:
+      "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
+    configLine: 'capabilities.decided.resource-limits: "<reason>"',
+  });
+  expect(rows.codegraph).toEqual({
+    name: "codegraph",
+    status: "installed",
+    detail:
+      "the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)",
+  });
+  const statuses = state.capabilities.map((row) => row.status);
+  for (const status of ["present", "installed", "live", "withheld", "decided", "open"] as const) {
+    expect(statuses).toContain(status);
+  }
+
+  const emptied = fixture("state-stage3.json") as { capabilities: unknown[] };
+  expect(emptied.capabilities).toEqual([]);
+});
+
+test("a capability row's status is one the report renders, and the report cannot be dropped", () => {
+  const unknownStatus = fixture("state.json") as { capabilities: { status: string }[] };
+  unknownStatus.capabilities = [{ ...unknownStatus.capabilities[0], status: "missing" }];
+  expect(LegionStateResponse.safeParse(unknownStatus).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.capabilities;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is
 // Stage 2's shape and the merge-queue holder's in production — and state lists that issue for the
 // claim's sake. The document parsed here is the one a live daemon served with such a claim on it:

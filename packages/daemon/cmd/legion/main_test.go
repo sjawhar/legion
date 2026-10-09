@@ -492,6 +492,13 @@ github_apps:
 	return path, marker
 }
 
+// tmuxCapabilityGaps are the two lines `legion start --check-config` prints after Config OK for a
+// tmux configuration that decides neither: the tmux runtime enrolls nothing with the secrets broker
+// and sets no requests or limits, so both deployment capabilities are open until the file records
+// a decision (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps).
+const tmuxCapabilityGaps = "capability secrets is open: the tmux runtime enrolls no process with the secrets broker; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n" +
+	"capability resource-limits is open: the tmux runtime sets no requests or limits on a pane; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"
+
 // `legion start --check-config` validates the file the way boot does, says so, and exits: no App
 // key command runs, no store is opened (the configured Postgres is unreachable), and no team is
 // taken.
@@ -504,8 +511,8 @@ func TestStartCheckConfigValidatesAndStartsNothing(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("legion start --check-config = %d, stderr %q", code, errb.String())
 	}
-	if out.String() != "Config OK: project=DEMO\n" {
-		t.Fatalf("stdout = %q, want \"Config OK: project=DEMO\\n\"", out.String())
+	if want := "Config OK: project=DEMO\n" + tmuxCapabilityGaps; out.String() != want {
+		t.Fatalf("stdout = %q, want %q", out.String(), want)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
@@ -740,6 +747,7 @@ func TestStartCheckConfigReadsTheLaunchSecretsAsBootDoes(t *testing.T) {
 			if tc.key == seedKey {
 				want = "Config OK: project=DEMO nats-nkey-user=" + public + "\n"
 			}
+			want += tmuxCapabilityGaps
 			if tc.refusal == nil {
 				if code != 0 || out.String() != want || errb.Len() != 0 {
 					t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
@@ -798,7 +806,7 @@ func TestStartCheckConfigReadsTheDaemonNATSSeedAsBootDoes(t *testing.T) {
 				t.Fatalf("the check printed a seed: stdout %q stderr %q", out.String(), errb.String())
 			}
 			if tc.refusal == nil {
-				if want := "Config OK: project=DEMO nats-nkey-user=" + paneUser + " nats-daemon-nkey-user=" + daemonUser + "\n"; code != 0 || out.String() != want || errb.Len() != 0 {
+				if want := "Config OK: project=DEMO nats-nkey-user=" + paneUser + " nats-daemon-nkey-user=" + daemonUser + "\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
 					t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 				}
 			} else if want := "legion start: " + tc.refusal(path); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
@@ -871,6 +879,125 @@ runtime:
 
 			if want := tc.says(dir); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and stderr starting %q", code, out.String(), errb.String(), want)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+			}
+		})
+	}
+}
+
+// kubernetesCheckConfig is a kubernetes configuration `legion start --check-config` passes: the
+// keys every pod needs, a kubeconfig naming a context the check never dials, and extra appended
+// at the top level (a four-space-indented line extends the runtime.kubernetes block, which comes
+// last before it).
+func kubernetesCheckConfig(t *testing.T, extra string) string {
+	t.Helper()
+	dir := t.TempDir()
+	body := fmt.Sprintf(`project: DEMO
+postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
+state_dir: %s
+bind: 10.0.0.5
+daemon_url: http://10.0.0.5:13370
+envoy_url: http://envoy-listener.internal.example:9020
+envoy_token_file: ./envoy-token
+operator_token_file: ./operator-token
+dispatch_url: https://dispatch.internal.example
+dispatch_token_file: ./dispatch-token
+nats_urls: [nats://nats.internal.example:4222]
+projects:
+  DEMO: { repo: acme/widgets }
+github_apps:
+  implement: { app_id: "1", private_key_command: "exit 1" }
+  review: { app_id: "2", private_key_command: "exit 1" }
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    storage_class: gp2
+    kubeconfig: ./kubeconfig
+    context: legion-daemon
+%s`, filepath.Join(dir, "state"), extra)
+	config := filepath.Join(dir, "legion.yaml")
+	for name, contents := range map[string]string{
+		config: body, "envoy-token": "envoy\n", "operator-token": "operator\n", "dispatch-token": "dispatch\n",
+		"kubeconfig": `apiVersion: v1
+kind: Config
+clusters: [{name: example, cluster: {server: "https://192.0.2.20:6443"}}]
+users: [{name: legion-daemon, user: {token: placeholder}}]
+contexts: [{name: legion-daemon, context: {cluster: example, user: legion-daemon, namespace: legion}}]
+current-context: legion-daemon
+`,
+	} {
+		if !filepath.IsAbs(name) {
+			name = filepath.Join(dir, name)
+		}
+		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return config
+}
+
+// After Config OK, --check-config prints one line per deployment capability the file alone leaves
+// open (daemon.Deployment: secrets with no broker configured, resource-limits with a role lacking
+// CPU and memory requests and limits), each in the words boot logs it with and naming the
+// legion.yaml line that records a decision — and exits 0, because a gap is reported, never
+// refused. A decision quiets its row, every role reserved closes the resource-limits row, and a
+// configured broker's secrets row is boot's to measure, so the check says nothing of it. Model
+// fallback is the probe's and never printed here.
+func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
+	legionState(t)
+	const everyRole = `    resources:
+      architect: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
+      planner: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
+      implementer: {requests: {cpu: "1", memory: 2Gi}, limits: {cpu: "4", memory: 6Gi}}
+      tester: {requests: {cpu: "2", memory: 4Gi}, limits: {cpu: "4", memory: 12Gi}}
+      reviewer: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
+      merger: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
+`
+	const secretsGap = "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
+	for _, tc := range []struct{ name, extra, want string }{
+		{"nothing reserved, no broker", "", secretsGap +
+			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: architect, planner, implementer, tester, reviewer, merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
+		{"a role with limits alone", "    resources: {tester: {limits: {cpu: \"4\", memory: 12Gi}}}\n", secretsGap +
+			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: architect, planner, implementer, tester, reviewer, merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
+		{"every role reserved", everyRole, secretsGap},
+		{"the controller's pod unreserved under controller: daemon", everyRole + "controller: daemon\n", secretsGap +
+			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: controller; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
+		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, operator: operator@example.com}\n", ""},
+		{"both decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n    resource-limits: one tree per node\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := kubernetesCheckConfig(t, tc.extra)
+
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			if want := "Config OK: project=DEMO\n" + tc.want; code != 0 || out.String() != want || errb.Len() != 0 {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+			}
+		})
+	}
+}
+
+// A decision may name only a capability the daemon measures from the deployment: anything else is
+// refused as an unknown key naming the three, and a blank reason records nothing, so it is refused
+// too — each with exit 1 and no Config OK.
+func TestStartCheckConfigRefusesAnUnknownCapabilityDecision(t *testing.T) {
+	legionState(t)
+	for _, tc := range []struct{ name, extra, want string }{
+		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits\n"},
+		{"a blank reason", "capabilities: {decided: {secrets: \"\"}}\n", "legion start: capabilities.decided.secrets must not be empty\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config, marker := workflowConfig(t, 13370, tc.extra)
+
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			if code != 1 || out.Len() != 0 || errb.String() != tc.want {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and stderr %q", code, out.String(), errb.String(), tc.want)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Fatalf("the private_key_command ran (marker stat: %v)", err)

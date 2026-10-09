@@ -83,10 +83,9 @@ const LEGION_PROBE = "legion state; echo exit=$?";
 
 /** The full headless leg: 32 bash calls and 3 `task` spawns. `short` is the terminal leg: 8
  * bash calls and 1 spawn. Neither prompt names the credential variable or the word `export`, nor
- * `legion handoff complete`, which the extension refuses in a phase worker's shell (its phase
- * ends through the `legion` tool's `handoff_complete`). The gh steps run the pane's own gh with
- * nothing but the pane's environment: `gh --version` needs no credential, `gh auth token` prints
- * the one `GH_CONFIG_DIR` holds without touching the network. */
+ * `legion handoff complete`: a phase ends through the `legion` tool's `handoff_complete`. The gh
+ * steps run the pane's own gh with nothing but the pane's environment: `gh --version` needs no
+ * credential, `gh auth token` prints the one `GH_CONFIG_DIR` holds without touching the network. */
 function buildSteps(short: boolean): Step[] {
   const probe = (n: number): Step => ({ n, kind: "bash", command: PROBE_COMMAND });
   const ghToken = (n: number): Step => ({ n, kind: "bash", command: GH_TOKEN_PROBE });

@@ -19,20 +19,19 @@ Follow this ordering exactly. It keeps the reviewed branch clean while preservin
 retrospective's durable output.
 
 1. Tester green and all code-review cycles finish.
-2. The reviewer approves the head. It still carries `.legion/`: no role removes it before the
-   merge. The daemon strips whatever `.legion/` main still carries from the next issue's branch
-   before any of its roles start, so that tree's own merge carries the removal onto the default
-   branch; no operator sweep follows.
-3. Run this retro: commit durable learnings to `docs/solutions/`, bring the pull request body's
-   path-derived content up to date for that commit before you push it, and post the retro
-   message on the Dispatch issue.
-   Retro writes **no `.legion` file**, so it never changes the approved head's handoffs.
-4. The merger verifies the tip is the approved head plus commits that change only
-   `docs/solutions/` — `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY —
-   and sends the READY packet with its completion; the daemon posts it on the Dispatch issue and
-   publishes it to the project's merge-queue role when one is configured. A human merges under the
-   repository's GitHub branch-protection and CODEOWNERS requirements; GitHub's merge queue
-   participates only when the repository enables it.
+2. The reviewer approves the head. It still carries the issue's handoffs, `.legion/<issue>/`
+   (`<issue>` is your `LEGION_ISSUE`), which every tester and reviewer round writes again.
+3. Run this retro (*Durable outputs*, below): its learnings under `docs/solutions/`, then one final
+   commit removing `.legion/<issue>/`, pushed together, and the retro message on the Dispatch
+   issue. Retro writes **no handoff**. The removal exists because a squash merge commits the head
+   merged into the base, and nothing on the base reads a handoff; the handoffs stay on the issue
+   branch below that commit.
+4. The merger verifies the tip is the approved head plus retro's commits, quotes their
+   `jj diff --from <approved-sha> --to <tip-sha> --summary` in READY, and sends the READY packet
+   with its completion, which refuses a head that still carries `.legion/<issue>/`; the daemon
+   posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
+   configured. A human merges under the repository's GitHub branch-protection and CODEOWNERS
+   requirements; GitHub's merge queue participates only when the repository enables it.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
    and records it on the PR and the issue: the agent that developed it is responsible for testing
    in production. The architect's sign-off waits for that record.
@@ -41,10 +40,12 @@ retrospective's durable output.
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
    owned by the architect and implemented by the same implementer; the parent stays open until it lands.
 
-Retro's commit sits above the reviewer's approved head and the approval stands: a commit that
-changes only `docs/solutions/` does not void it, and the tree goes from retro to the merger —
-never back to the tester or reviewer. A conflict-forced rebase after retro moves these documents
-with the branch; retro does not re-run.
+Retro's commits sit above the reviewer's approved head and the approval stands: commits that
+change only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the
+tree goes from retro to the merger — never back to the tester or reviewer. A conflict-forced
+rebase after retro moves these commits with the branch. Any round after retro (a conflict round, a
+round a red CI sends back, a re-review) writes `.legion/<issue>/` again, and every approval moves
+the issue to retro once more: each retro ends with the removal again, or READY is refused.
 
 Do not start retro before step 2 or skip it because the change seems mechanical; the merger's
 `READY` comes only after step 3. The design gate is not a substitute for review and retro.
@@ -106,24 +107,30 @@ related_issues:
 ```
 
 Commit the documentation on the existing issue branch. Do not create a replacement branch or
-bookmark.
+bookmark. Then commit the removal of the issue's handoffs as the one final commit, touching
+nothing else, when the head still holds them:
+`cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before READY" ".legion/${LEGION_ISSUE:?}"; fi`.
+A retro that commits no learning makes that commit alone; a retro after an earlier removal with no
+handoff written since has nothing to remove and makes none (without the guard, `rm -r` would fail
+on the missing directory and that retro would stop there).
 
-Before you push that commit, bring up to date the body content the repository derives from the
+Before you push those commits, bring up to date the body content the repository derives from the
 pull request's changed paths. A repository can require such content, a line naming a checklist
 for each class of changed path for instance, and have a required check read it from the PR body.
-When your commit adds a `docs/solutions/` path the approved body never accounted for, that check
-fails at your head; the merger reports a stale body rather than rewriting it, and READY refuses a
-head whose required check failed, so the tree stops at the merger.
+When your commits add a `docs/solutions/` path the approved body never accounted for, or take away
+the `.legion/` paths it did, that check fails at your head; the merger reports a stale body rather
+than rewriting it, and READY refuses a head whose required check failed, so the tree stops at the
+merger.
 
 1. Read what the deployment instructions in your system prompt, and the agent guide and pull
    request template of the repository you are working in, derive from the changed paths. When
    they derive nothing, skip steps 2 to 4 and go on to the push.
-2. Compute it the way they say, for the paths the pull request changes at your commit, the files
+2. Compute it the way they say, for the paths the pull request changes at your head, the files
    GitHub lists on it:
-   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <commit>)' --to <commit> --name-only`
-   lists them, `<base>` the pull request's base branch and `<commit>` your docs commit. Where a
+   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <head>)' --to <head> --name-only`
+   lists them, `<base>` the pull request's base branch and `<head>` your removal commit. Where a
    line affirms work, such as a checklist completed for a class of path, do that work for the
-   paths your commit adds before you write the line: the line is a claim. That work may change
+   paths your commits add before you write the line: the line is a claim. That work may change
    files under `docs/solutions/` only, folded into your docs commit before the push, since
    anything else above the approved head voids the approval.
 3. In a fresh `mktemp -d` directory outside `$LEGION_WORKSPACE` (the one place you write outside
@@ -139,16 +146,17 @@ head whose required check failed, so the tree stops at the merger.
    `cd -- "$LEGION_WORKSPACE" && gh api --method PATCH repos/{owner}/{repo}/pulls/{number} -F body=@<dir>/body.md`.
    The checks the push starts read the body as it stands then; an edit after the push re-runs
    only a check that also starts on an edited body. Such a check re-runs now at the approved
-   head, on a diff without your commit, and may fail there; READY reads the head your push makes.
+   head, on a diff without your commits, and may fail there; READY reads the head your push makes.
 
 When you cannot compute that content, cannot do the work a line affirms within
 `docs/solutions/`, the body read fails or comes back empty, or GitHub refuses the body, push
 nothing and do not complete: tell the architect with `envoy_publish` to its role topic, naming
 what failed.
 
-Then push the commit with `legion push`. When the push is refused after step 4 wrote the body,
-write `<dir>/before.md` back the same way before you report the refusal to the architect, so the
-body matches the head GitHub has. After the push, post one Dispatch message on
+Then push both commits with one `legion push`, so one CI run covers them. When the push is
+refused after step 4 wrote the body, write `<dir>/before.md` back the same way before you report
+the refusal to the architect, so the body matches the head GitHub has. After the push, post one
+Dispatch message on
 the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
@@ -174,23 +182,27 @@ dispatch_message({
 })
 ```
 
-The `docs/solutions/` commit, the PR body lines that commit makes stale, and the Dispatch message
-are the only retro outputs. Never write a handoff, phase artifact, local feedback log, or
-completion label, and add or change nothing under `.legion/`. Report completion with the `legion`
-tool's `handoff_complete` alone (its summary: two sentences for the architect) — no
-`handoff_write`.
+The `docs/solutions/` commit, the removal of `.legion/<issue>/`, the PR body lines those commits
+make stale, and the Dispatch message are the only retro outputs. Never write a handoff, phase
+artifact, local feedback log, or completion label, and change nothing under `.legion/` but that
+removal. Report completion with the `legion` tool's `handoff_complete` alone (its summary: two
+sentences for the architect) — no `handoff_write`.
 
 ## Completion check
 
 Before returning, verify all of the following:
 
-- The reviewer-approved head remains below the retro documentation commit, and the reviewer's
-  approval of that head stands: the merger accepts the approved head plus this commit.
+- The reviewer-approved head remains below the retro commits, and the reviewer's approval of that
+  head stands: the merger accepts the approved head plus the documentation commit and the removal.
 - The learning documents and the Dispatch message both exist (never a GitHub issue comment).
 - The PR body carries what the repository's instructions derive from the pull request's changed
   paths at the retro head, written back before that head's push, and each line that affirms work
   affirms work you did; or the instructions derive nothing.
 - Both proofs were read, and any gap in either is recorded as a learning.
-- No `.legion` file was created or modified by retro.
+- Retro wrote no handoff, and when the head held `.legion/<issue>/`, its last commit, pushed,
+  removed it and nothing else:
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r <head> "root:.legion/${LEGION_ISSUE:?}"`
+  prints nothing (`root:` names the path from the repository root, so a run from another directory
+  cannot print nothing by failing).
 - The fresh-eyes analysis was considered alongside the implementer's context.
 - The merger remains a subsequent step, not work performed by retro.

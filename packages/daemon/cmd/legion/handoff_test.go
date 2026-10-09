@@ -1086,48 +1086,90 @@ func TestHandoffTakesPhaseWordsForPhasesAndRolesForRoles(t *testing.T) {
 	}
 }
 
-// A branch head that deleted .legion/ still completes: the implementer and the tester report
-// completion without recreating it. The commit that deleted the handoff is the last commit on the
-// branch that changed it, and the completion reports it.
-func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
+// retroRemovedHandoffs is a real jj workspace whose issue branch carries THIS-1's product change,
+// its plan, implement and test handoffs, and, last, retro's commit removing .legion/THIS-1/ before
+// READY (dispatch://LEGION-605). It returns the workspace, the absolute jj, and that commit.
+func retroRemovedHandoffs(t *testing.T) (string, string, string) {
+	t.Helper()
+	workspace, jj := handoffRepo(t)
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
+	writeHandoffFile(t, workspace, "THIS-1", "plan.json", `{"issue":"THIS-1","round":"the plan"}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "plan: record handoff")
+	writeHandoffFile(t, workspace, "THIS-1", "implement.json", `{"issue":"THIS-1","round":1}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
+	writeHandoffFile(t, workspace, "THIS-1", "test.json", `{"issue":"THIS-1","round":1}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "test: record handoff")
+	if err := os.RemoveAll(filepath.Join(workspace, ".legion", "THIS-1")); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, workspace, "commit", "-m", "retro: remove .legion/THIS-1/ before READY")
+	return workspace, jj, handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+}
+
+// Retro's last commit removes the issue's handoffs from the head a human merges, and they stay the
+// recovery source of truth on the issue branch while the issue is open: a role that reads a
+// handoff after that commit, in the production check or in a round a withdrawn READY sent back,
+// reads the one the removal took away, from the commit before it. A handoff the branch wrote again
+// since is read from the workspace as always.
+func TestHandoffReadReadsAHandoffRetroRemovedFromTheBranch(t *testing.T) {
+	workspace, jj, _ := retroRemovedHandoffs(t)
+	writeHandoffFile(t, workspace, "THIS-1", "implement.json", `{"issue":"THIS-1","round":2}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff (round 2)")
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"the plan"`) {
+		t.Fatalf("handoff read --phase plan after retro removed it = %d, stdout %q, stderr %q; want the plan the removal took away", code, out.String(), errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace}, &out, &errb); code != 0 {
+		t.Fatalf("handoff read after retro removed the handoffs = %d, stderr %q", code, errb.String())
+	}
+	var all map[string]map[string]any
+	if err := json.Unmarshal(out.Bytes(), &all); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	if all["plan"]["round"] != "the plan" || all["test"]["round"] != float64(1) || all["implement"]["round"] != float64(2) {
+		t.Fatalf("handoff read = %v; want the removed plan and test, and round 2's implement written since", all)
+	}
+}
+
+// A round after retro's removal, which a withdrawn READY sends back to implementing, testing and
+// review, owes its own handoff like every file-backed round: a completion whose handoff a commit
+// removed is refused before any request, naming the file to write, and never reports retro's
+// commit as the round's handoff. Written and committed again, it completes naming that commit.
+func TestHandoffCompleteAfterRetroRemovedTheHandoffsWantsThemWrittenAgain(t *testing.T) {
 	for _, tc := range []struct {
-		role, verdict string
-		current       phase.Phase
+		role, verdict, word string
+		current             phase.Phase
 	}{
-		{"implementer", "", phase.Implementing},
-		{"tester", "pass", phase.Testing},
+		{"implementer", "", "implement", phase.Implementing},
+		{"tester", "pass", "test", phase.Testing},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
-			workspace, jj := handoffRepo(t)
+			workspace, jj, removal := retroRemovedHandoffs(t)
 			t.Chdir(workspace)
-			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
-			writeHandoffFile(t, workspace, "THIS-1", "implement.json", `{"issue":"THIS-1"}`+"\n")
-			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
-			writeHandoffFile(t, workspace, "THIS-1", "test.json", `{"issue":"THIS-1"}`+"\n")
-			handoffJJ(t, jj, workspace, "commit", "-m", "test: record handoff")
-			if err := os.RemoveAll(filepath.Join(workspace, ".legion")); err != nil {
-				t.Fatal(err)
-			}
-			handoffJJ(t, jj, workspace, "commit", "-m", "chore: remove .legion/ before approval")
-			deletion := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", tc.role)
 			bodies := handoffDaemon(t, tc.current)
-			args := []string{"legion", "handoff", "complete", "--summary", "the .legion/ deletion is pushed"}
+			args := []string{"legion", "handoff", "complete", "--summary", "the round is done"}
 			if tc.verdict != "" {
 				args = append(args, "--verdict", tc.verdict)
 			}
 			var out, errb bytes.Buffer
-			if code := run(context.Background(), args, &out, &errb); code != 0 {
-				t.Fatalf("%s handoff complete after the .legion/ deletion = %d, stderr %q", tc.role, code, errb.String())
+			if code := run(context.Background(), args, &out, &errb); code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), filepath.Join(".legion", "THIS-1", tc.word+".json")+" is missing from the workspace") {
+				t.Fatalf("%s handoff complete after retro's removal = %d, daemon read %v, stderr %q; want a refusal naming the missing handoff before any request (retro's commit is %s)", tc.role, code, *bodies, errb.String(), removal)
 			}
-			if len(*bodies) != 1 || (*bodies)[0]["commit"] != deletion {
-				t.Fatalf("daemon read %v, want one completion naming %s, the commit that deleted .legion/", *bodies, deletion)
-			}
-			if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
-				t.Fatalf(".legion/ after the completion: %v, want it still absent", err)
+
+			writeHandoffFile(t, workspace, "THIS-1", tc.word+".json", `{"issue":"THIS-1","round":2}`+"\n")
+			handoffJJ(t, jj, workspace, "commit", "-m", tc.word+": record handoff (round 2)")
+			written := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+			errb.Reset()
+			if code := run(context.Background(), args, &out, &errb); code != 0 || len(*bodies) != 1 || (*bodies)[0]["commit"] != written {
+				t.Fatalf("%s handoff complete once written again = %d, daemon read %v, stderr %q; want one completion naming %s", tc.role, code, *bodies, errb.String(), written)
 			}
 		})
 	}

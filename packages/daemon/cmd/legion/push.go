@@ -72,11 +72,12 @@ the branch: the planner's .legion/<issue>/plan.json, the tester's .legion/<issue
 reviewer's .legion/<issue>/review.json whose verdict is "changes_requested". Its head commit then
 ends with GitHub's "skip-checks: true" trailer, so the push starts no workflow, and the Go daemon
 carries the code head's verdict to it. Every other push runs CI in full: one carrying code, a
-reviewer round with any other verdict or none, the .legion/ deletion, and a rewrite. The paths are
-read from the push's commits, not from its net tree diff: no commit may touch a path outside those
-three, even one a later commit undoes, because the daemon classifies the push from the union of
-its commits' paths and a head this rule skipped over such a commit would carry no verdict at all. A
-trailer an earlier push left on @- is removed. Never add or remove the trailer yourself.
+reviewer round with any other verdict or none, retro's removal of .legion/<issue>/, which leaves the
+head a human merges, and a rewrite. The paths are read from the push's commits, not from its net
+tree diff: no commit may touch a path outside those three, even one a later commit undoes, because
+the daemon classifies the push from the union of its commits' paths and a head this rule skipped
+over such a commit would carry no verdict at all. A trailer an earlier push left on @- is removed.
+Never add or remove the trailer yourself.
 
 Those three files are an allow-list, narrower than the sentence that opens this rule:
 .legion/<issue>/implement.json and .legion/<issue>/architect.json are excluded although their

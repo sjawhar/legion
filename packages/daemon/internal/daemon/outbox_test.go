@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -187,7 +188,7 @@ func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
 	if got := publisher.keys(); fmt.Sprint(got) != "[legion-outbox:57]" {
 		t.Fatalf("controller notice keys = %v, want the row's own key", got)
 	}
-	if got, want := publisher.payloads()[0], (record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}); got != want {
+	if got, want := publisher.payloads()[0], (record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("controller notice payload = %+v, want the notice %+v", got, want)
 	}
 }

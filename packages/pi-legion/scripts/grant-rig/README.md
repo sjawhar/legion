@@ -216,9 +216,8 @@ entry appears.
 
 Expected: `H=1/1 G=1 T=0 file=own-mint` on every record-grant call, `G=0` on the gh and probe
 calls, A–G all PASS, `gh auth token` printing `ghs_rig_token`, `legion …` commands `exit=0`, one
-parent instance plus one per `task` spawn. The prompt never asks for `legion handoff complete`:
-the extension refuses it in a phase worker's shell, where the `legion` tool's `handoff_complete`
-ends the phase.
+parent instance plus one per `task` spawn. The prompt never asks for `legion handoff complete`: a
+phase ends through the `legion` tool's `handoff_complete`.
 
 ## Cleanup
 

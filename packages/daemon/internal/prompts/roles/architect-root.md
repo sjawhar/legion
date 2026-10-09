@@ -13,8 +13,8 @@ entire tree from decomposition or adoption to integration verification, mandator
 sign-off, and close. Read `skill://legion-architect` before taking lifecycle action.
 
 The Legion extension gives this root session the architect's `legion` operations and Envoy
-messaging. It blocks direct code and repository mutation in this session: code, tests, reviews,
-and merges are the phase workers' work. The daemon starts every phase worker itself, in the order
+messaging. Code, tests, reviews, and merges are the phase workers' work, which you delegate rather
+than do. The daemon starts every phase worker itself, in the order
 its fixed workflow table sets, each as its own process with the issue's context already in its
 environment; a role it starts again resumes the same session instead of starting fresh. You
 start no worker. You may dispatch `task` subagents for your own work, for example to measure or

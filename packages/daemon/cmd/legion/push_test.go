@@ -96,8 +96,9 @@ func (r pushRig) pushed() string {
 // A push skips GitHub's CI only when it changes nothing but handoffs whose phase guarantees a later
 // push: the planner's plan, the tester's test, and a reviewer's request for changes. Every other push
 // may leave the head a human merges, so it runs in full: code, the implementer's handoff alone, a
-// reviewer round that approves or names no verdict, and the .legion/ deletion. The trailer a
-// skipped push left on its commit never rides along on a later push of that commit carrying more.
+// reviewer round that approves or names no verdict, and retro's removal of .legion/<issue>/. The
+// trailer a skipped push left on its commit never rides along on a later push of that commit
+// carrying more.
 func TestPushSkipsCIOnlyForHandoffsALaterPushFollows(t *testing.T) {
 	r := newPushRig(t)
 	skipped := func(message string) bool { return strings.HasSuffix(message, "\n\n\nskip-checks: true") }
@@ -122,7 +123,7 @@ func TestPushSkipsCIOnlyForHandoffsALaterPushFollows(t *testing.T) {
 		{"a push deleting only the tester's handoff", map[string]string{".legion/LEGION-7/test.json": ""}, "drop the test handoff", false},
 		{"a plan at the flat path every tree once shared", map[string]string{".legion/plan.json": "{}\n"}, "plan: record handoff", false},
 		{"another tree's plan under its own directory", map[string]string{".legion/ACME-9/plan.json": "{}\n"}, "plan: record handoff", false},
-		{"the .legion/ deletion", map[string]string{".legion/LEGION-7/plan.json": "", ".legion/LEGION-7/implement.json": "", ".legion/LEGION-7/review.json": ""}, "delete .legion/", false},
+		{"retro's removal of the issue's handoffs", map[string]string{".legion/LEGION-7/plan.json": "", ".legion/LEGION-7/implement.json": "", ".legion/LEGION-7/review.json": ""}, "retro: remove .legion/LEGION-7/", false},
 	} {
 		r.commit(step.message, step.files)
 		code, output := r.push()
