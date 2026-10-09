@@ -1,11 +1,12 @@
 {
-  "completed": "2026-10-09T09:18:02.842539213Z",
+  "completed": "2026-10-09T11:35:56.585966227Z",
   "deviations": [
     "The plan's no-copy grep cannot print nothing as written: its `claims/register` alternative matches the phase-stall test's pre-existing assertion on the paths the pane called (and the new shell case's identical assertion); the route-definition form `pathname === \"/legion/v1/claims/register\"` prints nothing — recorded in proof 2",
     "isSelfCheck is not exported from the harness (the plan's T2 listed it among the exports): after the hoist nothing outside omp-harness.ts calls it, and LegionPane.turns()/selfChecks() cover its use",
     "The stall test's local PaneOptions extends Pick\u003cLegionPaneOptions, legion|quietMs|selfCheck\u003e instead of re-declaring the three fields with copied doc comments (simplify pass)",
     "Round 2: `legion is available only to this session’s registered claim` (the plan’s T5 wording for the subagent sentence) is not quoted: on the real binary the subagent’s tool list has no `legion`, so the guard at legion.ts:616-620 is never reached; the documents say the subagent has every host tool but the `legion` tool",
-    "Round 1 reported the pi-legion suite as 193 pass / 697 expect() calls; every run printed 192 / 691. Corrected here and in the PR body"
+    "Round 1 reported the pi-legion suite as 193 pass / 697 expect() calls; every run printed 192 / 691. Corrected here and in the PR body",
+    "Round 3 (conflict): GitHub reported the head conflicting with main (the pi-legion CHANGELOG’s Unreleased → Changed list gained two entries on main where this branch inserted one). Resolved by a forward merge, never a rebase: commit 1511d4fabfa94d40422ee910181bd9de411fd8f1 = jj new legion/LEGION-634 main@origin; the one conflict kept both insertions (this issue’s entry first, then main’s LEGION-588 entries). Unchanged-diff fingerprint b66bfa91566f4896b26211c3135740d2520fe7b2dc4fad105b8ce5d21f7665b7 before (5b9d7372c1b8, fork point 5c956b07) and after (1511d4fa, fork point df983ada): the branch’s own diff is byte-identical, so the proofs above stand at their heads; on the merged tree pi-shared tsc + 23 pass, pi-legion tsc + 195 pass / 701 expect() on omp/18.6.0 (main added three cases), go test ./internal/prompts ok, skills-guard 6 pass, old-clause grep empty, LEGION-631 once per document, biome and check-private-names clean, after bun install --frozen-lockfile for the lockfile main bumped"
   ],
   "filesChanged": [
     "packages/pi-legion/tsconfig.json",
