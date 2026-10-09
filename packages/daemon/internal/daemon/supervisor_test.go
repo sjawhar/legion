@@ -59,8 +59,8 @@ func TestHelloResolverRejectsAnUnknownTokenAtOnceDuringTheBootWait(t *testing.T)
 // A boot token a real claim minted — ClaimByBootTokenHash finds it — is held until restoration,
 // not rejected: a live pane reconnecting while the boot's readiness gate still waits out an
 // unreachable NATS or Dispatch (daemon.go's run, LEGION-580) waits on s.restored alone, with no
-// deadline of its own, and is judged only once restoration closes it (as it does in daemon.go's
-// run(), right after "legion daemon started" is logged).
+// deadline of its own, and is judged only once restoration closes it (supervision.start, once every
+// stored claim has its machine and the boot's unfinished launches have been relaunched).
 func TestHelloResolverHoldsAKnownTokenUntilRestoredRatherThanRejectingItAfterTheTimeout(t *testing.T) {
 	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
 	const resolveTimeout = 20 * time.Millisecond
@@ -240,39 +240,39 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 // hold by the first resolve alone would accept the old generation after its claim has already
 // moved on, taking the stream slot the real generation-2 shim's own hello then finds "already
 // bound to a live stream". The fix resolves the token again once restoration ends and judges
-// generation 1's hello by that second resolve, which comes back Stale either way a claim reaches
-// this restart: supervisor.restore rewrites a claim it finds StateLaunching with no locator to
-// StateLaunchUncertain through the Recording-wrapped store, and launchUnfinished's
-// ReleaseUncertainLaunch — the one path a StateLaunchUncertain claim is actually relaunched
-// through — persists it again, still holding generation 1's hash, through that same store before
-// the relaunch mints generation 2's. Both writes record generation 1's hash in this process's own
-// BootTokens even though neither minted it, so the second resolve always comes back Stale,
-// refused as "stale worker generation", and generation 2's own, freshly minted hello is accepted.
+// generation 1's hello by that second resolve. This process writes generation 1's claim before
+// generation 2's however the claim reaches the restart: supervisor.restore rewrites one stored
+// launching, or queued after a release, to StateLaunchUncertain, and one already stored
+// StateLaunchUncertain is written by its release (supervise's ReleaseUncertainLaunch), before the
+// launch writes generation 2. Every write goes through the Recording-wrapped store, which records
+// generation 1's hash in this process's own BootTokens though it never minted it, so the second
+// resolve comes back Stale, refused as "stale worker generation", and generation 2's own, freshly
+// minted hello is accepted.
 func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNotMissed(t *testing.T) {
 	type result struct {
 		stale bool
 		known bool
 		err   error
 	}
+	rewrite := func(ctx context.Context, recording supervise.Store, c supervise.Claim) error {
+		c.State = supervise.StateLaunchUncertain
+		return recording.PutClaim(ctx, c)
+	}
+	release := func(ctx context.Context, recording supervise.Store, c supervise.Claim) error {
+		c.State = supervise.StateQueued
+		return recording.PutClaim(ctx, c)
+	}
 
 	for _, tc := range []struct {
-		name            string
-		seeded          supervise.ClaimState
-		rewritten       supervise.ClaimState
-		staleFailureWhy string
+		name   string
+		seeded supervise.ClaimState
+		// first is this process's first write of generation 1's claim, through the Recording store,
+		// before generation 2's.
+		first func(ctx context.Context, recording supervise.Store, c supervise.Claim) error
 	}{
-		{
-			name:            "generation 1 stored as StateLaunching: restore's own rewrite records it, so the second resolve comes back Stale",
-			seeded:          supervise.StateLaunching,
-			rewritten:       supervise.StateLaunchUncertain,
-			staleFailureWhy: "restore's rewrite of a StateLaunching claim to StateLaunchUncertain runs through the Recording store too, so this process records generation 1's hash even without minting it itself",
-		},
-		{
-			name:            "generation 1 stored as StateLaunchUncertain: launchUnfinished's ReleaseUncertainLaunch records it before relaunching, so the second resolve also comes back Stale",
-			seeded:          supervise.StateLaunchUncertain,
-			rewritten:       supervise.StateQueued,
-			staleFailureWhy: "ReleaseUncertainLaunch's own persist runs through the Recording store too, still holding generation 1's hash, so this process records it even without minting it itself",
-		},
+		{name: "generation 1 stored launching: restore's rewrite records it", seeded: supervise.StateLaunching, first: rewrite},
+		{name: "generation 1 stored queued after a release: restore's rewrite records it", seeded: supervise.StateQueued, first: rewrite},
+		{name: "generation 1 stored launch_uncertain: its release records it", seeded: supervise.StateLaunchUncertain, first: release},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &relaunchingStore{}
@@ -281,14 +281,14 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			const boot1, boot2 = "generation-1-token", "generation-2-token"
 			ctx := context.Background()
-			// A previous daemon's own row, or a still-earlier restore's rewrite: either way this
-			// process has done no write for it yet, so its BootTokens has recorded nothing. Seeded
-			// through the bare store, bypassing Recording, so the rewrite below is the only write
-			// that can record the hash.
-			if err := store.PutClaim(ctx, supervise.Claim{
+			// A previous daemon's own row: this process has done no write for it yet, so its
+			// BootTokens has recorded nothing. Seeded through the bare store, bypassing Recording,
+			// so the write below is the only one that can record the hash.
+			generation1 := supervise.Claim{
 				Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
 				State: tc.seeded,
-			}); err != nil {
+			}
+			if err := store.PutClaim(ctx, generation1); err != nil {
 				t.Fatalf("write generation 1's claim: %v", err)
 			}
 
@@ -309,16 +309,11 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 			case <-time.After(10 * resolveTimeout):
 			}
 
-			// restore's own rewrite to StateLaunchUncertain, or launchUnfinished's
-			// ReleaseUncertainLaunch moving the claim to StateQueued — generation 1's hash
-			// unchanged either way — runs through the Recording-wrapped store before the relaunch
-			// that follows mints generation 2's own fresh token before the held hello is ever
-			// judged.
-			if err := recording.PutClaim(ctx, supervise.Claim{
-				Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
-				State: tc.rewritten,
-			}); err != nil {
-				t.Fatalf("write generation 1's claim as %s: %v", tc.rewritten, err)
+			// This process's first write of generation 1's claim runs through the Recording-wrapped
+			// store with generation 1's hash unchanged; then the relaunch writes generation 2's own
+			// fresh token, before the held hello is ever judged.
+			if err := tc.first(ctx, recording, generation1); err != nil {
+				t.Fatalf("write generation 1's claim: %v", err)
 			}
 			if err := recording.PutClaim(ctx, supervise.Claim{
 				Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
@@ -329,11 +324,9 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			select {
 			case got := <-done:
-				if got.err != nil || !got.known {
-					t.Fatalf("resolve(%q) known = %t, err = %v, want known and no error", boot1, got.known, got.err)
-				}
-				if !got.stale {
-					t.Fatalf("resolve(%q) stale = false, want true: %s", boot1, tc.staleFailureWhy)
+				if got.err != nil || !got.known || !got.stale {
+					t.Fatalf("resolve(%q) = known %t, stale %t, err %v; want known and stale, no error",
+						boot1, got.known, got.stale, got.err)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("the resolver never returned after restoration closed")

@@ -48,7 +48,7 @@ var retreeable = append([]ClaimState{StateQueued}, gone...)
 // still runs in the old tree is a wait (wait.ErrWaiting) until its old tree's stop lands.
 func (m *Machine) Retree(ctx context.Context, tree string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if m.claim.Tree == tree {
 		return nil
 	}

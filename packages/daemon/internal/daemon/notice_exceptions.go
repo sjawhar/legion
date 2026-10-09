@@ -136,14 +136,14 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
 	held := r.supervisedClaim(reported.architect)
-	if !claimRuns(held.State) {
+	if !holdsRole(held) {
 		lingers, err := r.issueTreeLingers(ctx, issue)
 		if err != nil {
 			return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 		}
-		if stoppedWithTree(lingers, held.State) {
+		if stoppedWithTree(lingers, held) {
 			r.log.Info("outbox notice not re-held: its architect stopped with its finished tree",
-				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "state", held.State)
+				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "state", held.State, "stopping", held.Stopping)
 			return nil
 		}
 	}
@@ -153,7 +153,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	due := r.now().Add(noticeReholdDelays[notice.Resends])
-	if copyDueAtOnce(held, notice.Resends, exception.RecipientSession) {
+	if copyDueAtOnce(held.Claim, notice.Resends, exception.RecipientSession) {
 		due = r.now()
 	}
 	mark := fmt.Sprintf("%s#%d", exception.DedupeKey, notice.Resends)
@@ -170,7 +170,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			if err != nil {
 				return err
 			}
-			if superseded = catchUpSuperseded(*notice.CatchUp, held, root); superseded {
+			if superseded = catchUpSuperseded(*notice.CatchUp, held.Claim, root); superseded {
 				return nil
 			}
 		}
@@ -296,7 +296,6 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (reportedNotice, b
 // still passes the fence.
 func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) error {
 	now := r.now()
-	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
 	released := []int64{}
 	if err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		waiting, err := r.records.WaitingNotices(ctx, tx, r.dispatchProject, now)
@@ -320,7 +319,7 @@ func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) 
 			if err != nil {
 				return err
 			}
-			if owner, err := owningArchitect(route.project, route.issues, issue, notice.Kind, runs); err == nil && slices.Contains(architects, owner) {
+			if owner, err := owningArchitect(route.project, route.issues, issue, notice.Kind, r.holdsItsRole); err == nil && slices.Contains(architects, owner) {
 				released = append(released, row.ID)
 			}
 		}

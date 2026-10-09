@@ -68,6 +68,37 @@ legion start --config legion.yaml --check-config
   A model key that fails at boot refuses the boot even when the cause is a passing network blip,
   since the probe cannot tell the two apart. Start the daemon again once the cause is gone.
 
+## The daemon stops
+
+On SIGTERM (`legion stop`, a rollout, a node drain) the daemon logs `legion daemon stopping`, with
+`deciding` naming each claim whose decision is in flight and its event. It cuts short every
+relaunch and suspension it started itself and, once it has recorded its boot, the boot steps still
+running. A request in flight from the operator or an agent gets up to 8 seconds to finish, so a
+suspension or stop whose agent is already exiting is recorded. An operator request that would
+change a claim and that the daemon accepted before the stop began, but had not started deciding,
+is answered `503` (`<request> refused: the daemon is stopping; ask again once it is back`); one
+sent once the stop has begun gets the same 503, or finds no daemon listening once the daemon has
+closed its API listener. Repeat either once the daemon is back. It logs `legion daemon stopped`
+once it has recorded the boot's end. It waits at most 10 seconds for its own work before it records
+that, so it stops well inside a pod's termination grace. It ends no agent: the next boot re-adopts
+every pod or pane still running and relaunches each launch the stop cut short.
+
+A signal that comes before the boot is recorded ends the boot step under way only when that step
+is the plugin gate, which runs first, the GitHub App token mint, the image probe, or the NATS and
+Dispatch readiness checks; the daemon then stops without recording a boot. The cluster check,
+opening and migrating the store, building the runtime and recording the boot are not cut short:
+each runs to its end, with at most 30 seconds between one of the steps that end at the signal and
+the next, and the daemon stops at the next such step, or once its boot is recorded, which it then
+stamps.
+
+- **`legion daemon stopped draining the API`.** A request was still in flight after those 8
+  seconds. The daemon cut it short, the caller got an error, and the next boot takes its claim up;
+  repeat the request once the daemon is back.
+- **`legion daemon stopped waiting for its work`.** Some of the daemon's work had not ended when that
+  wait ran out, which takes a call into a process that does not answer; `deciding` names each claim
+  whose decision was still running, with its event. The daemon stopped anyway, and the next boot
+  takes those claims up.
+
 ## The controller
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running
