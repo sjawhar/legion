@@ -324,7 +324,7 @@ func TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL(t *testing.T) {
 
 // TestLoadLeavesAPasswordLibpqSuppliesToSignIn pins that a passwordless RDS URL whose password
 // comes from libpq's defaults, PGPASSWORD or a passfile, which pgx reads beneath the URL, signs in
-// with that password as before rather than having it swapped for a token.
+// with that password rather than a token.
 func TestLoadLeavesAPasswordLibpqSuppliesToSignIn(t *testing.T) {
 	for name, setup := range map[string]func(t *testing.T){
 		"PGPASSWORD": func(t *testing.T) { t.Setenv("PGPASSWORD", "from-the-environment") },
