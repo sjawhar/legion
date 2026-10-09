@@ -59,11 +59,11 @@ only on this phase's artifact.
 
 You never start another Legion role: the daemon starts every phase worker itself, from its fixed
 workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
-is a Legion role. A subagent runs in your pane as you, with every tool but the `legion` tool (which
-answers it `legion is available only to this session's registered claim`), and mints no grant: its
-bash runs `legion …`, a completion included, on the grant your last credentialed call wrote, within
-its 60 seconds (*Four facts about `gh`*, below), and the daemon takes that completion as yours — so
-give a subagent no completion step.
+is a Legion role. A subagent runs in your pane as you, with every host tool but the `legion` tool
+(it is never offered one), so a `legion` command from its bash, a completion included, is yours at
+the daemon: give a subagent no completion step. Today such a command runs on the per-call grant
+your own last credentialed call wrote, within its 60 seconds (*Four facts about `gh`*, below);
+LEGION-631 (dispatch://LEGION-631) replaces that grant with the role's mounted token file.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
@@ -428,12 +428,12 @@ check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report wit
 
 Report completion to the architect with the `legion` tool's `handoff_complete` and a two-sentence
 `summary`. This publishes your phase's completion to the architect's role and clears the daemon's
-record of this issue's active phase. The shell command `legion handoff complete` completes the
-phase at the daemon just as well and nothing refuses it, but only the tool call tells the
+record of this issue's active phase. A shell `legion handoff complete`, should one run, completes
+the phase at the daemon just as well and is not refused, but only the tool call tells the
 extension's phase stall: after a shell completion the reminder arrives when the turn settles and
 again after each later Envoy delivery's turn, until a tool `handoff_complete` next succeeds (in
-practice the next phase's). A completion made on that reminder is refused and leaves the stall
-open — `HANDOFF_NOT_CURRENT_PHASE` once the phase has moved, `HANDOFF_ALREADY_RECORDED` where a
+practice the next phase's). A completion made on that reminder is refused and closes nothing —
+`HANDOFF_NOT_CURRENT_PHASE` once the phase has moved, `HANDOFF_ALREADY_RECORDED` where a
 completion moves nothing (the implementer before its pull request exists; the production check) —
 so answer the reminder with a WAITING line saying the phase was completed from the shell. Do not
 add pipeline labels, run a controller loop, or invent a different completion protocol — this is the
