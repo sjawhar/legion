@@ -42,9 +42,9 @@ type createRequestResponse struct {
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
 	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
-	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. It
-	// waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null when nobody
-	// needs to.
+	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. While
+	// it is pending it waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null
+	// when the policy decided it at once, so no record names one.
 	Approver *string `json:"approver"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
@@ -115,7 +115,8 @@ type requestStatusResponse struct {
 	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
 	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. The
 	// record fixes it when the request is made, so a later change to the secret's owner does not
-	// move it. Null when nobody needs to.
+	// move it, and it stays once the request is decided. Null when the policy decided it at once,
+	// so no record names one.
 	Approver *string `json:"approver"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`

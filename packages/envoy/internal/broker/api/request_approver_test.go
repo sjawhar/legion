@@ -175,8 +175,9 @@ func TestARequestNamesWhomItWaitsOn(t *testing.T) {
 // the request's record, which the Inbox lists, never from the current policy: a request made while
 // its secret was one person's still answers that person once the secret's owner tag names another,
 // on its own status and on the same session's identical request, which joins it; the record stays
-// on the first owner's pending list and off the new owner's; and a new session's request, which
-// the current policy decides, names the new owner.
+// on the first owner's pending list and off the new owner's; that first owner may still deny it,
+// and the denied request still names them; and a new session's request, which the current policy
+// decides, names the new owner.
 func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T) {
 	ts := newTestServer(t)
 	const newOwner = "bob@example.com"
@@ -201,6 +202,13 @@ func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T
 	}
 	if !pendingFor(t, ts, owner, *first.RecordID) || pendingFor(t, ts, newOwner, *first.RecordID) {
 		t.Fatalf("record %s: want it on %s's pending list and off %s's", *first.RecordID, owner, newOwner)
+	}
+	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+*first.RecordID+"/deny", map[string]any{"approver": owner})
+	if status != http.StatusOK {
+		t.Fatalf("deny as %s after the owner change = %d %s", owner, status, body)
+	}
+	if read, body := ts.statusOf(t, sessionKey, session, first.RequestID); read.State != "denied" || !read.approverIs(&owner) {
+		t.Fatalf("GET /v1/requests/{id} once denied = %s; want denied, still naming %s", body, owner)
 	}
 
 	other, otherKey := ts.newSessionEnrollment(t, "box", "box-other-"+t.Name(), "carol@example.com")
