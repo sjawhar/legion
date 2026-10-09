@@ -2011,8 +2011,11 @@ orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read 
 Darwin the group's job-control count), which no shell can foreground and whose stops the kernel
 discards, ends the wait with exit 2 naming the pipe command. So does a terminal that was the
 prompt's controlling terminal and no longer is (TIOCGPGRP answers ENOTTY once the session-leader
-shell that started it exits); a terminal that never was, as the unit tests' bare pseudo-terminal,
-counts as held. The watcher handles SIGINT, SIGQUIT,
+shell that started it exits). A prompt that first reaches the terminal after that exit sees
+ENOTTY at once, so `controllingTerminal` also refuses when the session's leader is a zombie,
+reaped, or exiting (`sessionLeaderGone`: PF_EXITING in `/proc` on Linux, P_WEXIT or SZOMB from
+sysctl on Darwin). A terminal that never was, as the unit tests' bare pseudo-terminal in a live
+session, counts as held. The watcher handles SIGINT, SIGQUIT,
 SIGTERM, SIGHUP and SIGTSTP; signals whose kernel disposition is SIG_IGN remain ignored. ISIG is
 off: the reader acts on the terminal's signal keys itself (`promptReader.keys`, from the settings
 the shell handed it), sending the signal to its process group and discarding the rest of that

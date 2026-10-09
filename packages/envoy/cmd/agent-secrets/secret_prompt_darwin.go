@@ -3,7 +3,11 @@
 
 package main
 
-import "golang.org/x/sys/unix"
+import (
+	"errors"
+
+	"golang.org/x/sys/unix"
+)
 
 // The terminal calls the value prompt makes on macOS (secret_prompt_unix.go).
 const (
@@ -28,4 +32,34 @@ func processGroupOrphaned() (bool, error) {
 		return false, err
 	}
 	return proc.Eproc.Jobc == 0, nil
+}
+
+// The process states sessionLeaderGone reads (bsd/sys/proc.h): SZOMB in p_stat, and P_WEXIT in
+// p_flag, which sysctl sets from P_LEXIT (bsd/kern/kern_sysctl.c, fill_externproc).
+const (
+	procZombie  = 5      // SZOMB
+	procExiting = 0x2000 // P_WEXIT
+)
+
+// sessionLeaderGone reports whether this process's session leader has exited or begun to. From
+// then on the session has no controlling terminal and can never take one again: the leader's
+// exit revokes it (bsd/kern/kern_exit.c, proc_exit), and only a session leader can take a
+// terminal. A reaped leader has no record, which SysctlKinfoProc answers with EIO. It has not been
+// exercised on a Darwin machine.
+func sessionLeaderGone() (bool, error) {
+	sid, err := unix.Getsid(0)
+	if err != nil {
+		return false, err
+	}
+	if sid == unix.Getpid() {
+		return false, nil
+	}
+	leader, err := unix.SysctlKinfoProc("kern.proc.pid", sid)
+	if errors.Is(err, unix.EIO) {
+		return true, nil // reaped
+	}
+	if err != nil {
+		return false, err
+	}
+	return leader.Proc.P_stat == procZombie || leader.Proc.P_flag&procExiting != 0, nil
 }
