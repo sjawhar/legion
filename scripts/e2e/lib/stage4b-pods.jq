@@ -1,7 +1,8 @@
 # Stage 4b's reads of the pods its pod watch recorded (stage4b-sandbox-tree.sh): one definition of
-# a Sandbox pod the run judges, of the address its role launchers dial, of the worker stream the
-# daemon served when the pod was created, and of the reservation every container carries. Loaded
-# with `jq -L scripts/e2e/lib` and `include "stage4b-pods";`.
+# a Sandbox pod the run judges, of whether the scheduler placed a pod, of the address its role
+# launchers dial, of the worker stream the daemon served when the pod was created, and of the
+# reservation every container carries. Loaded with `jq -L scripts/e2e/lib` and
+# `include "stage4b-pods";`.
 
 # roles are an issue pod's six role containers, one per claim.Roles entry, each named for its role.
 def roles: ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
@@ -17,6 +18,15 @@ def ready_pod_event:
 
 # ready_pods is each such event's pod.
 def ready_pods: ready_pod_event | .object;
+
+# unschedulable is whether the scheduler reported it could not place a pod: PodScheduled=False with
+# reason Unschedulable.
+def unschedulable:
+  any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable");
+
+# scheduled is whether the scheduler placed a pod: bound to a node, or PodScheduled=True.
+def scheduled:
+  (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True");
 
 # launcher_connects is, for each role container of a pod, its role and the address its launcher
 # dials: the argument after `--connect` in its command, or null with none.

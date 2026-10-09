@@ -14,6 +14,7 @@ import {
   editorAttributes,
   type StoredMark,
 } from "../features/doc/editor";
+import type { PendingState } from "../features/doc/pending-sync";
 import type { DocumentRuntimeValue } from "../features/doc/runtime";
 
 export interface FakeEditor {
@@ -37,6 +38,7 @@ export interface FakeDocumentRuntime {
   admit(readOnly: boolean): void;
   connections: FakeConnection[];
   editors: FakeEditor[];
+  pending(state: PendingState): void;
   /** The server refuses the current socket because the stored document is outside the Proof
    * schema; a destroyed provider hears nothing more, so earlier connections are not told. */
   refuse(): void;
@@ -152,6 +154,11 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     },
     connections,
     editors,
+    pending(state) {
+      for (const callback of callbacks) {
+        callback.onPending(state);
+      }
+    },
     refuse() {
       callbacks.at(-1)?.onOutsideSchema();
     },

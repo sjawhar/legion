@@ -9,6 +9,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -61,9 +62,28 @@ func appendTextEmbed(t *testing.T, database *store.Store, artifactID string) {
 	}
 }
 
+// appendNestedLink persists a link over the first paragraph's text whose value nests 100 arrays
+// deep, one more than a mark's attribute may: the update a crafted document websocket client can
+// send, and what a server whose bound did not count the map ygo stores a mark as could write.
+func appendNestedLink(t *testing.T, database *store.Store, artifactID string) {
+	t.Helper()
+	persistence := docs.NewPgVersioned(database)
+	loaded, err := persistence.Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load document before crafted link: %v", err)
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		t.Fatalf("decode document before crafted link: %v", err)
+	}
+	if _, err := persistence.AppendUpdate(context.Background(), artifactID, docstest.NestedLinkUpdate(t, doc, docstest.NestedValue(100))); err != nil {
+		t.Fatalf("append crafted link: %v", err)
+	}
+}
+
 // outsideSchemaCorruptions are the stored trees outside the Proof schema a document can come to
-// hold: one the reader refuses, one only the renderer refuses, and one whose paragraph text
-// carries an embed.
+// hold: one the reader refuses, one only the renderer refuses, one whose paragraph text carries an
+// embed, and one whose text carries a mark nested past what ygo's text writers take.
 var outsideSchemaCorruptions = []struct {
 	name    string
 	corrupt func(*testing.T, *store.Store, string)
@@ -75,6 +95,7 @@ var outsideSchemaCorruptions = []struct {
 		}
 	}},
 	{"a paragraph whose text holds an embed", appendTextEmbed},
+	{"a mark nested past the bound", appendNestedLink},
 }
 
 // createCorruptedDocument creates a document holding "before" and gives it corrupt's stored tree,

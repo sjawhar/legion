@@ -109,6 +109,7 @@ func testConfig(t *testing.T) config.Config {
 		PromptRetireLimit:                       2,
 		OperatorTokenFile:                       tokenFile,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		ControllerLaunch:                        config.ControllerLaunchOperator,
 	}
 }
 
@@ -271,7 +272,7 @@ type built struct {
 
 // fakeRuntime is a daemon whose runtime is rt: the real stream listener, store, and machines,
 // with nothing launched for real.
-func fakeRuntime(rt *fake.Runtime, record *built) overrides {
+func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
 		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
 			record.mu.Lock()
@@ -486,6 +487,12 @@ type daemon struct {
 // startDaemon runs the daemon until the test stops it, and returns once it answers /healthz.
 func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Helper()
+	return startDaemonLogging(t, cfg, o, quietLogger())
+}
+
+// startDaemonLogging is startDaemon writing the daemon's log to log.
+func startDaemonLogging(t *testing.T, cfg config.Config, o overrides, log *slog.Logger) *daemon {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
 	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
@@ -496,7 +503,7 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
-	go func() { d.done <- run(ctx, cfg, quietLogger(), o) }()
+	go func() { d.done <- run(ctx, cfg, log, o) }()
 	t.Cleanup(d.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {

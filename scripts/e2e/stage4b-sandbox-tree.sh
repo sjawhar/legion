@@ -17,10 +17,12 @@
 # to backlog. Tree 3 is admitted when tree 2 leaves the line, supplies the held phase the controller
 # checkpoint needs, and is taken out from an operator shell. Tree 4 is admitted once tree 3 has left,
 # supplies a planner killed mid-turn and an implementer killed until it is held, and is taken out the
-# same way. Each checkpoint prints `== <name>`, what it observed with the source revision, the image
-# digest and the two plugins' versions recorded once in `run.json`, and `CHECK <name>: PASS`. The
-# first that fails ends the run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that
-# cannot run prints `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
+# same way. Between the operator's controller and tree 4, the daemon runs under `controller: daemon`
+# and back (daemon-controller-liveness). Each checkpoint prints `== <name>`, what it observed with
+# the source revision, the image digest and the two plugins' versions recorded once in `run.json`,
+# and `CHECK <name>: PASS`. The first that fails ends the run non-zero with `CHECK <name>: FAIL`,
+# naming it; a checkpoint that cannot run prints `CHECK <name>: BLOCKED`, naming the command that
+# failed and the record it checked.
 #
 # The proof human's GitHub writes (the merge, the teardown's closes and branch deletes, and the
 # fixture push) are the devbox gh's and its git credential helper's, acting as the sjawhar-agent
@@ -242,6 +244,9 @@ pair_session=
 # The completed idle planner probe spends only the former, by deleting each replacement before it
 # registers (supervise/budgets.go).
 launch_failure_limit=3
+# hold_rearm_limit is how many ends of one hold loop may land after their task's turn had ended
+# (hold_end_charged); each of them is given a new task and ended again, and one more fails the loop.
+hold_rearm_limit=2
 # Set while done cleans the smoke main (clean_smoke_main), so the verdict can tell that failure apart.
 smoke_main_cleaning=
 
@@ -494,6 +499,12 @@ takeover_ordered() {
 }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
+# claim_by_token TOKEN prints the claim TOKEN as `legion claims` shows it, and fails with none.
+claim_by_token() { claims_cli list --json | jq -ce --arg t "$1" '.claims[] | select(.token == $t)'; }
+# claim_live TOKEN: the claim TOKEN's agent is registered and live (ready, idle or working).
+claim_live() { claim_by_token "$1" | jq -e '.state | IN("ready", "idle", "working")' >/dev/null; }
+# claim_retired TOKEN: the claim TOKEN is retired.
+claim_retired() { claim_by_token "$1" | jq -e '.state == "retired"' >/dev/null; }
 # live_claims prints, as one JSON array sorted by token, every claim of the run that runs a process,
 # as `legion claims` shows it: its tree, issue, role, generation, issue pod (name and uid),
 # incarnation, session file, state and budgets.
@@ -819,6 +830,10 @@ nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@" 2> >(scrub >&2);
 
 # ---- the daemon ----------------------------------------------------------------------------------
 
+# controller_cpu is the CPU the pod of the controller the daemon launches requests
+# (runtime.kubernetes.resources.controller); set, legion.yaml says `controller: daemon`. It stays
+# empty, the operator's controller, but in daemon-controller-liveness.
+controller_cpu=
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
@@ -867,6 +882,18 @@ EOF
   render_operator_pod
   sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
   grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+  if [ -n "$controller_cpu" ]; then
+    cat >>"$work/legion.yaml" <<EOF
+    resources:
+      controller:
+        requests:
+          cpu: "$controller_cpu"
+          memory: 1Gi
+        limits:
+          memory: 2Gi
+controller: daemon
+EOF
+  fi
 }
 # resources_block prints the run's `runtime.kubernetes.resources` block: one entry per role the run
 # overrides (override_cpu, override_memory), with only the fields it sets, so the daemon fills the
@@ -973,6 +1000,14 @@ start_daemon() {
   kill -0 "$daemon_pid" 2>/dev/null || fail "the Go daemon exited before it answered /healthz: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' ' ')"
   ports_ours
 }
+# restart_daemon stops the run's daemon and starts it again on a legion.yaml written afresh
+# (write_legion_config).
+restart_daemon() {
+  stop_pid "$daemon_pid"
+  daemon_pid=
+  write_legion_config
+  start_daemon
+}
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
 log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log"; }
@@ -981,6 +1016,14 @@ log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_lo
 left_planning() {
   log_lines "workflow: phase changed" |
     jq -s -e -c --arg issue "$1" 'map(select(.issue == $issue and .from == "planning")) | first // empty | {time, to}'
+}
+# liveness_verdict PHASE MARK [--arg NAME VALUE]... is lib/controller-liveness-verdict.jq's verdict
+# for PHASE on the daemon log's lines after line MARK (daemon-controller-liveness).
+liveness_verdict() {
+  local phase=$1 mark=$2
+  shift 2
+  tail -n "+$((mark + 1))" "$daemon_log" |
+    jq -R -s -c -L "$root/scripts/e2e/lib" --arg phase "$phase" --argjson boot "$boot_timeout" "$@" -f "$root/scripts/e2e/lib/controller-liveness-verdict.jq"
 }
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
@@ -1109,6 +1152,54 @@ relaunch_ends() {
           else "expect: launch failures ran out" end )
   ' --args "$@"
 }
+# A hold loop (the controller checkpoint's on tree 3, deaths-with-work's on tree 4) ends a worker's
+# launch once its agent is ready or in a turn with its task outstanding, and counts on the daemon
+# charging that death as one with work outstanding (supervise/budgets.go, chargeDeath). An end takes
+# the driver seconds (end_claim_process), and on a loaded machine a short turn can finish inside
+# them: the turn's end retires its task and restarts the death count (supervise/delivery.go, settle
+# and retirePending), so the process dies holding no task, the daemon charges nothing, and its
+# relaunch boots with no task, which nothing would send it again.
+#
+# death_charge CLAIM INCARNATION prints how the daemon charged the death of CLAIM's process
+# INCARNATION: `charged N`, N its count of deaths with work outstanding then, which died
+# (supervise/machine.go) logs after the death and before any relaunch, or `uncharged`. It exits
+# non-zero when the daemon log has no death of that process.
+death_charge() {
+  jq -R -s -r -e --arg c "$1" --arg i "$2" '
+    [split("\n")[] | fromjson? | select(type == "object" and .claim == $c)] as $lines
+    | [range($lines | length) | select($lines[.].msg == "supervise: process died" and $lines[.].incarnation == $i)] as $deaths
+    | select($deaths != [])
+    | $deaths[0] as $d
+    | ([range($d + 1; $lines | length) | select($lines[.].msg == "supervise: launched")] | first // ($lines | length)) as $next
+    | [$lines[($d + 1):$next][] | select(.msg == "supervise: the agent died with work outstanding") | .deaths] as $charged
+    | if $charged == [] then "uncharged" else "charged \($charged[0])" end
+  ' "$daemon_log"
+}
+# hold_end_charged CLAIM judges the end the driver took of CLAIM's process ended_incarnation, once
+# the claim has moved on (claim_restarted_or_held). It returns 0 when the daemon charged the death.
+# Otherwise the end missed its task's turn and counts toward no hold: it counts the miss in
+# hold_misses, which each hold loop starts at 0, fails once more than hold_rearm_limit ends have
+# missed, gives CLAIM a new task, and returns 1. The task goes through the daemon (legion claims
+# deliver), since a Dispatch message (send_agent) sets no delivery of the daemon's and a death in
+# the turn it starts would be charged nothing either. It asks for the reading the deployment
+# instructions give a phase worker's first message, so its turn lasts about as long as that one's.
+hold_end_charged() {
+  local claim=$1 charge out
+  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, then reply WAITING and wait for the targeted message. Change nothing."
+  charge=$(death_charge "$claim" "$ended_incarnation") ||
+    fail "the daemon log has no death of $claim's process $ended_incarnation, which the proof ended"
+  if [ "$charge" != uncharged ]; then
+    note "the daemon charged the death of $ended_incarnation as one with work outstanding, ${charge#charged } of $launch_failure_limit"
+    return 0
+  fi
+  hold_misses=$((hold_misses + 1))
+  [ "$hold_misses" -le "$hold_rearm_limit" ] ||
+    fail "$hold_misses ends of $claim came after their task's turn had ended, the last its process $ended_incarnation, so the daemon charged no death for them; $hold_rearm_limit new tasks did not put an end inside a turn"
+  out=$(claims_cli deliver --claim "$claim" --task "$task" 2>&1) ||
+    fail "legion claims deliver could not give $claim a new task after the end of $ended_incarnation missed its turn: $out"
+  note "the end of $ended_incarnation came after its task's turn had ended, so the daemon charged no death and its relaunch has no task (miss $hold_misses of at most $hold_rearm_limit); gave $claim a new task with legion claims deliver"
+  return 1
+}
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
 # a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`)
 # that no driver action ended, and exits 1 when there is any. The daemon names the dead process by
@@ -1159,20 +1250,18 @@ pod_watch_verdict() {
   [ ! -s "$work/pod-watch-verdict.txt" ]
 }
 # never_scheduled_deaths WATCH DAEMONLOG prints, one a line, each incarnation the daemon found dead
-# (`supervise: process died`) whose pod, the incarnation's pod uid, the watch saw `PodScheduled=False`
-# with reason `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon
-# retired at its boot deadline because the scheduler never placed it. It reads the pod's own
-# conditions, never the daemon's detail text.
+# (`supervise: process died`) whose pod, the incarnation's pod uid, the watch saw unschedulable and
+# never scheduled (stage4b-pods.jq): a pod the daemon retired at its boot deadline because the
+# scheduler never placed it. It reads the pod's own conditions, never the daemon's detail text.
 never_scheduled_deaths() {
   local watch=$1 log=$2
-  jq -s -r --rawfile log "$log" '
+  jq -s -r -L "$root/scripts/e2e/lib" --rawfile log "$log" '
+    include "stage4b-pods";
     ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died") | .incarnation)) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
     | $died[] | . as $i | ($i | split("/")[0]) as $uid
     | [ $pods[] | select(.metadata.uid == $uid) ] as $seen
-    | select(($seen | length) > 0
-        and any($seen[]; any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))
-        and (any($seen[]; (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True")) | not))
+    | select(($seen | length) > 0 and any($seen[]; unschedulable) and (any($seen[]; scheduled) | not))
     | $i
   ' "$watch" | sort -u
 }
@@ -1729,12 +1818,16 @@ production_baseline() {
   dispatch_get "issues?project=$project" >/dev/null || fail "read production Dispatch"
   prod_baseline=$(date -u +%FT%T.%NZ)
 }
+# registered_jq selects the daemon log's lines that record one of the run's sessions registering: an
+# agent's claim, the operator's controller, and the controller the daemon launches
+# (daemon-controller-liveness). Each carries the session.
+registered_jq='select(.msg | IN("api: claim registered", "api: controller registered", "api: launched controller registered"))'
 # production_audit fails on any production write the run made outside LEGSMOKE, and on any sampled
 # interest of the run's sessions outside it.
 production_audit() {
   local sessions actors
   audited=1
-  sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session) | unique' "$daemon_log")
+  sessions=$(jq -R -s -c "split(\"\\n\") | map(fromjson? | $registered_jq | .session) | unique" "$daemon_log")
   printf '%s\n' "$sessions" >"$evidence/run-sessions.json"
   # Production Dispatch is busy with other work while the run goes on, so an issue outside
   # LEGSMOKE updated since the baseline is the run's write only when one of its events names one
@@ -1808,14 +1901,14 @@ find_outside_writer() {
   fail "$(wc -w <<<"$keys") issues outside $project were updated since $prod_baseline, and none of their events reads as since then"
 }
 # interests_sample LABEL appends the Envoy interests of every session the run has registered so far
-# (its agents' claims and the operator's controller)
+# (registered_jq: its agents' claims and both kinds of controller)
 # to $evidence/interests.jsonl, each line labelled, and each attempt's outcome to
 # $evidence/interests-outcomes.txt as "TIME SESSION ok|absent|error DETAIL". A session no longer
 # registered answers 404 (absent). No answer, or any other, is an error, so an unreadable listener
 # never reads as a clean sample.
 interests_sample() {
   local session code now tmp=$work/interest.$BASHPID.json
-  for session in $(jq -R -r 'fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session' "$daemon_log" | sort -u); do
+  for session in $(jq -R -r "fromjson? | $registered_jq | .session" "$daemon_log" | sort -u); do
     now=$(date -u +%FT%T.%3NZ)
     if ! code=$(curl -sS --max-time 20 -o "$tmp" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session" 2>&1); then
       printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code" | scrub)" >>"$evidence/interests-outcomes.txt"
@@ -2542,7 +2635,7 @@ begin finished-idle-planner-death
 # exhausted budget's failure, its single worker-died notice and the unheld phase are proved by
 # packages/daemon/internal/daemon/outbox_lifecycle_test.go:592-633 (LEGION-462 plan version 10).
 planner2=$(claim_token "$tree2" planner)
-planner2_claim() { claims_cli list --json | jq -ce --arg t "$planner2" '.claims[] | select(.token == $t)'; }
+planner2_claim() { claim_by_token "$planner2"; }
 planner2_idle_without_task() { planner2_claim | jq -e '.state == "idle" and .pending == null'; }
 planner2_task_deliveries() {
   claim_session_text "$tree2" planner | jq -R -s -r --arg issue "$tree2" \
@@ -3064,7 +3157,7 @@ judge_relaunched() {
   local was=$1 token claim pod role uid session_file stale refused
   token=$(jq -r .token <<<"$was")
   on_tree "$(jq -r .tree <<<"$was")" until_true 900 "$token to run its next generation, registered and ready" claim_relaunched "$was"
-  claim=$(claims_cli list --json | jq -ce --arg t "$token" '.claims[] | select(.token == $t)') || fail "legion claims shows no claim $token"
+  claim=$(claim_by_token "$token") || fail "legion claims shows no claim $token"
   pod=$(jq -r .locator.sandbox.name <<<"$claim")
   role=$(jq -r .role <<<"$claim")
   uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read pod $pod"
@@ -3300,26 +3393,31 @@ on_tree "$tree3" wait_for_worker "$tree3" planner
 # tree is admitted, so an end of it or of a relaunch leaves no task outstanding, and a relaunch that
 # reaches ready restarts the launch count. So the hold is driven on tree 3's implementer, whose task
 # is fresh: the planner is told to plan, and each implementer launch is killed once its agent is
-# ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
-# either budget.
+# ready or in a turn with its task outstanding. Every such death that lands inside the task's turn
+# is charged; one that lands after the turn had ended is given a new task and killed again
+# (hold_end_charged), and counts toward no hold. The check below accepts either budget.
 send_agent "$tree3" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree3" wait_for_phase "$tree3" implementing "$plan_seconds"
 on_tree "$tree3" wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
+hold_misses=0
+# Each miss costs up to launch_failure_limit ends, the charged ends its turn's end wiped out and the
+# miss itself, and the hold takes launch_failure_limit more.
+hold_kills=$(((hold_rearm_limit + 1) * launch_failure_limit))
 # held_ready_with_work: tree 3's implementer claim names a process none of the ends took, its agent
 # is ready or in a turn, and its task is outstanding, as `legion claims` shows it. It runs in this
 # shell: the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax
 # error.
 held_ready_with_work() {
   local claim inc
-  claim=$(claims_cli list --json | jq -ce --arg t "$(claim_token "$tree3" implementer)" '.claims[] | select(.token == $t)') || return 1
+  claim=$(claim_by_token "$(claim_token "$tree3" implementer)") || return 1
   inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
   [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed" &&
     jq -e '(.state | IN("ready", "working", "idle")) and .pending != null' <<<"$claim" >/dev/null
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
-  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended implementer launches"
+  [ "$kills" -lt "$hold_kills" ] || fail "$tree3 was not held after $kills ended implementer launches, $hold_misses of them after their task's turn"
   on_tree "$tree3" until_true 600 "$tree3's implementer ready with its task outstanding" held_ready_with_work
   state=$(claim_view "$tree3" implementer | jq -r '.state // "none"')
   end_claim_process "$tree3" implementer kill
@@ -3327,8 +3425,9 @@ until issue_phase "$tree3" held >/dev/null 2>&1; do
   kills=$((kills + 1))
   note "ended implementer launch $kills of $tree3 (process $ended_incarnation in pod $ended_pod_uid), its claim $state with its task outstanding"
   on_tree "$tree3" until_true 600 "$tree3 to be held or its implementer relaunched" claim_restarted_or_held "$tree3" implementer "$ended_incarnation"
+  hold_end_charged "$(claim_token "$tree3" implementer)" || true
 done
-note "$tree3 is held after $kills ended implementer launches"
+note "$tree3 is held after $kills ended implementer launches, $hold_misses of them after their task's turn"
 # The hold is one of the implementer claim's own supervise budgets, launches or deaths with work
 # outstanding, and no other path that also holds an issue (a prompt budget, the architect's
 # escalation).
@@ -3507,6 +3606,128 @@ note "the controller parked $report ('$report_title') in icebox and posted its d
 pass
 fi # the daily report
 
+# boot_timeout is worker_boot_timeout_seconds, the daemon's default (120), which the run's legion.yaml
+# leaves unset: the least time between two not-registered lines, and how long a pod may stay
+# unscheduled before the runtime retires it.
+boot_timeout=120
+begin daemon-controller-liveness
+# Under `controller: daemon` the daemon's liveness sweep watches the controller it launches as it
+# watches the operator's, and writes the two lines a log monitor on the daemon counts, with the same
+# text and on the same cadence (docs/kubernetes.md, "Controller liveness"). What each phase below
+# requires, and why, is lib/controller-liveness-verdict.jq's header. The operator's controller quits
+# first, so no session of it holds the controller role. Then the daemon restarts three times:
+# 1. up, the negative control: `controller: daemon`, the controller's pod sized to run. The
+#    controller the daemon launches registers and holds the role, and the driver reads the log after
+#    two boot timeouts and more.
+# 2. down: the same with the pod's CPU request past any node's. The daemon re-adopts the running
+#    controller, the driver deletes its pod, and the verdict waits through the relaunch's failed
+#    launches.
+# 3. operator: `controller: operator`. The boot retires the controller's claim, its Sandbox and
+#    volume go and its registration ends, and the verdict waits for the operator's line.
+# The rest of the run keeps `controller: operator` with no controller registered, as before the
+# controller checkpoint.
+controller_token=legion-${project,,}-controller
+# role_answer prints the listener's status for the lookup of the controller role, and leaves its body
+# in $work/controller-role.json.
+role_answer() { curl -sS --max-time 20 -o "$work/controller-role.json" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/roles/$controller_token" 2>/dev/null; }
+role_unheld() { [ "$(role_answer)" = 404 ]; }
+role_held_by() { [ "$(role_answer)" = 200 ] && jq -e --arg s "$1" '.holder == $s' "$work/controller-role.json" >/dev/null; }
+# The operator's controller quits as a person quits it (controller-start-tmux.sh): Ctrl-C ends a
+# turn and asks again, and Ctrl-D on the empty editor quits. The tmux command's own shell, which
+# names the command too, is not `legion controller start`, so the pattern is anchored at the binary.
+operator_controller_runs() { pgrep -f -- "^$work/legion controller start --config $work/controller.yaml" >/dev/null; }
+operator_controller_quit() { ! operator_controller_runs; }
+if operator_controller_runs; then
+  for _ in 1 2 3 4 5; do
+    operator_controller_runs || break
+    tmux -L "legion-e2e4b-$$" send-keys -t controller C-c
+    sleep 2
+  done
+  if operator_controller_runs; then tmux -L "legion-e2e4b-$$" send-keys -t controller C-d; fi
+  until_true 60 "the operator's controller to quit" operator_controller_quit
+  note "the operator's controller quit"
+fi
+until_true 300 "the listener to answer that the controller role $controller_token has no live holder" role_unheld
+# 1. The negative control.
+controller_cpu=250m
+restart_daemon
+on_subject legion.dev/role=controller until_true 900 "the controller the daemon launched, $controller_token, to register and be ready" claim_live "$controller_token"
+launched_session=$(claim_by_token "$controller_token" | jq -r .session)
+until_true 120 "the controller role to name $launched_session" role_held_by "$launched_session"
+locator=$(daemon_state | jq -c .controllerLocator)
+jq -e --arg s "$launched_session" '.sessionId == $s' <<<"$locator" >/dev/null ||
+  fail "controllerLocator $locator does not name $launched_session, the session of the controller the daemon launched"
+log_lines "api: launched controller registered" | jq -e --arg s "$launched_session" 'select(.session == $s)' >/dev/null ||
+  fail "the daemon logged no registration of $launched_session as the controller it launched"
+up_mark=$(wc -l <"$daemon_log")
+watched=$((2 * boot_timeout + 30))
+note "$controller_token is ready as $launched_session and holds the role; watching the daemon log for $watched s"
+sleep "$watched"
+claim_live "$controller_token" || fail "the daemon's controller left ready during the negative control: $(claim_by_token "$controller_token" | jq -c '{state, generation}')"
+role_held_by "$launched_session" || fail "the controller role stopped naming $launched_session during the negative control"
+up=$(liveness_verdict up "$up_mark") || fail "lib/controller-liveness-verdict.jq could not read the daemon log"
+printf '%s\n' "$up" >"$evidence/controller-liveness-up.json"
+jq -e '.wrong == []' <<<"$up" >/dev/null || fail "the daemon logged a liveness line while its controller held the role: $(jq -c .wrong <<<"$up")"
+note "negative control: after line $up_mark of the daemon log, for $watched s with $launched_session holding the role, neither line"
+claim=$(claim_by_token "$controller_token")
+pod=$(jq -r .locator.sandbox.name <<<"$claim")
+mkdir -p "$evidence/transcripts/daemon-controller"
+op exec "$pod" -c "$(jq -r .locator.sandbox.container <<<"$claim")" -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
+  tar -C "$evidence/transcripts/daemon-controller" -xf - 2>/dev/null || note "the session of the controller the daemon launched could not be copied from $pod"
+# 2. The controller cannot come back.
+controller_cpu=100000
+restart_daemon
+until_true 300 "the restarted daemon to re-adopt its controller, ready" claim_live "$controller_token"
+claim=$(claim_by_token "$controller_token")
+[ "$(jq -r .session <<<"$claim")" = "$launched_session" ] || fail "the restarted daemon's controller is $(jq -c '{session, state}' <<<"$claim"), not $launched_session re-adopted"
+process=$(jq -r .locator.incarnation <<<"$claim")
+pod=$(jq -r .locator.sandbox.name <<<"$claim")
+pod_uid=$(jq -r .locator.sandbox.podUid <<<"$claim")
+down_mark=$(wc -l <"$daemon_log")
+driver_action delete-pod "$pod_uid"
+op delete pod "$pod" --wait=false >/dev/null
+note "deleted the controller's pod $pod (uid $pod_uid, process $process); each relaunch's pod requests $controller_cpu CPU, more than any node holds"
+# The no-holder line starts once the listener lets the dead session lapse, up to its session TTL
+# (5 min by default) after the session's last heartbeat, so the wait below allows for that and three
+# sweeps after it.
+liveness_down() {
+  liveness_verdict down "$down_mark" --arg claim "$controller_token" --arg session "$launched_session" \
+    --arg deleted_pod "$pod_uid" --arg cpu "$controller_cpu" --slurpfile watch "$evidence/pod-watch.json" \
+    >"$work/controller-liveness-down.json"
+}
+down_settled() { liveness_down && jq -e '.missing == [] or .wrong != []' "$work/controller-liveness-down.json" >/dev/null; }
+report_down() { note "the verdict so far: $(jq -c '{missing, wrong}' "$work/controller-liveness-down.json" 2>/dev/null)"; }
+timeout_hook=report_down
+until_true 1200 "both liveness lines while the controller cannot come back, through its relaunch's failed launches" down_settled
+timeout_hook=limit_pending_blocked
+cp "$work/controller-liveness-down.json" "$evidence/controller-liveness-down.json"
+jq -e '.wrong == []' "$work/controller-liveness-down.json" >/dev/null ||
+  fail "the daemon's liveness lines or the controller's relaunches depart from the down phase: $(jq -c .wrong "$work/controller-liveness-down.json")"
+note "$(jq -r --arg m "$down_mark" --arg s "$launched_session" '"after line \($m) of the daemon log: the no-holder line \(.noHolder | length) times, each naming \($s), from \(.noHolder[0].time) to \(.noHolder[-1].time); the not-registered line \(.notRegistered | length) times, at \([.notRegistered[].time] | join(", ")), claim states \([.notRegistered[].claimState] | unique | join(", ")), each in the daemon form; failed launches at \([.launchFailures[] | "\(.time) (generation \(.generation))"] | join(", ")); launches, each on the deleted pod: \(if .launches == [] then "none" else [.launches[] | "\(.incarnation) at \(.time)"] | join(", ") end); pods the relaunch made, each Unschedulable and none scheduled: \([.pods[] | "\(.name) uid \(.uid)"] | join(", "))"' "$work/controller-liveness-down.json")"
+# 3. Back to the operator.
+op_mark=$(wc -l <"$daemon_log")
+controller_cpu=
+restart_daemon
+until_true 120 "$controller_token to be retired" claim_retired "$controller_token"
+until_true 600 "the controller's Sandbox and volume to be gone" sh -c \
+  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get sandboxes,pvc -l 'legion.dev/project=$run_label,legion.dev/role=controller' -o name) && [ -z \"\$out\" ]"
+for msg in "controller: stopping the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator" \
+  "controller: ending the registration of the controller an earlier boot under controller: daemon launched; this daemon leaves the controller to its operator"; do
+  [ "$(tail -n "+$((op_mark + 1))" "$daemon_log" | jq -R -c --arg m "$msg" 'fromjson? | select(.msg == $m)' | wc -l)" = 1 ] ||
+    fail "the boot under controller: operator did not log '$msg' once"
+done
+daemon_state | jq -e '.controllerLocator == null' >/dev/null || fail "controllerLocator still names $(daemon_state | jq -c .controllerLocator) after the switch back"
+operator_settled() {
+  liveness_verdict operator "$op_mark" >"$work/controller-liveness-operator.json" &&
+    jq -e '.missing == [] or .wrong != []' "$work/controller-liveness-operator.json" >/dev/null
+}
+until_true $((boot_timeout + 120)) "the operator's not-registered line" operator_settled
+cp "$work/controller-liveness-operator.json" "$evidence/controller-liveness-operator.json"
+jq -e '.wrong == []' "$work/controller-liveness-operator.json" >/dev/null ||
+  fail "the operator's line departs from the monitored text: $(jq -c .wrong "$work/controller-liveness-operator.json")"
+note "back under controller: operator: $controller_token retired, its Sandbox and volume gone, its registration ended, and the operator's line at $(jq -r '.notRegistered[0].time' "$work/controller-liveness-operator.json"), exactly the monitored text"
+pass
+
 begin deaths-with-work
 # A worker whose process dies after its agent is ready, while it has its task outstanding, gets the
 # task back, and one that keeps dying before it completes a turn is held (supervise/budgets.go,
@@ -3518,14 +3739,20 @@ set_status "$tree4" todo
 on_tree "$tree4" drive_spec "$tree4"
 on_tree "$tree4" wait_for_worker "$tree4" planner
 # claim_json ISSUE ROLE is the claim as `legion claims` shows it, its budgets and pending task included.
-claim_json() { claims_cli list --json | jq -ce --arg t "$(claim_token "$1" "$2")" '.claims[] | select(.token == $t)'; }
+claim_json() { claim_by_token "$(claim_token "$1" "$2")"; }
 # in_turn ISSUE ROLE: the claim's agent is running the turn of its task.
 in_turn() { claim_json "$1" "$2" | jq -e '.state == "working" and .pending != null' >/dev/null; }
 # (a) One launcher-container kill mid-turn: the role process is relaunched in the same issue pod,
-# sent its task again, and told the turn was interrupted.
-on_tree "$tree4" until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
-end_claim_process "$tree4" planner kill
-planner_killed=$ended_incarnation
+# sent its task again, and told the turn was interrupted. A kill that lands after the turn had ended
+# is given a new task and killed again (hold_end_charged).
+planner_killed=
+hold_misses=0
+until [ -n "$planner_killed" ]; do
+  on_tree "$tree4" until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
+  end_claim_process "$tree4" planner kill
+  on_tree "$tree4" until_true 600 "$tree4's planner to be relaunched" claim_restarted_or_held "$tree4" planner "$ended_incarnation"
+  if hold_end_charged "$(claim_token "$tree4" planner)"; then planner_killed=$ended_incarnation; fi
+done
 note "killed $tree4's planner mid-turn (process $planner_killed in pod $ended_pod_uid)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
@@ -3533,7 +3760,9 @@ on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, tol
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree4" wait_for_phase "$tree4" implementing "$plan_seconds"
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
-# (b) Kills after each ready, the task outstanding, until the claim fails.
+# (b) Kills after each ready, the task outstanding, until the claim fails. A kill that lands after
+# the task's turn had ended is given a new task and killed again (hold_end_charged): only an unbroken
+# run of launch_failure_limit charged deaths holds the claim, and a miss restarts the run.
 on_tree "$tree4" wait_for_worker "$tree4" implementer
 implementer4=$(claim_token "$tree4" implementer)
 # ready_with_work: the implementer's claim names a process no kill took, its agent is ready or in a
@@ -3547,16 +3776,21 @@ ready_with_work() {
 }
 work_killed=" "
 work_kills=0
+work_streak=0
+hold_misses=0
 until issue_phase "$tree4" held >/dev/null 2>&1; do
-  [ "$work_kills" -lt 5 ] || fail "$tree4 was not held after $work_kills implementer deaths with its task outstanding"
+  [ "$work_streak" -lt "$launch_failure_limit" ] ||
+    fail "$tree4 was not held after $work_streak charged implementer deaths in a row, launch_failure_limit ($launch_failure_limit)"
   on_tree "$tree4" until_true 600 "$tree4's implementer ready with its task outstanding" ready_with_work
   end_claim_process "$tree4" implementer kill
   work_killed="$work_killed$ended_incarnation "
   work_kills=$((work_kills + 1))
   note "killed $tree4's implementer with its task outstanding, $work_kills (process $ended_incarnation in pod $ended_pod_uid)"
   on_tree "$tree4" until_true 600 "$tree4 to be held or its implementer relaunched" claim_restarted_or_held "$tree4" implementer "$ended_incarnation"
+  if hold_end_charged "$implementer4"; then work_streak=$((work_streak + 1)); else work_streak=0; fi
 done
-[ "$work_kills" = "$launch_failure_limit" ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit ($launch_failure_limit)"
+[ "$work_streak" = "$launch_failure_limit" ] ||
+  fail "$tree4 was held after $work_streak charged implementer deaths in a row, want launch_failure_limit ($launch_failure_limit)"
 claim=$(claim_json "$tree4" implementer) || fail "legion claims shows no claim $implementer4"
 jq -e --argjson n "$launch_failure_limit" '.state == "failed" and .budgets.deaths == $n' <<<"$claim" >/dev/null ||
   fail "$implementer4 reads $(jq -c '{state, budgets}' <<<"$claim"), want failed with budgets.deaths $launch_failure_limit"
@@ -3567,7 +3801,7 @@ failed_at=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 
 sleep 30
 relaunched=$(log_lines "supervise: launched" | jq -s --arg c "$implementer4" --arg at "$failed_at" '[.[] | select(.claim == $c and .time > $at)] | length')
 [ "$relaunched" = 0 ] || fail "the daemon launched $implementer4 $relaunched times after failing it"
-note "$tree4 is held after $work_kills implementer deaths with its task outstanding: $implementer4 failed because $why, budgets $(jq -c .budgets <<<"$claim"), and nothing relaunched it"
+note "$tree4 is held after $work_streak implementer deaths in a row with its task outstanding ($work_kills kills, $hold_misses after their task's turn): $implementer4 failed because $why, budgets $(jq -c .budgets <<<"$claim"), and nothing relaunched it"
 take_out "$tree4"
 pass
 
@@ -3766,7 +4000,6 @@ op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role arch
   fail "the operator could not spawn the root of $optree"
 op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role implementer --prompt-file "$work/op-worker.md" | jq -er .token) ||
   fail "the operator could not spawn a worker of $optree"
-claim_live() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state | IN("ready", "idle", "working")' >/dev/null; }
 on_tree "$optree" until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
 on_tree "$optree" until_true 900 "$optree's worker $op_worker to be live" claim_live "$op_worker"
 objects=$(tree_objects "$optree" "$optree" "$opchild")
@@ -3775,8 +4008,7 @@ for uid in $(jq -r '.[] | select(.kind == "Pod") | .uid' <<<"$objects"); do driv
 note "before the close, $optree has: $objects"
 closed=$(claims_cli close --json --claim "$op_root") || fail "the operator's close of $optree through $op_root was refused: $closed"
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close left $optree's root $(jq -c '{state}' <<<"$closed")"
-retired() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state == "retired"' >/dev/null; }
-retired "$op_worker" || fail "the close of $optree left its worker $op_worker $(claims_cli list --json | jq -c --arg t "$op_worker" '.claims[] | select(.token == $t) | {state}')"
+claim_retired "$op_worker" || fail "the close of $optree left its worker $op_worker $(claim_by_token "$op_worker" | jq -c '{state}')"
 until_true 600 "$optree's Sandboxes, pods and volumes to be gone" tree_gone "$optree" "$optree" "$opchild"
 note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree" "$optree" "$opchild")"
 pass
