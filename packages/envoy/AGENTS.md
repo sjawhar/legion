@@ -2059,14 +2059,17 @@ it; erase, word erase and kill edit it. An unhandled control byte is refused, in
 pastes too. The reader records the error, discards through the line ending (and through a
 bracketed paste's closing mark), then drains the post-line quiet window before returning it.
 The prompt enables bracketed paste and reads each such paste through its end, however far apart
-its writes arrive. Without brackets, it drains through 200 ms of quiet after the line, for at most
-10 seconds; that drain feeds the same reader (`drainAfterTheLine`), so a paste that begins in it
-is read through its closing mark within that bound, and a signal key inside it is pasted text.
+its writes arrive, as long as no more than `maxPasteDrain` (10 s) of quiet passes between them: the
+bound counts the quiet since the last input, restarted at each read, not the time since the paste
+began. Without brackets, it drains through 200 ms of quiet after the line; that drain feeds the
+same reader (`drainAfterTheLine`), so a paste that begins in it restarts the same bound and is read
+through its closing mark, and a signal key inside it is pasted text.
 Anything but line endings after the first line is refused with exit 2. Bytes arriving after that
 bounded drain can reach the shell; multi-line values should be piped, not pasted.
 A terminal hang-up before the line or paste ends returns an error, never a partial value, and so
-does a bracketed paste whose closing mark has not come `maxPasteDrain` (10 s) after it began, where
-the signal keys pressed meanwhile were pasted text.
+does a bracketed paste that falls quiet for `maxPasteDrain` (10 s) before its closing mark comes,
+where the signal keys pressed meanwhile were pasted text; input arriving after it is given up
+reaches the shell.
 Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 values are usage errors
 on either path.
 
@@ -2095,8 +2098,9 @@ off: the reader acts on the terminal's signal keys itself (`promptReader.keys`, 
 the shell handed it), sending the signal to its process group and discarding the rest of that
 read, so bytes typed after Ctrl-Z in the same write never reach the shell. A key inside a
 bracketed paste is pasted text, refused as a control byte with the paste drained through its end,
-and the key of an ignored signal does nothing. A key in the rest of the read in which the line or
-its paste ends still sends its signal (`promptReader.keyIn`), so the value is not stored.
+and the key of an ignored signal does nothing. `feed` scans the whole read, past the line's end, so
+a signal key in the rest of the read after the line, outside a paste, still sends its signal and the
+value is not stored.
 SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. The watcher
 (`promptWatch`) writes each signal's number as one byte to a pipe the reader polls with the
 terminal, so an event and its wake-up are one byte, taken only by `next`; it never changes the

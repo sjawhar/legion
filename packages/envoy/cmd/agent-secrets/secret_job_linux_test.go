@@ -739,8 +739,8 @@ func TestPromptJobSecondPasteInThePastedLinesCloseIsRead(t *testing.T) {
 }
 
 // A paste whose closing mark never comes, as from a terminal that sends only the start mark, is
-// given up once maxPasteDrain has passed since it began: the prompt ends, refusing the entry,
-// though the signal keys pressed meanwhile are pasted text. The helper shortens the bound.
+// given up once it has fallen quiet for the whole bound without closing: the prompt ends, refusing
+// the entry, though the signal keys pressed meanwhile are pasted text. The helper shortens the bound.
 func TestPromptJobPasteThatNeverEndsIsGivenUp(t *testing.T) {
 	for _, key := range []string{"\x03", "\x1c", "\x1a"} {
 		t.Run(fmt.Sprintf("%x", key), func(t *testing.T) {
@@ -752,6 +752,24 @@ func TestPromptJobPasteThatNeverEndsIsGivenUp(t *testing.T) {
 			s.noShellValue("pasteopen")
 		})
 	}
+}
+
+// A paste that keeps arriving past the bound is read on, not given up: the bound counts the quiet
+// since the last input, restarted at each read, so a slow paste is drained however long it takes and
+// its lines never reach the shell. At f7e1c781 the bound ran from the paste's first byte, so a paste
+// still arriving when it elapsed was given up and its later lines ran in the shell. The helper
+// shortens the bound; the lines arrive well inside it but for longer than it in all.
+func TestPromptJobLongPasteDrainsWhileInputKeepsArriving(t *testing.T) {
+	s := newPromptShell(t)
+	s.env = "AGENT_SECRETS_JOB_PASTE_BOUND=1s "
+	s.start(false, false)
+	s.send("\x1b[200~")
+	for range 20 {
+		s.send("echo LEAKED_$((9+9))\r")
+		time.Sleep(100 * time.Millisecond)
+	}
+	s.wait("RETURNED read the value at the terminal: " + errPasteCutShort.Error())
+	s.noShellValue("LEAKED_18", "LEAKED_$((")
 }
 
 // A signal key that follows a paste's closing mark in the same read is a keypress: it acts as it

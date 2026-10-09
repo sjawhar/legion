@@ -135,17 +135,20 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	tty.stopped, tty.notice = false, false
 	r := newPromptReader(saved, controlling, ignored)
 	buf := make([]byte, 512)
-	var pasteSince time.Time // when the open paste began; zero outside one
+	var pasteDeadline time.Time // when an open paste is given up; reset at each read, zero outside one
 	for {
+		// An open paste restarts the bound at each read, so it is the quiet since the last
+		// input, not the time since the paste began, that gives a still-arriving paste up: a
+		// slow paste is read on however long it takes, and only one that falls quiet for the
+		// whole bound without closing is abandoned.
 		tty.wait = -1
 		if r.inPaste {
-			if pasteSince.IsZero() {
-				pasteSince = time.Now()
+			if pasteDeadline.IsZero() {
+				pasteDeadline = time.Now().Add(maxPasteDrain)
 			}
-			tty.wait = int((time.Until(pasteSince.Add(maxPasteDrain)) + time.Millisecond - 1).Milliseconds())
-			tty.wait = max(0, tty.wait)
+			tty.wait = max(0, int((time.Until(pasteDeadline) + time.Millisecond - 1).Milliseconds()))
 		} else {
-			pasteSince = time.Time{}
+			pasteDeadline = time.Time{}
 		}
 		n, err := tty.read(buf)
 		if err != nil {
@@ -158,9 +161,9 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			tty.stopped = false
 		}
 		if n == 0 {
-			if r.inPaste && time.Since(pasteSince) >= maxPasteDrain {
-				// The paste's closing mark never came, so the signal keys pressed since were
-				// pasted text: give the paste up rather than read it forever.
+			if r.inPaste && !time.Now().Before(pasteDeadline) {
+				// The paste fell quiet for the whole bound without closing, so the signal
+				// keys pressed since were pasted text: give it up rather than read it forever.
 				return nil, errPasteCutShort
 			}
 			switch {
@@ -173,6 +176,7 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			}
 			return nil, errValueCutShort
 		}
+		pasteDeadline = time.Time{} // input arrived: a still-open paste restarts the bound
 		done, sig := r.feed(buf[:n])
 		if sig != 0 {
 			if err := tty.raise(sig); err != nil {
@@ -666,22 +670,19 @@ func eraseWord(b []byte) []byte {
 	return b
 }
 
-// drainAfterTheLine reads, and so discards, what follows the line, feeding each read to r, until
-// the terminal has been quiet for pasteGapDeciseconds outside a paste, for at most maxPasteDrain. A
-// paste that begins there is read through its closing mark however far apart its writes arrive,
-// within that bound, so a signal key inside it is pasted text; a signal key outside a paste acts as
-// it does in the line, and the rest of that read is discarded. Anything but line endings, and a
-// paste or paste mark still open when the drain ends, is more than one line (r.more).
+// drainAfterTheLine reads, and so discards, what follows the line, feeding each read to r. Outside
+// a paste it ends once the terminal has been quiet for pasteGapDeciseconds. An open paste restarts
+// the bound at each read, as the main loop does: it is read through its closing mark however far
+// apart its writes arrive, given up only once it has fallen quiet for the whole bound, so a signal
+// key inside it is pasted text; a signal key outside a paste acts as it does in the line, and the
+// rest of that read is discarded. Anything but line endings, and a paste or paste mark still open
+// when the drain ends, is more than one line (r.more).
 func drainAfterTheLine(tty *promptTerminal, r *promptReader, buf []byte) error {
-	deadline := time.Now().Add(maxPasteDrain)
 	for {
-		left := time.Until(deadline).Milliseconds()
-		if left <= 0 {
-			break
-		}
-		tty.wait = int(left)
-		if !r.inPaste {
-			tty.wait = min(tty.wait, pasteGapDeciseconds*100)
+		if r.inPaste {
+			tty.wait = int(maxPasteDrain.Milliseconds())
+		} else {
+			tty.wait = pasteGapDeciseconds * 100
 		}
 		n, err := tty.read(buf)
 		if err != nil {
