@@ -4,11 +4,86 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
+
+// expiringTokens makes fake mint installation tokens that live 250 ms, under githubapp's own
+// five-minute renewal margin, so the client mints one each time it is asked for a token, and
+// counts every request that carries a token past its expiry, which it answers as GitHub does:
+// 401 Bad credentials. A handler that returns true has answered.
+func expiringTokens(t *testing.T, fake *fakeGitHub) (refuse func(http.ResponseWriter, *http.Request) bool, expired *atomic.Int64) {
+	t.Helper()
+	fake.tokenLifetime = 250 * time.Millisecond
+	expired = &atomic.Int64{}
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		if !fake.tokenExpired(r) {
+			return false
+		}
+		expired.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		mustEncode(t, w, map[string]any{"message": "Bad credentials"})
+		return true
+	}, expired
+}
+
+// TestListWorkflowRunsAsksForATokenPerPage: a walk whose pages outlast the installation token its
+// first page used goes on with a new one and never sends an expired token. A reconcile walk over a
+// busy repository runs past a token's hour, and GitHub answers the next page 401 Bad credentials.
+// The first page here is answered after its token has expired.
+func TestListWorkflowRunsAsksForATokenPerPage(t *testing.T) {
+	fake := newFakeGitHub(t)
+	refuse, expired := expiringTokens(t, fake)
+	fake.handle("GET /repos/acme/widgets/actions/workflows/deploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		if refuse(w, r) {
+			return
+		}
+		switch r.URL.Query().Get("page") {
+		case "1":
+			time.Sleep(400 * time.Millisecond)
+			mustEncode(t, w, map[string]any{"total_count": 15, "workflow_runs": repeatRunItems(10, 1)})
+		default:
+			mustEncode(t, w, map[string]any{"total_count": 15, "workflow_runs": repeatRunItems(5, 11)})
+		}
+	})
+	runs, err := collectWorkflowRuns(t.Context(), fake.newTestClient(), "acme", "widgets", "deploy.yml",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ListWorkflowRuns across a token's expiry: %v", err)
+	}
+	if len(runs) != 15 || expired.Load() != 0 {
+		t.Fatalf("listed %d runs, want 15; %d requests carried an expired token, want none", len(runs), expired.Load())
+	}
+}
+
+// TestListWorkflowRunJobsAsksForATokenPerPage: a run's jobs pages, too, each ask for a token, so a
+// page answered after the previous page's token expired is asked for with a new one.
+func TestListWorkflowRunJobsAsksForATokenPerPage(t *testing.T) {
+	fake := newFakeGitHub(t)
+	refuse, expired := expiringTokens(t, fake)
+	fake.handle("GET /repos/acme/widgets/actions/runs/7/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if refuse(w, r) {
+			return
+		}
+		switch r.URL.Query().Get("page") {
+		case "1":
+			time.Sleep(400 * time.Millisecond)
+			mustEncode(t, w, map[string]any{"total_count": runJobsPageSize + 5, "jobs": repeatJobItems(runJobsPageSize)})
+		default:
+			mustEncode(t, w, map[string]any{"total_count": runJobsPageSize + 5, "jobs": repeatJobItems(5)})
+		}
+	})
+	jobs, err := ListWorkflowRunJobs(t.Context(), fake.newTestClient(), "acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("ListWorkflowRunJobs across a token's expiry: %v", err)
+	}
+	if len(jobs) != runJobsPageSize+5 || expired.Load() != 0 {
+		t.Fatalf("listed %d jobs, want %d; %d requests carried an expired token, want none", len(jobs), runJobsPageSize+5, expired.Load())
+	}
+}
 
 func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
 	fake := newFakeGitHub(t)

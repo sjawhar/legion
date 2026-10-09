@@ -48,6 +48,17 @@ type fakeGitHub struct {
 	// existed. Round 5's errgroup-concurrent cross-installation search mints several
 	// installations' tokens at once, so tokenMints is atomic rather than a bare int.
 	installations []fakeInstallation
+	// tokenLifetime is how long a minted installation token lives, as expires_at tells the client;
+	// zero is GitHub's hour. tokenExpiry records each minted token's expiry for tokenExpired.
+	tokenLifetime time.Duration
+	tokenExpiry   sync.Map
+}
+
+// tokenExpired reports whether r's bearer is an installation token this fake minted whose expiry
+// has passed: GitHub answers such a request 401 Bad credentials.
+func (f *fakeGitHub) tokenExpired(r *http.Request) bool {
+	expires, ok := f.tokenExpiry.Load(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	return ok && !time.Now().Before(expires.(time.Time))
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -100,11 +111,14 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	})
 	f.mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		mints := f.tokenMints.Add(1)
+		lifetime := f.tokenLifetime
+		if lifetime == 0 {
+			lifetime = time.Hour
+		}
+		token, expires := fmt.Sprintf("ghs_fake_%s_%d", r.PathValue("id"), mints), time.Now().Add(lifetime)
+		f.tokenExpiry.Store(token, expires)
 		w.WriteHeader(http.StatusCreated)
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"token":      fmt.Sprintf("ghs_fake_%s_%d", r.PathValue("id"), mints),
-			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
-		}); err != nil {
+		if err := json.NewEncoder(w).Encode(map[string]any{"token": token, "expires_at": expires.Format(time.RFC3339Nano)}); err != nil {
 			f.t.Errorf("encode token: %v", err)
 		}
 	})
@@ -456,6 +470,34 @@ func TestSearchMergedPullRequestsPaginatesAcrossPages(t *testing.T) {
 	}
 	if results[0].Number != 1 || results[149].Number != 150 {
 		t.Fatalf("results not in page order: first=%d last=%d", results[0].Number, results[149].Number)
+	}
+}
+
+// TestSearchMergedPullRequestsAsksForATokenPerPage: the merged-PR search walk reconciles each
+// window's pull requests between pages, so it too asks for a token per page, and a page answered
+// after the previous page's token expired is asked for with a new one.
+func TestSearchMergedPullRequestsAsksForATokenPerPage(t *testing.T) {
+	fake := newFakeGitHub(t)
+	refuse, expired := expiringTokens(t, fake)
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		if refuse(w, r) {
+			return
+		}
+		_, variables := decodeGraphQLRequest(t, r)
+		if after, _ := variables["after"].(string); after == "" {
+			time.Sleep(400 * time.Millisecond)
+			mustEncode(t, w, searchResponseJSON(150, repeatSearchNodes(100, 1), true, "cursor-100"))
+			return
+		}
+		mustEncode(t, w, searchResponseJSON(150, repeatSearchNodes(50, 101), false, ""))
+	})
+	results, err := SearchMergedPullRequests(t.Context(), fake.newTestClient(), "acme", "widgets", []string{"alice"},
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SearchMergedPullRequests across a token's expiry: %v", err)
+	}
+	if len(results) != 150 || expired.Load() != 0 {
+		t.Fatalf("found %d pull requests, want 150; %d requests carried an expired token, want none", len(results), expired.Load())
 	}
 }
 
