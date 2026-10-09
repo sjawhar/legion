@@ -14,6 +14,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import { readSessionTitle, sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import { noteInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_KEY,
@@ -159,6 +160,8 @@ const environmentKeys = [
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
   "LEGION_GRANT_FILE",
+  "LEGION_WORKSPACE_RECREATED",
+  "DISPATCH_STATE_DIR",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
@@ -198,10 +201,14 @@ afterAll(async () => {
   await rm(jjTemplate, { force: true, recursive: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // A suite run from inside a Legion pane inherits that pane's LEGION_*/DISPATCH_* launch
-  // environment; every test starts from none and sets only what it declares.
+  // environment; every test starts from none and sets only what it declares. The `dispatch`
+  // command's state (the session title file `titleSession` writes) goes to a scratch directory.
   for (const key of environmentKeys) delete process.env[key];
+  const dispatchState = await mkdtemp(path.join(os.tmpdir(), "legion-dispatch-state-"));
+  temporaryPaths.push(dispatchState);
+  process.env.DISPATCH_STATE_DIR = dispatchState;
 });
 
 afterEach(async () => {
@@ -247,6 +254,8 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
+  /** Every `sendMessage` call's options, in the order of sentMessages. */
+  readonly sentMessageOptions: unknown[];
   readonly sentUserMessages: string[];
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
@@ -258,6 +267,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
+  const sentMessageOptions: unknown[] = [];
   const sentUserMessages: string[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
@@ -286,7 +296,10 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       unknown: () => optional(),
       discriminatedUnion: () => ({}),
     },
-    sendMessage: (message) => sentMessages.push(message),
+    sendMessage: (message, sendOptions) => {
+      sentMessages.push(message);
+      sentMessageOptions.push(sendOptions);
+    },
     sendUserMessage: (content) => {
       if (typeof content !== "string") {
         throw new Error(
@@ -333,6 +346,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     handlers,
     tools,
     sentMessages,
+    sentMessageOptions,
     sentUserMessages,
     entries,
     activeTools,
@@ -500,6 +514,8 @@ interface ClaimPane {
   readonly commands: RegisteredCommand[];
   readonly activeTools: string[];
   readonly entries: AppendedEntry[];
+  readonly sentMessages: SentMessage[];
+  readonly sentMessageOptions: unknown[];
   readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
@@ -656,6 +672,8 @@ async function claimPane(options: {
     commands: fixture.commands,
     activeTools: fixture.activeTools,
     entries: fixture.entries,
+    sentMessages: fixture.sentMessages,
+    sentMessageOptions: fixture.sentMessageOptions,
     title: fixture.title,
     handlers: fixture.handlers,
     context,
@@ -1468,6 +1486,32 @@ describe("Legion OMP extension", () => {
       expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
+  test("a dispatch command's quoted here-document is data: the pane rules read only its head line", async () => {
+    const { toolCall, context } = await bootPane({
+      role: "implementer",
+      sessionId: "ses_implementer_dispatch_body",
+    });
+    const blocked = async (command: string): Promise<boolean> => {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
+        context
+      );
+      return typeof result === "object" && result !== null && "block" in result && !!result.block;
+    };
+
+    // A message whose body names a refused command is a message, not the command.
+    expect(
+      await blocked(
+        "dispatch message --issue X --body-file - <<'EOF'\nPlease don't jj abandon @-.\nlegion handoff complete is the tool's.\nEOF"
+      )
+    ).toBe(false);
+    expect(await blocked("jj abandon")).toBe(true);
+    // A comment before the opener, or a CR that makes bash's delimiter `EOF\r` (its here-document
+    // ends at `EOF\r` and the line after runs), leave the shell running what reads as the body:
+    // those are no dispatch head, so the whole command is held to the pane rules.
+    expect(await blocked("dispatch search --query x # <<'EOF'\njj abandon\nEOF")).toBe(true);
+    expect(await blocked("dispatch x <<'EOF'\r\na\r\nEOF\r\njj abandon")).toBe(true);
+  });
   test("leaves file-level jj restore, jj op log, jj op show, and quoted message words alone", async () => {
     const { toolCall, context, requests } = await bootPane({
       role: "implementer",
@@ -1662,6 +1706,25 @@ describe("Legion OMP extension", () => {
       await toolCall({ ...call, toolCallId: `call-gh-unserved-${index}` }, context);
     }
     expect(grantRequests(requests)).toHaveLength(served.length);
+  });
+  test("a dispatch command mints no grant, and a git push still does", async () => {
+    const { toolCall, context, requests } = await bootPane({ role: "implementer" });
+
+    for (const command of [
+      "dispatch search --query 'saved carts'",
+      "dispatch message --issue X --body-file - <<'EOF'\na body\nEOF",
+    ]) {
+      await expect(
+        toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context)
+      ).resolves.toBeUndefined();
+    }
+    expect(grantRequests(requests)).toHaveLength(0);
+
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-push", input: { command: "git push" } },
+      context
+    );
+    expect(grantRequests(requests)).toHaveLength(1);
   });
   /**
    * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
@@ -2098,21 +2161,21 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("the Envoy extension's own notice (a dispatch_ask's follow notice) does not re-arm a quiet stall", async () => {
+    test("the Envoy extension's own notice (its session-id-changed notice) does not re-arm a quiet stall", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
 
-      // The worker answers the follow-up by opening a dispatch_ask, and the Envoy extension steers
-      // its follow notice into the session: the worker's own doing, not an event from outside.
+      // A branch re-mints the worker's session id, and the Envoy extension steers its notice into
+      // the session: the session's own doing, not an event from outside.
       await worker.arrives({
         message: {
           ...envoyEvent.message,
-          content: "Following ask ask-1 on REPO-43: its answer and replies reach you directly.",
+          content: "envoy:\n  notice: session id changed",
           details: LOCAL_ENVOY_NOTICE,
         },
       });
-      expect(await worker.settles("Asked the human which schema to use.")).toBeUndefined();
+      expect(await worker.settles("Noted the new session id.")).toBeUndefined();
 
       await worker.arrives(envoyEvent);
       expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));
@@ -3897,6 +3960,15 @@ describe("a Legion session's title", () => {
     });
   });
 
+  test("the session's title file holds the Legion title for the pane's first dispatch command", async () => {
+    const worker = await bootPane({ role: "implementer", sessionId: "ses_title_file" });
+
+    expect(worker.title.set).toEqual(["Legion implementer · REPO-43"]);
+    expect(readSessionTitle(sessionDirectory(process.env, "ses_title_file"))).toBe(
+      "Legion implementer · REPO-43"
+    );
+  });
+
   test("a root architect is titled by its tree's issue", async () => {
     const pane = await bootPane({
       role: "architect",
@@ -3981,5 +4053,172 @@ describe("a Legion session's title", () => {
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
       title: "Legion controller · OMP",
     });
+  });
+});
+
+describe("the recreated-workspace notice", () => {
+  const notices = (pane: ClaimPane) =>
+    pane.sentMessages.flatMap((message, i) =>
+      "customType" in message && message.customType === "legion-workspace-recreated"
+        ? [{ message, options: pane.sentMessageOptions[i] }]
+        : []
+    );
+  // A resumed session, its history uncompacted turns, whose role launcher said its workspace was
+  // recreated: at session start the plugin saves one notice naming the issue's branch, as a steer
+  // that starts no turn, so Oh My Pi stores it ahead of the next turn whatever starts that turn.
+  test("a resume told LEGION_WORKSPACE_RECREATED=true saves one notice ahead of its next turn", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const history = [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-1" }] } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "reply 1" }] },
+      },
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-2" }] } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "reply 2" }] },
+      },
+    ];
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43", branch: history });
+    expect(notices(pane)).toEqual([
+      {
+        message: {
+          customType: "legion-workspace-recreated",
+          content: expect.stringContaining(
+            "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
+          ),
+          display: true,
+          details: { id: expect.any(String) },
+        },
+        options: { deliverAs: "steer", triggerTurn: false },
+      },
+    ]);
+  });
+
+  test("a resume told false, or nothing, saves no notice", async () => {
+    for (const value of ["false", undefined]) {
+      if (value === undefined) delete process.env.LEGION_WORKSPACE_RECREATED;
+      else process.env.LEGION_WORKSPACE_RECREATED = value;
+      const pane = await bootPane({ role: "implementer", sessionId: `ses_recreated_${value}` });
+      expect(notices(pane)).toEqual([]);
+      expect(
+        await pane.handlers.get("before_agent_start")?.({ prompt: "task" }, pane.context)
+      ).toBeUndefined();
+    }
+  });
+
+  // A session that is no Legion session is left alone even with the variable set: only the role
+  // launcher sets it, beside the role variables, and pi-legion is inert outside a Legion session.
+  test("a session that is no Legion session saves no notice", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const fixture = createPi({ bindEnvoy: false });
+    legionExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_person"));
+    expect(fixture.sentMessages).toEqual([]);
+    expect(
+      await fixture.handlers.get("before_agent_start")?.(
+        { prompt: "task" },
+        sessionContext("ses_person")
+      )
+    ).toBeUndefined();
+  });
+
+  /** The pane's own notice id, its before_agent_start and context handlers, and a context whose
+   * `getBranch()` returns what `branch()` does at each call. */
+  const recoveryPane = async (branch: () => readonly unknown[]) => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    const sent = notices(pane)[0]?.message;
+    const id =
+      sent !== undefined && "details" in sent && typeof sent.details?.id === "string"
+        ? sent.details.id
+        : undefined;
+    const beforeAgentStart = pane.handlers.get("before_agent_start");
+    const requestOf = pane.handlers.get("context");
+    if (id === undefined || beforeAgentStart === undefined || requestOf === undefined) {
+      throw new Error("the pane sent no notice, or registered no before_agent_start or context");
+    }
+    const context = {
+      ...pane.context,
+      sessionManager: { ...pane.context.sessionManager, getBranch: branch },
+    };
+    return { pane, id, beforeAgentStart, requestOf, context };
+  };
+  const entry = (id: string) => ({
+    type: "custom_message",
+    customType: "legion-workspace-recreated",
+    content: "Your workspace was recreated since your last turn: …",
+    display: true,
+    details: { id },
+  });
+  const copy = (id: string) => ({
+    role: "custom",
+    customType: "legion-workspace-recreated",
+    content: "…",
+    details: { id },
+  });
+  const task = { role: "user", content: [{ type: "text", text: "TURN-2" }] };
+  const turn = (role: "user" | "assistant", text: string) => ({
+    type: "message",
+    message: { role, content: [{ type: "text", text }] },
+  });
+
+  // The daemon's next task is an RPC prompt, and Oh My Pi first recovers a failed last turn: an
+  // empty `length` stop is dropped by moving the branch back to that turn's parent, which takes the
+  // copy saved after it off the branch. before_agent_start runs after that recovery and puts the
+  // notice into the run's messages when the branch no longer holds this process's copy; while the
+  // branch holds it, nothing is added. Once the first run starts, nothing is owed. The recovery left
+  // the saved copy in the live context, so from the re-send on each request keeps the first copy
+  // alone, and before it no request is touched.
+  test("a prompt whose recovery dropped the saved notice carries it again, once", async () => {
+    let branch: readonly unknown[] = [];
+    const { id, pane, beforeAgentStart, requestOf, context } = await recoveryPane(() => branch);
+    branch = [
+      turn("user", "TURN-1"),
+      { type: "message", message: { role: "assistant", content: [], stopReason: "length" } },
+      entry(id),
+    ];
+
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toBeUndefined();
+    branch = branch.slice(0, 1);
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
+      message: {
+        customType: "legion-workspace-recreated",
+        content: expect.stringContaining("it holds what was pushed to legion/REPO-43"),
+        display: true,
+        details: { id },
+      },
+    });
+    await pane.handlers.get("agent_start")?.({}, context);
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toEqual({
+      messages: [copy(id), task],
+    });
+    expect(await requestOf({ messages: [copy(id), task] }, context)).toBeUndefined();
+  });
+
+  // A session recreated twice carries the earlier recreation's notice in its history. When the
+  // recovery drops this process's copy, that earlier notice is not it: the notice is sent again,
+  // and the request filter leaves the earlier one where the history put it, keeping this process's
+  // first copy too. The same holds when the earlier notice sits after the last good reply, as one
+  // saved by a process lost before its turn's first reply does.
+  test("a notice an earlier recreation saved does not stand in for this process's", async () => {
+    let branch: readonly unknown[] = [];
+    const { id, beforeAgentStart, requestOf, context } = await recoveryPane(() => branch);
+    const earlier = "an-earlier-process";
+    for (const recovered of [
+      [turn("user", "TURN-1"), entry(earlier), turn("user", "X"), turn("assistant", "reply X")],
+      [turn("user", "TURN-1"), turn("assistant", "reply 1"), entry(earlier), turn("user", "X")],
+    ]) {
+      branch = recovered;
+      expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
+        message: expect.objectContaining({ details: { id } }),
+      });
+    }
+    expect(
+      await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
+    ).toEqual({ messages: [copy(earlier), copy(id), task] });
   });
 });

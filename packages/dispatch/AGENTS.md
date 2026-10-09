@@ -221,7 +221,7 @@ An open ask card lists every session the server routes the ask's answer and repl
 
 `features/refs/RefPreview.tsx` is the one hover card for every reference: resting the pointer on a `dispatch://` anchor in a Markdown body, a Proof document link mark, a board card, a list row or parent pill, an Inbox owner link, a child row, or a search result for 300 ms (or moving keyboard focus onto one) opens a `role="tooltip"` card, linked to its trigger by `aria-describedby`, that shows the target — issue: key, title, status, priority, labels, open-ask count, and the first three rendered lines of its spec; document: owner, name, latest version, and the first three rendered lines of its text; ask: the question in two rendered lines, state, option count; comment or message: author and the first three rendered lines of its body. Each of those texts is Markdown and renders through `MarkdownPreview`, formatted and then clamped. The card is a single click-through to the trigger's href, never interactive. The hover itself calls `prefetchReference` (`reference-target.ts`), which warms `useReferenceData`'s queries plus the issue's primary spec text that only the card reads, so the card opens populated and otherwise shows `RefLink`'s short form, never a spinner. Every trigger is an element carrying `data-dispatch-ref` (React links spread `referenceTriggerProps(route)`; `collectReferenceAnchors` tags Markdown anchors) or Proof's `data-dispatch-href`; one `RefPreviewHost` in the shell owns document-level `pointerover`/`pointerout`/`focusin`/`focusout` listeners for all of them, so anchors React never rendered are triggers too, keeps exactly one card open in a module-level store, and renders it into `document.body` (fixed, clamped to the viewport, flipping above the anchor when it will not fit below). Focus opens the card only when the trigger matches `:focus-visible` (the browser's own keyboard-versus-pointer verdict); a touch pointer or a held button (drag-selection) never opens one, so a tap follows the link as before. The anchor and its card are one hover zone (`inHoverZone`): a `pointerout` that leaves the zone gives the pointer 150 ms to come back, a `pointerover` that re-enters it keeps the card whether or not a button is held (so a drag-selection that leaves the reference and returns keeps it), and a move that lands directly on the other never leaves the zone, while one that crosses the 6 px gap between them is carried by the same 150 ms. Focus has the same exception of its own (`onFocusOut` skips a `focusout` whose destination is inside the card); leaving the zone for 150 ms, blur, Escape, any click, or the anchor leaving the DOM closes the card, and so does scrolling — unless the anchor holds keyboard focus (focusing it may itself scroll), in which case the card follows the anchor.
 
-A document's approval (`features/doc/ApprovalChip.tsx`) is a human review pinned to a version: the header of an issue document, the issue's Spec header, and a project document page show a chip (`Awaiting approval`, `Approved v12`, `Approved v12 · changed since` when edited after approval, `Changes requested`) that opens the review history, plus `Approve` (`Approve v<latest>` when stale) and `Request changes` (reason required) controls that `POST /artifacts/{id}/reviews`; draft documents render no chip or approval controls. An agent's `dispatch_request_approval` opens an ask of `kind: "approval"`, which the Inbox card renders as `Approval requested` with two fixed options and no Other row, requiring a `Reason` when `Request changes` is chosen; answering it is the same review. Its question is `Approve <name> (version N)?` followed by the requester's summary of what the human is approving. A document version moves that open request in place, preserving its thread and filing it under Waiting on agents until the agent hands it back with another `dispatch_request_approval` call. An agent requests approval rarely, only for a spec with no open decision blocks whose every point the human has already agreed to and whose current version they have not yet approved (Legion's design gate among them), so nothing about it is prominent.
+A document's approval (`features/doc/ApprovalChip.tsx`) is a human review pinned to a version: the header of an issue document, the issue's Spec header, and a project document page show a chip (`Awaiting approval`, `Approved v12`, `Approved v12 · changed since` when edited after approval, `Changes requested`) that opens the review history, plus `Approve` (`Approve v<latest>` when stale) and `Request changes` (reason required) controls that `POST /artifacts/{id}/reviews`; draft documents render no chip or approval controls. An agent's `dispatch request-approval` opens an ask of `kind: "approval"`, which the Inbox card renders as `Approval requested` with two fixed options and no Other row, requiring a `Reason` when `Request changes` is chosen; answering it is the same review. Its question is `Approve <name> (version N)?` followed by the requester's summary of what the human is approving. A document version moves that open request in place, preserving its thread and filing it under Waiting on agents until the agent hands it back with another `dispatch request-approval` call. An agent requests approval rarely, only for a spec with no open decision blocks whose every point the human has already agreed to and whose current version they have not yet approved (Legion's design gate among them), so nothing about it is prominent.
 
 Each open ask card (`features/inbox/`) keeps the full clarification exchange directly under its question: its two newest replies appear newest first, and **Show N more replies** (`aria-controls` names the older-replies list it reveals) reveals the older replies below them; **Show fewer replies** restores the two-reply view. The one answer composer still serves both outcomes. Urgency appears as a colored left border; blocking and high asks also have a small top-border notch, while every urgency remains in the article's accessible name. The question is the card's headline at 15 px medium; one provenance line follows it and nothing else separates it from its options. That line reads turn (`data-testid="turn-<id>"`, the only part of it a reader acts on), author, time, and the ask's own `dispatch://` reference. A session author's own handles - its ID, its title, its tmux target - fold behind the author chip, which is a button (`aria-expanded`) that opens them onto a `basis-full` row of the same wrapping line: five 44 px copy controls cannot share one row inside a 390 px phone or a 280 px margin without pushing the reference past the card's edge, and a session identifier is chrome a reader wants perhaps once a week. Each handle copies through the shared `components/CopyButton.tsx` (`Copy <what> <value>`), and the reference copies through `features/refs/CopyRefButton.tsx`: each confirms a successful copy for 1.5 s and, when neither clipboard path succeeds, prints the value it tried in a selectable `<code>` (or says to select the text when the button already shows it). `CopyRefButton` is the one copy control for a node's reference — the same quiet glyph over `CopyButton`, taking the node's `DispatchReferenceRoute` and building the string with `buildDispatchReference` — and it is mounted wherever a node is shown: the issue header (with `primary` = the issue key, so a click copies `CORE-12` and a Ctrl/Cmd-click copies `dispatch://CORE-12`; the button's name says so), every `AskCard` (`dispatch://CORE-12/ask/<id>`, or `dispatch://CORE/artifact/<slug>/ask/<id>` for a project-document ask — Inbox rows carry `document`, the margin passes its `owner`), the `AskBlockCard` header, the document headers (`SpecToolbar`: `dispatch://CORE-12/spec`, or `dispatch://CORE-12/artifact/<slug>@vN` when a historical version is shown; `ArtifactHeader` on issue artifact and project document pages likewise, via `documentRoute(artifact, version)` in `refs/routes.ts`), Artifacts-tab and project Documents rows, margin thread comments (`dispatch://…/comment/<id>`, `itemRoute` picks the issue or document form), and Conversation turns (`dispatch://CORE-12/message/<id>` for a message or targeted message, `dispatch://CORE-12/comment/<id>` for a comment turn). `RefPreview` stays non-interactive; a `CopyButton` given a function `value` picks what to copy from the click's modifiers and names itself through `label`. Option-bearing question asks append an **Other** row; selecting it records no fixed option and requires free text. A chosen row takes the same `selectedCardBorder`/`selectedCardBg` the recorded answer shows afterwards, so choosing and having chosen read alike. A human can add free-text context to any fixed option, then selects **Answer**, or **Ask back**; question-shaped free text with no option chosen is offered as a clarification first, while answered asks retain their separate **Reply** composer (`AskReplyComposer`). Where the thread is collapsed (the Conversation and decision blocks; the margin's compact cards keep the inline thread and its composer) it sits behind a **Write a reply** control, named apart from the form's own **Reply** submit button, which renders that composer directly after itself and names it in `aria-controls`, so focus stays on the control and the next Tab lands in the field. The composer's unsent draft and its send belong to the ask, not to the card (`features/inbox/reply-drafts.ts`, a store every composer for the ask subscribes to, and the `["ask-reply", <ask id>]` mutation key): two composers for one ask on one page (the margin beside a Conversation card or a decision block) show the same draft, a composer that remounts (switching the margin from Comments to Pinned and back, or closing and reopening **Write a reply**) picks the draft back up, and while a reply is out every composer for that ask, including one mounted since, shows it disabled, so a remount mid-send cannot post it twice. A sent reply, an emptied field, or the ask resolving drops the draft. Moving an answered ask from **Needs you** to the decided list does not remount its card (`CommentsTab` keys both groups in one list). Approval asks keep their server-defined fixed choices and no **Other** row; a human to-do is an ordinary question with whatever options its asker chose, rendered through the same rows as any option question. Every Dispatch-owned multi-line input keeps Enter for a new line and submits with Ctrl/Cmd+Enter.
 
@@ -530,6 +530,18 @@ document tab mounts. `loadDocumentTransport` resolves to a synchronous `connect`
 browser is offline is retried once the network returns (Chromium caches a failed module fetch,
 so the retry can reject too); a failure while online, or a retry that rejects, reaches
 `DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
+`pending-edits.ts` keeps each local Yjs update in IndexedDB until its own Hocuspocus `SyncStatus`
+acknowledgement arrives: `pending-sync.ts` pairs acknowledgements with frames by update payload
+rather than a provider counter, so reconnect queues cannot clear an earlier unconfirmed edit, and
+reads every frame field through `sync-frame.ts`'s bounds-checked `readField`. The first synced
+admission judges each saved row on a scratch copy of the live document before applying it: the
+copy takes every row the live document takes and is copied afresh after a row it refuses, so a
+row a rebuild leaves parked is dropped and reported alone while the others apply, and the rows it
+handled are deleted in one IndexedDB write once their re-recorded rows are stored. A read-only
+admission keeps them all, and an `ARTIFACT_NOT_FOUND` admission removes rows for the document that
+is gone. The connection indicator names saved edits while disconnected and warns when IndexedDB
+cannot retain them across a reload.
+
 The one exception is a page being left: from `beforeunload` no failure reloads it, because WebKit
 and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new
 ones), and a reload then would replace the reader's navigation with a reload of the page they are
@@ -834,8 +846,8 @@ fixture state in one object that the reset replaces whole, so a field added to i
 rest. These Envoy fixture helpers run
 for local and deployed targets. The fake GitHub's `seedFakeGithub` remains unavailable to a deployed
 target and skips the test that calls it. A fixture call follows `resetDatabase()` rather than running
-beside it in a `Promise.all`: a reset left running would overlap the next test's, and each waits out
-the other's open transaction. It also holds the Agents page the keyboard specs share: `seedAgents`
+beside it in a `Promise.all`: the reset empties whatever lands before it finishes, and a reset left
+running would overlap the next test's. It also holds the Agents page the keyboard specs share: `seedAgents`
 (the Planner and Reviewer sessions, both listed, and two open issues for the picker) and
 `openAgents`, which waits for the page's heading before a key is pressed, since the keymap binds
 only once sign-in resolves. A session a shared helper seeds, as these two are, carries no
@@ -894,11 +906,15 @@ it waits for the spec's decision block to be indexed, so `inboxRows` is exact wh
 
 `e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
 (`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every
-live document and waits for the settlements in flight: a settlement locks its document's owner
-row and then reads `artifact_versions`, while `TRUNCATE` takes an exclusive lock on every table
-in its own order, and the two crossing is a PostgreSQL deadlock that kills either the reset or
-the settlement. With no live room and no armed settlement timer the two cannot overlap, so the
-reset does not retry. It still waits for any open server transaction before truncating. For a
+live document and waits for the settlements in flight, so the documents the previous scenario had
+open finish writing before the truncate rather than failing against the emptied tables after it.
+`TRUNCATE` locks its tables one at a time, in its own order, so a transaction that reads two of
+them in another order can close a cycle with it, and PostgreSQL aborts one side: a settlement
+(which locks its document's owner row and then reads `artifact_versions`), a request from a page an
+earlier scenario left open, or one of the server's own sweeps. So the reset first takes
+`ACCESS EXCLUSIVE` on every table the truncate empties, and never waits while it holds one (the
+comment above `resetDatabaseOnce` says how), so the truncate cannot deadlock and the reset does
+not retry. A table still held after 5 s fails the reset, naming each holder's query. For a
 deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
 bearer-seeded API calls. Every SQL statement the harness runs, `seed.ts`'s and
 `failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that database
@@ -911,15 +927,16 @@ to Postgres as a setting, which refuses the connection, so the harness server ne
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
 is up, without evaluating `e2e/api.ts`.
 
-That reset is also the one rig failure that presents as a code failure. Any other process holding
-a non-idle connection to the test database — most often a Dispatch server from an earlier run
-still listening on `DISPATCH_E2E_PORT` — keeps a client backend out of `idle`, so the wait above
-never clears and `resetDatabase` throws in `beforeEach`. Because it throws in the hook, **every**
-spec in the file reports failed, each carrying the `psql … DO $$` wait loop in its message, which
-reads as a catastrophic regression in the change under test. Recognise that shape as the rig: kill
-whatever holds the port and run again. With reuse off a run cannot reach that shape through the
-port at all, and this paragraph is where the harness-port rule lives — `README.md` and the
-`docs/solutions` learning point here rather than restating it.
+That reset is also the one rig failure that presents as a code failure. A transaction that holds
+one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
+a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, makes
+`resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
+reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
+which reads as a catastrophic regression in the change under test. Recognise that shape as the
+rig: stop whatever holds those tables (most often whatever holds the port) and run again. With
+reuse off a run cannot reach that shape through the port at all, and this paragraph is where the
+harness-port rule lives — `README.md` and the `docs/solutions` learning point here rather than
+restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
 `9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
@@ -944,7 +961,7 @@ the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own
 `DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
 the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
-new port, so that server's live rooms stay open for the `TRUNCATE` to deadlock against. Reuse is
+new port, so that server's live rooms stay open across the truncate. Reuse is
 opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: unset or empty
 starts this run's own servers, and any other value is refused at config load naming the variable
 and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
@@ -954,7 +971,8 @@ file, which derives the target's `ENVOY_URL` from that same value; the README's 
 wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
 is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
+The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
@@ -965,8 +983,10 @@ Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a cl
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
 send still name one issue. So do its rows on a message in flight (the picker and Reply held, no sent text back in
 the composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still
-named, marked closed). The project selects all three specs by file name, not title, so renaming a row cannot drop it. CI
-installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
+named, marked closed). The project selects every listed spec by file name, not title, so renaming
+a row cannot drop it. The offline-edits rows exercise browser-held IndexedDB updates and the
+WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. CI installs WebKit
+beside Chromium for them (`bun run e2e:install` does the same locally).
 
 The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
@@ -988,11 +1008,13 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, the live
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
-editing puts text typed over a code block's last line before that line's newline, and deletes a
-paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
-spec is the one that needs a second engine; the picker and deep-links specs run for the reasons given under `webkit` above. CI installs Firefox
-beside Chromium for them (`bun run e2e:install` does the same locally).
+The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`: Firefox's native editing puts
+text typed over a code block's last line before that line's newline, and deletes a paragraph's hard
+break along with the text after it, which Chromium and WebKit never do, so that spec is the one
+that needs a second engine; the picker and deep-links specs run for the reasons given under
+`webkit` above. CI installs Firefox beside Chromium for them (`bun run e2e:install` does the same
+locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to

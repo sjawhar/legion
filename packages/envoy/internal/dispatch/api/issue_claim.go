@@ -21,7 +21,7 @@ import (
 //
 // The claim and the issue's status are separate, because humans may use the status to keep track
 // of work. So claiming an issue never moves its status, and the only thing that creates a claim is
-// POST /api/v1/issues/{key}/claim (the `dispatch_claim` tool). Messages, comments, asks,
+// POST /api/v1/issues/{key}/claim (the `dispatch claim` command). Messages, comments, asks,
 // labels, links, priority, route and component writes, and every read, leave the claim alone;
 // closing an issue is the one status move that touches it, clearing it because the work is
 // over.
@@ -31,7 +31,7 @@ import (
 // caller), or, for a bearer, the session the caller declares in `actor` — what the token
 // proves is its owner or its service subject, not which session it is running. So a bearer
 // could name another session here exactly as it could on any other write; what makes a claim
-// trustworthy is that `dispatch_claim` fills `actor` from the host's own runtime, so no model
+// trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model
 // chooses it, and that the request has no second parameter for claiming on someone's behalf.
 // The body is closed to unknown fields, so an invented one is refused rather than ignored.
 //

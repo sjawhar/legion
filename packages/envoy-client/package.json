@@ -34,10 +34,25 @@
       "bun": "./src/dispatch-cwd.ts",
       "default": "./dist/dispatch-cwd.js"
     },
+    "./dispatch-cli": {
+      "types": "./src/dispatch-cli.ts",
+      "bun": "./src/dispatch-cli.ts",
+      "default": "./dist/dispatch-cli.js"
+    },
+    "./dispatch-command": {
+      "types": "./src/dispatch-command.ts",
+      "bun": "./src/dispatch-command.ts",
+      "default": "./dist/dispatch-command.js"
+    },
     "./dispatch-subscribe": {
       "types": "./src/dispatch-subscribe.ts",
       "bun": "./src/dispatch-subscribe.ts",
       "default": "./dist/dispatch-subscribe.js"
+    },
+    "./dispatch-session-state": {
+      "types": "./src/dispatch-session-state.ts",
+      "bun": "./src/dispatch-session-state.ts",
+      "default": "./dist/dispatch-session-state.js"
     },
     "./dispatch-picture-tools": {
       "types": "./src/dispatch-picture-tools.ts",
@@ -86,7 +101,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ bin/"

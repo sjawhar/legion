@@ -191,6 +191,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:    launchSecretNames(cfg, lookup),
 		ProvidersSecrets: providersSecrets(cfg, lookup),
+		SessionDSNKey:    k.SessionDSNSecret,
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,

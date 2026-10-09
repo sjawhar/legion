@@ -109,6 +109,7 @@ func testConfig(t *testing.T) config.Config {
 		PromptRetireLimit:                       2,
 		OperatorTokenFile:                       tokenFile,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		ControllerLaunch:                        config.ControllerLaunchOperator,
 	}
 }
 
@@ -489,7 +490,7 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	return startDaemonLogging(t, cfg, o, quietLogger())
 }
 
-// startDaemonLogging is startDaemon with the daemon's log written to log.
+// startDaemonLogging is startDaemon writing the daemon's log to log.
 func startDaemonLogging(t *testing.T, cfg config.Config, o overrides, log *slog.Logger) *daemon {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

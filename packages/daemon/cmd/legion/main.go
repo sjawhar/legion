@@ -69,6 +69,7 @@ var commands = map[string]commandEntry{
 	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
+	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
 	"gh":             {runGh, "run gh with a GitHub token from this session's grant; merges and GitHub-issue writes are refused"},
 	"credential":     {runCredential, "git credential helper answering with a token from this session's grant"},
 	"handoff":        {runHandoff, "write or read a phase's .legion/ handoff, or report the phase complete"},

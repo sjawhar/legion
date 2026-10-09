@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -23,11 +24,11 @@ const rebuildUpdateItems = 100_000
 // empty paragraphs. Each is accepted on its own: AppendUpdate applies it to an empty document,
 // where the first integrates and each later one parks whole behind the clock gap the earlier ones
 // leave, within ygo's pending cap of 100,000 items. Merged, they are one client's 1.1 million
-// items, which ygo refuses from that client's header before it integrates any (reearth/ygo v1.49.5,
-// crdt/update.go decodeAndPark), so the history cannot load and no load of it walks a million
-// items first. Each paragraph is prepended because ygo finds an insert position by walking the
-// fragment's children from its start (crdt/yxml.go leftChildAt): appending takes quadratic time,
-// about 30 s for 100,000.
+// items, which ygo refuses from that client's header before it integrates any (sjawhar/ygo
+// v1.51.3-sami.1, crdt/update.go:545-558 decodeAndPark), so the history cannot load and no load
+// of it walks a million items first. Each paragraph is prepended because ygo finds an insert
+// position by walking the fragment's children from its start (crdt/yxml.go leftChildAt):
+// appending takes quadratic time, about 30 s for 100,000.
 func oversizedHistory(t *testing.T) [][]byte {
 	t.Helper()
 	doc := crdt.New()
@@ -157,6 +158,8 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	}
 }
 
+// rebuildCaptureStore counts rebuilds, and while invalid loads the stored document once, of either
+// kind (a room's or a cold read's), as a history that does not decode.
 type rebuildCaptureStore struct {
 	VersionedStore
 	invalid  bool
@@ -169,6 +172,16 @@ func (s *rebuildCaptureStore) Load(ctx context.Context, room string) (persistenc
 		return persistence.LoadResult{Update: []byte{0xff}}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s *rebuildCaptureStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.invalid {
+		s.invalid = false
+		if err := crdt.ApplyUpdateV1(newDocumentCopy(), []byte{0xff}, nil); err != nil {
+			return LoadedDocument{}, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+		}
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
 }
 
 func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {

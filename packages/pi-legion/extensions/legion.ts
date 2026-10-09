@@ -4,6 +4,10 @@ import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import {
+  sessionDirectory as dispatchSessionDirectory,
+  writeSessionTitle,
+} from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -19,6 +23,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "@legion/pi-shared/pi-types";
+import { dispatchCommandHead } from "@legion/pi-shared/shell-command";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createClaimSession } from "../src/claim-session";
@@ -37,6 +42,13 @@ import {
 } from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { createLegionTool } from "../src/tools";
+import {
+  branchHoldsWorkspaceRecreatedNotice,
+  type WorkspaceRecreatedNotice,
+  withoutRepeatedWorkspaceRecreatedNotice,
+  workspaceRecreatedMessage,
+  workspaceRecreatedNotice,
+} from "../src/workspace-recreated";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -57,9 +69,13 @@ const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
  * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
  * that runs `legion gh`. A grant lives its ttl (60 seconds, or pushTTL for a `legion push`
  * invocation), so a call that reaches `gh` long after the
- * pane's last bash command needs its own. */
+ * pane's last bash command needs its own. A `dispatch` command (`dispatchCommandHead`) redeems
+ * none: the CLI authenticates with the pane's Dispatch token, so it neither waits on the daemon
+ * nor fails when minting does. */
 function needsGrant({ toolName, input }: ToolCallEvent): boolean {
-  if (toolName === "bash") return typeof input.command === "string";
+  if (toolName === "bash") {
+    return typeof input.command === "string" && dispatchCommandHead(input.command) === undefined;
+  }
   if (toolName === "github") return true;
   const paths = Array.isArray(input.paths) ? input.paths : [input.path];
   return paths.some((entry) => typeof entry === "string" && GH_RESOLVED_URL.test(entry));
@@ -293,7 +309,7 @@ function refusedCommand(
 }
 
 /** The `write` targets that are not files, each scheme in any case, as Oh My Pi routes it: a tool
- * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Dispatch tools), a
+ * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Envoy tools), a
  * message to an agent of this process (`agent://<id>`), or job and service control (`proc://<id>`:
  * `content` goes to a supervised service's stdin; `/kill` stops a job, `/mode` sets its lifetime). */
 const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
@@ -453,12 +469,25 @@ export default function legionExtension(pi: PiApi): void {
    * Names the session by its Legion identity (`src/session-title.ts`), so every Dispatch
    * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
    * session claims its Envoy role: that claim registers the session, and the registration carries
-   * the title then rather than at the next heartbeat.
+   * the title then rather than at the next heartbeat. The `dispatch` command reads the title from
+   * the session's `title` file, which envoy.ts rewrites only before a shell command whose session
+   * name changed, so it is written here too, and the pane's first command already carries it.
    */
   const titleSession = async (context: SessionContext): Promise<void> => {
     const title = legionSessionTitle(classifySession(process.env), process.env.LEGION_PROJECT);
-    if (title !== undefined) await applySessionTitle(pi, context, title);
+    if (title === undefined) return;
+    await applySessionTitle(pi, context, title);
+    const sessionID = context.sessionManager.getSessionId();
+    if (sessionID === "") return;
+    writeSessionTitle(
+      dispatchSessionDirectory(process.env, sessionID),
+      context.sessionManager.getSessionName?.() ?? title
+    );
   };
+
+  // The recreated-workspace notice this process owes its first run: set at session_start below,
+  // with the id its copies carry, and owed until that run starts (agent_start), whatever starts it.
+  let recreatedNotice: WorkspaceRecreatedNotice | undefined;
 
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
@@ -469,8 +498,8 @@ export default function legionExtension(pi: PiApi): void {
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open.
     phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
-    const { kind } = classifySession(process.env);
-    if (kind === "not-legion") return;
+    const session = classifySession(process.env);
+    if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
     // Envoy plugin's interface, so a process without it ends here, the way a refused boot
     // registration does: one log line, then the exit the daemon sees and relaunches from. A
@@ -482,13 +511,57 @@ export default function legionExtension(pi: PiApi): void {
     }
     // The operator-launched controller registers through the controller session and carries no
     // `legion` tool: its operations are an architect's and a worker's.
-    if (kind === "controller") {
+    if (session.kind === "controller") {
       await controllerSession.handleSessionStart(context);
       return;
+    }
+    // A resume whose role launcher found the workspace recreated since the session was last
+    // written (src/workspace-recreated.ts) is told so in a message saved to the session ahead of
+    // the next turn, whatever starts that turn (a task, an Envoy delivery), so a process lost in
+    // that turn resumes with the notice already in its history. It goes before the role claim, so
+    // no delivery on the role's topic can start a turn ahead of it, and a subagent, which returned
+    // above, never is told.
+    recreatedNotice = workspaceRecreatedNotice(
+      process.env,
+      session.kind === "root-architect" ? session.tree : session.issue
+    );
+    if (recreatedNotice !== undefined) {
+      pi.sendMessage(workspaceRecreatedMessage(recreatedNotice), {
+        deliverAs: "steer",
+        triggerTurn: false,
+      });
     }
     await claimSession.bootstrap(context);
     registerLegionTool();
     await activateLegionTool();
+  });
+
+  // A prompt (the daemon's task as an RPC `prompt`, or a person's direct message pi-envoy
+  // delivers as a user turn) first recovers a failed last turn, and Oh My Pi recovers an empty
+  // `length` stop by moving the branch back to that turn's parent, which takes the copy saved
+  // after it off the branch. before_agent_start runs after that recovery, so it puts the notice
+  // back into the run's messages when the branch no longer holds this process's copy, a notice an
+  // earlier recreation saved not counting, and the run saves it on the branch. An Envoy card,
+  // sent with triggerTurn, starts its turn with neither the recovery nor before_agent_start, so
+  // its branch keeps the saved copy.
+  let resentNoticeId: string | undefined;
+  pi.on("before_agent_start", async (_event, context) => {
+    if (recreatedNotice === undefined) return undefined;
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    if (branchHoldsWorkspaceRecreatedNotice(branch, recreatedNotice.id)) return undefined;
+    resentNoticeId = recreatedNotice.id;
+    return { message: workspaceRecreatedMessage(recreatedNotice) };
+  });
+  pi.on("agent_start", async () => {
+    recreatedNotice = undefined;
+  });
+  // The recovery kept the saved copy in the process's live context, so once it is sent again
+  // every later request of this process would carry it twice: the first copy, where the history
+  // put it, is the one each request keeps.
+  pi.on("context", async (event) => {
+    if (resentNoticeId === undefined) return undefined;
+    const messages = withoutRepeatedWorkspaceRecreatedNotice(event.messages, resentNoticeId);
+    return messages === undefined ? undefined : { messages };
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
@@ -517,9 +590,11 @@ export default function legionExtension(pi: PiApi): void {
     // grant is minted. Classified once per instance, on the first call: a throw for a malformed
     // LEGION_ROLE stays inside the handler, never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
+    // A `dispatch` command's quoted here-document is data on its stdin, never a command, so the
+    // pane rules read only its head line: a message body that names `jj abandon` is not refused.
     const commands =
       toolCall.toolName === "bash" && typeof toolCall.input.command === "string"
-        ? splitShellCommands(toolCall.input.command)
+        ? splitShellCommands(dispatchCommandHead(toolCall.input.command) ?? toolCall.input.command)
         : undefined;
     const refusal = paneRuleRefusal(toolCall, paneRules, commands);
     if (refusal !== undefined) return { block: true, reason: refusal };

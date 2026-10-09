@@ -28,9 +28,8 @@ func states(report []State) map[Name]State {
 }
 
 // A deployment that satisfies everything, its image probed, renders every row of Table in its
-// order: the image rows present — codegraph installed, the one row that awaits a pod launch — the
-// live and withheld rows as CheckImage renders them (the probe pod's log and `legion state` then
-// read alike), the deployment rows present, and nothing open.
+// order: the image rows present, the live and withheld rows as CheckImage renders them (the probe
+// pod's log and `legion state` then read alike), the deployment rows present, and nothing open.
 func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 	report := satisfied.Report()
 
@@ -68,13 +67,13 @@ func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 	}
 }
 
-// The codegraph row, once the probe passed, is installed, not present: the probe proved the image
-// carries the CLI and the plugin, and the detail says a pod's agent gets the tool only once its
-// launch loads profile plugins (dispatch://LEGION-629), since every pod is launched
-// `--no-extensions` today. Before a probe reports, it is unchecked like every other image row.
-func TestTheCodeGraphRowIsInstalledOnceProbedAndUncheckedBefore(t *testing.T) {
+// The codegraph row, once the probe passed, is present like every other image row: the probe proved
+// the image carries the CLI and the plugin, and a pod's launch loads that plugin now that
+// LEGION-629 turned extension discovery on. Before a probe reports, it is unchecked like every
+// other image row.
+func TestTheCodeGraphRowIsPresentOnceProbedAndUncheckedBefore(t *testing.T) {
 	probed := states(satisfied.Report())[CodeGraph]
-	want := State{Name: CodeGraph, Status: StatusInstalled, Detail: "the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"}
+	want := State{Name: CodeGraph, Status: StatusPresent, Detail: "checked by the daemon's probe of the worker image, which passed"}
 	if !reflect.DeepEqual(probed, want) {
 		t.Errorf("probed codegraph row = %+v, want %+v", probed, want)
 	}

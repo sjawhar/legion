@@ -61,7 +61,8 @@ func requireText(t *testing.T, service *Service, artifactID, want string) {
 // before it calls OnLoadDocument, with the room's ready barrier still open. It stands for any
 // failure that lands in that window - a committed write's publish, a browser update's append,
 // a commit whose outcome is unknown - which a test cannot time by hand. It fails the first load
-// that runs after it is armed, so a test can choose which load meets the failure.
+// that runs after it is armed, a room's (Load) or a cold read's (LoadDocument), so a test can
+// choose which load meets the failure.
 type failRoomDuringLoadStore struct {
 	VersionedStore
 	service atomic.Pointer[Service]
@@ -73,14 +74,28 @@ type failRoomDuringLoadStore struct {
 
 func (s *failRoomDuringLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	result, err := s.VersionedStore.Load(ctx, room)
-	if err != nil || room != s.room || !s.armed.Load() {
-		return result, err
+	if err == nil {
+		s.failDuringLoad(room)
+	}
+	return result, err
+}
+
+func (s *failRoomDuringLoadStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	loaded, err := s.VersionedStore.LoadDocument(ctx, room)
+	if err == nil {
+		s.failDuringLoad(room)
+	}
+	return loaded, err
+}
+
+func (s *failRoomDuringLoadStore) failDuringLoad(room string) {
+	if room != s.room || !s.armed.Load() {
+		return
 	}
 	s.once.Do(func() {
 		s.service.Load().failRoom(room, errors.New("injected room failure"))
 		close(s.failed)
 	})
-	return result, nil
 }
 
 // A room that fails while it is still loading recovers. The failure's eviction waits in ygo's
@@ -645,11 +660,11 @@ func (s *failingBrowserAppendStore) AppendUpdate(ctx context.Context, room strin
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *failingBrowserAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (s *failingBrowserAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := s.fail(); err != nil {
 		return 0, err
 	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
 func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {

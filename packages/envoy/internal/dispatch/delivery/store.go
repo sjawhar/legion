@@ -57,9 +57,13 @@ func GetSettings(ctx context.Context, pool *store.Pool) (DeliverySettings, error
 	return settings, nil
 }
 
-// PutSettings upserts the one delivery_settings row, clearing the freshness columns: a settings
-// change (a different repository, a different population) makes the previous freshness
-// meaningless, and the next reconcile sets it again from scratch. Takes the pool directly, not a
+// PutSettings upserts the one delivery_settings row, clearing the freshness columns and every
+// delivery_reconcile_progress row: a settings change (a different repository, a different
+// population) makes the previous freshness and every step's recorded progress meaningless, and
+// the next reconcile sets both again from scratch. The delete rides the same statement as the
+// upsert (a data-modifying CTE, which Postgres runs exactly once whether or not the outer query
+// reads its output) so no pass can ever see the new settings beside the old settings' progress.
+// Takes the pool directly, not a
 // transaction: putDeliverySettings (api/settings_delivery.go) deliberately does not wrap this in
 // a transaction+event+publish the way sibling settings routes do, since delivery_settings is a
 // true singleton with no project/issue/artifact to own an event against (see that handler's own
@@ -80,6 +84,7 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 		excludedRepos = []string{}
 	}
 	return ScanSettings(pool.QueryRow(ctx, `
+		with cleared as (delete from delivery_reconcile_progress)
 		insert into delivery_settings (
 			singleton, deploy_repo, deploy_workflow_path, production_job_name,
 			pr_checks_workflow_path, population_authors, excluded_repos, updated_by
@@ -131,6 +136,59 @@ func RecordReconcileSuccess(ctx context.Context, pool *store.Pool, t time.Time) 
 // pass silently reporting itself healthy by advancing the timestamp anyway.
 func RecordReconcileError(ctx context.Context, pool *store.Pool, message string) error {
 	_, err := pool.Exec(ctx, `update delivery_settings set last_error = $1 where singleton`, message)
+	return err
+}
+
+// ReconcileProgressThrough reads one step's recorded progress under scope, or a zero time when
+// the step has none (no row, or a row recorded against another scope).
+func ReconcileProgressThrough(ctx context.Context, pool *store.Pool, step, scope string) (time.Time, error) {
+	var through time.Time
+	err := pool.QueryRow(ctx, `select through from delivery_reconcile_progress where step = $1 and scope = $2`, step, scope).Scan(&through)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return through, nil
+}
+
+// RecordReconcileProgress records that step has imported everything up to through, under scope.
+// Within one scope progress only ever moves forward (greatest): a resumed pass re-reads its
+// overlap, so its first window can end before the progress already recorded, and that must not
+// move the step backward. A row recorded under another scope is replaced outright, since that
+// scope's window says nothing about this one's.
+func RecordReconcileProgress(ctx context.Context, pool *store.Pool, step, scope string, through time.Time) error {
+	_, err := pool.Exec(ctx, `
+		insert into delivery_reconcile_progress (step, scope, through)
+		values ($1, $2, $3)
+		on conflict (step) do update set
+			scope = excluded.scope,
+			through = case
+				when delivery_reconcile_progress.scope = excluded.scope
+					then greatest(delivery_reconcile_progress.through, excluded.through)
+				else excluded.through
+			end,
+			updated_at = now()
+	`, step, scope, through)
+	return err
+}
+
+// PruneMergedPullRequestProgress deletes the merged-PR search progress of every installation
+// outside keep -- an App installation that was removed, or one whose repositories moved to
+// another. Its row would otherwise sit in delivery_reconcile_progress for good: nothing else
+// deletes a step's row, and the step name carries an installation id no listing answers any
+// more. keep empty deletes every installation's row, which is what an App with no installations
+// means.
+func PruneMergedPullRequestProgress(ctx context.Context, pool *store.Pool, keep []int64) error {
+	steps := make([]string, 0, len(keep))
+	for _, installationID := range keep {
+		steps = append(steps, mergedPullRequestsStep(installationID))
+	}
+	_, err := pool.Exec(ctx, `
+		delete from delivery_reconcile_progress
+		where starts_with(step, $1) and not (step = any($2))
+	`, mergedPullRequestsStepPrefix, steps)
 	return err
 }
 

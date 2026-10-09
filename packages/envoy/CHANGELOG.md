@@ -4,6 +4,19 @@
 
 ### Added
 
+- The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
+  `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
+  new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
+  auth token minted for that user and host from the AWS SDK's default credentials, in the region
+  `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS config names (it needs `rds-db:connect` on
+  the database user), so no database password exists for RDS to rotate under the broker. Such a URL
+  must name that one host with `sslmode=verify-full` and an `sslrootcert` file, or the broker
+  refuses to start naming the host, since a token is a password for 15 minutes,
+  `sslmode=require` verifies nothing and `sslrootcert=system` holds no RDS CA. A password pgx reads
+  for the URL (`PGPASSWORD`, a passfile) keeps it on that password. The Envoy image ships the RDS global CA bundle at
+  `/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so no binary in the image
+  trusts an RDS CA for any other connection. A URL with a password, the
+  `${BROKER_DATABASE_PASSWORD}` placeholder, or any other host connects as before (LEGION-662).
 - `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
   with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
   `expected_answer_at` to change the current answer; the change is another `ask.answered`
@@ -307,9 +320,26 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
-- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
+- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A document opens in the editor however many documents the process has touched: the 1,000-room
+  cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
+  nothing still holds it. Before, every document opened since a restart kept its state and counted
+  against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
+- A document's pending authors now survive room release, process restart and overlapping Dispatch
+  tasks in `doc_pending_authors` (migration `0084`). A browser update is first an in-flight,
+  room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
+  document lock. A joined write records its authors in R in its content transaction. A version
+  reads R under that lock and may capture F only from its own room; after its transaction commits,
+  it deletes the R rows it listed and consumes the F credits it listed. The scoped rule means a
+  task can list another task's durable R records but never that task's F, while the same task can
+  consume F before its queued append can re-record an author. Each author is consequently pending
+  in F or R, or listed on one committed version, rather than in more than one of them. A settlement
+  that writes no version leaves R intact, and an upload that writes a replacement clears all R and
+  only the F credits present at its last room read. The document room can therefore go idle without
+  retaining author state or losing the authors a later version, ask or event must name
+  (LEGION-513).
 - `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's
@@ -374,9 +404,27 @@
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
 - An id outside nats.go's key alphabet (`ses:bad`) failed whatever met it in the interest and role buckets, since nats.go refuses such a key on every read, write and delete and the stores took that refusal for a failure. A role claim over such a holder, which an earlier build's bare-string claim or a direct bucket write can leave in the role bucket, wrote the claim and then answered 500. A caller could cause the same 500 itself: a session subscribed to a role topic outside the alphabet (`notifications.role.bad:role`, which subscribe accepts) got it on every unsubscribe of that topic, every unsubscribe of all its topics and every `DELETE /v1/interests/<id>`, and its interest stayed. An interest or claim stored under such a key, which only a direct bucket write makes, stopped the interest reaper or the role reaper at that key every five minutes, logging `reaper cycle failed` or `role claim reaper cycle failed` at ERROR. The handle every bucket opens through now names nats.go's refusal as the refusal it is (`bus.ErrInvalidKey`, naming the key), so each of these skips the key as it already skipped one past the key bound: the claim and the unsubscribe answer 200, and the reapers go on, with a WARN naming the key they cannot delete, which an operator removes by hand (`packages/envoy/AGENTS.md`). A `/v1` route given a session id or role outside the alphabet answers 400 naming it, where it answered 500 (503 on subscribe, 404 reading the interests of a session it holds none for), and Dispatch reads a 400 or 413 from `GET /v1/interests/<id>` as no interest, as it reads a 404 (LEGION-456).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.50.1-sami.2` since the entry below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
-- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.50.1-sami.2` (commit
-  `e792b8c7`, on upstream `main` at `4d6865dc`), which adds six ygo fixes to the two above, each
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.51.3-sami.1` since the entries below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
+- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.51.3-sami.1` (commit
+  `e5c1aacf`): upstream v1.51.2 and seven fixes, each open upstream as a reearth/ygo pull
+  request - #258 (carried as the fork's own #262), #260, #263, #266, #268, #269 and #291
+  (LEGION-535). A browser's document connection now gets a `SyncStatus` frame (Hocuspocus tag 8)
+  for every SyncStep2 or Update it sends, in the order it sent them: 1 once the room applied the
+  update, 0 when the room refused it (the connection stays open) or the connection is read-only
+  and the update adds something the room lacks. ygo defined the tag but never sent it, so the
+  dashboard's `@hocuspocus/provider` counted every edit as unsynced for the life of the
+  connection. A sync frame that does not decode now closes the connection with 1002 rather than
+  being dropped (#291). A room's broadcast of an update Dispatch writes is checked with ygo's
+  bundled stores' check, which applies no pending cap, rather than under the server's
+  `MaxPendingItems` (#268, which replaces the withdrawn #267): the room has already applied the
+  update, and its document still decodes under `MaxPendingItems`. A complete state resolves its
+  own dependencies through a worklist rather than a re-scan per step, so a chain-shaped state near
+  the pending cap no longer takes time quadratic in its size (#260). A merged update's skip has
+  parked the items after it upstream since v1.51.0 (#257). Upstream v1.51.1's depth check on the
+  values `YText` stores is the entry below's.
+- A mark attribute value nesting exactly 100 arrays and objects, which the schema admitted, is now outside it: ygo stores a mark as one value, the map of its attributes, so that mark reached 101 levels, and from ygo v1.51.1 (reearth/ygo#288) `YText.Insert`, `Format` and `ApplyDelta` panic on a value nested past 100. `pmdoc.Update` writes marks through all three and `MarkRange` through `Format`, so on that ygo an edit rewriting text that carried such a mark answered `500` from a recovered panic. The bound is stated once in terms of ygo's limit (`ygoValueNesting`): 100 for a node's attribute value, which ygo stores as it is, and 99 for a mark's; `MarkRange` checks the mark it is given before it writes. A stored document holding such a mark, which only a crafted client can write, is a tree outside the schema like any other: its reads and edits answer `409 DOC_SCHEMA` naming the repair, settlement writes no version of it and never writes it back, and an upload of replacement markdown repairs it (LEGION-535).
+- Dispatch pinned `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.50.1-sami.2` (commit
+  `e792b8c7`, on upstream `main` at `4d6865dc`), which adds six ygo fixes to #263 and #262, each
   open upstream (LEGION-496, LEGION-502, LEGION-484). Text no longer changes order when a document
   is encoded again: ygo folded a character into the run before it even when the two were typed
   toward different right-hand neighbours, so a browser joining a room, settlement's copy of a room
