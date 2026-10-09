@@ -101,7 +101,7 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 	}
 
 	pullPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	body, status, header, err := client.Read(ctx, token, pullPath)
+	body, status, header, err := readGitHubPage(ctx, client, token, pullPath)
 	if err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
 	}
@@ -117,7 +117,7 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 	}
 
 	commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=1", url.PathEscape(owner), url.PathEscape(repo), number)
-	commitsBody, commitsStatus, commitsHeader, err := client.Read(ctx, token, commitsPath)
+	commitsBody, commitsStatus, commitsHeader, err := readGitHubPage(ctx, client, token, commitsPath)
 	if err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("fetch first commit of %s/%s PR #%d: %w", owner, repo, number, err)
 	}
@@ -255,7 +255,7 @@ func fetchedPullRequestFromSearchNode(node searchPullRequestNode) FetchedPullReq
 
 // SearchMergedPullRequests finds every pull request merged in [since, until) authored by any of
 // authors, in owner/repo, via GitHub's GraphQL search. GitHub's search caps every query at 1,000
-// results: fetchWindowed (windowed.go) halves the window and recurses when a query's total
+// results: walkWindowed (windowed.go) halves the window and recurses when a query's total
 // exceeds that cap, shared with ListWorkflowRuns's identical logic. The prototype's own measured
 // rule is that a single day can hold on the order of 700-1,000 merges for the busiest repository
 // it watched, so a caller backfilling several weeks should expect this function to recurse into
@@ -269,7 +269,16 @@ func SearchMergedPullRequests(ctx context.Context, client *githubapp.Client, own
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s merged-PR search: %w", owner, repo, err)
 	}
-	return searchMergedPullRequests(ctx, client, token, []string{owner + "/" + repo}, authors, since, until)
+	var found []FetchedPullRequest
+	err = searchMergedPullRequests(ctx, client, token, []string{owner + "/" + repo}, authors, since, until,
+		func(_ time.Time, prs []FetchedPullRequest) error {
+			found = append(found, prs...)
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
 }
 
 // installationSearchConcurrency bounds how many installations SearchMergedPullRequestsAcrossInstallation
@@ -288,36 +297,68 @@ const installationSearchConcurrency = 8
 // (ListInstallationRepositoriesByID), since an App-authenticated search query with no repo:/org:
 // qualifier is NOT scoped to any installation's repositories for public-repository content --
 // live-verified against a real installation token, it returns results from unrelated public
-// repositories no installation of this App covers. Results are merged and de-duplicated by URL:
-// GitHub does not let one repository belong to two installations of the same App, so a duplicate
-// should never occur, but de-duplicating costs nothing and removes any doubt.
+// repositories no installation of this App covers.
+//
+// since is asked for each installation's own window start, and an installation whose window
+// start cannot be read is skipped with that error rather than searched from the backfill floor:
+// a failed read is not evidence that nothing was imported, and searching 28 days on the strength
+// of it spends thousands of requests re-importing what the step already has. visit is called
+// once per completed search window with the installation it came from, so a caller records each
+// installation's progress separately and one installation's failure never makes another redo
+// what it already imported. A duplicate is nothing to guard against: GitHub does not let one
+// repository belong to two installations of the same App, and every write behind visit is an
+// upsert.
+//
+// listed, when not nil, is called once with every installation the App has, after the listing
+// succeeds and before any installation is searched, so a caller can act on which installations
+// exist -- reconcile prunes the progress of the ones that no longer do. It is not called when the
+// listing fails or names no installation, so a caller never takes an empty or failed listing as
+// "none exist".
 //
 // Installations are searched concurrently through boundedFanOut (reconcile.go) via
 // searchOneInstallation -- see boundedFanOut's own doc comment for the shared
-// fan-out/cancellation mechanics. One installation's own failure never discards what every
-// other installation already found: its error is collected by name (which installation, by id
-// and account) rather than aborting the whole search, and the caller still gets back every
-// result gathered so far alongside a non-nil error naming what failed -- the pass is reported
-// unhealthy, but nothing already found is thrown away. A *githubapp.RateLimitError is the one
+// fan-out/cancellation mechanics, and note that visit is therefore called from several
+// goroutines at once. One installation's own failure never stops another: its error is collected
+// by name (which installation, by id and account) rather than aborting the whole search, and
+// everything every other installation visited still stands -- the pass is reported unhealthy,
+// but nothing already imported is thrown away. A *githubapp.RateLimitError is the one
 // exception: it stops every further installation from starting (the ones already in flight
 // still finish), since a rate limit is a global condition on this installation token budget,
 // not one installation's own problem.
-func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+func SearchMergedPullRequestsAcrossInstallation(
+	ctx context.Context,
+	client *githubapp.Client,
+	authors []string,
+	since func(installationID int64) (time.Time, error),
+	until time.Time,
+	listed func(installations []githubapp.Installation),
+	visit func(installation githubapp.Installation, windowUntil time.Time, prs []FetchedPullRequest) error,
+) error {
 	installations, err := client.ListInstallations(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list installations for merged-PR search: %w", err)
+		return fmt.Errorf("list installations for merged-PR search: %w", err)
 	}
 	if len(installations) == 0 {
-		return nil, errors.New("merged-PR search: the App has no installations")
+		return errors.New("merged-PR search: the App has no installations")
+	}
+	if listed != nil {
+		listed(installations)
 	}
 
 	var mu sync.Mutex
-	seen := map[string]bool{}
-	var results []FetchedPullRequest
 	var failures []string
-
 	fanErr := boundedFanOut(ctx, installationSearchConcurrency, installations, func(ctx context.Context, installation githubapp.Installation) error {
-		found, err := searchOneInstallation(ctx, client, installation, authors, since, until)
+		windowStart, err := since(installation.ID)
+		if err != nil {
+			mu.Lock()
+			failures = append(failures, fmt.Sprintf("installation %d (%s): %s", installation.ID, installation.AccountLogin, err))
+			mu.Unlock()
+			return nil
+		}
+		err = searchOneInstallation(ctx, client, installation, authors, windowStart, until,
+			func(windowUntil time.Time, prs []FetchedPullRequest) error {
+				return visit(installation, windowUntil, prs)
+			})
 		if err != nil {
 			if limited, ok := githubapp.AsRateLimit(err); ok {
 				return limited
@@ -325,48 +366,47 @@ func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *git
 			mu.Lock()
 			failures = append(failures, fmt.Sprintf("installation %d (%s): %s", installation.ID, installation.AccountLogin, err))
 			mu.Unlock()
-			return nil
 		}
-		mu.Lock()
-		for _, pr := range found {
-			if !seen[pr.URL] {
-				seen[pr.URL] = true
-				results = append(results, pr)
-			}
-		}
-		mu.Unlock()
 		return nil
 	})
 	if fanErr != nil {
-		return results, fmt.Errorf("rate-limited searching installations: %w", fanErr)
+		return fmt.Errorf("rate-limited searching installations: %w", fanErr)
 	}
 	if len(failures) > 0 {
-		return results, fmt.Errorf("%d of %d installations failed: %s", len(failures), len(installations), strings.Join(failures, "; "))
+		return fmt.Errorf("%d of %d installations failed: %s", len(failures), len(installations), strings.Join(failures, "; "))
 	}
-	return results, nil
+	return nil
 }
 
 // searchOneInstallation is SearchMergedPullRequestsAcrossInstallation's per-installation body.
-func searchOneInstallation(ctx context.Context, client *githubapp.Client, installation githubapp.Installation, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+func searchOneInstallation(ctx context.Context, client *githubapp.Client, installation githubapp.Installation, authors []string, since, until time.Time, visit func(time.Time, []FetchedPullRequest) error) error {
 	repos, err := client.ListInstallationRepositoriesByID(ctx, installation.ID)
 	if err != nil {
-		return nil, fmt.Errorf("list repositories: %w", err)
+		return fmt.Errorf("list repositories: %w", err)
 	}
 	if len(repos) == 0 {
-		return nil, nil
+		return nil
 	}
 	token, err := client.Token(ctx, installation.ID)
 	if err != nil {
-		return nil, fmt.Errorf("mint token: %w", err)
+		return fmt.Errorf("mint token: %w", err)
 	}
-	return searchMergedPullRequests(ctx, client, token, repos, authors, since, until)
+	return searchMergedPullRequests(ctx, client, token, repos, authors, since, until, visit)
 }
 
-// searchMergedPullRequests pages a GraphQL search query over [since, until) through fetchWindowed
-// (windowed.go). newFetcher builds a fresh query string and a fresh (nil) cursor for every
-// window fetchWindowed asks for -- the original call and each recursive half -- so GitHub's
-// own cursor, not a REST page number, is this fetcher's only pagination state.
-func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, token string, repos, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+// searchMergedPullRequestsWindow bounds how many results one window of the merged-PR search
+// hands to its visit callback, and so how much a failed pass redoes: GitHub's own 1,000-result
+// cap, which at 100 results a page is ten pages. Unlike a run listing, nothing here costs a
+// GitHub call per result -- each one is classified and upserted against Postgres alone -- so a
+// window is its pages and no more.
+const searchMergedPullRequestsWindow = githubResultCap
+
+// searchMergedPullRequests walks a GraphQL search query over [since, until] through walkWindowed
+// (windowed.go), handing each completed window to visit. newFetcher builds a fresh query string
+// and a fresh (nil) cursor for every window walkWindowed asks for -- the original call and each
+// recursive half -- so GitHub's own cursor, not a REST page number, is this fetcher's only
+// pagination state.
+func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, token string, repos, authors []string, since, until time.Time, visit func(time.Time, []FetchedPullRequest) error) error {
 	scope := searchScopeLabel(repos)
 	newFetcher := func(since, until time.Time) func() ([]FetchedPullRequest, int, error) {
 		query := mergedPullRequestQuery(repos, authors, since, until)
@@ -380,7 +420,7 @@ func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, tok
 			return result.items, result.issueCount, nil
 		}
 	}
-	return fetchWindowed(since, until, "search merged PRs for "+scope, newFetcher)
+	return walkWindowed(since, until, "search merged PRs for "+scope, searchMergedPullRequestsWindow, newFetcher, visit)
 }
 
 // searchScopeLabel is what an error message calls the search scope.
@@ -431,7 +471,7 @@ type searchPage struct {
 
 // fetchSearchPage runs one page of query, after cursor ("" for the first page), returning the
 // page's pull requests, its own pagination cursor, and the connection's total issueCount (the
-// 1,000-result cap fetchWindowed checks).
+// 1,000-result cap walkWindowed checks).
 func fetchSearchPage(ctx context.Context, client *githubapp.Client, token, query, after string) (searchPage, error) {
 	var variables map[string]any
 	if after == "" {
@@ -439,12 +479,12 @@ func fetchSearchPage(ctx context.Context, client *githubapp.Client, token, query
 	} else {
 		variables = map[string]any{"q": query, "after": after}
 	}
-	body, status, header, err := client.GraphQL(ctx, token, searchPullRequestsQuery, variables)
+	body, status, header, err := queryGitHubPage(ctx, client, token, searchPullRequestsQuery, variables)
 	if err != nil {
-		return searchPage{}, fmt.Errorf("page after %q: %w", after, err)
+		return searchPage{}, fmt.Errorf("page after %q (%s): %w", after, pageAttemptsNote(), err)
 	}
 	if err := githubapp.CheckResponse(status, header, body); err != nil {
-		return searchPage{}, fmt.Errorf("page after %q: %w", after, err)
+		return searchPage{}, fmt.Errorf("page after %q (%s): %w", after, pageAttemptsNote(), err)
 	}
 	var response searchPullRequestsResponse
 	if err := json.Unmarshal(body, &response); err != nil {

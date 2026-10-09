@@ -241,8 +241,9 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 These arrive as messages on the Dispatch issue, and the architect is told:
 
-- **`Issue reached review_round_cap=3.`** Three review rounds sent the change back. The architect
-  decides what happens next, often with a question to you.
+- **`Issue reached review_round_cap=3.`** The implementer's round count reached three
+  ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
+  architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
@@ -260,10 +261,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   installation a review author's repository permission`, naming the installation's owner: the
   review App's installation cannot read the repository's collaborators, so until it can, no review
   but the review App's decides a round.
-- **`READY` refused.** The merger's `READY` is refused until every check the base branch requires
-  has succeeded on the pull request's head, and every workflow its rulesets require has a run on
-  the head that succeeded, and while the design gate is closed. The refusal names the head and the
-  check or workflow, or the spec version that needs approval.
+- **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
+  the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
+  to `retro`); until every check the base branch requires has succeeded on the head, and every
+  workflow its rulesets require has a run on the head that succeeded; and while the design gate is
+  closed. The refusal names the head and the directory, the check or workflow, or the spec version
+  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
+  failure, and the merger completes again. None of the head checks applies to a pull request a
+  person already merged: its `READY` is published unread, and the issue goes on to its production
+  check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  for a pull request that deletes it.
 
 An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
 or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no
