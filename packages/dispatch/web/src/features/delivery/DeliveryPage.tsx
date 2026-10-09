@@ -3,7 +3,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useSearchParams } from "react-router-dom";
 
 import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
-import { deliveryTimelineQuery } from "../../api/queries";
+import { deliveryMeasuresQuery, deliveryTimelineQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
@@ -36,6 +36,7 @@ import {
   type Filters,
   type ReworkFacet,
 } from "./lib/facets";
+import { MeasuresPanel } from "./MeasuresPanel";
 import { PRList } from "./PRList";
 import { SourceFreshness } from "./SourceFreshness";
 import { Timeline, type TimelineSelection } from "./Timeline";
@@ -229,6 +230,16 @@ export function DeliveryPage(): ReactNode {
   }, [state.from, state.to, state.filters, search]);
   const query = useQuery(deliveryTimelineQuery(timelineOptions));
   const data = query.data;
+  // The measures follow a brush drag as the prototype's panel does (its App.tsx: computeDora over
+  // the brush window), so they read the brush where the timeline keeps reading the whole window.
+  const measuresOptions: DeliveryTimelineOptions = useMemo(
+    () =>
+      state.brush === null
+        ? timelineOptions
+        : { ...timelineOptions, from: state.brush.start, to: state.brush.end },
+    [timelineOptions, state.brush]
+  );
+  const measures = useQuery(deliveryMeasuresQuery(measuresOptions));
 
   const activeWindow = useMemo(
     () =>
@@ -320,6 +331,15 @@ export function DeliveryPage(): ReactNode {
               onRetry={() => void query.refetch()}
             />
           ) : null}
+
+          {data === undefined ? null : measures.isError ? (
+            <QueryError
+              message="Couldn't load the delivery measures."
+              onRetry={() => void measures.refetch()}
+            />
+          ) : (
+            <MeasuresPanel data={measures.data} />
+          )}
 
           {data === undefined || activeWindow === null ? null : (
             <>
