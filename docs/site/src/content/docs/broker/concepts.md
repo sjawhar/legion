@@ -182,7 +182,10 @@ reason of at most 400 characters. The broker evaluates every name
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
   decide. An identical request from the same session while one is pending joins it rather than
-  asking twice.
+  asking twice. The broker's answer names the approver the record names, and `agent-secrets`
+  prints it, so the agent can tell that person. The record fixes its approver when the request is
+  made, and the request stays in that person's Inbox after the secret's tags change, though they
+  may then be unable to approve it ([what an owner change does](#approvals)).
 
 A granted request yields a **grant**: the session's right to read those values until the grant
 expires. A grant lives `BROKER_MAX_GRANT_SECONDS`, counted from the moment it is granted, unless its

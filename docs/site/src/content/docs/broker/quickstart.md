@@ -42,10 +42,22 @@ $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 demo-read-token-value
 ```
 
-When it needs a person's approval, `agent-secrets` says so, with the request's id and where to
-approve it (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
+When it needs a person's approval, `agent-secrets` says so, with the request's id, who approves it,
+and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
 otherwise Credential requests in the Dispatch Inbox), and waits (up to 30 minutes; set `--wait` to
-a duration such as `5m` to change that) while the approver decides.
+a duration such as `5m` to change that) while the approver decides:
+
+```console
+$ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
+agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 is waiting for approval; waiting up to 30m0s
+agent-secrets: waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox
+```
+
+The approver is the one the broker recorded when the agent asked: the secret's owner, or, for a
+shared secret, anyone signed in to Dispatch. Tell that person, not whoever you believe owns the
+secret: a request goes to whomever its owner tag named at the moment it was made.
+`agent-secrets request` and `agent-secrets status` print the same `waiting for …` line while the
+request waits.
 
 ## 2. The approver decides in Dispatch
 
