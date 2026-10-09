@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -71,6 +72,14 @@ type Options struct {
 	// accepted bot threads through; empty, in production, is https://api.github.com/graphql, and a
 	// test points it at a stand-in.
 	GitHubGraphQL string
+	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
+	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
+	// test points it at a stand-in.
+	GitHubAPI string
+	// Repository is the repository an issue's project works in (`projects.<KEY>.repo`), false for a
+	// project the configuration has no repository for; the handoff route reads the issue branch
+	// there. Nil answers no project.
+	Repository func(project string) (ghrepo.Repository, bool)
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -111,6 +120,8 @@ type server struct {
 	tokens        appauth.Tokens
 	githubOwner   string
 	githubGraphQL string
+	githubAPI     string
+	repository    func(project string) (ghrepo.Repository, bool)
 	grants        *credential.Grants
 	releaser      store.TreeReleaser
 	trees         TreeLifecycles
@@ -147,6 +158,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:             opts.Tokens,
 		githubOwner:        opts.GitHubOwner,
 		githubGraphQL:      opts.GitHubGraphQL,
+		githubAPI:          opts.GitHubAPI,
+		repository:         opts.Repository,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,

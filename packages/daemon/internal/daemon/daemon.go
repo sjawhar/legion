@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
@@ -1001,9 +1002,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
+	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
+		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready; otherwise watchController says when the operator's is missing.
@@ -1039,6 +1042,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Dispatch:           client,
 		Tokens:             tokens,
 		GitHubOwner:        githubOwner(cfg),
+		GitHubAPI:          githubAPI,
+		Repository:         projectRepository(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
@@ -1159,4 +1164,14 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
 	return cfg.Projects[cfg.Project].Repo.Owner()
+}
+
+// projectRepository answers the repository a project works in (`projects.<KEY>.repo`), as the
+// handoff route reads an issue branch there: what outbox.createBranch creates the branch in. A
+// project the configuration does not name, or names with no repository (Stage 2), has none.
+func projectRepository(cfg config.Config) func(project string) (ghrepo.Repository, bool) {
+	return func(project string) (ghrepo.Repository, bool) {
+		configured, ok := cfg.Projects[project]
+		return configured.Repo, ok && !configured.Repo.IsZero()
+	}
 }

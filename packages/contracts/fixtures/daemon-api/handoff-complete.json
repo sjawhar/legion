@@ -1,1 +1,3 @@
-{}
+{
+  "note": "no check is required on \"main\" of acme/widgets, so READY was published without reading the head's checks"
+}

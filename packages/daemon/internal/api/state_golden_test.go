@@ -351,7 +351,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 		Threads: []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
 		Refused: &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#discussion_r3", Error: "GitHub: Resource not accessible by integration"},
 	})
-	golden(t, "handoff-complete.json", HandoffCompleteResponse{})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: `no check is required on "main" of acme/widgets, so READY was published without reading the head's checks`})
 	golden(t, "issue-status.json", IssueStatusResponse{})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})

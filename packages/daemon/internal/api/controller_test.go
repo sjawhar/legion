@@ -369,7 +369,7 @@ func TestCredentialAndWorkflowRoutesRefuseAMissingFieldWithACode(t *testing.T) {
 	for _, route := range []struct{ path, body, field string }{
 		{"/legion/v1/grants", `{"sessionId":"s","tree":"LEGION-208","issue":"LEGION-208"}`, "secret"},
 		{"/legion/v1/grants", `{"sessionId":"s"}`, "secret"},
-		{"/legion/v1/handoff/complete", `{"grantId":"g","commit":"c"}`, "summary"},
+		{"/legion/v1/handoff/complete", `{"grantId":"g"}`, "summary"},
 		{"/legion/v1/issues/status", `{"grantId":"g","issue":"LEGION-208"}`, "status"},
 		{"/legion/v1/signoff", `{"grantId":"g"}`, "issue"},
 		{"/legion/v1/children/park", `{"grantId":"g"}`, "issue"},

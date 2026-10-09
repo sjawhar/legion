@@ -14,6 +14,7 @@ import {
   LegionGrantRequest,
   LegionGrantResponse,
   LegionHandoffCompleteRequest,
+  LegionHandoffCompleteResponse,
   LegionIssueStatusRequest,
   LegionOperatorClaimResponse,
   LegionOperatorClaimsResponse,
@@ -49,7 +50,7 @@ const schemas: Record<string, z.ZodType> = {
   "grant.json": LegionGrantResponse,
   "threads-resolve.json": LegionThreadsResolveResponse,
   "threads-resolve-refused.json": LegionThreadsResolveResponse,
-  "handoff-complete.json": LegionEmptyResponse,
+  "handoff-complete.json": LegionHandoffCompleteResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
   "wave-release.json": LegionWaveReleaseResponse,
@@ -169,7 +170,7 @@ test("every workflow request has a strict schema", () => {
     [
       "handoff complete",
       LegionHandoffCompleteRequest,
-      { grantId: "grant-208", summary: "completed", verdict: "", ready: false, commit: "abc123" },
+      { grantId: "grant-208", summary: "completed", verdict: "", ready: false },
     ],
     [
       "issue status",

@@ -384,6 +384,12 @@ export const LegionThreadsResolveResponse = z.strictObject({
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
+/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
+ * without reading the head's checks (the pull request already merged, or its base requiring none);
+ * every other completion answers none. */
+export const LegionHandoffCompleteResponse = z.strictObject({
+  note: nonEmptyString.optional(),
+});
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
 });
@@ -404,13 +410,13 @@ export const LegionControllerGrantRequest = z.strictObject({
   secret: nonEmptyString,
 });
 
-/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. */
+/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. The commit it
+ * reports is not on it: the daemon reads the issue branch's head on GitHub itself. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
   verdict: z.string(),
   ready: z.boolean(),
-  commit: nonEmptyString,
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

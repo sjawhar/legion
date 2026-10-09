@@ -341,8 +341,10 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if phase.FileBacked(issue.Phase) {
+		// The commit a completion carries is the branch head the daemon read on GitHub, so the
+		// head the role reported for its previous phase means nothing was pushed since.
 		if fact.Commit == row.LastHandoff {
-			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
+			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the branch head %s is the one you reported last time: nothing was pushed since; write, commit and push this phase's handoff for %s, then complete again", fact.Commit, issue.Key)), nil
 		}
 		row.LastHandoff = fact.Commit
 	}
