@@ -1,4 +1,4 @@
-import { type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
+import { keepPreviousData, type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
 
 import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
@@ -119,10 +119,12 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
 }
 
 /** The delivery timeline's one read, keyed by every facet so a filter change refetches its own
- *  cache entry: `GET /api/v1/delivery/timeline` applies the window and every facet server-side
- *  (LEGION-567's plan, "API"). */
+ *  cache entry: `GET /api/v1/delivery/timeline` applies the window, the search and every facet
+ *  server-side (LEGION-567's plan, "API"). The page keeps showing the previous answer while a new
+ *  selection's read is in flight, as a filter change in the prototype it ports never blanks it. */
 export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
   queryOptions({
+    placeholderData: keepPreviousData,
     queryKey: ["delivery", "timeline", filters],
     queryFn: () => api.getDeliveryTimeline(filters),
   });

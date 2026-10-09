@@ -2,7 +2,7 @@ import type { ECElementEvent, ECharts, EChartsOption } from "echarts";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import type { DeliveryPR, DeliveryRun } from "../../api/types";
-import { buildColorScale, type ColorFacet, colorKeyFor } from "./lib/colorScale";
+import { type ColorFacet, colorKeyFor } from "./lib/colorScale";
 import { PLACEHOLDER_LABELS } from "./lib/facets";
 
 // echarts is loaded only here, dynamically, so it ships with the /delivery route's own chunk and
@@ -17,8 +17,9 @@ interface Props {
   prs: readonly DeliveryPR[];
   runs: readonly DeliveryRun[];
   colorBy: ColorFacet;
+  colorScale: Map<string, string>;
   onSelect: (selection: TimelineSelection) => void;
-  /** Fired when the user zooms/pans the x axis, so the page can refetch a new window. */
+  /** Fired when the user zooms/pans the x axis. */
   onBrush: (window: { from: string; to: string }) => void;
 }
 
@@ -128,7 +129,7 @@ function buildOption(
 
 /** The delivery timeline chart: merges by lane (coloured by `colorBy`), successful deploys and
  *  pipeline failures each in their own row above the lanes, zoomable/pannable via `dataZoom`. */
-export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): ReactNode {
+export function Timeline({ prs, runs, colorBy, colorScale, onSelect, onBrush }: Props): ReactNode {
   const containerRef = useRef<HTMLDivElement>(null);
   // The chart instance is state, not a ref: the data effect below depends on it, so the first
   // render after `echarts.init` resolves (asynchronously, in the mount effect) always runs the
@@ -197,9 +198,8 @@ export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): Reac
   useEffect(() => {
     if (chart === undefined) return;
     const lanes = buildLanes(prs, colorBy);
-    const colorScale = buildColorScale(prs, colorBy);
     chart.setOption(buildOption(prs, runs, colorBy, lanes, colorScale), { notMerge: true });
-  }, [chart, prs, runs, colorBy]);
+  }, [chart, prs, runs, colorBy, colorScale]);
 
   return <div className="h-[420px] w-full" ref={containerRef} />;
 }

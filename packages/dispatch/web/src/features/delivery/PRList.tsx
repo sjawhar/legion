@@ -6,7 +6,7 @@ import {
   textMutedOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { buildColorScale, type ColorFacet, colorKeyFor } from "./lib/colorScale";
+import { type ColorFacet, colorKeyFor } from "./lib/colorScale";
 import { buildPRListRows, type PRListRow } from "./lib/prList";
 
 type SortKey =
@@ -58,7 +58,7 @@ function sortValue(row: PRListRow, key: SortKey): number | string | undefined {
     case "pr":
       return row.prLabel;
     case "issue":
-      return row.issueSort ?? row.issueLabel;
+      return row.issueSort?.key ?? row.issueLabel;
     case "parentAgent":
       return row.parentAgentSort ?? row.parentAgentLabel;
     case "author":
@@ -92,12 +92,16 @@ function compareRows(a: PRListRow, b: PRListRow, key: SortKey, direction: 1 | -1
  *  sort — this slice adds no table/virtualization dependency beyond what the SPA already has. */
 export function PRList({
   prs,
+  allRepos,
   colorBy,
+  colorScale,
   selectedId,
   onSelect,
 }: {
   prs: readonly DeliveryPR[];
+  allRepos: readonly string[];
   colorBy: ColorFacet;
+  colorScale: Map<string, string>;
   selectedId: string | undefined;
   onSelect: (id: string) => void;
 }): ReactNode {
@@ -105,8 +109,7 @@ export function PRList({
     key: "merged",
     direction: -1,
   });
-  const colorScale = useMemo(() => buildColorScale(prs, colorBy), [prs, colorBy]);
-  const rows = useMemo(() => buildPRListRows(prs), [prs]);
+  const rows = useMemo(() => buildPRListRows(prs, allRepos), [prs, allRepos]);
   const sorted = useMemo(
     () => [...rows].sort((a, b) => compareRows(a, b, sort.key, sort.direction)),
     [rows, sort]
@@ -179,7 +182,7 @@ export function PRList({
         </tbody>
       </table>
       {sorted.length === 0 ? (
-        <p className={`p-3 ${textMutedOnCanvas}`}>No PRs match the current filters.</p>
+        <p className={`p-3 ${textMutedOnCanvas}`}>No PRs in the current filter/window.</p>
       ) : null}
     </div>
   );
