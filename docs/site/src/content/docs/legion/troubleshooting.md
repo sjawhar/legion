@@ -204,7 +204,7 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 ## A pod does not come up
 
-- **`Pending`.** Usually scheduling: a pod reserves its roles' cpu and memory (3 CPU and 12 GiB for
+- **`Pending`.** Usually scheduling: a pod reserves its roles' cpu and memory (3 CPU and 15 GiB for
   an issue pod at the defaults) and lands wherever the pool has room, so a pool at its limits leaves
   the next pod unscheduled until the daemon reads it dead past `worker_boot_timeout_seconds` and,
   once its launch failures run out, fails the claim. `kubectl -n legion describe pod <pod>` names the

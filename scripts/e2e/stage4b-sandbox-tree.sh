@@ -154,11 +154,11 @@ run_pods_at_once=$((admission_cap + tree1_children))
 # data. The overrides are this run's, chosen so that an issue pod carries a reservation from each
 # path the loader has — the tester's cpu and memory both overridden, the reviewer's both, the
 # merger's cpu alone with its memory the default, and the architect's, planner's and implementer's
-# the defaults — while the pod's sum (2.95 CPU, 12 GiB) stays within the defaults' 3 CPU and 12 GiB.
+# the defaults — while the pod's sum (2.95 CPU, 13 GiB) stays within the defaults' 3 CPU and 15 GiB.
 # The controller's reservation is the image probe pod's; the run writes none for it, since only a
 # daemon under `controller: daemon` may name it.
 declare -A default_cpu=([architect]=250m [planner]=250m [implementer]=750m [tester]=750m [reviewer]=750m [merger]=250m [controller]=1)
-declare -A default_memory=([architect]=1Gi [planner]=1Gi [implementer]=3Gi [tester]=3Gi [reviewer]=3Gi [merger]=1Gi [controller]=4Gi)
+declare -A default_memory=([architect]=1Gi [planner]=1Gi [implementer]=4Gi [tester]=4Gi [reviewer]=4Gi [merger]=1Gi [controller]=4Gi)
 declare -A override_cpu=([tester]=1 [reviewer]=500m [merger]=200m)
 declare -A override_memory=([tester]=4Gi [reviewer]=2Gi)
 run_roles="architect planner implementer tester reviewer merger controller"

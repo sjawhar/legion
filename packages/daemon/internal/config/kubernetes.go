@@ -44,7 +44,7 @@ type Kubernetes struct {
 	// present with CPU and Memory filled: the file's value where runtime.kubernetes.resources.<role>
 	// sets one, the daemon's default (DefaultResources) otherwise, field by field. Each is both the
 	// container's request and its limit, so every Legion pod is Guaranteed and bursts past
-	// nothing; at the defaults a six-role issue pod sums to 3 CPU and 12 GiB.
+	// nothing; at the defaults a six-role issue pod sums to 3 CPU and 15 GiB.
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
@@ -83,9 +83,9 @@ func (r RoleResources) Reserved() bool {
 var defaultResources = map[claim.Role]RoleResources{
 	claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi"},
 	claim.RolePlanner:     {CPU: "250m", Memory: "1Gi"},
-	claim.RoleImplementer: {CPU: "750m", Memory: "3Gi"},
-	claim.RoleTester:      {CPU: "750m", Memory: "3Gi"},
-	claim.RoleReviewer:    {CPU: "750m", Memory: "3Gi"},
+	claim.RoleImplementer: {CPU: "750m", Memory: "4Gi"},
+	claim.RoleTester:      {CPU: "750m", Memory: "4Gi"},
+	claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi"},
 	claim.RoleMerger:      {CPU: "250m", Memory: "1Gi"},
 	claim.RoleController:  {CPU: "1", Memory: "4Gi"},
 }

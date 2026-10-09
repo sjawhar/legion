@@ -218,11 +218,11 @@
             "resources": {
               "limits": {
                 "cpu": "750m",
-                "memory": "3Gi"
+                "memory": "4Gi"
               },
               "requests": {
                 "cpu": "750m",
-                "memory": "3Gi"
+                "memory": "4Gi"
               }
             },
             "securityContext": {
@@ -298,11 +298,11 @@
             "resources": {
               "limits": {
                 "cpu": "750m",
-                "memory": "3Gi"
+                "memory": "4Gi"
               },
               "requests": {
                 "cpu": "750m",
-                "memory": "3Gi"
+                "memory": "4Gi"
               }
             },
             "securityContext": {
@@ -378,11 +378,11 @@
             "resources": {
               "limits": {
                 "cpu": "750m",
-                "memory": "3Gi"
+                "memory": "4Gi"
               },
               "requests": {
                 "cpu": "750m",
-                "memory": "3Gi"
+                "memory": "4Gi"
               }
             },
             "securityContext": {

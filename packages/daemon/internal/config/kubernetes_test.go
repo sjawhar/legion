@@ -96,7 +96,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 
 	resources := DefaultResources()
 	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", Memory: "6Gi"}
-	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "3Gi"}
+	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "4Gi"}
 	want := Runtime{Name: "kubernetes", Kubernetes: &Kubernetes{
 		Namespace:    "legion",
 		Image:        workerImage,
@@ -156,7 +156,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 
 // What a block that sets only its required members settles to: the issue volume at 20Gi, every
 // role's reservation at the daemon's default (the six workflow roles and the controller, each with
-// a cpu and a memory, summing to 3 CPU and 12 GiB over an issue pod's six), no scheduling beyond
+// a cpu and a memory, summing to 3 CPU and 15 GiB over an issue pod's six), no scheduling beyond
 // the Legion pool the runtime selects, in-cluster credentials, and nothing of the operator's in any
 // pod.
 func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
@@ -175,8 +175,8 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"issue_volume", block.IssueVolume, "20Gi"},
 		{"resources", block.Resources, map[claim.Role]RoleResources{
 			claim.RoleArchitect: {CPU: "250m", Memory: "1Gi"}, claim.RolePlanner: {CPU: "250m", Memory: "1Gi"},
-			claim.RoleImplementer: {CPU: "750m", Memory: "3Gi"}, claim.RoleTester: {CPU: "750m", Memory: "3Gi"},
-			claim.RoleReviewer: {CPU: "750m", Memory: "3Gi"}, claim.RoleMerger: {CPU: "250m", Memory: "1Gi"},
+			claim.RoleImplementer: {CPU: "750m", Memory: "4Gi"}, claim.RoleTester: {CPU: "750m", Memory: "4Gi"},
+			claim.RoleReviewer: {CPU: "750m", Memory: "4Gi"}, claim.RoleMerger: {CPU: "250m", Memory: "1Gi"},
 			claim.RoleController: {CPU: "1", Memory: "4Gi"},
 		}},
 		{"scheduling", block.Scheduling, Scheduling{}},
@@ -198,8 +198,8 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		cpu.Add(resource.MustParse(block.Resources[role].CPU))
 		memory.Add(resource.MustParse(block.Resources[role].Memory))
 	}
-	if cpu.Cmp(resource.MustParse("3")) != 0 || memory.Cmp(resource.MustParse("12Gi")) != 0 {
-		t.Errorf("an issue pod's six roles sum to %s CPU and %s, want 3 and 12Gi", cpu.String(), memory.String())
+	if cpu.Cmp(resource.MustParse("3")) != 0 || memory.Cmp(resource.MustParse("15Gi")) != 0 {
+		t.Errorf("an issue pod's six roles sum to %s CPU and %s, want 3 and 15Gi", cpu.String(), memory.String())
 	}
 }
 
@@ -211,7 +211,7 @@ func TestARoleSettingOnlyItsCPUKeepsTheDefaultMemory(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 	resources := cfg.Runtime.Kubernetes.Resources
-	if got, want := resources[claim.RoleReviewer], (RoleResources{CPU: "2", Memory: "3Gi"}); got != want {
+	if got, want := resources[claim.RoleReviewer], (RoleResources{CPU: "2", Memory: "4Gi"}); got != want {
 		t.Errorf("reviewer = %+v, want %+v: the file's cpu and the default memory", got, want)
 	}
 	if got, want := resources[claim.RolePlanner], (RoleResources{CPU: "250m", Memory: "2Gi"}); got != want {

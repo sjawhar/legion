@@ -729,11 +729,11 @@ file leaves out, a field or a whole role, takes the daemon's default (`config.De
 
 | role | cpu | memory |
 | :--- | :--- | :--- |
-| `implementer`, `tester`, `reviewer` | 750m | 3Gi |
+| `implementer`, `tester`, `reviewer` | 750m | 4Gi |
 | `architect`, `planner`, `merger` | 250m | 1Gi |
 | `controller` (`controller: daemon`), and the image probe | 1 | 4Gi |
 
-At the defaults a six-role issue pod sums to 3 CPU and 12 GiB. `issue_volume` sizes each issue's own
+At the defaults a six-role issue pod sums to 3 CPU and 15 GiB. `issue_volume` sizes each issue's own
 volume, the clone, the workspace, uv's Pythons and packages, and the roles' sessions on it; the
 controller's pod owns one of the same size, holding its sessions alone.
 
@@ -1264,20 +1264,29 @@ created the pod (`issuePod.initContainers`, `internal/runtime/sandbox/podkind.go
 launcher and init container the controller's, and the image probe's one container the controller's
 too. So every Legion pod is `Guaranteed`, and the pod bursts past its summed reservation nowhere;
 inside it, under gVisor, one role may use what its idle siblings reserved (below). At the defaults
-a six-role issue pod sums to 3 CPU and 12 GiB, the init containers adding nothing: a pod's
+a six-role issue pod sums to 3 CPU and 15 GiB, the init containers adding nothing: a pod's
 effective request is the larger of its containers' sum and its largest init container, and no one
 role's reservation exceeds the sum of the six. Every role reserved is what the `resource-limits`
 row of [The deployment's capability report](#the-deployments-capability-report) measures, so on a
 Kubernetes deployment it is `present` with or without a `resources` block.
 
+The defaults were sized from an issue pod on the production cluster (measured 2026-10-09, under
+`GOMAXPROCS=3`): `go test ./...` of `packages/daemon` peaks at about 1.45 GiB of summed RSS, a cold
+`go build ./...` at about 0.97 GiB, `bun test` of a plugin package at about 1.2 GiB, Biome and
+`bun install` at about 0.8 GiB each and `tsc` at about 0.75 GiB; a role's Oh My Pi process is about
+1 GiB after half an hour of work, and a headless Chromium's largest process about 0.45 GiB. So a
+lane-running role's 4Gi holds its agent, one lane and a browser, and the pod's 15 GiB holds six
+agents beside them.
+
 No pod carries an affinity: each owns its volume and shares nothing with another pod, so the
 scheduler bin-packs it wherever the `legion` pool has room for its reservation, and Karpenter adds a
 node under the pool's limits when none has, of the smallest type the pool's requirements allow. In
 production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
-floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 12 GiB
-issue pod fits, two per node, cpu the binding dimension. A pod relaunched onto another node waits
-for its `ReadWriteOnce` volume to detach from the old one, which shows as transient
-`FailedAttachVolume` or `Multi-Attach` events until the old pod is gone; then it runs on.
+floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 15 GiB
+issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 15 would place four), cpu the binding
+dimension. A pod relaunched onto another node waits for its `ReadWriteOnce` volume to detach from
+the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach` events until the old
+pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
@@ -1287,7 +1296,8 @@ container's own request and limit are what the API shows and the scheduler count
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum: at the defaults, two pods fit a floor node and
-`limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), where the
+`limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), and
+`limits.memory` divided by 15 GiB bounds them too when that is the smaller — where the
 tree-volume layout ran one tree per node, each pinned to a node of its own. `admission_cap` bounds
 roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods. A
 pod the pool cannot place stays `Pending`, unscheduled; once it has been for longer than

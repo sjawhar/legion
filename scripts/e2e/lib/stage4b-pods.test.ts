@@ -270,20 +270,20 @@ describe("the pod shape's reservation rule", () => {
     // carries the defaults, so those two containers depart and the others pass.
     const overrides = {
       ...defaults,
-      tester: { cpu: "1", memory: "4Gi" },
+      tester: { cpu: "1", memory: "5Gi" },
       merger: { cpu: "200m", memory: "1Gi" },
     };
     expect(reservationProblems(pod(), { resources: overrides })).toEqual([
-      "the tester container reserves cpu 750m, memory 3Gi, not the run's cpu 1, memory 4Gi for its role",
+      "the tester container reserves cpu 750m, memory 4Gi, not the run's cpu 1, memory 5Gi for its role",
       "the merger container reserves cpu 250m, memory 1Gi, not the run's cpu 200m, memory 1Gi for its role",
     ]);
-    const overridden = reserving("tester", reservation("1000m", "4096Mi"));
+    const overridden = reserving("tester", reservation("1000m", "5120Mi"));
     overridden.spec.containers = overridden.spec.containers.map((container: Container) =>
       container.name === "merger"
         ? { ...container, resources: reservation("200m", "1Gi") }
         : container
     );
-    // Quantities compare as amounts: 1000m is 1 and 4096Mi is 4Gi.
+    // Quantities compare as amounts: 1000m is 1 and 5120Mi is 5Gi.
     expect(reservationProblems(overridden, { resources: overrides })).toEqual([]);
   });
 
@@ -315,7 +315,7 @@ describe("the pod shape's reservation rule", () => {
     // The golden pod's init containers carry the architect's, the launching role's; a child's pod,
     // created by its planner's launch, carries the planner's, and one created by a relaunch of the
     // tester the tester's. A reservation no role of the pod has departs.
-    expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "3Gi")))).toEqual(
+    expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "4Gi")))).toEqual(
       []
     );
     expect(reservationProblems(reserving("workspace-fetch", reservation("2", "1Gi")))).toEqual([

@@ -52,15 +52,15 @@ and the checks that branch requires (its rulesets and its branch protection), th
 - **One reservation per pod, no affinity.** Every container of a Legion pod reserves cpu and memory
   with its request equal to its limit, so every pod is `Guaranteed`: a role's reservation is
   `runtime.kubernetes.resources.<role>` (`cpu`, `memory`, each optional), and the daemon's defaults
-  fill the rest — 750m and 3Gi for the implementer, tester and reviewer; 250m and 1Gi for the
+  fill the rest — 750m and 4Gi for the implementer, tester and reviewer; 250m and 1Gi for the
   architect, planner and merger; 1 CPU and 4Gi for the controller (`controller: daemon` only) and the
-  image probe. A six-role issue pod sums to 3 CPU and 12 GiB at the defaults. No pod carries an
+  image probe. A six-role issue pod sums to 3 CPU and 15 GiB at the defaults. No pod carries an
   affinity: each issue pod owns its volume, so the scheduler places it wherever the pool has room
   and Karpenter adds nodes under the pool's limits. Concurrent issue pods are bounded by what the
   pool's `limits.cpu` and `limits.memory` leave for pods of that sum (two per 8-vCPU floor node,
-  about 80 at `limits.cpu: 256`); `admission_cap` bounds roots alone, a tree of N children runs N+1
-  pods, and a pod the pool cannot place stays `Pending` until the daemon reads it dead and, once its
-  launch failures run out, fails the claim.
+  about 80 at `limits.cpu: 256`, or `limits.memory` / 15 GiB when that is smaller); `admission_cap`
+  bounds roots alone, a tree of N children runs N+1 pods, and a pod the pool cannot place stays
+  `Pending` until the daemon reads it dead and, once its launch failures run out, fails the claim.
 - **A namespace and a storage class.** Each issue's volume (`issue_volume`, 20Gi by default; the
   daemon-launched controller's pod owns one too) comes from `storage_class`, which is required.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all
