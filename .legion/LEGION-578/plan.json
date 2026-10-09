@@ -1,0 +1,183 @@
+{
+  "completed": "2026-10-09T07:43:56.916675596Z",
+  "concerns": [
+    "The implementer's own pod keeps the current image after the deployment pins the release (relaunch.go:84-92 replaces no pod for an image change); the production proof therefore drives roles of trees admitted after the reboot over Envoy (LEGION-630's method) and this pod contributes only image-independent reads (plan section 3, decision D1).",
+    "After #1843's merge and the pin, this pod's old `legion gh` calls routes the new daemon no longer serves [INFERENCE from #1843's body; verify at the forward merge]; GitHub reads from this pod may fail after the reboot — record it as the 'before' control, not a defect.",
+    "The two new Stage 4b checkpoints run first in the operator's run (blind bash): mitigated by jq unit tests over a captured session file, bash -n, and the STAGE4B_UNTIL re-run path; a checkpoint bug costs one re-run.",
+    "This branch conflicts by design with #1848, #1843 and #1842 on image_test.go, deployment_test.go, docs/kubernetes.md, stage4b-sandbox-tree.sh and README.md: forward-merge main only on CONFLICTING, re-read every shared literal, regenerate the daemon-api golden fixtures, re-run the contract-number sweep if DaemonAPIVersion moved.",
+    "Deployment rows (secrets, model-fallback, resource-limits) are open in production today and stay reported gaps; they pass only in the Stage 4b deployment (plan section 9).",
+    "Discovered scope for the architect: the six live capability rows have no automated check (deployment.go:84-93, image.go:103-128 render `live` from the static table; api/claims.go carries identity only); the spec's 'on pod start … fails loudly' is unmet for them; a pod-start self-check via the pi-legion extension (getAllTools/getActiveTools at session_start, gh api user) reporting to a daemon route would close it (plan section 11)."
+  ],
+  "decisionsForArchitect": [
+    "D1 production surface: no drain of this tree; production half proven in post-reboot pods over Envoy; go waits for the reboot (alternative: human drains and re-admits after the pin, generation 3).",
+    "D2 criterion 7 negative control: in-pod rootfs probe with gopls removed (real removal) plus Stage 4a's env-based image-probe-capability-negative.",
+    "D3 rule: a deployment row open in production is a reported gap; a live capability failing in the operator's run or a post-reboot pod is a failed criterion recorded for the architect's corrective child; only a fix that is this branch's is made here.",
+    "D4 the Stage 4b additions (repository-tools, full-agent, fixture, boot/controller assertions) belong to this round (alternative: a separate child).",
+    "D5 criterion 2 read post-#1848: defaults hold, a repository's .omp/config.yml can set them, the operator overlay wins where both set one.",
+    "D6 role matrix: full image-independent tool list in architect, planner, implementer, tester, reviewer; edit + gh in the merger.",
+    "D7 row sentence: liveDetail names the Stage 4b proof and that the daemon never reads a live row; repository-extensions ruling → dispatch://LEGION-578; github keeps dispatch://LEGION-631 and its Summary is reworded after #1843 merges.",
+    "D8 web_search and browser: web_search on its own result (measured working in a pod 2026-10-08), browser on file:// (network withheld by LEGION-5); a failure follows D3.",
+    "Section 11: whether the missing automated live check becomes a child or an accepted, documented gap."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "answer": "Plan section 3 and D1: the production half drives roles of trees admitted after the daemon reboots onto the release (slot.admittedAt after the boot), asking each for legion version and its omp argv as proof of the image; this tree's pod is the 'before' control; no drain.",
+        "finding": "The implementer's own pod will never run main's image, so an Envoy proof through this tree's own panes proves nothing about the new image."
+      },
+      {
+        "answer": "Section 2 step 3: the go for the production half is the daemon rebooted onto a release carrying the three merges (daemon.boots \u003e 21, codegraph: present); the operator's Stage 4b run needs only the digest.",
+        "finding": "An image existing is not enough: legion state's rows come from the production daemon's own probe, so the pin and the reboot are part of the gate."
+      },
+      {
+        "answer": "Section 2 step 2 lists every shared literal to re-read (not re-apply), the golden -update, the contracts tests, and forward merges only on CONFLICTING, in merge order.",
+        "finding": "This round edits exactly the files the three conflicting children edit; no forward-merge or golden-regeneration order was stated."
+      },
+      {
+        "answer": "Section 2 step 2: the branch must contain main's tip at the run; the contract-number sweep re-runs if DaemonAPIVersion moved; the ask names both SHAs; boot's note daemon-api-version=\u003cN\u003e is read against the checkout's constant.",
+        "finding": "The Stage 4b run pairs a checkout with an image by daemon API contract number, and two children both claim the next number."
+      },
+      {
+        "answer": "D2 and section 5 row 7: the implementer removes gopls from the release image's extracted rootfs and re-runs the image's own probe-image → exit 1 'capability lsp is missing'; Stage 4a's env-based control is recorded beside it.",
+        "finding": "Criterion 7's 'removed in a scratch build' negative control has no implementation; the existing one breaks the environment, not the image."
+      },
+      {
+        "answer": "D5: read post-#1848 (the baseline no longer pins the four); the fixture .omp/config.yml sets images.urls.enabled (operator does not set it) and retry.modelFallback: false (operator sets true); expected effective values given in 4.2(c); the architect confirms the reading.",
+        "finding": "Criterion 2's 'a repository can set them while the operator's overlay still wins' has two readings, one contradicted by the current pod baseline."
+      },
+      {
+        "answer": "4.2(c): the checkpoint runs omp config get under the agent process's /proc/\u003cpid\u003e/environ with env -i, as live_operator_test.go:184-191 does, in the workspace directory; the container-env reads are recorded as the control.",
+        "finding": "omp config get through pod_exec reads the container's environment, not the agent's PI_CONFIG_FILES."
+      },
+      {
+        "answer": "4.2(f) and section 5 row 6: the pass condition is the pod spec carrying no colocating affinity (#1842's issue-independence); observed nodeNames are recorded as corroboration; tree-separation's assertion is re-read at the forward merge.",
+        "finding": "'Sibling pods on different nodes' is a scheduling outcome no check can force; tree-separation asserts one node per tree today."
+      },
+      {
+        "answer": "Section 9 and D3: they pass in the Stage 4b deployment (operator fixture overlay, #1842 reservations) and are reported gaps in production with their configLine; no corrective child for a deployment row.",
+        "finding": "Two of criterion 6's clauses are deployment rows that are open in production today."
+      },
+      {
+        "answer": "Section 5 row 5: the App token; #1843's github-credential-refresh (the daemon's refresh write and the container's hosts.yml change) is the check, quoted exactly at the forward merge; production: two sha256sum reads of hosts.yml a rewrite period apart with gh still working.",
+        "finding": "'The token rotates across an hour' is ambiguous between the projected ServiceAccount token and the GitHub App token."
+      },
+      {
+        "answer": "Section 5 row 5: GitHub committer logins per head (github-credential), legion state's pullRequest.fixAttempts = 1 after ci-red-takeover and unchanged by handoff pushes, and the review App's reviews deciding rounds in tree-reviewed/review-thread.",
+        "finding": "'Told apart by the daemon' needs a concrete observable."
+      },
+      {
+        "answer": "Section 5 row 5: pod_exec into the implementer container reading the reviewer's GH_CONFIG_DIR/hosts.yml fails and vice versa; gh api user logins differ (legion-implementer[bot] vs legion-reviewer[bot]).",
+        "finding": "'Tokens separate and unreadable to each other' had no check."
+      },
+      {
+        "answer": "4.2(a): new helpers tool_result_said and tool_ran over toolResult entries (toolName, isError false), in lib/stage4b-tools.jq with bun tests over a captured session fixture, including the never-ran control (notebook).",
+        "finding": "assistant_said reads what the model said, not what a tool returned."
+      },
+      {
+        "answer": "4.2(b)/(c): the fixture gains Go, TypeScript and Python roots with a function and its test/caller; expected answers (greet_test.go for affected, the caller for impact) and the control impact NoSuchSymbol; codegraph status awaited before the queries.",
+        "finding": "codegraph affected/impact need an index over real code with a pre-stated answer; the fixture holds only configuration."
+      },
+      {
+        "answer": "D8: the spec measured web_search working in a pod (2026-10-08); browser is proven on file:// since network is withheld by LEGION-5; a web_search failure follows D3's rule (a failed criterion for a corrective child).",
+        "finding": "web_search and a networked browser may be unreachable from a pod."
+      },
+      {
+        "answer": "D6 and 4.2(d): the full image-independent list in the five roles the acceptance names, sent in parallel; edit and gh only in the merger, which is mid-merge.",
+        "finding": "'In each role' is not scoped; six roles times seven tools is heavy."
+      },
+      {
+        "answer": "4.2(b)/(c): each skill carries a nonce line; the role reads skill://fixture-omp-skill and skill://fixture-claude-skill and the read toolResult carries each nonce; distinct names avoid the Claude provider's namespacing.",
+        "finding": ".omp/skills and .claude/skills cannot write a marker, so adding them to the fixture alone proves nothing."
+      },
+      {
+        "answer": "4.2(c): all five keys read under the agent's environ: compaction.remoteEndpoint '', memory.backend off, images.urls.enabled true (the repository's), dev.autoqa false, retry.modelFallback true (the operator's).",
+        "finding": "Only remote compaction was checked among criterion 2's four defaults."
+      },
+      {
+        "answer": "4.2(e): the proof legion.yaml configures no agent_secrets, so secrets is open; controller's tick openCapabilities == [\"secrets\"] and not model-fallback (control); later checkpoints passing is the 'keeps running' evidence.",
+        "finding": "'Reaches the controller' needs a deliberately open row and a negative control."
+      },
+      {
+        "answer": "D7 and 4.1: github keeps dispatch://LEGION-631 because that issue's Stage 4b checkpoints are its check (the new sentence names Stage 4b); its Summary is reworded to plain gh/git on the mounted token after #1843 merges.",
+        "finding": "The github row's Ruling goes stale like repository-extensions' once #1843 lands."
+      },
+      {
+        "answer": "D7 and 4.1: liveDetail's sentence changes to 'proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon (\u003cruling\u003e)'; docs/kubernetes.md:888-891 drops LEGION-633 and LEGION-629 and names the checkpoints; tests and fixtures regenerate.",
+        "finding": "Repointing the Ruling alone leaves the row saying 'to be proved' after the proof."
+      },
+      {
+        "answer": "Section 6.2 gives the text: both SHAs, the digest, both commands with every variable as placeholders, the evidence directories, the expected verdict lines, the checkpoint-to-criterion map, what to paste back, the re-run entry points (STAGE4A_FROM, STAGE4B_UNTIL), the no-edit rule, and that the ask blocks the phase.",
+        "finding": "The dispatch_ask's required contents were only sketched."
+      },
+      {
+        "answer": "Sections 2 step 1, 6.3 and 7: pre-go work (code, fixture, PR body template, rehearsals on the current image, jq tests); the tester runs go test, go vet -tags e2e, the bun tests, bash -n, re-reads the operator's evidence against section 5's expected strings, and drives one post-reboot role itself over Envoy when one is live.",
+        "finding": "What the implementer does while idle and how the tester re-runs were unstated; the tester has the same credential gap."
+      },
+      {
+        "answer": "The plan cites the gen-1 handoffs as on main at f1dcadfe (jj file list -r main@origin .legion/ shows them), marks the #1843 route-deletion consequence [INFERENCE], and requires the implementer to re-check each child's landed content at the forward merge.",
+        "finding": "Several brief claims are not checkable from the repository (child PR contents, live state, the gen-1 test.json location)."
+      },
+      {
+        "answer": "Section 11 (discovered scope, with the pod-start self-check design sketched) and D4 (recommended: the checkpoints are this round's, as the re-runnable form of the check the row sentence names); both named in the completion summary.",
+        "finding": "Two scope decisions only the architect can take: the missing automated live check, and whether permanent Stage 4b changes belong in a verification round."
+      }
+    ]
+  },
+  "independentTasks": 4,
+  "issue": "LEGION-578",
+  "phase": "plan",
+  "planDocument": "dispatch://LEGION-578/artifact/plan-md (version 2)",
+  "planReview": {
+    "rounds": 1,
+    "verdict": "approved"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the shared workspace, legion push, the pull request body and proof rules (references/pr-body.md), the forward-merge procedure (references/conflicts-and-rewrites.md) this branch will need against three sibling merges",
+      "ce-simplify-code: the simplify pass over the diff before completion",
+      "dispatch: the operator's dispatch_ask for the Stage 4a/4b run (one step per ask, self-contained) and every message or comment on LEGION-578"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the round and thread disposal",
+      "thermonuclear-deep-review: a 3,600-line production proof script gains two checkpoints and a helper; a report sentence changes on two surfaces",
+      "thermonuclear-code-quality: new bash helpers and jq in scripts/e2e/lib, and the capability table's rendering change"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md says what the tester verifies, how test.json's proof is recorded, and that a unit test is never a proof; the tester cannot run Stage 4a/4b and records that",
+      "dispatch: any comment or message the tester posts on the issue"
+    ]
+  },
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1
+  },
+  "schemaVersion": 1,
+  "specDepartures": [
+    {
+      "evidence": "internal/capabilities/deployment.go:84-93,159-166 and image.go:103-128 render live rows from the static table with no input; internal/api/claims.go:40-130 register/ready carry identity only; shim/shim.go runs no probe; docs/kubernetes.md:888-891 says the live checks 'none of which runs yet'.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The six live rows (subagents, web-search, mcp, repository-extensions, dispatch-envoy-tools, github) are checked by the Stage 4b run the operator lane performs, recorded on this issue; no pod-start check exists and this round adds none. The plan reports the gap to the architect (plan section 11) with a pod-start self-check design for a child or an accepted gap.",
+      "spec": "Root spec, 'What done means': 'A check in the worker image build, or on pod start, compares a worker's capabilities against that list and fails loudly when one is missing, so a new gap cannot open silently.'"
+    },
+    {
+      "evidence": "A live row can only ever render 'live' with 'to be proved by a live check against a running pod (\u003cruling\u003e)' (deployment.go:162-168, image.go SiteLive branch); a pointer alone would read as pending after the proof. #1843 does not edit capabilities.go (its file list).",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The repository-extensions ruling points at dispatch://LEGION-578 (this round supersedes LEGION-633), and the live-row sentence itself changes to name the Stage 4b proof and that the daemon never reads a live row; the github row keeps dispatch://LEGION-631 and its Summary is reworded after #1843 merges.",
+      "spec": "LEGION-633 spec: 'repoint the row's ruling at this issue (or clear it once the check exists), re-aim the two tests that pin the sentence (image_test.go, deployment_test.go) and the docs'."
+    },
+    {
+      "evidence": "LEGION-5: the pod is the boundary (no cluster credentials in a pod); relaunch.go:84-92: this tree's pod keeps its image; LEGION-630's production check (dispatch://LEGION-630/message/d314e0dd-e0d6-45c3-8476-77b809b73747) drove sibling roles over Envoy the same way.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "Two surfaces: the operator lane's Stage 4a/4b run from this branch merged on main against the release image by digest (the named one, with two new checkpoints so criteria 1-3 and 7 are mechanical), and Legion's production pods of trees admitted after the daemon reboots onto the release, driven over Envoy by the implementer, since a pod cannot run the stages.",
+      "spec": "LEGION-633 spec: the criteria are proven 'through a real issue tree (scripts/e2e/README.md, stage 4b)'."
+    }
+  ],
+  "taskCount": 9,
+  "workflowRecommendation": "This round is the tree's integration verification (supersedes LEGION-633). The implementer prepares the branch now (capability-row sentence and ruling, Stage 4b checkpoints repository-tools and full-agent, fixture additions, jq helpers with tests, PR body template), opens the pull request, then waits live and idle for the architect's go; the go is: #1848, #1843 and #1842 merged, the release image digest known, and for the production half the LEGION daemon rebooted onto a release carrying them (legion state --json .daemon.boots \u003e 21). After the go it opens the operator's dispatch_ask for Stage 4a/4b at a named head and digest and runs the production-side proof over Envoy in pods of trees admitted after the reboot. Tester and reviewer cannot run the stages; they re-run what a pod can and read the operator's evidence."
+}
