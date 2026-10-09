@@ -1,28 +1,28 @@
 #!/usr/bin/env bun
 /**
- * A stand-in for the Legion daemon that serves exactly the routes a phase worker and the
- * `legion` command-line tool hit while a shell command runs: the worker's claim registration
- * (`claims/register`, `claims/ready`, the daemon's claim routes the plugin boots through), grant
- * minting, and a phase completion (`GET /legion/v1/state`, which `legion state` prints and
- * `legion handoff complete` reads the issue's phase from, then `handoff/complete`, the one route
- * here that redeems a grant). No credential route: a pane's `gh` and `git` read the rig's token
- * from the gh files under its `GH_CONFIG_DIR`, which `daemon-pane.go` writes.
+ * A stand-in for the Legion daemon that serves exactly the routes a phase worker's `legion` tool
+ * hits in a skill scenario: the worker's claim registration (`claims/register`, `claims/ready`,
+ * the daemon's claim routes the plugin boots through), the grant the tool mints in-process before
+ * each of its own daemon calls (`grants`), the issue's record (`GET /legion/v1/state`, the tool's
+ * `read_record`) and the phase completion (`handoff/complete`, the tool's `handoff_complete`, the
+ * one route here that redeems a grant). No credential route and no grant file: a pane's `gh` and
+ * `git` read the rig's token from the gh files under its `GH_CONFIG_DIR`, which `daemon-pane.go`
+ * writes, and no agent runs `legion` from bash.
  *
  * Every request and response body is the Go daemon's (`@legion/contracts/legion-api`): the
- * plugin's grant request, the CLI's completion, and the state document. The grant rule mirrors
- * the real daemon's: a grant lives for 60 seconds and redeems any number of times while it lives;
- * an unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
- * single-use.
+ * tool's grant request, its completion, and the state document. The grant rule mirrors the real
+ * daemon's: a grant lives for 60 seconds and redeems any number of times while it lives; an
+ * unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
+ * single-use. A completion answers `{}`: the real daemon reads the issue branch's head on GitHub
+ * and holds the handoff file to its shape there, which the rig's scorer reads from the run's own
+ * remote instead (score.ts testerProof).
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
- * mintedGrantId?}`. The rig driver (`run.ts`) reads that log to count grant mints per shell
- * command.
+ * mintedGrantId?}`, the run's record of what reached the daemon.
  *
- * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> [<project> <issue> <role>]`
- * The role token defaults to project `l12rig`, issue `RIG-1`, role `implementer`; the skill
- * scenarios (`../skill-scenarios/rig.sh`) name their own. The state document holds that one issue,
- * in the phase its role works.
- * Prints `listening on http://127.0.0.1:<port>` once the socket is open.
+ * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>`
+ * The state document holds that one issue, in the phase its role works. Prints
+ * `listening on http://127.0.0.1:<port>` once the socket is open (port 0: the kernel's pick).
  */
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
@@ -35,22 +35,34 @@ import {
 import { DAEMON_MODULE, runDaemonPane } from "./daemon-pane";
 
 const GRANT_TTL_MS = 60_000;
-/** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
- * since the worker claims this token on the real Envoy and Envoy rejects uppercase. */
-const [portArg, logFile, bootTokenFile, project = "l12rig", issue = "RIG-1", role = "implementer"] =
-  Bun.argv.slice(2);
+const [portArg, logFile, bootTokenFile, project, issue, role] = Bun.argv.slice(2);
+if (
+  portArg === undefined ||
+  logFile === undefined ||
+  bootTokenFile === undefined ||
+  project === undefined ||
+  issue === undefined ||
+  role === undefined
+) {
+  console.error(
+    "usage: bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>"
+  );
+  process.exit(2);
+}
 if (!isLegionRole(role)) {
   console.error(`${role} is not a Legion role`);
   process.exit(2);
 }
+/** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
+ * since the worker claims this token on the real Envoy and Envoy rejects uppercase. */
 const ROLE_TOKEN = roleToken(project, issue, role);
 const SESSION_SECRET = "rig-secret";
 
 const startedAt = new Date().toISOString();
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
  * (`workflow.RoleFor`, through daemon-pane.go). `capabilities` is the deployment's capability
- * report (contract 16), which the strict reader requires; the rig has no deployment to report on,
- * so it is the empty list the daemon's MarshalJSON emits for an empty report. */
+ * report, which the strict reader requires; the rig has no deployment to report on, so it is the
+ * empty list the daemon's MarshalJSON emits for an empty report. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
@@ -76,12 +88,6 @@ interface LogLine {
   readonly mintedGrantId?: string;
 }
 
-if (portArg === undefined || logFile === undefined || bootTokenFile === undefined) {
-  console.error(
-    "usage: bun daemon-standin.ts <port> <log file> <boot token file> [<project> <issue> <role>]"
-  );
-  process.exit(2);
-}
 const expectedBootToken = (await Bun.file(bootTokenFile).text()).trim();
 if (expectedBootToken.length === 0) {
   console.error(`boot token file ${bootTokenFile} is empty`);

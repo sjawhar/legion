@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // The tester-proof pane, as the Legion daemon's tmux runtime launches a phase worker, pointed at
-// rig.sh's daemon stand-in: the grant rig's `workerPane` over <base env file> (the variables rig.sh
-// gives every agent), read from <checkout>'s own daemon module, whose embedded role prompts it
+// rig.sh's daemon stand-in: daemon-pane.ts's `workerPane` over <base env file> (the variables
+// rig.sh gives every agent), read from <checkout>'s own daemon module, whose embedded role prompts it
 // composes. Writes two files into the run directory:
 //   worker.env   the pane's environment, one KEY=value line each
 //   system-args  the pane's one `--append-system-prompt` argument, as shell text
@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { isLegionRole } from "@legion/contracts";
-import { workerPane } from "../grant-rig/run";
+import { workerPane } from "./daemon-pane";
 
 const [runDir, baseEnvFile, port, profile, project, issue, role, checkout] = Bun.argv.slice(2);
 if (

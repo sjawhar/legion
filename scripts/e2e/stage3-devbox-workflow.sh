@@ -708,9 +708,10 @@ primary_issue() {
     # names one concrete correction the spec permits.
     review_note=""
     if [ "$round" = 2 ]; then
-      # Round 1 left the bot's thread answered by the implementer and still open: the reviewer, the
-      # independent party, accepts it now.
-      review_note=" A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer and reply on that thread as your role says for a bot's thread (the change is needed: the spec asks for it)."
+      # Round 1 left the bot's thread answered and resolved by the implementer: the reviewer, the
+      # independent party, adjudicates the finding now, with its reply and its resolve_threads
+      # (answered `already resolved`, the implementer having closed it first).
+      review_note=" A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer, reply on that thread in your own words, and resolve it with the legion tool's resolve_threads naming its thread id, as your role says for a bot's thread (the change is needed: the spec asks for it)."
     fi
     request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope.$review_note"
     # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
@@ -729,12 +730,12 @@ primary_issue() {
     bot_note=""
     if [ "$round" = 1 ]; then
       # A CI bot's review thread: the proof human is a GitHub App, a bot account that is none of
-      # Legion's role Apps. The implementer answers it, which closes nothing: the subject of a
-      # finding never closes it. The reviewer accepts it in round 2, and the implementer's legion
-      # threads resolve then closes it.
+      # Legion's role Apps. The implementer answers it as any thread it answers and resolves it
+      # with its own gh (the pull request author's resolveReviewThread); the reviewer adjudicates
+      # the finding in round 2.
       bot_thread=$(post_bot_thread 2>"$work/bot-thread.err") ||
         fail "the proof human could not open a bot review thread on pull request #$pr_number: $(cat "$work/bot-thread.err")"
-      bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it as your role says for a bot's thread (it is needed: the spec asks for it), before the push that answers this review."
+      bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it and resolve it as your role says for a thread you answer (it is needed: the spec asks for it), before you complete."
     fi
     send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round.$bot_note"
     # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
@@ -742,12 +743,12 @@ primary_issue() {
     wait_for_phase "$root_issue" testing 1200
     until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
     if [ "$round" = 1 ]; then
-      until_true 120 "the implementer's answer on the bot's review thread, the thread still open" bot_thread_answered_open "$bot_thread"
-      note "the implementer answered the bot's review thread $bot_thread and it stays open: the pull request author's reply closes nothing"
+      until_true 120 "the implementer's answer on the bot's review thread, and its own resolution of it" bot_thread_resolved "$bot_thread" legion-implementer
+      note "the implementer answered the bot's review thread $bot_thread and resolved it with its own gh"
     fi
     if [ "$round" = 2 ]; then
-      until_true 120 "the bot's review thread to be resolved on the Legion reviewer's acceptance by the implementer's legion threads resolve" bot_thread_resolved_on_acceptance "$bot_thread"
-      note "the bot's review thread $bot_thread is resolved: the Legion reviewer accepted it, and the implementer's legion threads resolve closed it"
+      until_true 120 "the Legion reviewer's reply on the bot's review thread, the thread resolved" bot_thread_resolved "$bot_thread" legion-reviewer
+      note "the bot's review thread $bot_thread carries the Legion reviewer's reply and is resolved: the reviewer adjudicated it and named it to resolve_threads"
     fi
     assert_round_handoff "$root_issue" "$round"
     assert_handoff_committer "$root_issue" implementer implementing "$round"

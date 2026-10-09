@@ -313,7 +313,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-envoy` |
-| Rigs | `scripts/grant-rig/`, `scripts/skill-scenarios/` | The grant rig proves on a real phase worker that a `legion` shell command gets its grant and no other command does (`scripts/grant-rig/README.md`); the skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section) |
+| Rigs | `scripts/skill-scenarios/` | The skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section); its tester-proof scenario boots a real phase worker through this extension against a stand-in daemon (`daemon-standin.ts`), with the pane built by the daemon's own functions (`daemon-pane.go`, `daemon-pane.test.ts`: no inherited key, no grant file reaches the pane). The grant rig that proved the per-command grant mint went with the mint (LEGION-631) |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 
 ## Critical conventions

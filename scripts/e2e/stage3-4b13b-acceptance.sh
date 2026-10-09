@@ -13,7 +13,7 @@
 #   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
 #     publishing it to merge_queue_role (a live holder, and no holder);
 #   - pr-merged / pr-closed-unmerged, and an issue whose PR merged early skipping READY.
-# It never merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
+# Nothing here merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
 # branch before any merge, and the scratch base is deleted at the end.
 #
 # Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
@@ -793,7 +793,7 @@ gate_finish "$root1"
 until_true 600 "the daemon's assignment to arm $root1's planner stall" assignment_delivered "$root1" planner
 note "root1 planner stall entries at its assignment: $({ grep -F '"customType":"legion-phase-stall"' "$(root1_planner_file)" || true; } | jq -r .data.state | tr '\n' ' ')"
 marker_plan="PHASE-STALL-PLANNER-$stamp"
-send_agent "$root1" planner "Acceptance planning operation ($marker_plan): write the required plan handoff for the one-file smoke change with the legion tool's handoff_write and commit it as your instructions require, then end your turn WITHOUT calling the legion tool's handoff_complete: reply with one line saying the handoff is committed, and wait. Do not call handoff_complete in this turn, and do not begin any line with WAITING."
+send_agent "$root1" planner "Acceptance planning operation ($marker_plan): write the required plan handoff file, commit it and push the issue branch as your instructions require, then end your turn WITHOUT calling the legion tool's handoff_complete: reply with one line saying the handoff is committed and pushed, and wait. Do not call handoff_complete in this turn, and do not begin any line with WAITING."
 gate_finish "$root2"
 until_true 600 "the daemon's assignment to arm $root2's planner stall" assignment_delivered "$root2" planner
 send_agent "$root2" planner "Acceptance planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
@@ -1037,46 +1037,37 @@ c=$(notice_deliveries "$root2" architect "$(notice_needle pr-closed-unmerged "$r
 note "merged $repo#${pr_of[$root2]} in merging: pr-merged $n, pr-closed-unmerged $c (control); the merger's READY moved $root2 straight to production_check with $(jq length "$evidence/ready-messages-$root2.json") READY messages posted"
 pass
 
-# ---- 7a. the READY cap at its exact boundary, through the daemon's own completion route ------------
+# ---- 7a. the merger's pane: no grant file, and no `legion` run from bash ----------------------------
 # utf16_len: stdin's length in UTF-16 code units, as Dispatch's len16 and MessageBodyLength count it.
 utf16_len() { python3 -c 'import sys; print(len(sys.stdin.read().encode("utf-16-le")) // 2)'; }
 cap_refusals() { tool_outcomes "$1" | jq -c '[.[] | select(.tool == "legion" and (.text | contains("READY_PACKET_TOO_LONG")))]'; }
-grant_mtime() { stat -c %.9Y "$1" 2>/dev/null || printf 'none\n'; }
-grant_changed() { [ "$(grant_mtime "$1")" != "$2" ]; }
-begin ready-cap-refused-at-the-boundary
+begin merger-pane-mints-no-grant
+# This check replaced ready-cap-refused-at-the-boundary, which drove the daemon's completion route
+# from this shell with a grant the merger's bash hook had minted into the pane's LEGION_GRANT_FILE
+# before a `legion state --json` command. Neither exists (LEGION-631): the `legion` tool mints its
+# grants in-process for its own daemon calls, no pane carries a grant file, no agent runs `legion`
+# from bash, and the CLI has no `handoff complete`. The READY cap at its exact boundary
+# (record.MessagePostLimit, one unit over) is the daemon's own test now (internal/api
+# handoff_test.go, the READY one unit over the limit, refused naming <limit+1>/<limit>), on the
+# Dispatch cap internal/daemon/outbox_scratch_dispatch_test.go measures; the merger's own over-cap
+# packet, refused READY_PACKET_TOO_LONG through the tool, is counted in
+# ready-posted-and-published-to-holder below. What stands here is the absence: the merger's pane
+# environment names no grant, its gh reads the role's files under GH_CONFIG_DIR, and no bash
+# command the merger has run invokes `legion`.
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
-# The pane's LEGION_GRANT_FILE is <LEGION_STATE_DIR>/secrets/<claim token>-grant, the file the
-# daemon names on the pane and the plugin writes a grant into before each bash command that invokes
-# `legion` (pi-legion extensions/legion.ts); the `legion state` below is one.
-merger_state=$(pane_value "$merger_omp" LEGION_STATE_DIR)
-merger_ws=$(readlink "/proc/$merger_omp/cwd")
-[ -n "$merger_state" ] || fail "$root1's merger pane names no LEGION_STATE_DIR"
-grant_file="$merger_state/secrets/$(claim_token "$root1" merger)-grant"
-note "the merger's grant file, as the plugin derives it: $grant_file"
-before=$(grant_mtime "$grant_file")
-send_agent "$root1" merger "Acceptance proof step: run exactly one bash command, legion state --json > /dev/null && echo state-read , then reply with the single line 'state read' and wait for the next instruction. Do not call handoff_complete yet."
-# The pane's bash hook mints a sixty-second grant into LEGION_GRANT_FILE before the command runs;
-# the completion below redeems it as the pane's own `legion` tool does, with the pane's environment.
-until_true 600 "$root1's merger bash hook to write a fresh grant" grant_changed "$grant_file" "$before"
-# record.MessagePostLimit: Dispatch's 2,000 units less the separator and the outbox marker at its longest.
-over=$(printf '\U0001F600'; printf 'x%.0s' $(seq 1 1955))
-[ "$(printf '%s' "$over" | utf16_len)" = 1957 ] || fail "the boundary packet is not 1957 UTF-16 units"
-mapfile -d '' -t pane_env <"/proc/$merger_omp/environ"
-cap_exit=0
-env -i "${pane_env[@]}" LEGION_GRANT_FILE="$grant_file" "$work/legion" handoff complete --ready --summary "$over" --workspace "$merger_ws" \
-  >"$evidence/ready-cap-boundary.stdout" 2>"$evidence/ready-cap-boundary.stderr" || cap_exit=$?
-printf 'exit %s\n' "$cap_exit" >"$evidence/ready-cap-boundary.exit"
-note "boundary packet (1 emoji + 1955 x = 1957 UTF-16 units, $(printf '%s' "$over" | wc -m) code points, $(printf '%s' "$over" | wc -c) bytes) → exit $cap_exit: $(cat "$evidence/ready-cap-boundary.stderr")"
-[ "$cap_exit" != 0 ] || soft "the 1957-unit READY packet was accepted"
-grep -qF 'READY_PACKET_TOO_LONG' "$evidence/ready-cap-boundary.stderr" && grep -qF '(1957/1956)' "$evidence/ready-cap-boundary.stderr" ||
-  soft "the 1957-unit READY packet was not refused as READY_PACKET_TOO_LONG naming 1957/1956"
-state_file ready-cap-after-boundary-refusal
-issue_phase "$root1" merging >/dev/null || soft "$root1 left merging on the refused boundary packet"
-[ "$(ready_messages "$root1" | jq length)" = 0 ] || soft "a READY message was posted for the refused boundary packet"
-db_value "select coalesce(summary, '') from phases where issue = '$root1' and role = 'merger'" >"$evidence/ready-cap-merger-row-after-refusal.txt"
-[ ! -s "$evidence/ready-cap-merger-row-after-refusal.txt" ] || [ "$(tr -d '\n' <"$evidence/ready-cap-merger-row-after-refusal.txt")" = "" ] ||
-  soft "the refused boundary packet was stored on $root1's merger row"
-note "after the refusal: $root1 $(jq -r --arg i "$root1" '.issues[$i].phase' "$evidence/ready-cap-after-boundary-refusal.json"), READY messages $(ready_messages "$root1" | jq length), merger row summary $(wc -c <"$evidence/ready-cap-merger-row-after-refusal.txt") bytes"
+for absent in LEGION_GRANT_FILE LEGION_GRANT; do
+  ! tr '\0' '\n' <"/proc/$merger_omp/environ" | grep -q "^$absent=" || fail "$root1's merger pane still carries $absent"
+done
+merger_gh_dir=$(pane_value "$merger_omp" GH_CONFIG_DIR)
+[[ $merger_gh_dir == *-merger-gh ]] || fail "$root1's merger pane carries GH_CONFIG_DIR=$merger_gh_dir, want its claim's gh directory"
+f=$(claim_session_file "$root1" merger)
+# A bash command invokes `legion` when a word of it is legion or ends in /legion (never a word that
+# only contains it, such as legion-worker).
+jq -R -s -r '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant")
+  | .message.content[]? | select(.type == "toolCall" and .name == "bash") | .arguments.command // ""
+  | select(test("(^|[^A-Za-z0-9_/-])(\\S*/)?legion([^A-Za-z0-9_-]|$)"))] | .[]' "$f" >"$evidence/merger-legion-commands.txt"
+[ ! -s "$evidence/merger-legion-commands.txt" ] || soft "$root1's merger ran legion from bash: $(tr '\n' ' ' <"$evidence/merger-legion-commands.txt" | cut -c1-300)"
+note "$root1's merger pane (OMP $merger_omp) carries no LEGION_GRANT_FILE or LEGION_GRANT, GH_CONFIG_DIR=$merger_gh_dir, and its session holds $(wc -l <"$evidence/merger-legion-commands.txt") bash commands invoking legion"
 pass
 
 # ---- 7. the daemon posts READY (direct) and publishes it to a live holder -----------------------------

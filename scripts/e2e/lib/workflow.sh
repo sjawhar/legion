@@ -548,14 +548,16 @@ close_unpassed_run_pull_requests() {
 
 # ---- the handoffs the daemon accepted -------------------------------------------------------------
 
-# The record keeps each role's phase row: the commit carrying the handoff its completion reported,
-# emptied when the role's next phase starts, and, on the implementer's row, the review round (its
-# returns to implementing). The issue moves out of implementing, retro, and merging only on that
-# phase's completion, and a production check's completion moves nothing, so a checker reads the
-# row right after the transition it follows, before the role's next phase can empty it.
+# The record keeps each role's phase row: the issue branch's head at the completion the daemon
+# accepted (the daemon reads legion/<KEY> on GitHub when the role completes; a push before the
+# completion is the role's rule), emptied when the role's next phase starts, and, on the
+# implementer's row, the review round (its returns to implementing). The issue moves out of
+# implementing, retro, and merging only on that phase's completion, and a production check's
+# completion moves nothing, so a checker reads the row right after the transition it follows,
+# before the role's next phase can empty it.
 
-# role_handoff ISSUE ROLE [PHASE...] prints the commit carrying ROLE's accepted completion, when the
-# issue stands in one of the PHASEs (any phase when none is named).
+# role_handoff ISSUE ROLE [PHASE...] prints the issue branch's head at ROLE's completion the daemon
+# accepted, when the issue stands in one of the PHASEs (any phase when none is named).
 role_handoff() {
   local issue=$1 role=$2 phases='' p
   shift 2
@@ -567,17 +569,18 @@ role_handoff() {
 review_round() {
   db_value "select coalesce((select rounds from phases where issue = '$1' and role = 'implementer'), 0)"
 }
-# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the commit carrying the handoff the daemon
-# accepted for the role's completion of that phase round. The check runs right after the round's
-# transition, before the role's next completion can move it.
+# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the issue branch's head at the completion the
+# daemon accepted for the role's completion of that phase round. The check runs right after the
+# round's transition, before the role's next completion can move it.
 handoff_fact_commit() {
   [ "$(review_round "$1")" = "$4" ] || return 0
   role_handoff "$1" "$2"
 }
 role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
-# assert_handoff_committer ISSUE ROLE PHASE ROUND: the commit carrying that completion's handoff is
-# authored and committed by the role's own App, read from the issue's workspace (the commit need not
-# be pushed), so no other pane sealed another role's handoff.
+# assert_handoff_committer ISSUE ROLE PHASE ROUND: the issue branch's head at the completion the
+# daemon accepted is authored and committed by the role's own App, read from the issue's workspace
+# (the role pushed it from there, so its clone holds the commit), so no other pane sealed another
+# role's handoff.
 assert_handoff_committer() {
   local commit identity want
   commit=$(handoff_fact_commit "$1" "$2" "$3" "$4")
@@ -593,8 +596,10 @@ assert_handoff_committer() {
 # post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
 # a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
 # thread's first comment's node id. The account is the devbox gh's, which acts as the user when its
-# App routing fails; the Legion reviewer's acceptance closes only a bot's thread, so the thread's
-# author is read back and anything but a bot outside Legion's Apps is refused, naming it.
+# App routing fails; the roles treat a bot's thread by its author (the implementer answers and
+# resolves it as any thread, the reviewer adjudicates it and resolves it with the legion tool's
+# resolve_threads), so the thread's author is read back and anything but a bot outside Legion's
+# Apps is refused, naming it.
 post_bot_thread() {
   local head posted id login type
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
@@ -620,19 +625,24 @@ bot_thread_replies() {
     --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") |
       (.isResolved | tostring), (.comments.nodes[1:][] | \"\\(.author.login)\\t\\(.body | ltrimstr(\" \") | split(\"\\n\")[0])\")"
 }
-# bot_thread_answered_open COMMENT: the implementer has replied on the bot's thread, and the thread is
-# still open, since the pull request author's reply closes nothing.
-bot_thread_answered_open() {
-  local replies
-  replies=$(bot_thread_replies "$1") || return 1
-  [ "$(head -1 <<<"$replies")" = false ] && grep -q $'^legion-implementer\t' <<<"$replies"
+# bot_thread_node_id COMMENT prints the node id of the review thread whose first comment is COMMENT:
+# the id a resolution names (the reviewer's resolve_threads, the daemon's log line).
+bot_thread_node_id() {
+  # shellcheck disable=SC2016 # a GraphQL query: its $ are GraphQL's
+  timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        reviewThreads(first: 100) { nodes { id comments(first: 1) { nodes { id } } } } } } }' \
+    --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") | .id" | grep .
 }
-# bot_thread_resolved_on_acceptance COMMENT: the bot's thread is resolved and carries the Legion
-# reviewer's Accepted: reply.
-bot_thread_resolved_on_acceptance() {
+# bot_thread_resolved COMMENT AUTHOR: the bot's thread is resolved and carries a reply by AUTHOR
+# (legion-implementer, whose own gh resolves the threads it answers; legion-reviewer, whose
+# resolve_threads has the daemon resolve the ones it answered). No word of the reply is read:
+# nothing resolves a thread on a magic form.
+bot_thread_resolved() {
   local replies
   replies=$(bot_thread_replies "$1") || return 1
-  [ "$(head -1 <<<"$replies")" = true ] && grep -q $'^legion-reviewer\tAccepted:' <<<"$replies"
+  [ "$(head -1 <<<"$replies")" = true ] && grep -q "^$2"$'\t' <<<"$replies"
 }
 # review_threads prints every review thread on the proof's pull request as one JSON array: each
 # thread's node id, its isResolved, and each comment's author (GraphQL names an App by its bare
@@ -665,12 +675,12 @@ reviewer_thread() {
 }
 # review_thread ID prints that thread, as review_threads prints each.
 review_thread() { review_threads | jq -ce --arg id "$1" '.[] | select(.id == $id)'; }
-# thread_accepted_unresolved FILE: the thread FILE holds (review_thread's output) is unresolved and
-# its newest submitted comment is the Legion reviewer's `Accepted:`, the state an approval that does
-# not wait on resolution lands in.
-thread_accepted_unresolved() {
-  jq -e '.isResolved == false
-    and ([.comments[] | select(.state == "SUBMITTED")] | last | .author == "legion-reviewer" and (.body | test("^[ \t\r\n]*Accepted:")))' "$1" >/dev/null
+# thread_resolved_by FILE AUTHOR: the thread FILE holds (review_thread's output) is resolved and its
+# newest submitted comment is AUTHOR's: the implementer's `Fixed in <commit>` reply before its own
+# resolution, or the reviewer's answer on a re-review that left the resolution standing.
+thread_resolved_by() {
+  jq -e --arg author "$2" '.isResolved == true
+    and ([.comments[] | select(.state == "SUBMITTED")] | last | .author == $author)' "$1" >/dev/null
 }
 # threads_all_resolved FILE ID: every review thread FILE holds (review_threads' output) is resolved,
 # and the thread ID is one of them.

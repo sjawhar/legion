@@ -43,11 +43,13 @@ const tick: Entry = {
   content: "envoy:\n  from: agent\n  summary: tick on LEGSMOKE\n  message:\n    kind: tick",
   display: true,
 };
-const bash: Call = {
+// The controller reads the daemon's state with its legion tool (read_state), never `legion` from
+// bash: a call of the turn that is not the report.
+const readState: Call = {
   type: "toolCall",
   id: callId(),
-  name: "bash",
-  arguments: { command: "legion state --json" },
+  name: "legion",
+  arguments: { op: "read_state" },
 };
 // The surfaces of one dispatch_message call on ISSUE.
 const viaTool = (issue: string): Call => ({
@@ -94,13 +96,13 @@ const posted = result(`Posted message 2adbdb49 (dispatch://${report}/message/2ad
 // controller idle and starts the turn that posts the report with CALL.
 const onTickTurn = (call: Call, startTurn: Entry[] = []): Entry[] => [
   start,
-  assistant("toolUse", bash),
+  assistant("toolUse", readState),
   result("{}"),
   tick,
   ...startTurn,
   assistant("stop"),
   tick,
-  assistant("toolUse", bash),
+  assistant("toolUse", readState),
   result("{}"),
   assistant("toolUse", call),
   posted,
@@ -109,7 +111,7 @@ const onTickTurn = (call: Call, startTurn: Entry[] = []): Entry[] => [
 // inStartTurn: the report is posted with CALL in the start turn, after a tick was steered into it.
 const inStartTurn = (call: Call): Entry[] => [
   start,
-  assistant("toolUse", bash),
+  assistant("toolUse", readState),
   result("{}"),
   tick,
   assistant("toolUse", call),
@@ -178,7 +180,7 @@ describe("report_after_tick", () => {
       "Post the report with a write to xd://dispatch_message, or tool.dispatch_message in eval."
     );
     const { code, stdout } = run(
-      onTickTurn(viaDevice(report), [assistant("toolUse", bash), skill])
+      onTickTurn(viaDevice(report), [assistant("toolUse", readState), skill])
     );
     expect(stdout).toBe("");
     expect(code).toBe(0);

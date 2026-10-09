@@ -71,9 +71,9 @@
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
 #     session a work directory starts carries the directory's digest in its name.
 #   - Its agent can still read the whole filesystem, including the other label's checkout and the
-#     checkout this script runs from (its `legion` resolves there), and write the machine's /tmp,
-#     which nothing here cleans. score.ts does not score a run that read outside its own label, or
-#     whose PR body carries another run's line (unscored, testerProof).
+#     checkout this script runs from, and write the machine's /tmp, which nothing here cleans.
+#     score.ts does not score a run that read outside its own label, or whose PR body carries
+#     another run's line (unscored, testerProof).
 #   - An exit stops what its command started (on_exit, stop_run, stop_batch).
 set -euo pipefail
 # Nothing the rig starts inherits a service endpoint or credential from the caller: a Legion pane
@@ -193,8 +193,9 @@ base_env() {
 
 # The run's stand-ins in $R/bin: `gh`, which records the call and answers from $R/fixtures.json,
 # and `bun`, which runs the bun this script runs on (a caller's `bun` may be a shim that resolves
-# nothing under the agent's HOME) and records the call to $R/calls.jsonl as legion-standin.sh
-# records its own. The score reads the tester's run of the CLI from that record.
+# nothing under the agent's HOME) and records the call to $R/calls.jsonl as gh-standin.ts records
+# its own. The score reads the tester's run of the CLI from that record. No `legion` stands in: an
+# agent reaches the daemon stand-in through its `legion` tool alone, never `legion` from bash.
 standins() {
   local bun_real
   bun_real=$(bun -e 'console.log(process.execPath)')
@@ -535,7 +536,7 @@ MDEOF
 # a head (two runs can meet in a scratch file in the shared /tmp), and each batch's heads carry its
 # own start time.
 # The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run whose
-# push changes more than .legion/test.json, and it cannot tell a tester that pinned a real defect
+# push changes more than .legion/<key>/test.json, and it cannot tell a tester that pinned a real defect
 # with a red test, which roles/core/tester.md asks for, from one that went off-task. A defect left
 # in the fixture turns correct testing into a fail.
 worker_fixture() {
@@ -587,16 +588,17 @@ test("trims the name", () => {
 EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
-  mkdir -p "$src/.legion"
-  # The handoff CLI writes the implement handoff, so it is the file the ledger reads, in the shape
-  # the Go CLI gives every handoff (schemaVersion, phase, completed).
-  "$work/bin/legion" handoff write --phase implement --workspace "$src" --data "$(
-    jq -cn --arg head "$C1" '{filesChanged:["greet.ts","greet.test.ts"],
-      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
-        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
-        negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}'
-  )"
-  g add -A && g commit -qm "legion: implement handoff ($worker_key)"
+  # The implement handoff as the implementer writes it with its write tool: the four stamps
+  # (schemaVersion, phase, issue, completed) and the phase's fields, at .legion/<key>/implement.json,
+  # the file the daemon reads at the implementer's completion and the tester reads with `read`.
+  mkdir -p "$src/.legion/$worker_key"
+  jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
+    {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,
+     filesChanged:["greet.ts","greet.test.ts"],
+     proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
+       surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
+       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$src/.legion/$worker_key/implement.json"
+  g add -A && g commit -qm "implement: record handoff ($worker_key)"
   C2=$(g rev-parse HEAD)
   g push -q "$R/remote.git" "legion/$worker_key"
   : >"$R/pushes.log"
@@ -636,7 +638,6 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
      statusCheckRollup:[{name:"test", status:"COMPLETED", conclusion:"SUCCESS"},
                         {name:"lint", status:"COMPLETED", conclusion:"SUCCESS"}]} as $pr
     | {routes:[
-      {match:"^legion threads resolve ", stdout:("no unresolved review threads on #" + ($number|tostring))},
       {match:"^gh pr view", stdout:$pr},
       {match:"^gh pr checks", stdout:"lint\tpass\t10s\thttps://example.invalid/1\ntest\tpass\t20s\thttps://example.invalid/2"},
       {match:"^gh pr (edit|comment|review|ready)", stdout:($url+"#issuecomment-1")},
@@ -656,7 +657,6 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 
 run_tester_proof() {
   local name=$1 n=$2 index=$3 start=$4 state project port
-  [ -x "$work/bin/legion" ] || fail "no Go legion at $work/bin/legion: a run needs its batch's build"
   worker_fixture "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
@@ -667,10 +667,9 @@ run_tester_proof() {
   mkdir -p "$state/gh" "$state/secrets"
   chmod 0700 "$state/secrets"
   (umask 077 && openssl rand -hex 16 >"$state/secrets/boot")
-  ln -s "$here/legion-standin.sh" "$R/bin/legion"
   printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[ui]\npaginate = "never"\n' >"$R/jj.toml"
   # Port 0: the kernel assigns the stand-in's port, which it prints, so concurrent runs never race.
-  start_process daemon bun "$here/../grant-rig/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" tester
+  start_process daemon bun "$here/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" tester
   await_start daemon "$daemon_pid" 0 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
   port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
   base_env
@@ -686,7 +685,6 @@ run_tester_proof() {
     echo "JJ_EMAIL=rig@example.invalid"
     echo "JJ_CONFIG=$R/jj.toml"
     echo "GH_REPO=$worker_repo"
-    echo "SKILL_SCENARIO_LEGION=$work/bin/legion"
   } >"$R/pane.env"
   launch "$name"
 }
@@ -744,9 +742,6 @@ cmd_batch() {
   for label in "$@"; do load_label "$label"; done
   lock_services
   on_exit stop_batch
-  # The Go `legion` a tester-proof run's stand-in and fixture run, built from this checkout once
-  # for the whole batch.
-  (cd "$root/packages/daemon" && go build -o "$work/bin/legion" ./cmd/legion) || fail "building the Go legion failed"
   services_up
   start=$(date +%s)
   for label in "$@"; do

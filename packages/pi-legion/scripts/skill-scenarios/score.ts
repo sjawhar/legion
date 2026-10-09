@@ -11,8 +11,7 @@
 //     is. Each scenario's rule is on the function that scores it: askOnMessage,
 //     measureBeforeAsk, testerProof, brainstormSurface. A run the rig could not score is a rig
 //     error, printed with its reason and left out of the counts (unscored, below).
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { CREATED, type SessionEntry, session, toolResults } from "./transcript";
@@ -42,8 +41,8 @@ const IssueEvents = z.array(
 );
 /** `GET /api/v1/issues/{key}/messages/{id}`: the message and its replies. */
 const MessageRead = z.looseObject({ message: z.looseObject({ body: z.string() }) });
-/** One line gh-standin.ts or legion-standin.sh records: when the call started, its exit, and (a gh
- * call that edited the pull request's body) the body the stand-in kept and serves from then on. */
+/** One line gh-standin.ts or the `bun` stand-in records: when the call started, its exit, and (a
+ * gh call that edited the pull request's body) the body the stand-in kept and serves from then on. */
 const Call = z.looseObject({
   at: z.string(),
   as: z.string(),
@@ -62,12 +61,31 @@ const World = z.object({
   head: z.string(),
   code: z.string(),
 });
-/** The tester's handoff, once `legion handoff write` accepts it, as far as the score reads it. */
+const nonEmpty = z.string().min(1);
+/** The tester's handoff as the daemon holds it at the tester's completion (internal/handoff, the
+ * `test` shape), as far as the score reads it: the stamps the tester writes itself (`schemaVersion`
+ * 1, `phase` test, its `issue`, `completed` an RFC 3339 time), the implementer's proof verdict, the
+ * failures, and the tester's own proof, each entry's six fields non-empty. Nothing stamps a
+ * handoff for the tester: it writes the whole file with `write`. */
 const TestHandoff = z.looseObject({
+  schemaVersion: z.literal(1),
   phase: z.literal("test"),
-  implementerProof: z.looseObject({ verdict: z.string() }),
-  failures: z.array(z.unknown()).optional(),
-  proof: z.array(z.looseObject({ headSha: z.string() })).optional(),
+  issue: nonEmpty,
+  completed: z.iso.datetime({ offset: true }),
+  implementerProof: z.looseObject({ verdict: z.enum(["verified", "rejected"]), how: nonEmpty }),
+  failures: z.array(z.looseObject({ criterion: z.string(), evidence: z.string() })).optional(),
+  proof: z
+    .array(
+      z.looseObject({
+        criterion: nonEmpty,
+        surface: nonEmpty,
+        command: nonEmpty,
+        observed: nonEmpty,
+        headSha: nonEmpty,
+        negativeControl: nonEmpty,
+      })
+    )
+    .optional(),
 });
 
 function lines(file: string): string[] {
@@ -334,52 +352,26 @@ function namesOwnCommit(text: string, commits: string[]): boolean {
   );
 }
 
-/** What the Go `legion handoff write --phase test` refuses in a test handoff, each problem naming
- * its field: the rules every pane's write meets, run by the binary rig.sh builds beside the runs
- * directory (<work>/bin/legion) into a scratch workspace. The data leaves out the fields the CLI
- * writes itself, as a pane's write does. */
-function testHandoffWriteProblems(runDir: string, handoff: unknown): string[] {
-  const legion = path.join(path.dirname(path.dirname(runDir)), "bin", "legion");
-  if (!existsSync(legion)) throw new Error(`no ${legion}: rig.sh builds it before any run`);
-  if (typeof handoff !== "object" || handoff === null || Array.isArray(handoff))
-    return [".legion/test.json is not a JSON object"];
-  const {
-    schemaVersion: _version,
-    phase: _phase,
-    completed: _completed,
-    ...fields
-  } = handoff as Record<string, unknown>;
-  const workspace = mkdtempSync(path.join(tmpdir(), "skill-scenarios-handoff-"));
-  try {
-    const write = Bun.spawnSync([legion, "handoff", "write", "--phase", "test"], {
-      cwd: workspace,
-      stdin: new TextEncoder().encode(JSON.stringify(fields)),
-    });
-    if (write.exitCode === 0) return [];
-    const refusal = write.stderr.toString().trim();
-    const problems = refusal.split("legion handoff write: Invalid test handoff: ")[1];
-    return problems === undefined ? [refusal] : problems.split("; ");
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
-}
-
 /** tester-proof: the legion-worker skill's rule for a tester whose predecessor's proof holds.
- * worker_fixture writes the implement handoff through the handoff CLI, so it is valid, its proof
- * reproduces, and its CLI meets all three acceptance criteria, so the skill's answer is `verified`
- * with a proof of the tester's own and no red test to push (a handoff that failed validation would
- * read as missing, and the answer would be `rejected`). A run passes when all of these hold:
- *   1. before the first accepted `handoff write --phase test`, the run's `bun` stand-in recorded a
- *      run of greet.ts (the first argument that is not a flag, after an optional `run`): the
- *      tester drove the CLI, whatever command line it wrote to do so. The stand-in records only a
- *      bun reached through PATH: `mise exec bun@… -- bun greet.ts` and a bun named by its absolute
- *      path bypass it, and such a run reads as having run nothing;
- *   2. that write comes before the first push carrying .legion/test.json, which comes before an
- *      accepted `handoff complete`;
+ * worker_fixture writes a valid implement handoff whose proof reproduces, and its CLI meets all
+ * three acceptance criteria, so the skill's answer is `verified` with a proof of the tester's own
+ * and no red test to push (a handoff that failed validation would read as missing, and the answer
+ * would be `rejected`). The handoff write is the session's `write` tool call of
+ * .legion/<key>/test.json and the completion its `legion` tool call with `op: "handoff_complete"`
+ * that the tool answered without error, each timed at the call; the pushes are the run's own
+ * remote's record. A run passes when all of these hold:
+ *   1. before the handoff write, the run's `bun` stand-in recorded a run of greet.ts (the first
+ *      argument that is not a flag, after an optional `run`): the tester drove the CLI, whatever
+ *      command line it wrote to do so. The stand-in records only a bun reached through PATH:
+ *      `mise exec bun@… -- bun greet.ts` and a bun named by its absolute path bypass it, and such
+ *      a run reads as having run nothing;
+ *   2. that write comes before the first push carrying .legion/<key>/test.json, which comes before
+ *      the accepted completion: a push before you complete is the rule, since the daemon reads
+ *      the handoff at the branch's head on GitHub;
  *   3. the branch as the tester completed it (its last push before the completion) changes nothing
- *      under the PR's head but .legion/test.json, which passes the handoff CLI's write rules and
- *      has phase `test`, `implementerProof.verdict` `verified`, no failures, and a proof whose
- *      every `headSha` names a commit of this run's own (namesOwnCommit);
+ *      under the PR's head but .legion/<key>/test.json, which is a test handoff (TestHandoff) of
+ *      this issue with `implementerProof.verdict` `verified`, no failures, and a proof whose every
+ *      `headSha` names a commit of this run's own (namesOwnCommit);
  *   4. the PR body the gh stand-in kept last has an `E2E (tester)` line, up to the next field, that
  *      names a commit of this run's own.
  * A line naming another run's PR head instead is two runs meeting in the shared /tmp, where agents
@@ -388,12 +380,38 @@ function testHandoffWriteProblems(runDir: string, handoff: unknown): string[] {
 function testerProof(runDir: string, run: string, label: string, heads: string[]): Row {
   const world = json(path.join(runDir, "world.json"), World);
   const calls = parsed(path.join(runDir, "calls.jsonl"), Call);
-  const handoffs = calls.filter((c) => c.as === "legion" && c.argv[0] === "handoff");
-  const writes = handoffs.filter((c) => c.argv[1] === "write" && c.argv.includes("test"));
-  // A write or completion the CLI refused never counts.
-  const write = writes.find((c) => c.exit === 0);
-  const refused = writes.filter((c) => c.exit !== 0).length;
-  const complete = handoffs.find((c) => c.argv[1] === "complete" && c.exit === 0);
+  const entries = session(runDir);
+  const handoffPath = `.legion/${world.key}/test.json`;
+  // Each tool result, by the call it answers: whether the tool refused it.
+  const refusedResults = new Map<string, boolean>();
+  for (const { message } of entries) {
+    if (message?.role === "toolResult" && message.toolCallId !== undefined)
+      refusedResults.set(message.toolCallId, message.isError === true);
+  }
+  // The session's tool calls, each timed at the assistant message that made it.
+  const timedCalls = entries.flatMap((entry) =>
+    entry.message?.role !== "assistant"
+      ? []
+      : (entry.message.content ?? [])
+          .filter((part) => part.type === "toolCall")
+          .map((part) => {
+            const args =
+              typeof part.arguments === "object" && part.arguments !== null
+                ? (part.arguments as Record<string, unknown>)
+                : {};
+            return { at: entry.timestamp ?? "", id: part.id ?? "", tool: part.name ?? "", args };
+          })
+  );
+  const write = timedCalls.find(
+    (c) =>
+      c.tool === "write" && typeof c.args.path === "string" && c.args.path.endsWith(handoffPath)
+  );
+  const completions = timedCalls
+    .filter((c) => c.tool === "legion" && c.args.op === "handoff_complete")
+    .map((c) => ({ at: c.at, accepted: refusedResults.get(c.id) === false }));
+  // A completion the tool refused never counts.
+  const complete = completions.find((c) => c.accepted);
+  const refused = completions.filter((c) => !c.accepted).length;
   const remote = path.join(runDir, "remote.git");
   const git = (...args: string[]) => Bun.spawnSync(["git", "-C", remote, ...args]);
   const pushes = lines(path.join(runDir, "pushes.log"))
@@ -403,16 +421,13 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
     })
     .filter((p) => p.ref === `refs/heads/${world.branch}`);
   const own = [world.head, ...pushes.map((p) => p.sha)];
-  const entries = session(runDir);
   const drove = calls.find((c) => {
     if (c.as !== "bun") return false;
     const args = c.argv.filter((arg) => !arg.startsWith("-"));
     return (args[0] === "run" ? args[1] : args[0])?.endsWith("greet.ts") ?? false;
   });
+  const push = pushes.find((p) => git("cat-file", "-e", `${p.sha}:${handoffPath}`).exitCode === 0);
   const ran = drove !== undefined && write !== undefined && drove.at < write.at;
-  const push = pushes.find(
-    (p) => git("cat-file", "-e", `${p.sha}:.legion/test.json`).exitCode === 0
-  );
   const ordered =
     write !== undefined &&
     push !== undefined &&
@@ -424,17 +439,15 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   if (tip === undefined) problems.push("nothing pushed");
   else {
     const changed = git("diff", "--name-only", world.head, tip.sha).stdout.toString().trim();
-    if (changed !== ".legion/test.json") problems.push(`the push changed [${changed.split("\n")}]`);
-    const shown = git("show", `${tip.sha}:.legion/test.json`);
-    const handoff: unknown = shown.exitCode === 0 ? JSON.parse(shown.stdout.toString()) : undefined;
-    const written =
-      handoff === undefined ? ["no .legion/test.json"] : testHandoffWriteProblems(runDir, handoff);
-    problems.push(...written);
-    const read = TestHandoff.safeParse(handoff);
-    if (written.length === 0 && !read.success)
-      problems.push(`not a test handoff: ${read.error.message}`);
-    if (read.success) {
-      const { implementerProof, failures = [], proof = [] } = read.data;
+    if (changed !== handoffPath) problems.push(`the push changed [${changed.split("\n")}]`);
+    const shown = git("show", `${tip.sha}:${handoffPath}`);
+    const read = TestHandoff.safeParse(
+      shown.exitCode === 0 ? JSON.parse(shown.stdout.toString()) : undefined
+    );
+    if (!read.success) problems.push(`not a test handoff: ${z.prettifyError(read.error)}`);
+    else {
+      const { issue, implementerProof, failures = [], proof = [] } = read.data;
+      if (issue !== world.key) problems.push(`issue is ${issue}, not ${world.key}`);
       if (implementerProof.verdict !== "verified")
         problems.push(`implementerProof.verdict is ${implementerProof.verdict}`);
       if (failures.length > 0) problems.push(`${failures.length} failures`);
@@ -464,7 +477,7 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
     .filter((target) => target.includes("legion-worker"))
     .map((target) => target.replace("skill://legion-worker", "") || "/");
   const notes = [
-    `ran=${ran} write=${write !== undefined} refusedWrites=${refused} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${testerLine !== ""} ownHead=${ownHead}`,
+    `ran=${ran} write=${write !== undefined} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} refusedCompletions=${refused} ordered=${ordered} testerLine=${testerLine !== ""} ownHead=${ownHead}`,
     `editBeforeWrite=${edit !== undefined && write !== undefined && edit.at < write.at}`,
     ...(proof ? [] : [`proofProblems=${JSON.stringify(problems)}`]),
     `refs=[${worker.join(",")}]`,

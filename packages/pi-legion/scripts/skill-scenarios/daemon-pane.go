@@ -1,12 +1,9 @@
-// Daemon-pane is the rigs' one reading of the Legion daemon: what the daemon gives a phase-worker
-// pane, computed by the daemon's own functions, for the grant rig (run.ts, setup.sh,
-// daemon-standin.ts) and the skill-scenario rig (../skill-scenarios/worker-pane.ts) to run Oh My Pi
-// and the stand-in daemon under. It belongs to no module: daemon-pane.ts runs it with `go run
-// -overlay` as a main inside a checkout's packages/daemon, the one place the daemon's internal
-// packages can be imported from.
+// Daemon-pane is the skill-scenario rig's one reading of the Legion daemon: what the daemon gives a
+// phase-worker pane, computed by the daemon's own functions, for worker-pane.ts and
+// daemon-standin.ts to run Oh My Pi and the stand-in daemon under. It belongs to no module:
+// daemon-pane.ts runs it with `go run -overlay` as a main inside a checkout's packages/daemon, the
+// one place the daemon's internal packages can be imported from.
 //
-//	install <root> <legion>  installs root's bin/legion, which execs legion, as the daemon does at
-//	                         boot (workerbin.Install), and prints the launcher's directory
 //	phase <role>             prints the phase the role's worker runs in: the first phase
 //	                         workflow.RoleFor gives to the role
 //	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh files
@@ -34,14 +31,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-const usage = "usage: daemon-pane install <root> <legion> | phase <role> | pane < request.json"
+const usage = "usage: daemon-pane phase <role> | pane < request.json"
 
 func main() {
 	args := os.Args[1:]
 	var err error
 	switch {
-	case len(args) == 3 && args[0] == "install":
-		err = install(args[1], args[2])
 	case len(args) == 2 && args[0] == "phase":
 		err = printPhase(claim.Role(args[1]))
 	case len(args) == 1 && args[0] == "pane":
@@ -54,14 +49,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "daemon-pane %s: %v\n", args[0], err)
 		os.Exit(1)
 	}
-}
-
-func install(root, legion string) error {
-	if err := workerbin.Install(root, legion); err != nil {
-		return err
-	}
-	fmt.Println(workerbin.LauncherDir(root))
-	return nil
 }
 
 func printPhase(role claim.Role) error {
