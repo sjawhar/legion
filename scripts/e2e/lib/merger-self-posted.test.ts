@@ -156,7 +156,7 @@ describe("merger_self_posted", () => {
   });
 
   test("a file write whose content mentions the device as prose is no self-post", () => {
-    const code = `await tool.write({ path: "./notes.md", content: "See xd://dispatch_message for the device. READY LEGSMOKE-1" });`;
+    const code = `await tool.write({ path: "./notes.md", content: "READY LEGSMOKE-1. See xd://dispatch_message for the device." });`;
     expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
   });
 

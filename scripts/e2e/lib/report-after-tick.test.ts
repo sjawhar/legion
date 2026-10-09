@@ -223,7 +223,7 @@ describe("report_after_tick", () => {
   });
 
   test("a block comment naming the device inside another device's write is not the report's call", () => {
-    const code = `await tool.write({ path: "xd://another_device", /* xd://dispatch_message */ content: "{}" });`;
+    const code = `await tool.write({ path: "xd://another_device", /* xd://dispatch_message */ content: "issue ${report} unrelated" });`;
     const { code: exitCode, stdout } = run(
       onTickTurn({
         type: "toolCall",
@@ -239,7 +239,7 @@ describe("report_after_tick", () => {
   });
 
   test("a file write whose content mentions the device as prose is not the report's call", () => {
-    const code = `await tool.write({ path: "./notes.md", content: "See xd://dispatch_message for the device" });`;
+    const code = `await tool.write({ path: "./notes.md", content: "See xd://dispatch_message for ${report}, the device" });`;
     const { code: exitCode, stdout } = run(
       onTickTurn({
         type: "toolCall",
@@ -255,7 +255,7 @@ describe("report_after_tick", () => {
   });
 
   test("a Python kwargs file write, then a print naming the device, is not the report's call", () => {
-    const code = `tool.write(path="./notes.md", content="hello")\nprint("the device is xd://dispatch_message")`;
+    const code = `tool.write(path="./notes.md", content="about ${report}")\nprint("the device is xd://dispatch_message")`;
     const { code: exitCode, stdout } = run(
       onTickTurn({
         type: "toolCall",
@@ -271,7 +271,7 @@ describe("report_after_tick", () => {
   });
 
   test("a write to a device with the report's name as a prefix is not the report's call", () => {
-    const code = `await tool.write({ path: "xd://dispatch_message.md", content: "{}" });`;
+    const code = `await tool.write({ path: "xd://dispatch_message.md", content: "issue ${report}" });`;
     const { code: exitCode, stdout } = run(
       onTickTurn({
         type: "toolCall",
