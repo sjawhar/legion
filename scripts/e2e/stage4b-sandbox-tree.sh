@@ -3308,10 +3308,12 @@ begin daemon-controller-liveness
 #    registers, holds the role and is ready, and for two boot timeouts and more the daemon logs
 #    neither line. That is the negative control.
 # 2. The same, the pod's CPU request past any node's: the daemon re-adopts the running controller,
-#    and the driver deletes its pod. Each relaunch's pod stays unschedulable until the runtime
-#    retires it at the boot timeout, so the controller cannot come back, and the record still names
-#    the dead session: the Prober's no-holder line at every sweep, and the not-registered line once
-#    per boot timeout in the daemon's form, through a relaunch that died.
+#    and the driver deletes its pod. The relaunch's Running patch makes a pod no node can hold, whose
+#    role launcher never connects, so each launch onto it fails at the boot timeout and the machine
+#    records no process for it (`supervise: launch failed`). The controller cannot come back, and the
+#    record still names the dead session: the Prober's no-holder line at every sweep, and the
+#    not-registered line once per boot timeout in the daemon's form, through the failed launches,
+#    while the pod watch sees every pod the relaunch made Unschedulable and none scheduled.
 # 3. `controller: operator`: the boot stops the controller's claim, releases its Sandbox and volume
 #    and ends its registration, and the sweep logs the operator's line, exactly the monitored text.
 # The rest of the run keeps `controller: operator` with no controller registered, as before the
@@ -3351,7 +3353,7 @@ until_true 300 "the listener to answer that the controller role $controller_toke
 controller_launch=daemon
 controller_cpu=250m
 restart_daemon
-until_true 900 "the controller the daemon launched, $controller_token, to register and be ready" controller_live
+on_subject legion.dev/role=controller until_true 900 "the controller the daemon launched, $controller_token, to register and be ready" controller_live
 launched_session=$(controller_claim | jq -r .session)
 until_true 120 "the controller role to name $launched_session" role_held_by "$launched_session"
 locator=$(daemon_state | jq -c .controllerLocator)
@@ -3380,32 +3382,32 @@ restart_daemon
 until_true 300 "the restarted daemon to re-adopt its controller, ready" controller_live
 claim=$(controller_claim)
 [ "$(jq -r .session <<<"$claim")" = "$launched_session" ] || fail "the restarted daemon's controller is $(jq -c '{session, state}' <<<"$claim"), not $launched_session re-adopted"
-deleted=$(jq -r .locator.incarnation <<<"$claim")
+process=$(jq -r .locator.incarnation <<<"$claim")
 pod=$(jq -r .locator.sandbox.name <<<"$claim")
 pod_uid=$(jq -r .locator.sandbox.podUid <<<"$claim")
 down_mark=$(wc -l <"$daemon_log")
 driver_action delete-pod "$pod_uid"
 op delete pod "$pod" --wait=false >/dev/null
-note "deleted the controller's pod $pod (uid $pod_uid, process $deleted); each relaunch requests $controller_cpu CPU, more than any node holds"
+note "deleted the controller's pod $pod (uid $pod_uid, process $process); each relaunch's pod requests $controller_cpu CPU, more than any node holds"
+# The pods a relaunch made are those of the controller requesting $controller_cpu, from the pod
+# watch: the deleted pod, and the pod the Agent Sandbox controller recreates from the old template
+# as soon as it is gone, request the negative control's CPU and are not judged. The no-holder line
+# starts once the listener lets the dead session lapse, up to its session TTL (5 min by default)
+# after the session's last heartbeat, so the wait below allows for that and three sweeps after it.
 liveness_down() {
-  liveness_verdict down "$down_mark" --arg claim "$controller_token" --arg session "$launched_session" --arg deleted "$deleted" \
+  liveness_verdict down "$down_mark" --arg claim "$controller_token" --arg session "$launched_session" \
+    --arg deleted_pod "$pod_uid" --arg cpu "$controller_cpu" --slurpfile watch "$evidence/pod-watch.json" \
     >"$work/controller-liveness-down.json"
 }
 down_settled() { liveness_down && jq -e '.missing == [] or .wrong != []' "$work/controller-liveness-down.json" >/dev/null; }
 report_down() { note "the verdict so far: $(jq -c '{missing, wrong}' "$work/controller-liveness-down.json" 2>/dev/null)"; }
 timeout_hook=report_down
-until_true 900 "both liveness lines while the controller cannot come back, through a relaunch that died" down_settled
-timeout_hook=
+until_true 1200 "both liveness lines while the controller cannot come back, through its relaunch's failed launches" down_settled
+timeout_hook=limit_pending_blocked
 cp "$work/controller-liveness-down.json" "$evidence/controller-liveness-down.json"
 jq -e '.wrong == []' "$work/controller-liveness-down.json" >/dev/null ||
-  fail "the daemon's liveness lines depart from what a log monitor counts: $(jq -c .wrong "$work/controller-liveness-down.json")"
-# Each relaunch that died is one the runtime retired at the boot timeout because the scheduler never
-# placed its pod: the launch the driver made to fail, and no other death.
-unscheduled=$(never_scheduled_deaths "$evidence/pod-watch.json" "$daemon_log")
-for uid in $(jq -r '.deaths[].incarnation' "$work/controller-liveness-down.json"); do
-  grep -qxF -- "$uid" <<<"$unscheduled" || fail "the controller's relaunch $uid died, but the pod watch did not see its pod only unschedulable"
-done
-note "$(jq -r --arg m "$down_mark" --arg s "$launched_session" '"after line \($m) of the daemon log: the no-holder line \(.noHolder | length) times, each naming \($s), from \(.noHolder[0].time) to \(.noHolder[-1].time); the not-registered line \(.notRegistered | length) times, at \([.notRegistered[].time] | join(", ")), claim states \([.notRegistered[].claimState] | unique | join(", ")), each in the daemon form; relaunches retired unscheduled: \([.deaths[] | "\(.incarnation) at \(.time)"] | join(", "))"' "$work/controller-liveness-down.json")"
+  fail "the daemon's liveness lines or the controller's relaunches depart from the down phase: $(jq -c .wrong "$work/controller-liveness-down.json")"
+note "$(jq -r --arg m "$down_mark" --arg s "$launched_session" '"after line \($m) of the daemon log: the no-holder line \(.noHolder | length) times, each naming \($s), from \(.noHolder[0].time) to \(.noHolder[-1].time); the not-registered line \(.notRegistered | length) times, at \([.notRegistered[].time] | join(", ")), claim states \([.notRegistered[].claimState] | unique | join(", ")), each in the daemon form; failed launches at \([.launchFailures[] | "\(.time) (generation \(.generation))"] | join(", ")); launches, each on the deleted pod: \(if .launches == [] then "none" else [.launches[] | "\(.incarnation) at \(.time)"] | join(", ") end); pods the relaunch made, each Unschedulable and none scheduled: \([.pods[] | "\(.name) uid \(.uid)"] | join(", "))"' "$work/controller-liveness-down.json")"
 # 3. Back to the operator.
 op_mark=$(wc -l <"$daemon_log")
 controller_launch=
