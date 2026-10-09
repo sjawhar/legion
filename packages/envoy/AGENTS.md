@@ -256,9 +256,9 @@ dependency no stored update supplies, a delete of an item none holds - is merged
 state, so the room that loads it parks it again until a peer sends what it waits on. A state is
 kept only when it reads back as the document that made it: decoded into a fresh document, it must
 make the same state vector. That catches a re-encoding that renumbers or drops a client's clocks,
-as at ygo `v1.49.6-sami.3`, whose decoder integrated the items after a skipped clock range;
-`v1.50.1-sami.2`'s decoder parks them instead. It does not catch a re-encoding that keeps every
-clock and moves text, such as a lost right origin, which
+as a decoder that integrated the items after a skipped clock range would; ygo parks them (upstream
+since v1.51.0, reearth/ygo#257). It does not catch a re-encoding that keeps every clock and moves
+text, such as a lost right origin, which
 `TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump. A state that
 reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending
 queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
@@ -497,7 +497,7 @@ looked up again with `GetDoc` once that Apply returned can have been evicted in 
 
 The replica's lock is the one a room's browsers wait on. The update observer takes it for every peer
 update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only
-once the observer has returned (sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go`), so a read
+once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read
 holding the replica for its walk holds every other browser's copy of the keystroke. A read
 therefore only tries the lock, and
 reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
@@ -557,12 +557,13 @@ Every decode of document bytes takes the pending queue `maxUpdateItems`, whose c
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
 the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history,
 including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or
-ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check
-of each update the service broadcasts). In a room, which keeps what it parks across updates, the
-queue is also the most the room's peers can park, about ten times ygo's default.
-`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and
-`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
-which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
+ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms). ygo's check of
+each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the
+room has already applied the update (reearth/ygo#268, in the pinned fork). In a room, which keeps
+what it parks across updates, the queue is also the most the room's peers can park, about ten
+times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook` and
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue
+refuses, which fails the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
 `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
 `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
 deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead
@@ -572,7 +573,7 @@ A room whose last peer leaves, or that only the service's `Server.Apply` touches
 edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
 the moment its last peer leaves even while a `Server.Apply` is inside its callback on it
-(sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go` checks only the peers): the callback's
+(sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers): the callback's
 write then lands on the evicted room and reaches the store only through its retiring persistence
 worker, while the next access has already loaded the store without it and serves, and takes, the
 next write on a document
@@ -1078,7 +1079,7 @@ transaction is open. Settlement marks its injections owner-verified (`withOwnerV
 because it has already read and locked the owner row in its own transaction, so `allowInject`
 does not read it again. An injection that is not owner-verified does read the issue through the
 shared pool, and that read is outside the cycle only because ygo runs `OnInject` before
-`getOrCreateRoom` (`provider/websocket/inject.go:311-320`): an injection refused there has
+`getOrCreateRoom` (`provider/websocket/inject.go:321-330`): an injection refused there has
 published no room placeholder for a connection-holder to park on. A handler that must read
 outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
 duplicate-external branch before it opens the advice transaction - and a scan that publishes

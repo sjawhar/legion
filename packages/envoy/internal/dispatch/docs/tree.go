@@ -264,7 +264,7 @@ func renderDocumentForUpdate(doc *crdt.Doc) (string, *pmdoc.Node, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.50.1-sami.2, crdt/yxml.go:301-317) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.51.3-sami.1, crdt/yxml.go:353-369) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -285,8 +285,8 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.50.1-sami.2, crdt/doc.go:640-645), and a walk of the live tree takes no
-// lock (crdt/yxml.go:301-317), so a render or read of the live tree can walk it while another
+// lock (sjawhar/ygo v1.51.3-sami.1, crdt/doc.go:647-652), and a walk of the live tree takes no
+// lock (crdt/yxml.go:353-369), so a render or read of the live tree can walk it while another
 // transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
 // false WARN and counts the update as a content change. Only a holder of mu writes or walks the
 // replica, and it brings the replica up to date under the live document's lock first, so each walk

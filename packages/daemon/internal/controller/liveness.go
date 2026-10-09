@@ -58,9 +58,10 @@ type ProberOptions struct {
 	Log *slog.Logger
 }
 
-// Prober reads an operator-launched controller's liveness from the Envoy role registry, the one
-// record of it the daemon can read: the operator's session is on their own machine, with no
-// process of the daemon's to probe.
+// Prober reads the registered controller session's liveness from the Envoy role registry, under
+// either `controller` mode: the one record of the operator's controller the daemon can read, since
+// its session is on the operator's own machine with no process of the daemon's to probe, and the
+// role the daemon's own controller must hold to take its wakes.
 type Prober struct {
 	lookup string
 	token  string
