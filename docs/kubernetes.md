@@ -833,6 +833,8 @@ capabilities:                   # optional: the deployment capabilities decided 
 - a `resources` key that is neither a workflow role nor `controller`, and `resources.controller`
   unless `controller: daemon`, the one setting under which the daemon launches the controller's pod;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
+- `agent_secrets.operator`, removed with LEGION-664: the daemon's machine login is the
+  `legion-daemon` service's, which anyone signed in to Dispatch approves, so it names no approver;
 - an image that is not pinned by digest;
 - `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
   one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
@@ -1577,7 +1579,7 @@ issue's pod (every role container of it alike) and the image probe's.
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
   address). The block names no approver: the daemon's login is the `legion-daemon` service's, which
-  anyone signed in to Dispatch approves on the Dispatch credential page, and a file that still sets
+  anyone signed in to Dispatch approves on the Dispatch credential page, and a file that sets
   `operator` is refused at load naming the key — there is no launcher-token file and no manual CLI
   step. The daemon runs its own login at boot, on a background context, and logs the confirmation
   code exactly once: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential

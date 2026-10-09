@@ -407,8 +407,9 @@ decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
-and the broker refuses anyone the record's rule does not admit (its approver, or anyone signed in
-for a record naming `anyone`) with `403 NOT_APPROVER`, surfaced verbatim.
+and the broker refuses anyone the record's rule does not admit (anyone signed in for a service's
+machine login or a shared secret naming `anyone`; otherwise its approver) with `403 NOT_APPROVER`,
+surfaced verbatim.
 Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
 recorded decision and no buttons, on the record page and on the machine page alike, whether the
 machine page looked the login up already decided or decided it itself; every broker error
