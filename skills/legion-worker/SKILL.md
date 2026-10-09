@@ -121,8 +121,7 @@ moves the issue to `implementing` and interrupts your turn, and the implementer 
 that turn has ended. Do not resume the interrupted work afterward.
 
 On every start, and especially after revival or re-creation, read the issue and then the
-committed predecessor handoffs in lifecycle order from
-`$LEGION_WORKSPACE/.legion/<issue>/`:
+committed predecessor handoffs in lifecycle order, with the `legion` tool's `handoff_read`:
 
 1. `architect.json`
 2. `plan.json`
@@ -132,8 +131,8 @@ committed predecessor handoffs in lifecycle order from
 
 Read only files that precede the assigned phase. Each was held to its phase's rules when it was
 written (`handoff_write`, in the completion gate below): fields the phase does not declare passed
-untouched and reach the next worker. The `legion` tool's `handoff_read` returns each file as it
-stands in the workspace.
+untouched and reach the next worker. The `legion` tool's `handoff_read` returns them; its
+description says where it reads each one from.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a prior
@@ -414,12 +413,12 @@ report to the architect with the output, never a force-push. The merger makes no
 pushes nothing.
 
 Do not report phase completion until the write, existence check, handoff commit, and push
-succeed. This is the committed copy the next phase reads after revival. No phase removes
-`.legion/`: the reviewer approves a head that carries it. The daemon strips any `.legion/` still on
-main from the next issue's branch before any of its roles start (dispatch://LEGION-565), so that
-tree's own merge carries the removal onto the default branch; no operator sweep follows. Retro and
-the post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and
-report with `handoff_complete` alone (below).
+succeed. This is the committed copy the next phase reads after revival. Retro's last commit
+removes `.legion/<issue>/` from the head a human merges (`skill://legion-retro`); a round after
+it, such as one a withdrawn READY sends back, writes and commits its own handoff again, since
+`handoff_complete` refuses a handoff that commit removed. Retro and the post-merge production
+check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report with
+`handoff_complete` alone (below).
 
 ## Completion: report to the architect, then stay
 

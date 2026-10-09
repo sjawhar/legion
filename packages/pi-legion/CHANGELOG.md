@@ -16,6 +16,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- No Legion handoff reaches the default branch (LEGION-605). The `legion-retro` skill ends retro
+  with one final commit that removes the issue's `.legion/<issue>/`, pushed with its
+  `docs/solutions/` commit in one `legion push`; the `legion-worker` and `legion-architect` skills
+  and the merge-gate reference say the merger accepts that commit above the approved head and that
+  READY refuses a head still carrying it, in place of the rule that every head kept `.legion/` and
+  the daemon stripped main's from the next branch. The `legion` tool's `handoff_read` description
+  says it finds a handoff that commit removed. Install this release with a Go `legion` built from
+  the same commit, whose `legion handoff read` reads such a handoff and whose READY makes that
+  refusal. `legion.daemonApiVersion` is unchanged.
 - `legion.daemonApiVersion` is 16 (LEGION-578). Contract 16 adds `capabilities` to
   `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
   `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its
