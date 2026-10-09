@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 	// test-created repository ever registers a root with the operator's long-running watchman.
 	// watchman drops a root once its directory is deleted, so without this, the roots that pile
 	// up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
-	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, treeVolume's
-	// isolated one) still wins: os.Environ() is read fresh by every exec.Command.
+	// that sets its own JJ_CONFIG afterward (treeVolume's isolated one) still wins: os.Environ() is
+	// read fresh by every exec.Command.
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -331,10 +331,8 @@ func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
 		table   map[string]command
 	}{
 		{"claims", claimsCommands},
-		{"handoff", handoffCommands},
 		{"workspace-init", workspaceInitCommands},
 		{"controller", controllerCommands},
-		{"threads", threadsCommands},
 	} {
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)

@@ -478,8 +478,7 @@ func describedArgs(jj, dir string) []string {
 	return []string{jj, "log", "-r", `@ ~ description(exact:"")`, "--no-graph", "-T", "commit_id", "-R", dir}
 }
 
-// runAdoption runs the adoption with PATH's jj — the one the pane's own shell runs, the same one
-// `legion push` and `legion handoff complete` run (jjOnPath, cmd/legion/handoff.go), since no
+// runAdoption runs the adoption with PATH's jj — the one the pane's own shell runs, since no
 // runtime pins a jj on a pane or pod — on the workspace the shim's environment names in
 // LEGION_WORKSPACE, which the runtime sets on every pane, under the requested identity and
 // budget. Every role of an issue shares the workspace, so a working copy the previous role left
