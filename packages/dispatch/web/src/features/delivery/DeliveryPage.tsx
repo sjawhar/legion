@@ -9,6 +9,7 @@ import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-
 import {
   borderStrong,
   dragHandleBg,
+  linkText,
   surfaceMutedBg,
   switchOffBg,
   switchOnBg,
@@ -272,8 +273,24 @@ export function DeliveryPage(): ReactNode {
   }
   return (
     <section className="flex flex-col gap-3 xl:h-[calc(100dvh-3rem)]">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
+      <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Delivery timeline</h1>
+        {data === undefined ? null : (
+          <div className={`text-xs ${textMutedOnCanvas}`}>
+            Generated {new Date(query.dataUpdatedAt).toLocaleString()} · window{" "}
+            {new Date(data.window.from).toLocaleDateString()}–
+            {new Date(data.window.to).toLocaleDateString()}
+            {state.brush === null ? null : (
+              <button
+                className={`ml-3 underline ${linkText}`}
+                onClick={() => setState({ ...state, brush: null })}
+                type="button"
+              >
+                clear brush window
+              </button>
+            )}
+          </div>
+        )}
       </header>
 
       {notConfigured ? (
@@ -292,7 +309,9 @@ export function DeliveryPage(): ReactNode {
         </section>
       ) : (
         <>
-          {data === undefined ? null : <SourceFreshness freshness={data.freshness} />}
+          {data === undefined ? null : (
+            <SourceFreshness freshness={data.freshness} readAtMs={query.dataUpdatedAt} />
+          )}
 
           {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
           {query.isError ? (
@@ -337,15 +356,15 @@ export function DeliveryPage(): ReactNode {
                 </span>
               </div>
 
-              <div className="flex min-h-0 flex-1 gap-4">
-                <div className="w-56 shrink-0 overflow-y-auto">
+              <div className="flex min-h-0 flex-1 flex-col gap-4 xl:flex-row">
+                <div className="shrink-0 xl:w-56 xl:overflow-y-auto">
                   <FacetPanel
                     data={data}
                     filters={state.filters}
                     onChange={(filters) => setState({ ...state, filters })}
                   />
                 </div>
-                <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col">
+                <div className="flex h-[75dvh] min-h-[28rem] min-w-0 flex-col xl:h-auto xl:flex-1">
                   {state.view.mode === "timeline" ? (
                     <Timeline
                       colorBy={state.view.colorBy}

@@ -8,11 +8,18 @@ import {
 } from "../../theme/classes";
 import { type DeliveryFreshness, sourceFreshness } from "./lib/freshness";
 
-/** One row per freshness fact sourceFreshness reports: the two aggregate timestamps (reconcile,
- *  events) and, when positive, the unfetchable pull-request count -- red, with its reason in the
- *  text and on hover, when it has gone stale, never happened, or (the count) is nonzero. Ticks
- *  every second on its own, so the ages move between refetches without re-rendering the page. */
-export function SourceFreshness({ freshness }: { freshness: DeliveryFreshness }): ReactNode {
+/** One row naming each source with how long ago it was checked (sourceFreshness): red, with its
+ *  last error in the text and on hover, when its last check failed or it has gone stale. `readAtMs`
+ *  is when the timeline was last answered, which is when Dispatch's issues and the agents' titles
+ *  were read. Ticks every second on its own, so the ages move between refetches without
+ *  re-rendering the page. */
+export function SourceFreshness({
+  freshness,
+  readAtMs,
+}: {
+  freshness: DeliveryFreshness;
+  readAtMs: number;
+}): ReactNode {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -25,19 +32,19 @@ export function SourceFreshness({ freshness }: { freshness: DeliveryFreshness })
       className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs"
       role="status"
     >
-      {sourceFreshness(freshness, now).map((row) => (
+      {sourceFreshness(freshness, now, readAtMs).map((row) => (
         <span
+          className={`flex max-w-[36rem] items-center gap-1 ${row.red ? dangerText : textMutedOnCanvas}`}
+          data-red={row.red}
+          data-source={row.name}
           key={row.name}
           title={row.detail}
-          data-source={row.name}
-          data-red={row.red}
-          className={`flex items-center gap-1 ${row.red ? dangerText : textMutedOnCanvas}`}
         >
           <span
             aria-hidden="true"
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${row.red ? connectionDotFailed : connectionDotConnected}`}
           />
-          <span>{row.text}</span>
+          <span className="truncate">{row.text}</span>
         </span>
       ))}
     </div>

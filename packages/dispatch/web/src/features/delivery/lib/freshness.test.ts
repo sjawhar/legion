@@ -1,132 +1,68 @@
 import { expect, test } from "bun:test";
-import { sourceFreshness } from "./freshness";
+import { type DeliveryFreshness, sourceFreshness } from "./freshness";
 
 const NOW = Date.parse("2024-06-01T12:00:00Z");
 
-test("healthy: a recent reconcile pass with no error is not red", () => {
-  const [reconcile] = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 60_000).toISOString(),
-      last_error: null,
-      unfetchable_count: 0,
-    },
-    NOW
-  );
-  expect(reconcile.red).toBe(false);
-  expect(reconcile.text).toBe("Reconcile 1 min ago");
+const healthy: DeliveryFreshness = {
+  last_error: null,
+  last_event_at: "2024-06-01T11:59:30Z",
+  last_reconcile_at: "2024-06-01T11:59:00Z",
+  unfetchable_count: 0,
+};
+
+const byName = (freshness: DeliveryFreshness, readAtMs = NOW) =>
+  Object.fromEntries(sourceFreshness(freshness, NOW, readAtMs).map((row) => [row.name, row]));
+
+test("the six sources of the prototype, in its order and words", () => {
+  const rows = sourceFreshness(healthy, NOW, NOW - 5_000);
+  expect(rows.map((row) => row.text)).toEqual([
+    "PRs 1 min ago",
+    "Deploy runs 1 min ago",
+    "PR CI 1 min ago",
+    "Dispatch 5 s ago",
+    "Agents 5 s ago",
+    "Events 30 s ago",
+  ]);
+  expect(rows.some((row) => row.red)).toBe(false);
 });
 
-test("stale: no pass for over three missed intervals (15 min) is red, with no last_error", () => {
-  const [reconcile] = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 20 * 60_000).toISOString(),
-      last_error: null,
-      unfetchable_count: 0,
-    },
-    NOW
-  );
-  expect(reconcile.red).toBe(true);
-  expect(reconcile.text).toBe("Reconcile 20 min ago");
-  expect(reconcile.detail).toContain("no pass for over 15 min");
+test("stale: the three reconciled sources go red past three missed passes (15 min)", () => {
+  const rows = byName({ ...healthy, last_reconcile_at: "2024-06-01T11:40:00Z" });
+  for (const name of ["prs", "runs", "ci"]) {
+    expect(rows[name]?.red).toBe(true);
+    expect(rows[name]?.detail).toContain("no check for over 15 min");
+  }
+  expect(rows.prs?.text).toBe("PRs 20 min ago");
+  expect(rows.dispatch?.red).toBe(false);
 });
 
-test("failing: a named last_error is shown by name and wins over the age-based staleness text", () => {
-  const [reconcile] = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 60_000).toISOString(),
-      last_error: "the installation lacks Actions: read on acme/widgets",
-      unfetchable_count: 0,
-    },
-    NOW
+test("failing: a named last_error shows on each reconciled source, however recent the last pass", () => {
+  const rows = byName({
+    ...healthy,
+    last_error: "the installation lacks Actions: read on acme/widgets",
+  });
+  expect(rows.runs?.red).toBe(true);
+  expect(rows.runs?.text).toBe(
+    "Deploy runs 1 min ago: the installation lacks Actions: read on acme/widgets"
   );
-  expect(reconcile.red).toBe(true);
-  expect(reconcile.text).toBe(
-    "Reconcile failing: the installation lacks Actions: read on acme/widgets"
-  );
-  // Never the generic staleness wording while a named failure is present, even for a pass this
-  // recent: a stale-but-healthy row and a failing one must never read the same way.
-  expect(reconcile.text).not.toContain("ago");
+  expect(rows.events?.red).toBe(false);
 });
 
-test("failing with no prior success: last_reconcile_at null and a named last_error still names the error, not 'never ran'", () => {
-  const [reconcile] = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: null,
-      last_error: "rate-limited by GitHub",
-      unfetchable_count: 0,
-    },
-    NOW
+test("never checked: no pass yet is red, naming the error when the first pass failed", () => {
+  expect(byName({ ...healthy, last_reconcile_at: null }).prs?.text).toBe("PRs never checked");
+  expect(byName({ ...healthy, last_reconcile_at: null, last_error: "rate limited" }).ci?.text).toBe(
+    "PR CI never checked: rate limited"
   );
-  expect(reconcile.red).toBe(true);
-  expect(reconcile.text).toBe("Reconcile failing: rate-limited by GitHub");
-  expect(reconcile.detail).toContain("last successful pass never");
+  expect(byName({ ...healthy, last_event_at: null }).events).toMatchObject({
+    red: true,
+    text: "Events never received",
+  });
 });
 
-test("cleared after success: a previously-failing row with last_error now null reads healthy again", () => {
-  const failing = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 20 * 60_000).toISOString(),
-      last_error: "the installation lacks Actions: read on acme/widgets",
-      unfetchable_count: 0,
-    },
-    NOW
-  )[0];
-  expect(failing.red).toBe(true);
-  expect(failing.text).toContain("failing");
-
-  const recovered = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 10_000).toISOString(),
-      last_error: null,
-      unfetchable_count: 0,
-    },
-    NOW
-  )[0];
-  expect(recovered.red).toBe(false);
-  expect(recovered.text).toBe("Reconcile 10 s ago");
-});
-
-test("never ran: no last_reconcile_at and no last_error is red with the never-ran wording", () => {
-  const [reconcile] = sourceFreshness(
-    { last_event_at: null, last_reconcile_at: null, last_error: null, unfetchable_count: 0 },
-    NOW
-  );
-  expect(reconcile.red).toBe(true);
-  expect(reconcile.text).toBe("Reconcile never ran");
-});
-
-test("unfetchable: a positive unfetchable_count adds a third, red row naming the count", () => {
-  const rows = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 60_000).toISOString(),
-      last_error: null,
-      unfetchable_count: 3,
-    },
-    NOW
-  );
-  expect(rows).toHaveLength(3);
-  const unfetchable = rows[2];
-  expect(unfetchable.name).toBe("unfetchable");
-  expect(unfetchable.red).toBe(true);
-  expect(unfetchable.text).toBe("3 pull requests can no longer be fetched from GitHub");
-});
-
-test("unfetchable: a zero count adds no third row", () => {
-  const rows = sourceFreshness(
-    {
-      last_event_at: null,
-      last_reconcile_at: new Date(NOW - 60_000).toISOString(),
-      last_error: null,
-      unfetchable_count: 0,
-    },
-    NOW
-  );
-  expect(rows).toHaveLength(2);
+test("unfetchable: a positive count adds a red row naming it, zero adds none", () => {
+  expect(byName({ ...healthy, unfetchable_count: 2 }).unfetchable).toMatchObject({
+    red: true,
+    text: "2 pull requests can no longer be fetched from GitHub",
+  });
+  expect(sourceFreshness(healthy, NOW, NOW).map((row) => row.name)).not.toContain("unfetchable");
 });
