@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -820,6 +821,86 @@ func TestProvisionLocksAnExistingUnlockedWorkspace(t *testing.T) {
 	}
 	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
 		t.Errorf("provisioning left the existing workspace's git worktree unlocked: %v", locked)
+	}
+}
+
+// Provisioning that creates a workspace records when it did (Created), where jj never snapshots
+// it: `jj status` in the new workspace lists no change. Provisioning the workspace again keeps the
+// record as it was, and a workspace removed and created again records its new creation, which the
+// role launcher compares with a resumed session's last write.
+func TestProvisionRecordsWhenItCreatedTheWorkspace(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	started := time.Now()
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	created, ok, err := Created(workspace.Dir)
+	if err != nil || !ok || created.Before(started.Truncate(time.Millisecond)) || created.After(time.Now()) {
+		t.Fatalf("Created = %v, %t, %v; want a record between %v and now", created, ok, err, started)
+	}
+	if status := runSetup(t, workspace.Dir, "jj", "status"); !strings.Contains(status, "The working copy has no changes") {
+		t.Errorf("jj status in the new workspace = %q, want no change: the record is not the working copy's", status)
+	}
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision the existing workspace: %v", err)
+	}
+	if again, _, err := Created(workspace.Dir); err != nil || !again.Equal(created) {
+		t.Errorf("Created after provisioning the existing workspace = %v, %v; want %v unchanged", again, err, created)
+	}
+
+	if err := Remove(context.Background(), run, workspace); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, ok, err := Created(workspace.Dir); ok || err != nil {
+		t.Fatalf("Created of the removed workspace = %t, %v; want no record", ok, err)
+	}
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision the removed workspace again: %v", err)
+	}
+	if recreated, ok, err := Created(workspace.Dir); err != nil || !ok || !recreated.After(created) {
+		t.Errorf("Created of the workspace created again = %v, %t, %v; want a record after %v", recreated, ok, err, created)
+	}
+}
+
+// The creation record is on a volume every agent of the tree can write, so Created reads only a
+// regular file holding one RFC 3339 instant and refuses anything else by name: a symlink, which it
+// does not follow, a FIFO, which it does not block on, and text that is no instant.
+func TestCreatedRefusesARecordThatIsNotOneInstant(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, path string){
+		"a symlink": func(t *testing.T, path string) {
+			target := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.WriteFile(target, []byte("2026-10-09T00:00:00Z\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a FIFO": func(t *testing.T, path string) {
+			if err := syscall.Mkfifo(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"text": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("yesterday\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, ".jj"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, ".jj", createdFile)
+			plant(t, path)
+			if _, ok, err := Created(dir); ok || err == nil || !strings.Contains(err.Error(), path) {
+				t.Errorf("Created = %t, %v; want a refusal naming %s", ok, err, path)
+			}
+		})
 	}
 }
 

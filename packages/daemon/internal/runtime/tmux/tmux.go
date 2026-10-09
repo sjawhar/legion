@@ -277,6 +277,9 @@ func (r *Runtime) Socket() string { return r.socket }
 // state directory before the launch.
 func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 
+// SessionsOnVolume is false: a pane's session is a file on the daemon's own host, wherever its tree.
+func (r *Runtime) SessionsOnVolume() bool { return false }
+
 // ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision
 // first.
 func (r *Runtime) ProvisionBound() time.Duration { return 0 }

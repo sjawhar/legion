@@ -183,5 +183,6 @@
 - Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
   `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
   `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
-  `PLAN_REVIEW_VERDICTS`. Nothing holds a handoff to a shape any more: each role's prompt spells
-  the fields its handoff carries, and the worker writes the file itself; `HANDOFF_PHASES` stays.
+  `PLAN_REVIEW_VERDICTS`, and `HANDOFF_PHASES` with the `legion` tool's `handoff_write`/`handoff_read`
+  that took one (LEGION-631). Nothing holds a handoff to a shape any more: each role's prompt spells
+  the fields its handoff carries, and the worker writes the file itself.

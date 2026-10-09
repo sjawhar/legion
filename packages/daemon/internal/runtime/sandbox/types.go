@@ -118,6 +118,15 @@ type Options struct {
 	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
+	// SessionDSNKey is the providers Secret's key that holds the postgres:// URL of the database
+	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres); ""
+	// keeps each session a file in the tree volume's sessions directory. With one, every pod and the
+	// image probe mount that key at ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is
+	// started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file
+	// (mainEnvironment), which the shim, seeing the pointer, never exports; a resume is held to the
+	// session table rather than the volume (the role launcher's check, internal/launcher), and no
+	// launch expects the tree volume to hold a session.
+	SessionDSNKey string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.

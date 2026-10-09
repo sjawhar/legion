@@ -29,8 +29,10 @@ import (
 
 const (
 	defaultConfigPath = "./legion.yaml"
-	// stopTimeout bounds the wait for a stopping daemon, whose own exit is two bounded steps —
-	// draining the API and stamping the boot.
+	// stopTimeout bounds the wait for a stopping daemon, which returns at most 22 s after its stop
+	// begins once its boot is recorded: its stop budget, the boot's stamp and the store's close
+	// (the daemon package's stopBudget). A signal before then waits out the boot step under way
+	// first, each bounded by the boot's own 30 s (the daemon package's Run).
 	stopTimeout = 30 * time.Second
 	// requestTimeout bounds a CLI read of a daemon's HTTP API.
 	requestTimeout = 5 * time.Second
@@ -67,6 +69,7 @@ var commands = map[string]commandEntry{
 	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
+	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
 	"workspace-init": {runWorkspaceInit, "a Sandbox pod's init containers: fetch the repository, provision the issue's workspace, prepare the controller's volume"},
 	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},

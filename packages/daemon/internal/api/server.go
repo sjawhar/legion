@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -55,6 +56,19 @@ type Options struct {
 	// and a registration registers the controller only from a launch of the controller's claim.
 	// Unset (`controller: operator`), only the operator's capability registers it.
 	ControllerLaunched bool
+	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
+	// connections no route holds (RouteDecisions): an operator's request that would change a claim
+	// is refused from then on (stopped), and a route whose decision fails logs it at Info
+	// (logFailure), since the stop is what cut it short. Nil is never.
+	Stopping context.Context
+	// Drained is done once the daemon's stop has drained the API, or the drain ran out, and ends
+	// every decision a route asked of a machine (decision). A decision in flight at the stop's
+	// start gets the drain to finish, so an operator's suspension whose process is already exiting
+	// is recorded. Nil is never.
+	Drained context.Context
+	// Decisions is where the routes record the claims whose decisions they are running, for the
+	// daemon's stop to read (RouteDecisions). Nil is a set nothing reads.
+	Decisions *RouteDecisions
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -125,7 +139,11 @@ type server struct {
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
-	log          *slog.Logger
+	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
+	stopping  context.Context
+	drained   context.Context
+	decisions *RouteDecisions
+	log       *slog.Logger
 }
 
 // NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface
@@ -159,6 +177,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
 		log:                opts.Log,
+		stopping:           opts.Stopping,
+		drained:            opts.Drained,
+		decisions:          opts.Decisions,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
@@ -168,6 +189,15 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if s.log == nil {
 		s.log = slog.Default()
+	}
+	if s.stopping == nil {
+		s.stopping = context.Background()
+	}
+	if s.drained == nil {
+		s.drained = context.Background()
+	}
+	if s.decisions == nil {
+		s.decisions = NewRouteDecisions()
 	}
 
 	mux := http.NewServeMux()
@@ -212,6 +242,89 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
+}
+
+// decision is the context a route runs a decision of token's claim on. It outlives the request,
+// so a caller that hangs up mid-request does not leave a registration or a stop half done, and it
+// ends once the daemon's stop has drained the API (Options.Drained). Until the caller calls the
+// returned function, which it does once the decision is made, the claim is recorded as decided by
+// a route (RouteDecisions). A route that decides other claims too records each of them (begin).
+func (s *server) decision(r *http.Request, token claim.Token) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	stop := context.AfterFunc(s.drained, cancel)
+	ended := s.decisions.begin([]claim.Token{token})
+	return ctx, func() {
+		ended()
+		stop()
+		cancel()
+	}
+}
+
+// RouteDecisions is the claims whose decisions an API route is running now (server.decision).
+// The daemon's stop keeps the worker stream connections of these claims open through the API's
+// drain and closes every other one: a route's suspension or stop sends its process the shutdown
+// frame over that connection.
+type RouteDecisions struct {
+	mu     sync.Mutex
+	claims map[claim.Token]int
+}
+
+// NewRouteDecisions is a set no route has recorded a claim in yet.
+func NewRouteDecisions() *RouteDecisions {
+	return &RouteDecisions{claims: map[claim.Token]int{}}
+}
+
+// Holds is whether a route is running a decision of token's claim now.
+func (d *RouteDecisions) Holds(token claim.Token) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.claims[token] > 0
+}
+
+// begin records tokens as decided by a route until the returned function runs.
+func (d *RouteDecisions) begin(tokens []claim.Token) func() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, token := range tokens {
+		d.claims[token]++
+	}
+	return func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for _, token := range tokens {
+			if d.claims[token]--; d.claims[token] == 0 {
+				delete(d.claims, token)
+			}
+		}
+	}
+}
+
+// logFailure logs a route's failure at Error, or at Info once the daemon's stop has begun
+// (Options.Stopping): the stop is what cut it short, and the next boot takes the claim up.
+func (s *server) logFailure(msg string, args ...any) {
+	if s.stopping.Err() != nil {
+		s.log.Info(msg, args...)
+		return
+	}
+	s.log.Error(msg, args...)
+}
+
+// stopped answers 503 and reports true once the daemon's stop has begun (Options.Stopping): an
+// operator's request that would change a claim is refused then, rather than decided without the
+// claim's worker stream connection, which the stop closes for every claim no route holds. The
+// caller asks only after it has recorded its claims (decision, RouteDecisions.begin), so a request
+// recorded too late for the stop to keep its connections always finds the stop begun; closeTree's
+// second record, after the root's close, is the one exception, and says why. A request reaches
+// this once the stop has begun only if the server accepted it before the stop began, or while the
+// halt waits on the supervisor's lock before the daemon's serve shuts the server down, which closes
+// its listener.
+func (s *server) stopped(w http.ResponseWriter, request string) bool {
+	if s.stopping.Err() == nil {
+		return false
+	}
+	s.log.Info("api: refused an operator request: the daemon is stopping", "request", request)
+	writeJSON(w, http.StatusServiceUnavailable, errorBody(request+" refused: the daemon is stopping; ask again once it is back"))
+	return true
 }
 
 func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {

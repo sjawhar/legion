@@ -102,6 +102,8 @@ export interface ExtensionMessage {
   readonly content: string;
   readonly display: boolean;
   readonly attribution?: "user" | "agent";
+  /** Saved with the message and never sent to the model. */
+  readonly details?: Readonly<Record<string, unknown>>;
 }
 
 export interface BeforeAgentStartResult {

@@ -159,6 +159,7 @@ const environmentKeys = [
   "LEGION_BOOT_TOKEN_FILE",
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
+  "LEGION_WORKSPACE_RECREATED",
   "DISPATCH_STATE_DIR",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
@@ -252,6 +253,8 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
+  /** Every `sendMessage` call's options, in the order of sentMessages. */
+  readonly sentMessageOptions: unknown[];
   readonly sentUserMessages: string[];
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
@@ -263,6 +266,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
+  const sentMessageOptions: unknown[] = [];
   const sentUserMessages: string[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
@@ -291,7 +295,10 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       unknown: () => optional(),
       discriminatedUnion: () => ({}),
     },
-    sendMessage: (message) => sentMessages.push(message),
+    sendMessage: (message, sendOptions) => {
+      sentMessages.push(message);
+      sentMessageOptions.push(sendOptions);
+    },
     sendUserMessage: (content) => {
       if (typeof content !== "string") {
         throw new Error(
@@ -338,6 +345,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     handlers,
     tools,
     sentMessages,
+    sentMessageOptions,
     sentUserMessages,
     entries,
     activeTools,
@@ -493,6 +501,8 @@ interface ClaimPane {
   readonly commands: RegisteredCommand[];
   readonly activeTools: string[];
   readonly entries: AppendedEntry[];
+  readonly sentMessages: SentMessage[];
+  readonly sentMessageOptions: unknown[];
   readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
@@ -640,6 +650,8 @@ async function claimPane(options: {
     commands: fixture.commands,
     activeTools: fixture.activeTools,
     entries: fixture.entries,
+    sentMessages: fixture.sentMessages,
+    sentMessageOptions: fixture.sentMessageOptions,
     title: fixture.title,
     handlers: fixture.handlers,
     context,
@@ -3266,5 +3278,172 @@ describe("a Legion session's title", () => {
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
       title: "Legion controller · OMP",
     });
+  });
+});
+
+describe("the recreated-workspace notice", () => {
+  const notices = (pane: ClaimPane) =>
+    pane.sentMessages.flatMap((message, i) =>
+      "customType" in message && message.customType === "legion-workspace-recreated"
+        ? [{ message, options: pane.sentMessageOptions[i] }]
+        : []
+    );
+  // A resumed session, its history uncompacted turns, whose role launcher said its workspace was
+  // recreated: at session start the plugin saves one notice naming the issue's branch, as a steer
+  // that starts no turn, so Oh My Pi stores it ahead of the next turn whatever starts that turn.
+  test("a resume told LEGION_WORKSPACE_RECREATED=true saves one notice ahead of its next turn", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const history = [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-1" }] } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "reply 1" }] },
+      },
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-2" }] } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "reply 2" }] },
+      },
+    ];
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43", branch: history });
+    expect(notices(pane)).toEqual([
+      {
+        message: {
+          customType: "legion-workspace-recreated",
+          content: expect.stringContaining(
+            "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
+          ),
+          display: true,
+          details: { id: expect.any(String) },
+        },
+        options: { deliverAs: "steer", triggerTurn: false },
+      },
+    ]);
+  });
+
+  test("a resume told false, or nothing, saves no notice", async () => {
+    for (const value of ["false", undefined]) {
+      if (value === undefined) delete process.env.LEGION_WORKSPACE_RECREATED;
+      else process.env.LEGION_WORKSPACE_RECREATED = value;
+      const pane = await bootPane({ role: "implementer", sessionId: `ses_recreated_${value}` });
+      expect(notices(pane)).toEqual([]);
+      expect(
+        await pane.handlers.get("before_agent_start")?.({ prompt: "task" }, pane.context)
+      ).toBeUndefined();
+    }
+  });
+
+  // A session that is no Legion session is left alone even with the variable set: only the role
+  // launcher sets it, beside the role variables, and pi-legion is inert outside a Legion session.
+  test("a session that is no Legion session saves no notice", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const fixture = createPi({ bindEnvoy: false });
+    legionExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_person"));
+    expect(fixture.sentMessages).toEqual([]);
+    expect(
+      await fixture.handlers.get("before_agent_start")?.(
+        { prompt: "task" },
+        sessionContext("ses_person")
+      )
+    ).toBeUndefined();
+  });
+
+  /** The pane's own notice id, its before_agent_start and context handlers, and a context whose
+   * `getBranch()` returns what `branch()` does at each call. */
+  const recoveryPane = async (branch: () => readonly unknown[]) => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    const sent = notices(pane)[0]?.message;
+    const id =
+      sent !== undefined && "details" in sent && typeof sent.details?.id === "string"
+        ? sent.details.id
+        : undefined;
+    const beforeAgentStart = pane.handlers.get("before_agent_start");
+    const requestOf = pane.handlers.get("context");
+    if (id === undefined || beforeAgentStart === undefined || requestOf === undefined) {
+      throw new Error("the pane sent no notice, or registered no before_agent_start or context");
+    }
+    const context = {
+      ...pane.context,
+      sessionManager: { ...pane.context.sessionManager, getBranch: branch },
+    };
+    return { pane, id, beforeAgentStart, requestOf, context };
+  };
+  const entry = (id: string) => ({
+    type: "custom_message",
+    customType: "legion-workspace-recreated",
+    content: "Your workspace was recreated since your last turn: …",
+    display: true,
+    details: { id },
+  });
+  const copy = (id: string) => ({
+    role: "custom",
+    customType: "legion-workspace-recreated",
+    content: "…",
+    details: { id },
+  });
+  const task = { role: "user", content: [{ type: "text", text: "TURN-2" }] };
+  const turn = (role: "user" | "assistant", text: string) => ({
+    type: "message",
+    message: { role, content: [{ type: "text", text }] },
+  });
+
+  // The daemon's next task is an RPC prompt, and Oh My Pi first recovers a failed last turn: an
+  // empty `length` stop is dropped by moving the branch back to that turn's parent, which takes the
+  // copy saved after it off the branch. before_agent_start runs after that recovery and puts the
+  // notice into the run's messages when the branch no longer holds this process's copy; while the
+  // branch holds it, nothing is added. Once the first run starts, nothing is owed. The recovery left
+  // the saved copy in the live context, so from the re-send on each request keeps the first copy
+  // alone, and before it no request is touched.
+  test("a prompt whose recovery dropped the saved notice carries it again, once", async () => {
+    let branch: readonly unknown[] = [];
+    const { id, pane, beforeAgentStart, requestOf, context } = await recoveryPane(() => branch);
+    branch = [
+      turn("user", "TURN-1"),
+      { type: "message", message: { role: "assistant", content: [], stopReason: "length" } },
+      entry(id),
+    ];
+
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toBeUndefined();
+    branch = branch.slice(0, 1);
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
+      message: {
+        customType: "legion-workspace-recreated",
+        content: expect.stringContaining("it holds what was pushed to legion/REPO-43"),
+        display: true,
+        details: { id },
+      },
+    });
+    await pane.handlers.get("agent_start")?.({}, context);
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toEqual({
+      messages: [copy(id), task],
+    });
+    expect(await requestOf({ messages: [copy(id), task] }, context)).toBeUndefined();
+  });
+
+  // A session recreated twice carries the earlier recreation's notice in its history. When the
+  // recovery drops this process's copy, that earlier notice is not it: the notice is sent again,
+  // and the request filter leaves the earlier one where the history put it, keeping this process's
+  // first copy too. The same holds when the earlier notice sits after the last good reply, as one
+  // saved by a process lost before its turn's first reply does.
+  test("a notice an earlier recreation saved does not stand in for this process's", async () => {
+    let branch: readonly unknown[] = [];
+    const { id, beforeAgentStart, requestOf, context } = await recoveryPane(() => branch);
+    const earlier = "an-earlier-process";
+    for (const recovered of [
+      [turn("user", "TURN-1"), entry(earlier), turn("user", "X"), turn("assistant", "reply X")],
+      [turn("user", "TURN-1"), turn("assistant", "reply 1"), entry(earlier), turn("user", "X")],
+    ]) {
+      branch = recovered;
+      expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
+        message: expect.objectContaining({ details: { id } }),
+      });
+    }
+    expect(
+      await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
+    ).toEqual({ messages: [copy(earlier), copy(id), task] });
   });
 });

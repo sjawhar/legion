@@ -514,6 +514,41 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	}
 }
 
+// A child issue's launch waiting out its tree's other pods ends with its context, at once, and sets
+// nothing Running: the wait is bounded by minutes (treeWaitBound), and the daemon's stop cancels the
+// launches in flight rather than wait them out (LEGION-650).
+func TestARelaunchWaitingOnItsTreeEndsWithItsContext(t *testing.T) {
+	g := newRig(t, nil)
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	g.launcher(childToken)
+	launching, cancel := context.WithCancel(g.ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(launching, childSpec(t))
+		done <- err
+	}()
+	child := SandboxName(childToken)
+	g.eventually("the child issue's sandbox", func() bool { return g.sandbox(child) != nil })
+	time.Sleep(200 * time.Millisecond)
+	if got := steps(t, g.writes(), child); slices.Contains(got, "run") {
+		t.Fatalf("the child issue's pod was set Running while the root's was still in workspace-init: %v", got)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the cancelled launch returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the launch went on waiting for the root's workspace-init after its context ended")
+	}
+	if got := steps(t, g.writes(), child); slices.Contains(got, "run") {
+		t.Fatalf("the cancelled launch set the child issue's pod Running: %v", got)
+	}
+}
+
 // The daemon computes removable-workspace candidates last, under the tree's launch turn, after
 // every other pod of the tree has finished initializing (dispatch://LEGION-583): a sibling that
 // becomes live while this launch waits out another pod's workspace-init is read as live by the

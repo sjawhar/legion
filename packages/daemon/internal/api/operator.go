@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -181,7 +180,11 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		s.operatorFailure(w, "spawn", token, err)
 		return
 	}
-	ctx := context.WithoutCancel(r.Context())
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	if s.stopped(w, "spawn") {
+		return
+	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
 		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
@@ -232,7 +235,12 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			return
 		}
 		status := http.StatusOK
-		if err := m.Handle(context.WithoutCancel(r.Context()), ev); errors.Is(err, supervise.ErrSuspendHeld) {
+		ctx, decided := s.decision(r, token)
+		defer decided()
+		if s.stopped(w, request) {
+			return
+		}
+		if err := m.Handle(ctx, ev); errors.Is(err, supervise.ErrSuspendHeld) {
 			status = http.StatusAccepted
 		} else if err != nil {
 			s.operatorFailure(w, request, token, err)
@@ -268,7 +276,10 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // would stay for good. A workflow issue's tree is the workflow's to close, and a worker's claim is
 // stopped, not closed.
 //
-// The root goes first, since its close is where the supervisor answers both of the questions that
+// The tree's claims are read first and held as this route's decisions (RouteDecisions), so a
+// daemon's stop that begins during the close keeps their worker stream connections; a read that
+// fails there closes nothing, and a close the daemon's stop has already begun is refused. Then the
+// root goes first, since its close is where the supervisor answers both of the questions that
 // decide it — whether a workflow issue backs the tree, and whether this claim is its tree's root
 // at all — where the answers and the close they decide sit together; a refused close stops
 // nothing, and the refusal an operator sees is the machine's. A close of a tree already retired
@@ -289,37 +300,56 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := root.Claim()
-	ctx := context.WithoutCancel(r.Context())
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	// The tree's other claims are this route's decisions from before the root's close, which waits
+	// out the root's exit: a daemon's stop that begins meanwhile keeps their worker stream
+	// connections open, and each one's stop below sends its shutdown frame over its own
+	// (RouteDecisions). A claim the store gains later is recorded with the read the stops use.
+	claims, err := s.supervisor.Claims(ctx)
+	if err != nil {
+		s.logFailure("api: read the claims of a tree the operator closes", "tree", c.Tree, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed nothing: the daemon could not read the claims of tree %s", c.Tree)))
+		return
+	}
+	defer s.decisions.begin(treeOthers(claims, c.Tree, token))()
+	if s.stopped(w, "close") {
+		return
+	}
 	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
 		s.operatorFailure(w, "close", token, err)
 		return
 	}
 	lifecycle, cleanup, err := s.trees.ReserveOperatorTreeCleanup(ctx, s.project, c.Tree)
 	if err != nil {
-		s.log.Error("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
+		s.logFailure("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("closed %s's root claim, but its durable tree cleanup could not be reserved: %v. Retry legion claims close once that is resolved", c.Tree, err)))
 		return
 	}
-	claims, err := s.supervisor.Claims(ctx)
+	claims, err = s.supervisor.Claims(ctx)
 	if err != nil {
-		s.log.Error("api: read the claims of a tree the operator closed", "tree", c.Tree, "error", err)
+		s.logFailure("api: read the claims of a tree the operator closed", "tree", c.Tree, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but the daemon could not read the tree's other claims to stop them", c.Tree, token)))
 		return
 	}
+	others := treeOthers(claims, c.Tree, token)
+	// The one record that no stop check follows (stopped): a claim the tree gained while its root
+	// exited, by an operator's spawn into the tree being closed, is recorded only here, so a daemon's
+	// stop that begins in that same moment may already have closed its connection, and its stop then
+	// ends its agent without the shutdown frame. Its stored state is still right (retired); a check
+	// here would instead leave the root closed and the tree's other claims unstopped.
+	defer s.decisions.begin(others)()
 	var unstopped []string
-	for _, other := range claims {
-		if other.Tree != c.Tree || other.Token == token || other.State == supervise.StateRetired {
-			continue
-		}
-		m, ok := s.supervisor.Machine(other.Token)
+	for _, other := range others {
+		m, ok := s.supervisor.Machine(other)
 		if !ok {
-			s.log.Error("api: a claim of a tree the operator closed has no machine to stop", "claim", other.Token)
-			unstopped = append(unstopped, fmt.Sprintf("%s (the daemon supervises no machine for it, so legion claims stop cannot reach it until the daemon restarts)", other.Token))
+			s.log.Error("api: a claim of a tree the operator closed has no machine to stop", "claim", other)
+			unstopped = append(unstopped, fmt.Sprintf("%s (the daemon supervises no machine for it, so legion claims stop cannot reach it until the daemon restarts)", other))
 			continue
 		}
-		if err := m.Handle(ctx, supervise.RequestStop{Claim: other.Token}); err != nil {
-			s.log.Error("api: stop a claim of a tree the operator closed", "claim", other.Token, "error", err)
-			unstopped = append(unstopped, fmt.Sprintf("%s (%v)", other.Token, err))
+		if err := m.Handle(ctx, supervise.RequestStop{Claim: other}); err != nil {
+			s.logFailure("api: stop a claim of a tree the operator closed", "claim", other, "error", err)
+			unstopped = append(unstopped, fmt.Sprintf("%s (%v)", other, err))
 		}
 	}
 	if len(unstopped) > 0 {
@@ -329,7 +359,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	}
 	if cleanup {
 		if err := s.trees.CleanupReservedTree(ctx, s.project, c.Tree, lifecycle.Epoch, s.releaser); err != nil {
-			s.log.Error("api: cleanup an operator-closed tree", "tree", c.Tree, "error", err)
+			s.logFailure("api: cleanup an operator-closed tree", "tree", c.Tree, "error", err)
 			writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's claims, but durable resource cleanup is pending: %v. Retry legion claims close after the reported cleanup error is resolved", c.Tree, err)))
 			return
 		}
@@ -337,9 +367,22 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, operatorView(root.Claim()))
 }
 
-// list answers every claim the daemon supervises, in token order: as its machine holds it now, or,
-// for a claim no machine supervises, as the store holds it. The machine's is what knows whether a
-// suspension is held.
+// treeOthers is every claim of tree in claims, but root and those already retired.
+func treeOthers(claims []supervise.Claim, tree string, root claim.Token) []claim.Token {
+	var others []claim.Token
+	for _, c := range claims {
+		if c.Tree == tree && c.Token != root && c.State != supervise.StateRetired {
+			others = append(others, c.Token)
+		}
+	}
+	return others
+}
+
+// list answers every claim the daemon supervises, in token order: as its machine last published it
+// (supervise.Machine.View), or, for a claim no machine supervises, as the store holds it. The
+// machine's is what knows whether a suspension is held. It never waits on a decision in flight: a
+// relaunch holds its machine for as long as the runtime waits out its pods, and with many claims
+// one is nearly always relaunching.
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
@@ -351,7 +394,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	views := make([]OperatorClaim, len(claims))
 	for i, c := range claims {
 		if m, ok := s.supervisor.Machine(c.Token); ok {
-			c = m.Claim()
+			c = m.View().Claim
 		}
 		views[i] = operatorView(c)
 	}
@@ -367,6 +410,6 @@ func (s *server) operatorFailure(w http.ResponseWriter, request string, token cl
 		writeJSON(w, http.StatusConflict, errorBody(refused.Error()))
 		return
 	}
-	s.log.Error("api: an operator request failed", "request", request, "claim", token, "error", err)
+	s.logFailure("api: an operator request failed", "request", request, "claim", token, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("%s %s: %v", request, token, err)))
 }

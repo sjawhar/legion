@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -86,7 +85,9 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
 // the workspace's place on the tree volume and the tree's root claim, whose Sandbox owns that
-// volume; the root's own launch owns it. A resume expects the tree volume to hold what it left.
+// volume; the root's own launch owns it. A resume of a session kept on the volume expects the tree
+// volume to hold what it left; a session kept in the database expects nothing of the volume, so a
+// resume on a new one provisions its workspace from the issue's pushed branch and continues.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {
@@ -101,7 +102,7 @@ func (issuePod) prepare(l *launch) error {
 		return fmt.Errorf("the tree's root claim: %w", err)
 	}
 	l.workspace, l.volume, l.ownsVolume = working.Dir, root, claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree)
-	l.expectTreeVolume = l.resumeFile != ""
+	l.expectTreeVolume = l.resumeFile != "" && !l.sessionsInDatabase
 	return nil
 }
 
@@ -252,14 +253,14 @@ func (pod issuePod) readyNewPod(ctx context.Context, r *Runtime, l *launch, s *s
 
 // provision is what a new issue pod needs before it starts, run under the tree's launch turn: it
 // waits until no other pod of the tree is initializing (awaitTreeInitialized), reads whether
-// workspace-init must find the tree volume holding retained sessions, lists the tree's removable
-// workspaces, mints the provisioning token for the repository's owner, and writes it to the pod's
-// init-only provisioning Secret.
+// workspace-init must find the tree volume holding retained sessions (never under a session
+// database, which keeps none on it), lists the tree's removable workspaces, mints the provisioning
+// token for the repository's owner, and writes it to the pod's init-only provisioning Secret.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	if err := r.awaitTreeInitialized(ctx, *l); err != nil {
 		return fmt.Errorf("wait for its tree's other pods to finish initializing: %w", err)
 	}
-	if !l.expectTreeVolume && l.spec.WorkspaceRecoveredFrom == "" {
+	if !l.expectTreeVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionsInDatabase {
 		sessions, err := r.store.TreeHasSessions(ctx, r.project, l.spec.Tree)
 		if err != nil {
 			return fmt.Errorf("read its tree's retained sessions: %w", err)
@@ -342,14 +343,14 @@ func (controllerPod) secretAnnotations(launch) map[string]string { return nil }
 
 // initContainers are one workspace-init, which mounts the controller's volume alone: `workspace-init
 // controller` provisions nothing and waits on no lock. It is told the image's PATH and, when the
-// pod is created to resume the controller, the session it must find, as the volume holds it, so a
-// lost volume brings up a fresh controller before any launcher starts. It takes the controller's
-// resources.
+// pod is created to resume a controller whose session is a file on the volume, the session it must
+// find, as the volume holds it, so a lost volume brings up a fresh controller before any launcher
+// starts; a session kept in the database is the launcher's to find (internal/launcher). It takes
+// the controller's resources.
 func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
 	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
-	if l.resumeFile != "" {
-		onVolume := TreeRoot + "/" + SessionsSubPath + strings.TrimPrefix(l.resumeFile, ompSessionsDir)
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: onVolume})
+	if l.resumeFile != "" && !l.sessionsInDatabase {
+		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: sessionOnVolume(l.resumeFile, TreeRoot)})
 	}
 	return []corev1.Container{{
 		Name:            initContainer,

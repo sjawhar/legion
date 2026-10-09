@@ -477,6 +477,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
+LEGION_E2E_SESSION_DB_PORT=<port> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -484,7 +485,7 @@ LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
-`diff`, and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
+`diff`, `docker` (the scratch session database), and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
 YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
@@ -508,7 +509,15 @@ the audience is the operator's and `operator-token` checks the token against it.
 also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
 harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
-with the providers Secret mounted, as a deployment with `provider_keys` does.
+with the providers Secret mounted, as a deployment with `provider_keys` does, and a second key,
+`stage4a_sessions`, the scratch session database's URL, which only `postgres-resume`'s runtime
+projects (`session_dsn_secret`).
+
+For `postgres-resume` the script starts a throwaway Postgres (the pinned image CI tests against) in
+a docker container on the devbox's private address at `LEGION_E2E_SESSION_DB_PORT`, which pods reach
+as they reach the worker stream, and removes it on every exit. Its password is the run's own, reaches
+docker through an owner-only env file, and the URL is written only to an owner-only file the harness
+and the providers Secret read; neither is printed.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -518,6 +527,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
+| `LEGION_E2E_SESSION_DB_PORT` | required | a port on the devbox's private address that the devbox's security group admits from the Legion nodes, as it admits the worker-stream port, where the scratch session database listens; refused when it is not a number, is the worker stream's port, or is taken |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-launcher`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
@@ -593,6 +603,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `re-adopt` | the listener and runtime closed, a separate issue pod deleted while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded processes and unchanged pods and Sandbox generations, the deleted issue is gone with its recorded process, and every living shim says hello again with its current token |
 | `orphan-sweep` | a running separate issue Sandbox left out of `known` survives a sweep with a 1-hour grace, and a sweep with a 1-second grace while its tree's lifecycle is open; once its tree's cleanup is recorded confirmed and the runtime and listener are replaced, a 1-second sweep deletes it. The suspended role and every known issue Sandbox survive |
 | `release-preserves-issue` | Release of one worker ends only its role process: the shared issue Sandbox remains `Running`, the root role remains Alive, and the tree PVC remains `Bound`. Stage 4b, through the daemon's durable outbox effect, proves whole-tree cleanup |
+| `postgres-resume` | the listener and runtime replaced by one with `session_store: postgres` (`SessionDSNKey` `stage4a_sessions`); a new tree's root spawned under it registers, and its stub agent's environment carries `OMP_SESSION_STORAGE=sql`, `OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/OMP_SESSION_SQL_DSN` and `LEGION_WORKSPACE_RECREATED=false`, and never the URL. The harness writes the root's session into the scratch database's table, as `legion sessions import` copies one, at a path the tree volume holds no file at, dated an hour before the pod's workspace was created. Suspended, the root's Resume naming a path the table lacks is refused by its launcher with `the session table holds no such session` and registers nothing; its Resume from the copied path registers that generation's token, so the launcher found the session in the table through the pod's URL file, and the agent's environment (`LEGION_WORKSPACE_RECREATED=true`) says the workspace was recreated since the session was last written |
 | `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
 
 Everything the run creates carries the project label `s4a-<UTC timestamp>-<4 hex>`, and the

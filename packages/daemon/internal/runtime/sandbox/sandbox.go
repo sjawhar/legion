@@ -73,6 +73,7 @@ type Runtime struct {
 	providerKeys                            map[string]string
 	providersSecrets                        []string
 	natsUser                                string
+	sessionDSNKey                           string
 	agentSecrets                            *AgentSecrets
 	agent                                   []string
 	bootTimeout                             time.Duration
@@ -274,7 +275,7 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and the cluster's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
-	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets); err != nil {
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets, opts.SessionDSNKey); err != nil {
 		return refuse("%v", err)
 	}
 	for _, name := range opts.ProvidersSecrets {
@@ -288,7 +289,8 @@ func configure(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
+		sessionDSNKey: opts.SessionDSNKey,
+		bootTimeout:   opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
@@ -591,6 +593,11 @@ func (r *Runtime) checkLocator(loc runtime.Locator) error {
 // ProvisionsWorkspaces is true: every pod's init containers provision its claim's workspace on the
 // tree volume, and the tree volume goes with the tree's root claim.
 func (r *Runtime) ProvisionsWorkspaces() bool { return true }
+
+// SessionsOnVolume is true unless the runtime keeps sessions in its session database
+// (Options.SessionDSNKey): a file session is on its tree's volume, which another tree's pods never
+// mount.
+func (r *Runtime) SessionsOnVolume() bool { return r.sessionDSNKey == "" }
 
 // Suspend ends only the recorded role process. It never changes the issue Sandbox operating mode:
 // every other resident role shares that pod and stays reachable until its own explicit stop or

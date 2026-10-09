@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -171,6 +172,12 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
 			return err
 		}
+	}
+	// Recorded the moment the add has made the workspace, ahead of anything that can still fail:
+	// a provisioning that failed after it finds the workspace there next time and adds it no more,
+	// so only this one can record when it was created (Created).
+	if err := RecordCreated(workspace.Dir, time.Now()); err != nil {
+		return err
 	}
 	if !fromMain {
 		return nil

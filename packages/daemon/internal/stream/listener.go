@@ -89,6 +89,8 @@ type Listener struct {
 	// listener ends: Await's wake-up.
 	registered chan struct{}
 	closed     bool
+	// narrowed is the daemon's stop begun (Narrow): no child shim's hello is answered any more.
+	narrowed bool
 	// registrations numbers the connections in the order they were registered (Conn.Sequence).
 	registrations uint64
 
@@ -374,8 +376,17 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, LauncherHandler
 	if hello.Validate() != nil {
 		return nil, nil, "malformed hello"
 	}
+	if l.isNarrowed() {
+		// The daemon is stopping: the shim keeps what its agent says and redials the next daemon.
+		return nil, nil, ""
+	}
 	token, generation, stale, known, err := l.resolve(hello.BootToken)
 	switch {
+	case l.isNarrowed():
+		// The stop began while the token was resolved, and whatever the resolver answered (an error,
+		// a hold the stop released, a generation since replaced) is the stop's, not the shim's.
+		l.log.Info("worker-stream: the daemon's stop began while a hello's boot token was resolved; the shim redials the next daemon")
+		return nil, nil, ""
 	case err != nil:
 		l.log.Warn("worker-stream: could not resolve a hello's boot token; the shim redials", "error", err)
 		return nil, nil, ""
@@ -398,7 +409,7 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, LauncherHandler
 func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64, identity *AgentSecretsIdentity) (*Conn, string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closed {
+	if l.closed || l.narrowed {
 		return nil, ""
 	}
 	if _, bound := l.conns[token]; bound {
@@ -429,6 +440,31 @@ func (l *Listener) isClosed() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.closed
+}
+
+func (l *Listener) isNarrowed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.narrowed
+}
+
+// Narrow is the start of the daemon's stop, before the listener's own end: from now on no child
+// shim's hello is answered, and every child shim connection whose claim keep does not name is
+// closed, each with its Closed event. A shim whose connection is gone keeps what its agent says
+// in its backlog and replays it to the next daemon; a connection left open would take frames a
+// stopping daemon no longer acts on. keep names the claims whose decisions the stop lets finish,
+// which send their process's shutdown frame over that connection. A launcher's hello is still
+// answered and its connections stay open: a suspension the stop lets finish waits on its
+// launcher's report.
+func (l *Listener) Narrow(keep func(claim.Token) bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.narrowed = true
+	for token, conn := range l.conns {
+		if !keep(token) {
+			_ = conn.nc.Close()
+		}
+	}
 }
 
 // shutdown is the end of the listener's context: no more accepts (closing a unix listener

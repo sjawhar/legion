@@ -613,6 +613,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -1206,6 +1207,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

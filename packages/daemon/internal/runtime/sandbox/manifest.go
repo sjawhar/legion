@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -82,7 +83,19 @@ var runtimeOwned = map[string]bool{
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
 	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
+	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 }
+
+// sessionStoreVariables are Oh My Pi's two variables that place a session: the runtime sets both
+// under a session database (Options.SessionDSNKey) and the pod baseline the first to file otherwise
+// (internal/podsafety), so neither is ever the operator's or a provider key's to set.
+var sessionStoreVariables = []string{ompsessions.StorageVariable, ompsessions.DSNFileVariable}
+
+// sessionDSNFile is the file under ProvidersDir that the providers Secret's session database URL
+// key (Options.SessionDSNKey) is mounted as: named for the variable whose `_FILE` pointer names it,
+// OMP_SESSION_SQL_DSN_FILE, so the shim, which skips a file whose pointer its environment carries,
+// never exports the URL into Oh My Pi's environment whatever the key is called.
+const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones and each launcher
@@ -144,18 +157,24 @@ type launch struct {
 	ownsVolume bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is checked by the role launcher before it starts the child; an issue pod's shared
-	// init checks tree storage, not a triggering role's transcript, and other stored sessions can
-	// also require an existing tree.
+	// resumeFile is checked by the role launcher before it starts the child, on the tree volume or,
+	// under a session database, in the session table (internal/launcher); an issue pod's shared init
+	// checks tree storage, not a triggering role's transcript, and other stored sessions can also
+	// require an existing tree.
 	resumeFile string
+	// sessionsInDatabase is whether the runtime keeps every session in a database
+	// (Options.SessionDSNKey) rather than as files on the volume: then no recorded session says
+	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
+	// controller's is held to one.
+	sessionsInDatabase bool
 	// expectTreeVolume and removableWorkspacesJSON are an issue pod's workspace-init inputs
 	// (initEnvironment), which the issue pod sets itself (issuePod.prepare, issuePod.readyNewPod).
 	// expectTreeVolume is whether the tree volume must already hold the shared clone or a retained
-	// session. removableWorkspacesJSON is the tree's removable-workspace candidates
-	// (Options.Removable), JSON-encoded together with their expiry, one object; "" when there are
-	// none. It is set last, under the tree's launch turn (setRemovable): prepare runs long before
-	// that turn is even requested, so a list this early could already be stale by the time a pod's
-	// manifest is actually written.
+	// session, which only sessions kept on the volume can say. removableWorkspacesJSON is the tree's
+	// removable-workspace candidates (Options.Removable), JSON-encoded together with their expiry,
+	// one object; "" when there are none. It is set last, under the tree's launch turn
+	// (setRemovable): prepare runs long before that turn is even requested, so a list this early
+	// could already be stale by the time a pod's manifest is actually written.
 	expectTreeVolume        bool
 	removableWorkspacesJSON string
 }
@@ -197,7 +216,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}}
+	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != ""}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}
 	}
@@ -282,6 +301,22 @@ func validateSessionPath(file string) error {
 			file, ompSessionsDir)
 	}
 	return nil
+}
+
+// SessionOnVolume is where a recorded session file sits on a tree or controller volume mounted at
+// root: an agent's sessions directory is the volume's SessionsSubPath, so a session's path below
+// the one is its path below the other. It refuses a session file no pod keeps there
+// (validateSessionPath).
+func SessionOnVolume(file, root string) (string, error) {
+	if err := validateSessionPath(file); err != nil {
+		return "", err
+	}
+	return sessionOnVolume(file, root), nil
+}
+
+// sessionOnVolume is SessionOnVolume of a session file validateSessionPath already passed.
+func sessionOnVolume(file, root string) string {
+	return filepath.Join(root, SessionsSubPath, strings.TrimPrefix(file, ompSessionsDir+"/"))
 }
 
 // agentArgv is the command the shim runs: the agent with the image's Envoy and Legion plugins as
@@ -534,10 +569,12 @@ func agentSecretsMounts(broker *AgentSecrets, role claim.Role) []corev1.VolumeMo
 
 // providers are the providers Secret's volume and its read-only mount at ProvidersDir: the
 // configured keys alone, each a file named for the variable Oh My Pi reads, which is what the shim
-// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv), and each
-// providers secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since
-// the container's `<NAME>_FILE` points at it (providersPointers). Neither without provider keys or
-// providers secrets, so a deployment with none needs no such Secret.
+// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv); each providers
+// secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since the
+// container's `<NAME>_FILE` points at it (providersPointers); and the session database's URL key
+// (Options.SessionDSNKey) as sessionDSNFile, which the shim skips for the same reason
+// (mainEnvironment's OMP_SESSION_SQL_DSN_FILE). None of them without any of the three, so a
+// deployment with none needs no such Secret.
 func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 	if !r.mountsProviders() {
 		return nil, nil
@@ -549,16 +586,40 @@ func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 	for _, name := range r.providersSecrets {
 		items = append(items, corev1.KeyToPath{Key: name, Path: name})
 	}
+	if r.sessionDSNKey != "" {
+		items = append(items, corev1.KeyToPath{Key: r.sessionDSNKey, Path: sessionDSNFile})
+	}
 	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
 		}}}},
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
 }
 
-// mountsProviders reports whether every pod mounts the providers Secret: some provider key or
-// providers secret is configured.
+// mountsProviders reports whether every pod mounts the providers Secret: some provider key,
+// providers secret, or session database URL key is configured.
 func (r *Runtime) mountsProviders() bool {
-	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0
+	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0 || r.sessionDSNKey != ""
+}
+
+// providersKeys are the providers Secret's keys every pod mounts, sorted: what the image probe
+// names when the kubelet cannot mount one.
+func (r *Runtime) providersKeys() []string {
+	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
+	if r.sessionDSNKey != "" {
+		keys = append(keys, r.sessionDSNKey)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// sessionDSNPointer is OMP_SESSION_SQL_DSN_FILE naming the mounted session database URL, none
+// without one: in the image probe's container it is what keeps `legion probe-image`, which reads
+// the providers directory as the shim does, from exporting the URL into Oh My Pi's environment.
+func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
+	if r.sessionDSNKey == "" {
+		return nil
+	}
+	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: ProvidersDir + "/" + sessionDSNFile}}
 }
 
 // providersPointers are the `<NAME>_FILE` pointer of each providers secret to its file in the
@@ -704,11 +765,14 @@ func (r *Runtime) ProvisionBound() time.Duration {
 // every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
 // (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
-// mount. None of them repeats another: the runtime refuses a spec naming one of its own
-// (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or a spec's.
-// POD_UID is the pod's own incarnation, from the downward API. The secrets broker is told only to
-// a role that enrolls (enrolledWith). PI_SHELL_PREFIX puts the `legion` directory first on PATH
-// alone: a pod's gh is the image's, so no directory of the tree volume leads PATH.
+// mount, then, under a session database (Options.SessionDSNKey), OMP_SESSION_STORAGE=sql and
+// OMP_SESSION_SQL_DSN_FILE naming its mounted URL, which a pod created before the store was set
+// does not mount: Oh My Pi refuses to start on an unreadable URL file, so that generation fails
+// rather than keeping files. None of them repeats another: the runtime refuses a spec naming one
+// of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
+// a spec's. POD_UID is the pod's own incarnation, from the downward API. The secrets broker is
+// told only to a role that enrolls (enrolledWith). PI_SHELL_PREFIX puts the `legion` directory
+// first on PATH alone: a pod's gh is the image's, so no directory of the tree volume leads PATH.
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -751,7 +815,14 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", generationDir(l.spec.Generation)+"/"+name)
 	}
-	return append(env, r.providersPointers()...)
+	env = append(env, r.providersPointers()...)
+	// Oh My Pi's own two variables, which place the session in the database whose URL the mounted
+	// key holds (providers); with none, the pod baseline keeps it a file (internal/podsafety).
+	if r.sessionDSNKey != "" {
+		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+		add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
+	}
+	return env
 }
 
 // launchEnvironment is mainEnvironment split into its two carriers: the variables the kubelet
