@@ -108,8 +108,11 @@ related_issues:
 
 Commit the documentation on the existing issue branch. Do not create a replacement branch or
 bookmark. Then commit the removal of the issue's handoffs as the one final commit, touching
-nothing else: `cd -- "$LEGION_WORKSPACE" && rm -r -- ".legion/$LEGION_ISSUE" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/$LEGION_ISSUE/ before READY" ".legion/$LEGION_ISSUE"`.
-A retro that commits no learning makes that commit alone.
+nothing else, when the head still holds them:
+`cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/$LEGION_ISSUE" ]; then rm -r -- ".legion/$LEGION_ISSUE" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/$LEGION_ISSUE/ before READY" ".legion/$LEGION_ISSUE"; fi`.
+A retro that commits no learning makes that commit alone; a retro after an earlier removal with no
+handoff written since has nothing to remove and makes none (a split of an absent path would leave
+an empty commit).
 
 Before you push those commits, bring up to date the body content the repository derives from the
 pull request's changed paths. A repository can require such content, a line naming a checklist
