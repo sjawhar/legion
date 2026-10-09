@@ -555,7 +555,7 @@ merger_summary() {
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
 # merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
-# made any of the three ways Oh My Pi gives the model to call dispatch_message and envoy_publish
+# made any way Oh My Pi gives the model to call dispatch_message and envoy_publish
 # (lib/omp-tool-calls.jq's calls). Any publish counts; a message counts when its body starts with
 # READY, which in eval code is a string literal that starts with it.
 merger_self_posted() {

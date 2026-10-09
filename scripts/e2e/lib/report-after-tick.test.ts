@@ -7,9 +7,9 @@ import { scriptFunctions } from "./script-functions";
 // report_after_tick, taken from stage4b-sandbox-tree.sh by name and run against controller sessions
 // written as Oh My Pi writes them: the daily-report checkpoint passes only when the controller's
 // call that posted its report came on a turn a tick started while the controller was idle. Oh My
-// Pi gives the model three ways to make that call, and each must count: the dispatch_message tool
-// itself, a write to its xd://dispatch_message device, and eval code that calls
-// tool.dispatch_message(...).
+// Pi gives the model four ways to make that call, and each must count: the dispatch_message tool
+// itself, a write to its xd://dispatch_message device, eval code that calls
+// tool.dispatch_message(...), and eval code that calls the generic tool.write(...) naming that device.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "report-after-tick-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -72,7 +72,22 @@ const viaEval = (issue: string): Call => ({
     code: `const body = \`${body}\`;\nconst r = await tool.dispatch_message({ issue: "${issue}", body });\nr;`,
   },
 });
-const surfaces = { tool: viaTool, device: viaDevice, eval: viaEval } as const;
+const viaEvalWrite = (issue: string): Call => ({
+  type: "toolCall",
+  id: callId(),
+  name: "eval",
+  arguments: {
+    language: "js",
+    title: "post daily report",
+    code: `const body = \`${body}\`;\nconst r = await tool.write({ path: "xd://dispatch_message", content: JSON.stringify({ issue: "${issue}", body }), i: "Post" });\nr;`,
+  },
+});
+const surfaces = {
+  tool: viaTool,
+  device: viaDevice,
+  eval: viaEval,
+  evalWrite: viaEvalWrite,
+} as const;
 const posted = result(`Posted message 2adbdb49 (dispatch://${report}/message/2adbdb49)`);
 
 // onTickTurn: the start turn has a tick steered into it and ends; the next tick finds the
@@ -182,7 +197,7 @@ describe("report_after_tick", () => {
   test("a session with no call posting on the report issue fails naming what it looked for", () => {
     const { code, stdout } = run(onTickTurn(viaEval("LEGSMOKE-469")));
     expect(stdout).toBe(
-      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message`
+      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message or tool.write`
     );
     expect(code).toBe(1);
   });
