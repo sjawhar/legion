@@ -328,28 +328,28 @@ func TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL(t *testing.T) {
 func TestLoadRefusesAnIAMURLThatDoesNotVerifyTheServer(t *testing.T) {
 	isolatePostgresDefaults(t)
 	base := "postgres://agent_secrets_broker@" + rdsHost + ":5432/agent_secrets"
-	for name, url := range map[string]string{
-		"sslmode=require":                          base + "?sslmode=require",
-		"sslmode=require with sslrootcert":         base + "?sslmode=require&sslrootcert=" + rdsBundle,
-		"no sslmode":                               base + "?sslrootcert=" + rdsBundle,
-		"sslmode=disable":                          base + "?sslmode=disable",
-		"sslmode=verify-ca":                        base + "?sslmode=verify-ca&sslrootcert=" + rdsBundle,
-		"verify-full without sslrootcert":          base + "?sslmode=verify-full",
-		"a later sslmode undoing verify-full":      verifiedRDSURL + "&sslmode=require",
-		"a second host":                            "postgres://agent_secrets_broker@" + rdsHost + ":5432,other.example.net:5432/agent_secrets?sslmode=verify-full&sslrootcert=" + rdsBundle,
-		"an sslrootcert that names no file":        base + "?sslmode=verify-full&sslrootcert=/nonexistent/rds-bundle.pem",
-		"an sslrootcert that holds no certificate": base + "?sslmode=verify-full&sslrootcert=config_test.go",
+	for name, tc := range map[string]struct{ url, reason string }{
+		"sslmode=require":                          {base + "?sslmode=require", "its sslmode is not verify-full"},
+		"sslmode=require with sslrootcert":         {base + "?sslmode=require&sslrootcert=" + rdsBundle, "its sslmode is not verify-full"},
+		"no sslmode":                               {base + "?sslrootcert=" + rdsBundle, "its sslmode is not verify-full"},
+		"sslmode=disable":                          {base + "?sslmode=disable", "its sslmode is not verify-full"},
+		"sslmode=verify-ca":                        {base + "?sslmode=verify-ca&sslrootcert=" + rdsBundle, "its sslmode is not verify-full"},
+		"verify-full without sslrootcert":          {base + "?sslmode=verify-full", "it names no sslrootcert"},
+		"a later sslmode undoing verify-full":      {verifiedRDSURL + "&sslmode=require", "its sslmode is not verify-full"},
+		"a second host":                            {"postgres://agent_secrets_broker@" + rdsHost + ":5432,other.example.net:5432/agent_secrets?sslmode=verify-full&sslrootcert=" + rdsBundle, "it names another host too"},
+		"an sslrootcert that names no file":        {base + "?sslmode=verify-full&sslrootcert=/nonexistent/rds-bundle.pem", "unable to read CA file"},
+		"an sslrootcert that holds no certificate": {base + "?sslmode=verify-full&sslrootcert=config_test.go", "unable to add CA to cert pool"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := validEnv()
-			e["BROKER_DATABASE_URL"] = url
+			e["BROKER_DATABASE_URL"] = tc.url
 			cfg, err := Load(env(e))
 			if err == nil {
-				t.Fatalf("Load accepted %s (DatabaseIAM %v); want a refusal naming the host", url, cfg.DatabaseIAM)
+				t.Fatalf("Load accepted %s (DatabaseIAM %v); want a refusal naming the host", tc.url, cfg.DatabaseIAM)
 			}
-			for _, want := range []string{"BROKER_DATABASE_URL", rdsHost} {
+			for _, want := range []string{"BROKER_DATABASE_URL", rdsHost, tc.reason} {
 				if !strings.Contains(err.Error(), want) {
-					t.Errorf("refusal %q does not name %s", err, want)
+					t.Errorf("refusal %q does not say %q", err, want)
 				}
 			}
 			if strings.Contains(err.Error(), "postgres://") {

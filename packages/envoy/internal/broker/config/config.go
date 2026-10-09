@@ -210,13 +210,23 @@ func databaseIAM(databaseURL string) (bool, error) {
 		}
 		return refuse("pgx cannot read it: " + err.Error())
 	}
-	switch {
-	case len(conn.Fallbacks) > 0 || !strings.EqualFold(conn.Host, host):
-		return refuse("it names another host too")
-	case conn.TLSConfig == nil || conn.TLSConfig.InsecureSkipVerify || conn.TLSConfig.ServerName != conn.Host:
-		return refuse("its sslmode is not verify-full")
-	case conn.TLSConfig.RootCAs == nil:
-		return refuse("it names no sslrootcert")
+	// pgx tries the primary and then each fallback in turn: another host is a fallback, and so is
+	// the plaintext retry sslmode=prefer (pgx's default) makes. Every attempt must be to the host,
+	// verified.
+	attempts := []*pgconn.FallbackConfig{{Host: conn.Host, Port: conn.Port, TLSConfig: conn.TLSConfig}}
+	attempts = append(attempts, conn.Fallbacks...)
+	for _, attempt := range attempts {
+		if !strings.EqualFold(attempt.Host, host) {
+			return refuse("it names another host too")
+		}
+	}
+	for _, attempt := range attempts {
+		if attempt.TLSConfig == nil || attempt.TLSConfig.InsecureSkipVerify || attempt.TLSConfig.ServerName != attempt.Host {
+			return refuse("its sslmode is not verify-full")
+		}
+		if attempt.TLSConfig.RootCAs == nil {
+			return refuse("it names no sslrootcert")
+		}
 	}
 	return true, nil
 }
