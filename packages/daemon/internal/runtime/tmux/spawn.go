@@ -46,9 +46,8 @@ var runtimeOwned = map[string]bool{
 	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true, "XDG_CONFIG_HOME": true,
-	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
-	"LEGION_BOOT_TOKEN_FILE": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true,
+	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true,
+	"XDG_STATE_HOME": true, "LEGION_BOOT_TOKEN_FILE": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true,
 	"GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
 	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
 }
@@ -163,10 +162,10 @@ type PaneInputs struct {
 // non-empty GH_TOKEN would; PI_SHELL_PREFIX, which keeps this daemon's legion launcher first in
 // the agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay
 // writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets
-// at all — and LEGION_GRANT_FILE, runtime.GrantFile), the four XDG base directories under
-// `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE` pointer per secret
-// file. PATH is never among them — tmux would replace it (LEGION-91) — and neither is any secret's
-// value. No tool path is told: a pane's gh, git and jj are whatever its PATH, the daemon's, gives.
+// at all), the four XDG base directories under `<state_dir>/home`, the spec's own variables
+// sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among them — tmux would
+// replace it (LEGION-91) — and neither is any secret's value. No tool path is told: a pane's gh,
+// git and jj are whatever its PATH, the daemon's, gives.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -195,7 +194,6 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
 	add("PI_CONFIG_FILES", filepath.Join(in.StateDir, podsafety.TurnScopeFile))
 	add("GIT_TERMINAL_PROMPT", "0")
-	add("LEGION_GRANT_FILE", runtime.GrantFile(in.StateDir, spec.Claim))
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
 	}

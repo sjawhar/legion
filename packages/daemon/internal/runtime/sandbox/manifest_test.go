@@ -402,40 +402,6 @@ func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
 	}
 }
 
-// Oh My Pi copies its own environment once for every `gh` it runs to serve a pr:// or issue://
-// read, so the worker container is told LEGION_GRANT_FILE from its start; the extension writes a
-// grant there before each such call (LEGION-262). The file is the claim's, on the state volume in
-// memory — never on the tree volume every agent of the tree can read — and no init container,
-// none of which redeems a grant, is told one.
-func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := workerSpec(t)
-	pod := podOf(t, r, spec, false)
-	main := workerOf(t, r, spec, false)
-	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
-	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
-		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
-	}
-	for _, init := range pod.InitContainers {
-		if got, ok := envOf(init)["LEGION_GRANT_FILE"]; ok {
-			t.Errorf("init container %s is told LEGION_GRANT_FILE=%q; no init container redeems a grant", init.Name, got)
-		}
-	}
-	var volume string
-	if mount := mountHolding(main, want); mount != nil {
-		volume = mount.Name
-	}
-	for _, v := range pod.Volumes {
-		if v.Name == volume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
-			return
-		}
-	}
-	t.Fatalf("the grant file %s is on volume %q, which is not an in-memory emptyDir", want, volume)
-}
-
 // A pod's own IP changes on every restart, so a daemon that runs as a pod hands pods a stable
 // address instead, a Kubernetes Service's DNS name: StreamURL is advertise_host at the worker
 // stream's port (shimAddress, internal/daemon/daemon.go) and DaemonURL is daemon_url. Neither

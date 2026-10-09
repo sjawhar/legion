@@ -299,6 +299,67 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 	}
 }
 
+// nextImage is another release's pinned image: what a daemon restarted onto a new release is
+// configured with over pods the previous release launched.
+const nextImage = "ghcr.io/sjawhar/legion-worker@sha256:2e2e2e2e0000000000000000000000000000000000000000000000000000cafe"
+
+// A pod launched from another release's image — every container of it, or an init container alone,
+// since a pod is built whole from one image — runs agents that call this daemon as that release,
+// for a route it no longer serves or a variable it no longer sets. A relaunch of any of its roles
+// replaces it, as one dialing a moved stream is replaced (imageDrift beside movedInPod), the
+// daemon-launched controller's pod included, and every container of the new pod runs the configured
+// image. A pod on the configured image is kept, the role's new generation started in it.
+func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
+	olderInit := func(pod *corev1.Pod) {
+		for i := range pod.Spec.InitContainers {
+			if pod.Spec.InitContainers[i].Name == initContainer {
+				pod.Spec.InitContainers[i].Image = nextImage
+			}
+		}
+	}
+	for name, tc := range map[string]struct {
+		spec     func(*testing.T) runtime.SpawnSpec
+		session  string
+		pinned   string            // the image the restarted daemon is configured with
+		stored   func(*corev1.Pod) // what the stored pod is edited to carry before the restart
+		replaced bool
+	}{
+		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, false},
+		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, true},
+		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, true},
+		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil)
+			spec := tc.spec(t)
+			loc := g.spawn(spec)
+			if tc.stored != nil {
+				g.update(g.pod(loc.Sandbox.Name), tc.stored)
+			}
+			r2 := secondRuntime(t, g, func(o *Options) { o.Image = tc.pinned })()
+			g.connectRunning(spec.Claim, loc.Sandbox.Generation)
+			g.eventually("the role's launcher to report its child to the restarted daemon", func() bool {
+				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)
+				return connected && state.Child != nil
+			})
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", tc.session
+			newLoc, err := r2.Resume(g.ctx, &loc, spec)
+			if err != nil {
+				t.Fatalf("Resume: %v", err)
+			}
+			if replaced := newLoc.Sandbox.PodUID != loc.Sandbox.PodUID; replaced != tc.replaced {
+				t.Fatalf("Resume replaced the pod: %t, want %t (pod %s, then %s)", replaced, tc.replaced, loc.Sandbox.PodUID, newLoc.Sandbox.PodUID)
+			}
+			if newLoc.Sandbox.Generation != 2 {
+				t.Fatalf("resumed at %+v, want generation 2", newLoc.Sandbox)
+			}
+			if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted {
+				t.Fatalf("the pod the role runs in has a container on image %s, want every container on the configured %s", other, tc.pinned)
+			}
+		})
+	}
+}
+
 // Stage 4b's finished-idle-planner-death: `kill 1` in a role container ends that role's launcher,
 // the kubelet restarts the container under restartPolicy Always, and the new launcher connects
 // before the pod status drops the killed instance's terminated state. The replacement generation

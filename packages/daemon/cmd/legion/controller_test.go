@@ -540,7 +540,6 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"GH_TOKEN":                        "",
 		"GITHUB_TOKEN":                    "",
 		"GH_HOST":                         "",
-		"LEGION_GRANT_FILE":               filepath.Join(secrets, "legion-demo-controller-grant"),
 		"LEGION_CONTROLLER_START_MESSAGE": daemon.ControllerStartMessage,
 		"DISPATCH_URL":                    "https://dispatch.test",
 		"DISPATCH_TOKEN_FILE":             filepath.Join(c.dir, "dispatch-token"),
@@ -1007,7 +1006,7 @@ func TestControllerStartDropsAnInheritedBootToken(t *testing.T) {
 }
 
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
-// the state directory, the secret file, the grant file, and LEGION_PROJECT.
+// the state directory, the secret file and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -1023,7 +1022,6 @@ func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
 		"LEGION_PROJECT":                "sjawharlegion",
 		"LEGION_STATE_DIR":              stateDir,
 		"LEGION_CONTROLLER_SECRET_FILE": filepath.Join(stateDir, "secrets", "legion-sjawharlegion-controller"),
-		"LEGION_GRANT_FILE":             filepath.Join(stateDir, "secrets", "legion-sjawharlegion-controller-grant"),
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)

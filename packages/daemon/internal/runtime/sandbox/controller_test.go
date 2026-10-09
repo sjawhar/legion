@@ -171,8 +171,7 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 		"LEGION_CONTROLLER": "1", "LEGION_ROLE": string(claim.RoleController), "LEGION_PROJECT": testProject,
 		"LEGION_DAEMON_URL": opts.DaemonURL, "LEGION_STATE_DIR": StateDir, "ENVOY_URL": opts.EnvoyURL,
 		"ENVOY_NATS_URL": opts.NATSURLs[0], "LEGION_BOOT_TOKEN_FILE": generationDir(2) + "/" + bootTokenKey,
-		"ENVOY_TOKEN_FILE": generationDir(2) + "/ENVOY_TOKEN", "LEGION_GRANT_FILE": runtime.GrantFile(StateDir, controllerToken),
-		"LEGION_GENERATION": "2",
+		"ENVOY_TOKEN_FILE": generationDir(2) + "/ENVOY_TOKEN", "LEGION_GENERATION": "2",
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)
@@ -187,7 +186,7 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	slices.Sort(told)
 	if want := []string{
 		"DISPATCH_TOKEN_FILE", "DISPATCH_URL", "ENVOY_NATS_URL", "ENVOY_URL", "GIT_TERMINAL_PROMPT", "LEGION_BOOT_TOKEN_FILE",
-		"LEGION_CONTROLLER", "LEGION_DAEMON_URL", "LEGION_GENERATION", "LEGION_GRANT_FILE", "LEGION_PROJECT", "LEGION_ROLE",
+		"LEGION_CONTROLLER", "LEGION_DAEMON_URL", "LEGION_GENERATION", "LEGION_PROJECT", "LEGION_ROLE",
 		"LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
 		"XDG_STATE_HOME",
 	}; !slices.Equal(told, want) {

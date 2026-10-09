@@ -77,7 +77,7 @@ var runtimeOwned = map[string]bool{
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
-	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true,
+	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
@@ -700,11 +700,9 @@ func (r *Runtime) ProvisionBound() time.Duration {
 // the generation's private launcher directory, then one per providers secret into the providers
 // mount. None of them repeats another: the runtime refuses a spec naming one of its own
 // (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or a spec's.
-// LEGION_GRANT_FILE names runtime.GrantFile on the state volume, which is empty at start: the
-// extension makes its directory. POD_UID is the pod's own incarnation, from the downward API. The
-// secrets broker is told only to a role that enrolls (enrolledWith). PI_SHELL_PREFIX puts the
-// `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the tree
-// volume leads PATH.
+// POD_UID is the pod's own incarnation, from the downward API. The secrets broker is told only to
+// a role that enrolls (enrolledWith). PI_SHELL_PREFIX puts the `legion` directory first on PATH
+// alone: a pod's gh is the image's, so no directory of the tree volume leads PATH.
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -729,7 +727,6 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
-	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
 	if broker := r.enrolledWith(spec.Role); broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)

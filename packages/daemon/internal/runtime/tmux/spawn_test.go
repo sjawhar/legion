@@ -92,11 +92,10 @@ func testSpec() runtime.SpawnSpec {
 // directory as GH_CONFIG_DIR with GH_TOKEN, GITHUB_TOKEN and GH_HOST emptied so no token in the
 // daemon's environment outranks the file, PI_SHELL_PREFIX over the launcher directory alone,
 // PI_CONFIG_FILES naming the turn-scoping overlay writeTurnScopeOverlay writes under the state
-// directory, the grant file the pi-legion extension writes before each command that redeems a
-// grant, the XDG base directories under `<state_dir>/home` explicitly, the caller's own variables
-// sorted, then one `<NAME>_FILE` pointer per secret — the boot token's first. PATH is never a pair:
-// tmux would discard it (LEGION-91); the shell command exports it. No tool path is a pair: a pane's
-// gh, git and jj are its PATH's. No secret value is in any pair.
+// directory, the XDG base directories under `<state_dir>/home` explicitly, the caller's own
+// variables sorted, then one `<NAME>_FILE` pointer per secret — the boot token's first. PATH is
+// never a pair: tmux would discard it (LEGION-91); the shell command exports it. No tool path is a
+// pair: a pane's gh, git and jj are its PATH's. No secret value is in any pair.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
 	in := PaneInputs{
@@ -128,7 +127,6 @@ func TestPanePairs(t *testing.T) {
 		"-e", "PI_SHELL_PREFIX=" + shellprefix.For("/state/bin"),
 		"-e", "PI_CONFIG_FILES=/state/" + podsafety.TurnScopeFile,
 		"-e", "GIT_TERMINAL_PROMPT=0",
-		"-e", "LEGION_GRANT_FILE=/state/secrets/legion-omp-legion-43-tester-grant",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
 		"-e", "XDG_CACHE_HOME=/state/home/.cache",
 		"-e", "XDG_DATA_HOME=/state/home/.local/share",

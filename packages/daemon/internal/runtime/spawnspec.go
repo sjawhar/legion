@@ -24,25 +24,13 @@ func IsEnvName(name string) bool { return envName.MatchString(name) }
 // when the claim is written with no process, and at boot every regular file that no claim with a
 // process owns goes, except the Dispatch token file; subdirectories are never pruned, except a
 // claim's `-gh` directory (GHConfigDir), which goes with the claim's files. So a claim's file is
-// named for its claim token (`<claim>` or `<claim>-<name>`, as GrantFile is), and a file the
-// daemon holds across claims is a subdirectory (config.ProviderEnvDir) or is kept by name in
-// boot's prune. In a Sandbox pod it is on the worker container's memory-backed state volume,
-// which goes with the pod.
+// named for its claim token (`<claim>` or `<claim>-<name>`), and a file the daemon holds across
+// claims is a subdirectory (config.ProviderEnvDir) or is kept by name in boot's prune. In a
+// Sandbox pod it is on the worker container's memory-backed state volume, which goes with the pod.
 func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secrets") }
 
 // SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.
 func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
-
-// GrantFile is the file an agent's LEGION_GRANT_FILE names: `<state_dir>/secrets/<claim>-grant`,
-// under tmux beside the claim's other secret files, which the daemon prunes it with. Every
-// runtime names it in the agent's environment from the process's start, and none writes it: the
-// pi-legion extension writes a fresh grant there before each bash command that invokes `legion`,
-// and `legion handoff complete`, `legion threads resolve` and `legion status` read it. It is a
-// worker's authentication to the daemon alone; `gh` and `git` read the role's App token from the
-// gh files under GH_CONFIG_DIR (GHConfigDir on tmux, the gh volume in a pod).
-func GrantFile(stateDir string, token claim.Token) string {
-	return SecretFilePath(stateDir, string(token)+"-grant")
-}
 
 // GitHubCredential is the daemon's one function a runtime calls for a tree role's GitHub
 // credential files: the gh `hosts.yml` and `config.yml` rendered from the role's App token
@@ -53,8 +41,8 @@ type GitHubCredential func(ctx context.Context, role claim.Role) (ghconfig.Rende
 
 // GHConfigDir is the tmux pane's GH_CONFIG_DIR: `<state_dir>/secrets/<claim>-gh`, the directory
 // holding the claim's gh files (ghconfig.HostsFile and ghconfig.ConfigFile), named for its claim
-// token as GrantFile is so the daemon prunes it with the claim's other secret files. A pod has no
-// use for it: there the files are a Secret volume the manifest mounts.
+// token so the daemon prunes it with the claim's other secret files. A pod has no use for it:
+// there the files are a Secret volume the manifest mounts.
 func GHConfigDir(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-gh")
 }

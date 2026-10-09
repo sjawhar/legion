@@ -151,7 +151,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	delete(env, natsauth.DaemonSeedFileVariable)
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
-	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
+	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
 	created, err := makeDirs(controllerDir)
@@ -235,7 +235,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
 // once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
 // pointers only. Later pairs replace any inherited value of the same name.
-func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
+func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile string) [][2]string {
 	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
@@ -253,7 +253,6 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
-		{"LEGION_GRANT_FILE", runtime.GrantFile(stateDir, legionclaim.Token(token))},
 		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {
