@@ -214,6 +214,32 @@ func TestProvisionLeavesAWorkspaceWholeWhenNoExclusionMatches(t *testing.T) {
 	}
 }
 
+// An excluded path the starting commit lacks splits no directory, even when another excluded path
+// makes the workspace sparse: `src` stays one pattern, so a file a worker adds there is recorded.
+func TestProvisionSplitsOnlyDirectoriesAboveAnExcludedPathTheCommitHas(t *testing.T) {
+	run := newLocalRunner(t)
+	pushTree(t, run, map[string]string{
+		"README.md":       "widgets\n",
+		"src/main.go":     "package main\n",
+		"tasks/t1/x.json": "{}\n",
+	})
+	request := provisionRequest(t)
+	request.Exclude = []string{"tasks", "src/gen"}
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if patterns := runSetup(t, workspace.Dir, "jj", "sparse", "list"); patterns != ".legion\nREADME.md\nsrc\n" {
+		t.Fatalf("jj sparse list = %q, want src whole: src/gen is not in the commit", patterns)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Dir, "src", "new.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := runSetup(t, workspace.Dir, "jj", "status"); !strings.Contains(status, "A src/new.go") {
+		t.Fatalf("jj status after adding src/new.go = %q, want it added", status)
+	}
+}
+
 // Exclusions shape only the workspace a provisioning creates: one that exists keeps its patterns,
 // so a path its agent added back stays checked out on every later provisioning.
 func TestProvisionKeepsAnExistingWorkspacesSparsePatterns(t *testing.T) {

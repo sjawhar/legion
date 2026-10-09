@@ -128,9 +128,10 @@ What each part is for:
   file written outside the patterns, so the role prompt tells each worker to add a path before
   writing under it, including a new top-level path or one beside a left-out path. The worker
   image's jj marks each left-out path skip-worktree in the workspace's Git index, so `git status`
-  does not list it as deleted; a worker still records changes with jj, never `git add -A` or
-  `git commit`. A path that a later commit adds beside a left-out one is not checked out until a
-  worker adds it.
+  does not list it as deleted, except after provisioning rebuilds a lost Git worktree entry (its
+  `git read-tree HEAD` sets no such mark) until the next jj command that rewrites a commit. A
+  worker still records changes with jj, never `git add -A` or `git commit`. A path that a later
+  commit adds beside a left-out one is not checked out until a worker adds it.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes

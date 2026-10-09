@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -51,55 +52,49 @@ func CleanExclude(paths []string) ([]string, error) {
 }
 
 // sparseInclude is the sparse patterns that check out everything in revision but the paths
-// exclude names (CleanExclude's form): jj's patterns name only what a working copy includes, each
-// a path and everything below it, so a path is left out by naming every entry of each directory
-// above it but the one on its way down. The entries come from the commit's own tree in the shared
-// clone. The patterns always name the handoff directory, which an issue branch starts without
-// (ghbranch.Create cuts it from main with `.legion/` deleted): jj records no file outside them.
-//
-// It returns no patterns when no excluded path is in revision's tree (a path the revision lacks,
-// or one below a file), so the workspace checks out everything rather than going sparse for
-// nothing.
+// exclude names (CleanExclude's form, non-empty): jj's patterns name only what a working copy
+// includes, each a path and everything below it, so a path is left out by naming every entry of
+// each directory above it but the one on its way down. The entries come from the commit's own tree
+// in the shared clone. An excluded path the revision lacks (or one below a file) leaves nothing out
+// and splits no directory; when no excluded path is in the tree, it returns no patterns, so the
+// workspace checks out everything rather than going sparse for nothing. The patterns always name
+// the handoff directory, which an issue branch starts without (ghbranch.Create cuts it from main
+// with `.legion/` deleted): jj records no file outside them.
 //
 // The patterns are computed once, for the revision the workspace is created at: an entry a later
 // commit adds beside an excluded path is not checked out until the workspace's agent adds it
 // (`jj sparse set --add <path>`), and nothing outside the patterns is ever changed in a commit.
 func sparseInclude(ctx context.Context, run Runner, cloneDir, revision string, exclude []string) ([]string, error) {
+	present, err := lsTree(ctx, run, cloneDir, revision, exclude)
+	if err != nil || len(present) == 0 {
+		return nil, err
+	}
 	excluded := map[string]bool{}
-	// Every directory above an excluded path, the repository root ("") included.
+	// Every directory above an excluded path the revision has, the repository root ("") included.
 	holding := map[string]bool{"": true}
-	for _, path := range exclude {
-		excluded[path] = true
-		for dir := path; strings.Contains(dir, "/"); {
+	for _, entry := range present {
+		excluded[entry.path] = true
+		for dir := entry.path; strings.Contains(dir, "/"); {
 			dir = dir[:strings.LastIndex(dir, "/")]
 			holding[dir] = true
 		}
 	}
-	dirs := make([]string, 0, len(holding))
-	for dir := range holding {
-		dirs = append(dirs, dir)
-	}
-	slices.Sort(dirs)
 	var include []string
-	leftOut := false
-	for _, dir := range dirs {
-		entries, err := treeEntries(ctx, run, cloneDir, revision, dir)
+	for _, dir := range slices.Sorted(maps.Keys(holding)) {
+		var contents []string
+		if dir != "" {
+			contents = []string{dir + "/"}
+		}
+		entries, err := lsTree(ctx, run, cloneDir, revision, contents)
 		if err != nil {
 			return nil, err
 		}
 		for _, entry := range entries {
-			if excluded[entry.path] {
-				leftOut = true
-				continue
-			}
-			if entry.tree && holding[entry.path] {
+			if excluded[entry.path] || entry.tree && holding[entry.path] {
 				continue
 			}
 			include = append(include, entry.path)
 		}
-	}
-	if !leftOut {
-		return nil, nil
 	}
 	if !slices.Contains(include, handoffDir) {
 		include = append(include, handoffDir)
@@ -108,20 +103,21 @@ func sparseInclude(ctx context.Context, run Runner, cloneDir, revision string, e
 	return include, nil
 }
 
-// treeEntry is one entry of a directory in a commit's tree: its path from the repository root,
-// and whether it is a directory (a tree; a file, a symlink and a submodule are not).
+// treeEntry is one entry of a commit's tree: its path from the repository root, and whether it is
+// a directory (a tree; a file, a symlink and a submodule are not).
 type treeEntry struct {
 	path string
 	tree bool
 }
 
-// treeEntries lists dir's entries in revision's tree, read from the shared clone's git store with
-// `git ls-tree`: the root's for "", none for a directory the revision does not have. Pathspecs are
-// literal, so a directory named with a glob character lists that directory alone.
-func treeEntries(ctx context.Context, run Runner, cloneDir, revision, dir string) ([]treeEntry, error) {
+// lsTree lists the entries of revision's tree that pathspecs name, read from the shared clone's
+// git store with `git ls-tree`: a path names that entry and a `dir/` names dir's entries, none
+// when the revision lacks it; no pathspec lists the root's entries. Pathspecs are literal, so a
+// path with a glob character names that path alone.
+func lsTree(ctx context.Context, run Runner, cloneDir, revision string, pathspecs []string) ([]treeEntry, error) {
 	argv := []string{"git", "--literal-pathspecs", "--git-dir=" + cloneDir + "/.git", "ls-tree", "-z", "--full-tree", revision}
-	if dir != "" {
-		argv = append(argv, "--", dir+"/")
+	if len(pathspecs) > 0 {
+		argv = append(append(argv, "--"), pathspecs...)
 	}
 	listed, err := RunChecked(ctx, run, argv, nil, "")
 	if err != nil {
