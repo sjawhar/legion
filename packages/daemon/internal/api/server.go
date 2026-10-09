@@ -243,15 +243,15 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 }
 
-// decision is the context a route runs a decision of the claims tokens names on. It outlives the
-// request, so a caller that hangs up mid-request does not leave a registration or a stop half
-// done, and it ends once the daemon's stop has drained the API (Options.Drained). Until the
-// caller calls the returned function, which it does once the decision is made, the claims are
-// recorded as decided by a route (RouteDecisions).
-func (s *server) decision(r *http.Request, tokens ...claim.Token) (context.Context, context.CancelFunc) {
+// decision is the context a route runs a decision of token's claim on. It outlives the request,
+// so a caller that hangs up mid-request does not leave a registration or a stop half done, and it
+// ends once the daemon's stop has drained the API (Options.Drained). Until the caller calls the
+// returned function, which it does once the decision is made, the claim is recorded as decided by
+// a route (RouteDecisions). A route that decides other claims too records each of them (begin).
+func (s *server) decision(r *http.Request, token claim.Token) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 	stop := context.AfterFunc(s.drained, cancel)
-	ended := s.decisions.begin(tokens)
+	ended := s.decisions.begin([]claim.Token{token})
 	return ctx, func() {
 		ended()
 		stop()

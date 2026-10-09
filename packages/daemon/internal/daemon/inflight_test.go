@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -697,8 +698,8 @@ func TestAFrameAShimWritesDuringTheDrainWaitsInItsBacklogForTheNextDaemon(t *tes
 	testwait.Eventually(t, "the daemon to say it is stopping", func() bool {
 		return strings.Contains(logs.String()[mark:], `"msg":"legion daemon stopping"`)
 	})
-	// Well inside the drain (8 s): the connection goes at the halt, not when the drain ends.
-	awaitLog(t, shimLog, "closed (", 3*time.Second, "the daemon kept the connection of a claim no route is deciding open through the drain")
+	// Well inside the drain: the connection goes at the halt, not when the drain ends.
+	awaitLog(t, shimLog, "closed (", drainOf(stopBudget)/2, "the daemon kept the connection of a claim no route is deciding open through the drain")
 	if err := decided.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
@@ -763,4 +764,155 @@ func TestAFrameAShimWritesDuringTheDrainWaitsInItsBacklogForTheNextDaemon(t *tes
 	if frame, err := shimwire.Decode(line); err != nil || frame.FrameType() != shimwire.TypeAgentStart {
 		t.Fatalf("the shim's first frame to the next daemon is %q, want the agent_start its agent wrote in the drain", line)
 	}
+}
+
+// closingRelease is the fake runtime whose release of the tree's root waits for the test to let the
+// root exit, as tmux's stop waits out a process its shutdown frame reached, and which records, at
+// every other claim's release, whether the claim still had its worker stream connection: tmux's
+// stop sends the shutdown frame over it, and kill-panes a process it has none for.
+type closingRelease struct {
+	*fake.Runtime
+	rec     *built
+	root    claim.Token
+	entered chan struct{}
+	exit    chan struct{}
+	mu      sync.Mutex
+	hadConn map[claim.Token]bool
+}
+
+func (r *closingRelease) Release(ctx context.Context, k runtime.Known) error {
+	switch {
+	case k.Locator == nil:
+	case k.Claim == r.root:
+		r.entered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("release %s: %w", k.Claim, ctx.Err())
+		case <-r.exit:
+		}
+	default:
+		r.rec.mu.Lock()
+		conns := r.rec.conns
+		r.rec.mu.Unlock()
+		_, ok := conns.Conn(k.Claim)
+		r.mu.Lock()
+		r.hadConn[k.Claim] = ok
+		r.mu.Unlock()
+	}
+	return r.Runtime.Release(ctx, k)
+}
+
+// An operator's close of a tree, in flight when the daemon is told to stop while the root's
+// process exits, stops the tree's other claims over their own worker stream connections: the close
+// holds them from before the root's close, so the stop keeps their connections, and each one's stop
+// sends its shutdown frame rather than ending its agent unannounced (LEGION-650).
+func TestAnOperatorsTreeCloseInFlightAtTheStopStopsTheTreesClaimsOverTheirConnections(t *testing.T) {
+	cfg := testConfig(t)
+	project, _ := claim.ProjectToken(cfg.Project)
+	root, _ := claim.NewToken(project, "LEGION-9", claim.RoleArchitect)
+	rec := &built{}
+	rt := &closingRelease{Runtime: fake.NewRuntime(), rec: rec, root: root, entered: make(chan struct{}, 1), exit: make(chan struct{}),
+		hadConn: map[claim.Token]bool{}}
+	logs := &syncBuffer{}
+	d := startDaemonLogging(t, cfg, fakeRuntime(rt, rec), slog.New(slog.NewJSONHandler(logs, nil)))
+	d.spawn(api.SpawnRequest{Tree: "LEGION-9", Issue: "LEGION-9", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."})
+	worker := d.spawn(api.SpawnRequest{Tree: "LEGION-9", Issue: "LEGION-10", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
+	for _, token := range []claim.Token{root, worker} {
+		readyClaim(t, d, rt.Runtime, token)
+		dialShim(t, rec.address, lastLaunch(t, rt.Runtime, token).BootToken)
+	}
+	answered := operatorRequest(d, http.MethodPost, "/legion/v1/operator/claims/"+string(root)+"/close", nil)
+	select {
+	case <-rt.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the root's release never reached the runtime; log:\n%s", logs)
+	}
+
+	d.stopped = true
+	d.transport.CloseIdleConnections()
+	mark := len(logs.String())
+	d.cancel()
+	testwait.Eventually(t, "the daemon to say it is stopping", func() bool {
+		return strings.Contains(logs.String()[mark:], `"msg":"legion daemon stopping"`)
+	})
+	// The halt runs in microseconds; the root, already told to shut down, exits a moment after.
+	time.Sleep(100 * time.Millisecond)
+	close(rt.exit)
+	select {
+	case err := <-d.done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(stopBound(stopBudget)):
+		t.Fatalf("run had not returned %s after its context was cancelled; it logged:\n%s", stopBound(stopBudget), logs.String()[mark:])
+	}
+	stopLog := logs.String()[mark:]
+
+	if status := <-answered; status != http.StatusOK {
+		t.Errorf("the operator's close was answered %d, want 200; the stop logged:\n%s", status, stopLog)
+	}
+	rt.mu.Lock()
+	had, stopped := rt.hadConn[worker]
+	rt.mu.Unlock()
+	if !stopped {
+		t.Fatalf("the worker's stop never reached the runtime; the stop logged:\n%s", stopLog)
+	}
+	if !had {
+		t.Errorf("the worker's stop reached the runtime with no worker stream connection, which under tmux kill-panes its agent without its shutdown frame")
+	}
+	if c := storedClaim(t, cfg, worker); c.State != supervise.StateRetired {
+		t.Errorf("the worker is stored %s, want retired", c.State)
+	}
+	quietStop(t, stopLog)
+}
+
+// A shim's hello the boot is holding, its claim real and restoration not yet over, when the daemon
+// is told to stop is closed unrefused and logged as the stop's: the stop released the hold, and a
+// stopping daemon does not report a shim reconnecting across a restart as a credential problem
+// (LEGION-650).
+func TestAHelloTheBootHoldsWhenTheStopComesClosesUnrefused(t *testing.T) {
+	cfg := testConfig(t)
+	project, _ := claim.ProjectToken(cfg.Project)
+	token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
+	bootToken := "held-" + randomSuffix(t)
+	putClaim(t, cfg, supervise.Claim{
+		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-3", Role: claim.RolePlanner,
+		State: supervise.StateQueued, BootTokenHash: supervise.HashBootToken(bootToken),
+	})
+	writePrompt(t, cfg, token)
+	rt := &bootReconcileStall{stallingRuntime: newStallingRuntime(t, fake.NewRuntime(), false), reconciling: make(chan struct{}, 1)}
+	rec := &built{}
+	o := fakeRuntime(rt, rec)
+	o.stopBudget = time.Second
+	cancel, done, logs := runLogging(t, cfg, o)
+	select {
+	case <-rt.reconciling:
+	case err := <-done:
+		t.Fatalf("run returned %v before its boot reconciled orphans; log:\n%s", err, logs)
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the boot never reconciled orphans; log:\n%s", logs)
+	}
+	rec.mu.Lock()
+	address := rec.address
+	rec.mu.Unlock()
+	conn, err := net.Dial("unix", strings.TrimPrefix(address, "unix://"))
+	if err != nil {
+		t.Fatalf("dial the worker stream: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := shimwire.NewWriter(conn).WriteFrame(shimwire.Hello2{BootToken: bootToken}); err != nil {
+		t.Fatal(err)
+	}
+	// The resolver reads the claim, then holds the hello until restoration is over.
+	time.Sleep(500 * time.Millisecond)
+
+	_, stopLog := stopRun(t, cancel, done, logs, stopBound(o.stopBudget))
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil {
+		t.Errorf("the stopping daemon answered the held hello with %q, want the connection closed unanswered", line)
+	}
+	quietStop(t, stopLog)
 }

@@ -293,6 +293,17 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	c := root.Claim()
 	ctx, decided := s.decision(r, token)
 	defer decided()
+	// The tree's other claims are this route's decisions from before the root's close, which waits
+	// out the root's exit: a daemon's stop that begins meanwhile keeps their worker stream
+	// connections open, and each one's stop below sends its shutdown frame over its own
+	// (RouteDecisions). A claim the store gains later is recorded with the read the stops use.
+	claims, err := s.supervisor.Claims(ctx)
+	if err != nil {
+		s.logFailure("api: read the claims of a tree the operator closes", "tree", c.Tree, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed nothing: the daemon could not read the claims of tree %s", c.Tree)))
+		return
+	}
+	defer s.decisions.begin(treeOthers(claims, c.Tree, token))()
 	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
 		s.operatorFailure(w, "close", token, err)
 		return
@@ -303,19 +314,13 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("closed %s's root claim, but its durable tree cleanup could not be reserved: %v. Retry legion claims close once that is resolved", c.Tree, err)))
 		return
 	}
-	claims, err := s.supervisor.Claims(ctx)
+	claims, err = s.supervisor.Claims(ctx)
 	if err != nil {
 		s.logFailure("api: read the claims of a tree the operator closed", "tree", c.Tree, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but the daemon could not read the tree's other claims to stop them", c.Tree, token)))
 		return
 	}
-	var others []claim.Token
-	for _, other := range claims {
-		if other.Tree == c.Tree && other.Token != token && other.State != supervise.StateRetired {
-			others = append(others, other.Token)
-		}
-	}
-	// The tree's other claims are this route's decisions too from here (RouteDecisions).
+	others := treeOthers(claims, c.Tree, token)
 	defer s.decisions.begin(others)()
 	var unstopped []string
 	for _, other := range others {
@@ -343,6 +348,17 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, operatorView(root.Claim()))
+}
+
+// treeOthers is every claim of tree in claims, but root and those already retired.
+func treeOthers(claims []supervise.Claim, tree string, root claim.Token) []claim.Token {
+	var others []claim.Token
+	for _, c := range claims {
+		if c.Tree == tree && c.Token != root && c.State != supervise.StateRetired {
+			others = append(others, c.Token)
+		}
+	}
+	return others
 }
 
 // list answers every claim the daemon supervises, in token order: as its machine last published it

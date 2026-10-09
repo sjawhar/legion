@@ -1041,27 +1041,34 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 	}
 }
 
-// halt begins the stop, once, and sets when it and the API's drain must end by (stopBy, drainBy)
-// before it closes halted: it says the daemon is stopping, why (cause), and which claims are
-// deciding then; then no machine is fed another event; then the worker stream stops answering a
-// shim's hello and closes every shim connection except those of the claims an API route is
-// deciding (stream.Listener.Narrow), so every other shim keeps what its agent says in its backlog
-// for the next daemon rather than hand it to one that no longer acts on it; then the machines'
-// context is cancelled. Every decision the daemon makes itself runs on that context — the
-// machines' own events, the workflow's outbox, the controller keeper, the boot's relaunches — so
-// it ends now rather than when its runtime call's own wait runs out: a Sandbox relaunch waits
-// minutes for the previous pod to go, the tree's other pods to finish workspace-init and the new
-// pod to appear. A launch the cancellation cuts short leaves its claim launching with no process
-// recorded, which the next boot relaunches once its orphan reconciliation has run. A decision an
-// API route asked for runs on until the drain ends (endDrain), with its claim's connection, which
-// carries its process's shutdown frame. What a kept connection carries meanwhile is not acted
-// on: its claim is being suspended or stopped, or registering an agent the next boot re-adopts.
-// Nothing in halt waits, so the stop's budget (stopBudget) runs from the moment it begins. A nil
-// cause is a boot that refused before it was recorded, which served nothing and says nothing more.
+// halt begins the stop, once. It sets when the stop and the API's drain must end by (stopBy,
+// drainBy), says the daemon is stopping, why (cause) and which claims are deciding, and closes
+// halted. Then, in this order:
+//
+//  1. No machine is fed another event (supervisor.halt).
+//  2. The worker stream stops answering a shim's hello and closes every shim connection except
+//     those of the claims an API route is deciding (stream.Listener.Narrow), so every other shim
+//     keeps what its agent says in its backlog for the next daemon rather than hand it to one that
+//     no longer acts on it. A kept connection carries its process's shutdown frame; what else it
+//     carries until the drain ends (endDrain) is not acted on, since its claim is being suspended
+//     or stopped, or is registering an agent the next boot re-adopts.
+//  3. The machines' context is cancelled. Every decision the daemon makes itself runs on it — the
+//     machines' own events, the workflow's outbox, the controller keeper, the boot's relaunches —
+//     so it ends now rather than when its runtime call's own wait runs out: a Sandbox relaunch
+//     waits minutes for the previous pod to go, the tree's other pods to finish workspace-init and
+//     the new pod to appear. A decision an API route asked for runs on until the drain ends.
+//
+// Two of those orderings are required: the first step comes before the second, so the Closed
+// events of the connections Narrow ends reach no machine; and the second before the third, so a
+// hello whose resolve the cancellation fails is already the stop's, and closes unrefused. A launch
+// the cancellation cuts short leaves its claim launching with no process recorded, which the next
+// boot relaunches once its orphan reconciliation has run. Nothing in halt waits, so the stop's
+// budget (stopBudget) runs from the moment it begins. A nil cause is a boot that refused before it
+// was recorded, which served nothing and says nothing more.
 func (s *supervision) halt(cause error) {
 	s.haltOnce.Do(func() {
 		now := time.Now()
-		s.stopBy, s.drainBy = now.Add(s.plan.stopBudget), now.Add(s.plan.stopBudget*4/5)
+		s.stopBy, s.drainBy = now.Add(s.plan.stopBudget), now.Add(drainOf(s.plan.stopBudget))
 		if cause != nil {
 			s.log.Info("legion daemon stopping", "project", s.cfg.Project, "claims", s.supervisor.count(),
 				"deciding", s.supervisor.inDecision(), "cause", cause.Error())
@@ -1071,6 +1078,12 @@ func (s *supervision) halt(cause error) {
 		s.stream.Narrow(s.decided.Holds)
 		s.cancel()
 	})
+}
+
+// drainOf is how long the API's drain may take within a stop budget: its first four fifths
+// (stopBudget).
+func drainOf(budget time.Duration) time.Duration {
+	return budget * 4 / 5
 }
 
 // stop ends supervision without ending a single agent: it halts it, if nothing has yet, ends the

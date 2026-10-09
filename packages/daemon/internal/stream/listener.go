@@ -382,8 +382,10 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, LauncherHandler
 	}
 	token, generation, stale, known, err := l.resolve(hello.BootToken)
 	switch {
-	case err != nil && l.isNarrowed():
-		l.log.Info("worker-stream: the daemon is stopping, so a hello's boot token was not resolved; the shim redials the next daemon", "error", err)
+	case l.isNarrowed():
+		// The stop began while the token was resolved, and whatever the resolver answered (an error,
+		// a hold the stop released, a generation since replaced) is the stop's, not the shim's.
+		l.log.Info("worker-stream: the daemon's stop began while a hello's boot token was resolved; the shim redials the next daemon")
 		return nil, nil, ""
 	case err != nil:
 		l.log.Warn("worker-stream: could not resolve a hello's boot token; the shim redials", "error", err)
