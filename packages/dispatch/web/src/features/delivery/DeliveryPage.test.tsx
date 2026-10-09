@@ -338,7 +338,9 @@ test("the list sorts by its headers and a row opens the PR's details", async () 
   try {
     renderPage();
     const titles = async () =>
-      (await screen.findAllByRole("row")).slice(1).map((row) => row.cells[3]?.textContent);
+      (await screen.findAllByRole("row"))
+        .slice(1)
+        .map((row) => (row instanceof HTMLTableRowElement ? row.cells[3]?.textContent : undefined));
     expect(await titles()).toEqual(["feat: a waiting widget", "feat: a shipped widget"]);
     fireEvent.click(screen.getByRole("button", { name: /^Merged/ }));
     expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
