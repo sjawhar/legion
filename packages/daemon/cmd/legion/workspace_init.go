@@ -111,23 +111,15 @@ func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io
 	root := flags.String("root", "/legion", "tree volume root directory")
 	credentialHelper := flags.String("credential-helper", "", "git credential helper written into the shared clone's config (required)")
 	feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
-	var exclude excludeFlag
-	flags.Var(&exclude, "exclude", "a path a new issue workspace leaves out of its checkout; once per path")
+	var exclude []string
+	flags.Func("exclude", "a path a new issue workspace leaves out of its checkout; once per path", func(path string) error {
+		exclude = append(exclude, path)
+		return nil
+	})
 	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
 		return code
 	}
 	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, exclude, stdout), stderr)
-}
-
-// excludeFlag is workspace-init provision's --exclude, given once per path the project's
-// `workspace_exclude` names.
-type excludeFlag []string
-
-func (f *excludeFlag) String() string { return strings.Join(*f, " ") }
-
-func (f *excludeFlag) Set(value string) error {
-	*f = append(*f, value)
-	return nil
 }
 
 const workspaceControllerUsage = "legion workspace-init controller [--root /legion]"

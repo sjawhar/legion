@@ -146,7 +146,7 @@ func TestProvisionLeavesTheExcludedPathsOutOfANewWorkspace(t *testing.T) {
 }
 
 // pushIssueBranchWithoutHandoffs pushes legion/WIDGETS-42 to run's remote as main with its
-// `.legion/` deleted, the commit ghbranch.Create starts an issue branch on.
+// `.legion/` deleted: an issue branch whose commit carries no handoff directory.
 func pushIssueBranchWithoutHandoffs(t *testing.T, run *recordingRunner) {
 	t.Helper()
 	work := filepath.Join(t.TempDir(), "work")
@@ -161,7 +161,7 @@ func pushIssueBranchWithoutHandoffs(t *testing.T, run *recordingRunner) {
 	runSetupWith(t, work, identity, "git", "push", "--quiet", "origin", "HEAD:refs/heads/legion/WIDGETS-42")
 }
 
-// An issue branch starts without `.legion/`, and the patterns still name it: a handoff written
+// An issue branch can start without `.legion/`, and the patterns still name it: a handoff written
 // there is part of the working copy's change, as on a workspace that checks out everything.
 func TestProvisionRecordsAHandoffOnAnIssueBranchWithoutHandoffs(t *testing.T) {
 	run := newLocalRunner(t)

@@ -58,16 +58,19 @@ func CleanExclude(paths []string) ([]string, error) {
 // in the shared clone. An excluded path the revision lacks (or one below a file) leaves nothing out
 // and splits no directory; when no excluded path is in the tree, it returns no patterns, so the
 // workspace checks out everything rather than going sparse for nothing. The patterns always name
-// the handoff directory, which an issue branch starts without (ghbranch.Create cuts it from main
-// with `.legion/` deleted): jj records no file outside them.
+// the handoff directory, which the starting commit may lack (an issue branch need not carry
+// `.legion/`): jj records no file outside them.
 //
 // The patterns are computed once, for the revision the workspace is created at: an entry a later
 // commit adds beside an excluded path is not checked out until the workspace's agent adds it
 // (`jj sparse set --add <path>`), and nothing outside the patterns is ever changed in a commit.
 func sparseInclude(ctx context.Context, run Runner, cloneDir, revision string, exclude []string) ([]string, error) {
 	present, err := lsTree(ctx, run, cloneDir, revision, exclude)
-	if err != nil || len(present) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(present) == 0 {
+		return nil, nil
 	}
 	excluded := map[string]bool{}
 	// Every directory above an excluded path the revision has, the repository root ("") included.
