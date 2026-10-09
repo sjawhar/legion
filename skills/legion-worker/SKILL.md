@@ -142,9 +142,9 @@ predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a prior
 transcript, the committed file wins: it is the copy that survived.
 
-If your system prompt, a task, or a message in your history begins with `Your workspace was recreated…`, read your phase's
-committed handoff, and `.legion/<issue>/workspace-recovered.json` when the workspace holds one, and
-reconcile before any new work: anything you did there and had not pushed is gone.
+If your task, prompt, or a message since your last turn begins `Your workspace was recreated…`, read
+your phase's committed handoff and any `.legion/<issue>/workspace-recovered.json`, and reconcile
+before new work: anything unpushed is gone. That message stays in history; reconciled, it is done.
 
 ## jj Safety Rules
 

@@ -4101,6 +4101,76 @@ describe("the recreated-workspace notice", () => {
       else process.env.LEGION_WORKSPACE_RECREATED = value;
       const pane = await bootPane({ role: "implementer", sessionId: `ses_recreated_${value}` });
       expect(notices(pane)).toEqual([]);
+      expect(
+        await pane.handlers.get("before_agent_start")?.({ prompt: "task" }, pane.context)
+      ).toBeUndefined();
     }
+  });
+
+  // A session that is no Legion session is left alone even with the variable set: only the role
+  // launcher sets it, beside the role variables, and pi-legion is inert outside a Legion session.
+  test("a session that is no Legion session saves no notice", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const fixture = createPi({ bindEnvoy: false });
+    legionExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_person"));
+    expect(fixture.sentMessages).toEqual([]);
+    expect(
+      await fixture.handlers.get("before_agent_start")?.(
+        { prompt: "task" },
+        sessionContext("ses_person")
+      )
+    ).toBeUndefined();
+  });
+
+  // The daemon's next task is an RPC prompt, and Oh My Pi first recovers a failed last turn: an
+  // empty `length` stop is dropped by moving the branch back to that turn's parent, which takes the
+  // notice saved after it off the branch. before_agent_start runs after that recovery and puts the
+  // notice into the run's messages when the branch no longer holds it; while the branch holds it,
+  // nothing is added. Once the first run starts, nothing is owed. The recovery left the saved copy
+  // in the live context, so from the re-send on each request keeps the first copy alone, and before
+  // it no request is touched.
+  test("a prompt whose recovery dropped the saved notice carries it again, once", async () => {
+    process.env.LEGION_WORKSPACE_RECREATED = "true";
+    const notice = {
+      type: "custom_message",
+      customType: "legion-workspace-recreated",
+      content: "Your workspace was recreated since your last turn: …",
+      display: true,
+    };
+    let branch: readonly unknown[] = [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-1" }] } },
+      { type: "message", message: { role: "assistant", content: [], stopReason: "length" } },
+      notice,
+    ];
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    const context = {
+      ...pane.context,
+      sessionManager: { ...pane.context.sessionManager, getBranch: () => branch },
+    };
+    const beforeAgentStart = pane.handlers.get("before_agent_start");
+    const requestOf = pane.handlers.get("context");
+    if (beforeAgentStart === undefined || requestOf === undefined) {
+      throw new Error("before_agent_start or context was not registered");
+    }
+    const copy = { role: "custom", customType: "legion-workspace-recreated", content: "…" };
+    const task = { role: "user", content: [{ type: "text", text: "TURN-2" }] };
+
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy, task, copy] }, context)).toBeUndefined();
+    branch = branch.slice(0, 1);
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
+      message: {
+        customType: "legion-workspace-recreated",
+        content: expect.stringContaining("it holds what was pushed to legion/REPO-43"),
+        display: true,
+      },
+    });
+    await pane.handlers.get("agent_start")?.({}, context);
+    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
+    expect(await requestOf({ messages: [copy, task, copy] }, context)).toEqual({
+      messages: [copy, task],
+    });
+    expect(await requestOf({ messages: [copy, task] }, context)).toBeUndefined();
   });
 });

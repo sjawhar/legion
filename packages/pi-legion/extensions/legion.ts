@@ -42,7 +42,12 @@ import {
 } from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { createLegionTool } from "../src/tools";
-import { WORKSPACE_RECREATED_MESSAGE, workspaceRecreatedNotice } from "../src/workspace-recreated";
+import {
+  branchHoldsWorkspaceRecreatedNotice,
+  WORKSPACE_RECREATED_MESSAGE,
+  withoutRepeatedWorkspaceRecreatedNotice,
+  workspaceRecreatedNotice,
+} from "../src/workspace-recreated";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -479,29 +484,21 @@ export default function legionExtension(pi: PiApi): void {
     );
   };
 
+  // The recreated-workspace notice this process owes its first run: set at session_start below,
+  // and owed until that run starts (agent_start), whatever starts it.
+  let recreatedNotice: string | undefined;
+
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
-    // A resume whose role launcher found the workspace recreated since the session was last
-    // written (src/workspace-recreated.ts) is told so in a message saved to the session ahead of
-    // the next turn, whatever starts that turn (a task, an Envoy delivery), so a process lost in
-    // that turn resumes with the notice already in its history; a subagent, which returned above,
-    // never is.
-    const recreated = workspaceRecreatedNotice(process.env);
-    if (recreated !== undefined) {
-      pi.sendMessage(
-        { customType: WORKSPACE_RECREATED_MESSAGE, content: recreated, display: true },
-        { deliverAs: "steer", triggerTurn: false }
-      );
-    }
     await titleSession(context);
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open.
     phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
-    const { kind } = classifySession(process.env);
-    if (kind === "not-legion") return;
+    const session = classifySession(process.env);
+    if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
     // Envoy plugin's interface, so a process without it ends here, the way a refused boot
     // registration does: one log line, then the exit the daemon sees and relaunches from. A
@@ -513,13 +510,58 @@ export default function legionExtension(pi: PiApi): void {
     }
     // The operator-launched controller registers through the controller session and carries no
     // `legion` tool: its operations are an architect's and a worker's.
-    if (kind === "controller") {
+    if (session.kind === "controller") {
       await controllerSession.handleSessionStart(context);
       return;
+    }
+    // A resume whose role launcher found the workspace recreated since the session was last
+    // written (src/workspace-recreated.ts) is told so in a message saved to the session ahead of
+    // the next turn, whatever starts that turn (a task, an Envoy delivery), so a process lost in
+    // that turn resumes with the notice already in its history. It goes before the role claim, so
+    // no delivery on the role's topic can start a turn ahead of it, and a subagent, which returned
+    // above, never is told.
+    recreatedNotice = workspaceRecreatedNotice(
+      process.env,
+      session.kind === "root-architect" ? session.tree : session.issue
+    );
+    if (recreatedNotice !== undefined) {
+      pi.sendMessage(
+        { customType: WORKSPACE_RECREATED_MESSAGE, content: recreatedNotice, display: true },
+        { deliverAs: "steer", triggerTurn: false }
+      );
     }
     await claimSession.bootstrap(context);
     registerLegionTool();
     await activateLegionTool();
+  });
+
+  // A prompt the daemon sends (an RPC `prompt`) first recovers a failed last turn, and Oh My Pi
+  // recovers an empty `length` stop by moving the branch back to that turn's parent, which takes
+  // the notice saved after it off the branch; before_agent_start runs after that recovery, so it
+  // puts the notice back into the run's messages when the branch no longer holds it, and the run
+  // saves it on the branch. A turn an Envoy delivery starts recovers nothing and has no
+  // before_agent_start: its branch keeps the saved notice.
+  let recreatedNoticeResent = false;
+  pi.on("before_agent_start", async (_event, context) => {
+    if (recreatedNotice === undefined) return undefined;
+    if (branchHoldsWorkspaceRecreatedNotice(context.sessionManager.getBranch?.() ?? [])) {
+      return undefined;
+    }
+    recreatedNoticeResent = true;
+    return {
+      message: { customType: WORKSPACE_RECREATED_MESSAGE, content: recreatedNotice, display: true },
+    };
+  });
+  pi.on("agent_start", async () => {
+    recreatedNotice = undefined;
+  });
+  // The recovery kept the saved notice in the process's live context, so once it is sent again
+  // every later request of this process would carry it twice: the first copy, where the history
+  // put it, is the one each request keeps.
+  pi.on("context", async (event) => {
+    if (!recreatedNoticeResent) return undefined;
+    const messages = withoutRepeatedWorkspaceRecreatedNotice(event.messages);
+    return messages === undefined ? undefined : { messages };
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree

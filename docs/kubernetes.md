@@ -429,15 +429,24 @@ starts the generation with `LEGION_WORKSPACE_RECREATED=true`; every other genera
 whatever the container's environment says, and so does a resume into a workspace with no record
 (one provisioned before the record was kept). A record that is empty or not one RFC 3339 instant,
 which an init container killed mid-write can leave, decides only that notice: the launcher logs it,
-takes the workspace as not recreated, and resumes. At session start the Legion plugin reads the
-variable and saves one message to the session, ahead of the next turn whatever starts it (a task,
-an Envoy event): `Your workspace was recreated since your last turn: it holds what was pushed to
-legion/<KEY> (main if nothing was), and anything you had not pushed is gone. …`
-(`packages/pi-legion/src/workspace-recreated.ts`, a steer that starts no turn). Measured on Oh My Pi
-`18.8.3-sami.20261009-045702` under SQL storage, it is in the stored session before that turn
-starts, and the turn's first model request carries it just after the history and before the turn's
-own message. Being saved, it stays in the history, so a process lost in that turn resumes with the
-notice already there. A `task` subagent is never told.
+takes the workspace as not recreated, and resumes. At session start a Legion session's plugin reads
+the variable and saves one message to the session, ahead of the next turn whatever starts it (a
+task, an Envoy event): `Your workspace was recreated since your last turn: it holds what was pushed
+to legion/<KEY> (main if nothing was), and anything you had not pushed is gone. …`
+(`packages/pi-legion/src/workspace-recreated.ts`, a steer that starts no turn). The daemon's next
+task, an RPC prompt, first recovers a failed last turn, and Oh My Pi recovers an empty `length`
+stop by moving the branch back to that turn's parent, which takes the saved message off the
+branch with it. The plugin's `before_agent_start`, which runs after that recovery, sends the
+message again when the branch no longer holds it, and the turn saves it after the task. The
+recovery leaves the first copy in the process's live context, so that process's requests keep the
+first copy alone. Measured on Oh My Pi `18.8.3-sami.20261009-045702`, under file storage and under
+SQL storage, with a resumed session whose last turn was an ordinary reply and one whose last turn
+was an empty `length` stop: the notice is in the stored session before the task arrives, the task's
+first model request carries it once, just after the history and before the task, and after the
+task the stored branch holds it, so a process lost in that turn resumes with the notice already
+there. With the plugin before the re-send, the `length` case's stored branch had lost it. A turn an
+Envoy delivery starts recovers nothing, so its branch keeps the saved message. A `task` subagent
+is never told.
 
 The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
 volume projects another session store than a pod created now would — one created before
