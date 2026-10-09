@@ -59,8 +59,8 @@ func TestHelloResolverRejectsAnUnknownTokenAtOnceDuringTheBootWait(t *testing.T)
 // A boot token a real claim minted — ClaimByBootTokenHash finds it — is held until restoration,
 // not rejected: a live pane reconnecting while the boot's readiness gate still waits out an
 // unreachable NATS or Dispatch (daemon.go's run, LEGION-580) waits on s.restored alone, with no
-// deadline of its own, and is judged only once restoration closes it (as it does in daemon.go's
-// run(), right after "legion daemon started" is logged).
+// deadline of its own, and is judged only once restoration closes it (supervision.start, once every
+// stored claim has its machine and the boot's unfinished launches have been relaunched).
 func TestHelloResolverHoldsAKnownTokenUntilRestoredRatherThanRejectingItAfterTheTimeout(t *testing.T) {
 	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
 	const resolveTimeout = 20 * time.Millisecond

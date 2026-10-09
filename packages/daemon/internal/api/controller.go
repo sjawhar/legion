@@ -182,14 +182,14 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 	}
 	generation, err := s.controller.MintController(ctx, s.project, controller.UnheldCapability())
 	if err != nil {
-		s.log.Error("api: record the launched controller's capability", "claim", launch.Claim, "error", err)
+		s.logFailure("api: record the launched controller's capability", "claim", launch.Claim, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
 		return
 	}
 	s.grants.RevokeControllers()
 	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
 	if err != nil || !registered {
-		s.log.Error("api: record the launched controller's registration", "claim", launch.Claim, "registered", registered, "error", err)
+		s.logFailure("api: record the launched controller's registration", "claim", launch.Claim, "registered", registered, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
 		return
 	}

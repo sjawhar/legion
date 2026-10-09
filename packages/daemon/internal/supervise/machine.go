@@ -464,10 +464,8 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // old-pane hellos move the state first, so the caller does not open a second pane. The release is
 // memory only, and the relaunch writes it: its admission (revive), and the retirement of a finished
 // task before it (settle), write the claim queued at the generation it had, before the launch
-// writes its next generation launching. A claim is created queued at generation zero and only this
-// makes one queued again after a launch, so the daemon's next boot counts a claim stored queued at
-// a generation above zero, with no process, as a launch to finish — which is what a stop between
-// the admission and the launch's write leaves.
+// writes its next generation launching. A stop between the admission and the launch's write leaves
+// that row, which ReleasedLaunch tells apart.
 func (m *Machine) ReleaseUncertainLaunch() bool {
 	m.mu.Lock()
 	defer m.unlock()
@@ -476,6 +474,14 @@ func (m *Machine) ReleaseUncertainLaunch() bool {
 	}
 	m.claim.State = StateQueued
 	return true
+}
+
+// ReleasedLaunch is whether a stored claim is an uncertain launch ReleaseUncertainLaunch released
+// and no launch then recorded: queued at a generation above zero, with no process. A claim is
+// created queued at generation zero, and only a release makes one queued again after a launch, so
+// the daemon's next boot counts such a claim as a launch to finish.
+func (c Claim) ReleasedLaunch() bool {
+	return c.State == StateQueued && c.Generation > 0 && c.Locator == nil
 }
 
 // StartedBy records the outbox row of the start being run against this claim, so a stop written

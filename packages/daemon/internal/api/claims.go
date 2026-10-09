@@ -196,7 +196,7 @@ func (s *server) claimFailure(w http.ResponseWriter, request string, token claim
 		writeJSON(w, http.StatusConflict, errorBody(refused.Error()))
 		return
 	}
-	s.log.Error("api: a claim request failed", "request", request, "claim", token, "error", err)
+	s.logFailure("api: a claim request failed", "request", request, "claim", token, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorBody(request+" failed: the daemon could not record it"))
 }
 

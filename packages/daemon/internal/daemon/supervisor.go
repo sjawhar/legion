@@ -130,15 +130,13 @@ func (s *supervisor) Claims(ctx context.Context) ([]supervise.Claim, error) {
 
 // restore builds the machine of every claim the store held at boot, and reports the claims whose
 // launch the last daemon began and never finished: launching with no locator, the process — if
-// one opened at all — never recorded; or queued at a generation above zero with no locator, a
-// launch it released at boot and stopped before the relaunch wrote its next generation (supervise's
-// ReleaseUncertainLaunch says why only a release leaves that row). Each is put back to
+// one opened at all — never recorded; or a launch it released at boot and stopped before the
+// relaunch wrote its next generation (supervise.Claim.ReleasedLaunch). Each is put back to
 // launch_uncertain, which is what it is: the daemon cannot yet say whether a process runs for it.
 func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]claim.Token, error) {
 	var unfinished []claim.Token
 	for _, c := range claims {
-		released := c.State == supervise.StateQueued && c.Generation > 0
-		if c.Locator == nil && (c.State == supervise.StateLaunching || released) {
+		if (c.State == supervise.StateLaunching && c.Locator == nil) || c.ReleasedLaunch() {
 			c.State = supervise.StateLaunchUncertain
 			if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 				return nil, err

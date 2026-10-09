@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // stopBound is how long run may take to return once its context is cancelled, given the stop's
@@ -281,6 +282,15 @@ func leftDeciding(t *testing.T, stopLog, event string, tokens ...claim.Token) {
 	namesDeciding(t, left, event, tokens...)
 }
 
+// neverStarted requires a daemon the stop caught mid-boot never to say it started: the signal cut
+// its boot short, and a started line after the stopping one would tell the operator otherwise.
+func neverStarted(t *testing.T, stopLog string) {
+	t.Helper()
+	if logLine(stopLog, "legion daemon started") != "" {
+		t.Errorf("a daemon the stop caught mid-boot said it started:\n%s", stopLog)
+	}
+}
+
 // A daemon supervising many claims, told to stop while relaunches wait on the cluster, says it is
 // stopping and which claims are deciding, ends those relaunches with the stop instead of waiting
 // them out, and stamps its boot, well inside a pod's termination grace (LEGION-650).
@@ -400,6 +410,7 @@ func TestRunStopsInsideAPodGraceWhileItsBootRelaunchesAnUnfinishedLaunch(t *test
 
 			t.Logf("stopped in %s while its boot relaunched %s", took, token)
 			namesDeciding(t, logsStopping(t, stopLog), "supervise.RequestSpawn", token)
+			neverStarted(t, stopLog)
 			if tc.ignoresContext {
 				leftDeciding(t, stopLog, "supervise.RequestSpawn", token)
 			} else {
@@ -434,38 +445,86 @@ func TestRunStopsInsideAPodGraceWhileItsBootReconcilesOrphans(t *testing.T) {
 
 	t.Logf("stopped in %s while its boot reconciled orphans", took)
 	logsStopping(t, stopLog)
+	neverStarted(t, stopLog)
 	neededNoBudget(t, stopLog)
 	if stopped := lastBootStopped(t, cfg); stopped == nil {
 		t.Fatalf("the boot was not stamped stopped; the stop logged:\n%s", stopLog)
 	}
 }
 
-// An operator's spawn waiting in the runtime when the daemon is told to stop ends with the stop, as
-// a decision the daemon made itself does, and the stop names it among the decisions in flight: the
-// operator, claims and controller routes run their decisions past a client that hangs up, never
-// past the daemon's stop (LEGION-650).
-func TestRunEndsAnOperatorSpawnInFlightWithTheStopAndNamesIt(t *testing.T) {
+// quietStop requires the stop to have logged nothing at WARN or ERROR: a rollout's stop cuts
+// decisions short by design, and the next boot takes their claims up.
+func quietStop(t *testing.T, stopLog string) {
+	t.Helper()
+	for _, line := range strings.Split(stopLog, "\n") {
+		if strings.Contains(line, `"level":"ERROR"`) || strings.Contains(line, `"level":"WARN"`) {
+			t.Errorf("the stop logged: %s", line)
+		}
+	}
+}
+
+// storedClaim is token's claim as the store holds it, as the next boot reads it.
+func storedClaim(t *testing.T, cfg config.Config, token claim.Token) supervise.Claim {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	defer st.Close()
+	claims, err := st.Claims(ctx)
+	if err != nil {
+		t.Fatalf("read the claims: %v", err)
+	}
+	for _, c := range claims {
+		if c.Token == token {
+			return c
+		}
+	}
+	t.Fatalf("the store holds no claim %s", token)
+	return supervise.Claim{}
+}
+
+// operatorRequest sends one operator request from a goroutine of its own and answers its status on
+// the returned channel, -1 when it got none.
+func operatorRequest(d *daemon, method, path string, body []byte) <-chan int {
+	answered := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequest(method, d.base+path, bytes.NewReader(body))
+		if err != nil {
+			answered <- -1
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+testOperatorToken)
+		resp, err := d.client.Do(req)
+		if err != nil {
+			answered <- -1
+			return
+		}
+		resp.Body.Close()
+		answered <- resp.StatusCode
+	}()
+	return answered
+}
+
+// An operator's spawn waiting in the runtime when the daemon is told to stop runs until the API's
+// drain ends, then ends with it inside the stop's budget, and the stop names it among the decisions
+// in flight: the operator, claims and controller routes run their decisions past a client that
+// hangs up, never past the drain. The failure the cut leaves is the stop's, logged at Info
+// (LEGION-650).
+func TestRunEndsAnOperatorSpawnInFlightWithTheDrainAndNamesIt(t *testing.T) {
 	cfg := testConfig(t)
 	rt := newStallingRuntime(t, fake.NewRuntime(), false)
 	logs := &syncBuffer{}
 	o := fakeRuntime(rt, &built{})
-	o.stopBudget = time.Second
+	o.stopBudget = 3 * time.Second
 	d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
 	rt.stalling.Store(true)
 	body, err := json.Marshal(api.SpawnRequest{Tree: "LEGION-9", Issue: "LEGION-9", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."})
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		req, err := http.NewRequest(http.MethodPost, d.base+"/legion/v1/operator/claims", bytes.NewReader(body))
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+testOperatorToken)
-		if resp, err := d.client.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	}()
+	answered := operatorRequest(d, http.MethodPost, "/legion/v1/operator/claims", body)
 	var spawning claim.Token
 	select {
 	case spawning = <-rt.entered:
@@ -475,10 +534,78 @@ func TestRunEndsAnOperatorSpawnInFlightWithTheStopAndNamesIt(t *testing.T) {
 
 	took, stopLog := stopWithin(t, d, logs, stopBound(o.stopBudget))
 
-	t.Logf("stopped in %s with the operator's spawn of %s waiting in the runtime", took, spawning)
+	t.Logf("stopped in %s with the operator's spawn of %s waiting in the runtime; it was answered %d", took, spawning, <-answered)
 	namesDeciding(t, logsStopping(t, stopLog), "supervise.RequestSpawn", spawning)
 	neededNoBudget(t, stopLog)
+	quietStop(t, stopLog)
 	if stopped := lastBootStopped(t, cfg); stopped == nil {
 		t.Fatalf("the boot was not stamped stopped; the stop logged:\n%s", stopLog)
 	}
+}
+
+// exitingSuspend is the fake runtime whose suspension has sent its shutdown frame and waits for the
+// process to exit, as tmux's stop does (awaitNotRunning): it says which claim's suspension waits on
+// stopping, and returns once the test lets the process exit, or with its context.
+type exitingSuspend struct {
+	*fake.Runtime
+	stopping chan claim.Token
+	exit     chan struct{}
+}
+
+func (r *exitingSuspend) Suspend(ctx context.Context, loc runtime.Locator) error {
+	r.stopping <- loc.Claim
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("suspend %s: %w", loc.Claim, ctx.Err())
+	case <-r.exit:
+	}
+	return r.Runtime.Suspend(ctx, loc)
+}
+
+// An operator's suspension whose shutdown frame went out before the daemon was told to stop, and
+// whose process exits a moment later, inside the API's drain, is recorded: the operator is answered
+// and the store holds the claim suspended. Cut short at the signal, it would leave the claim stored
+// live, which the next boot finds dead and relaunches, undoing the operator's request (LEGION-650).
+func TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain(t *testing.T) {
+	cfg := testConfig(t)
+	rt := &exitingSuspend{Runtime: fake.NewRuntime(), stopping: make(chan claim.Token, 4), exit: make(chan struct{})}
+	logs := &syncBuffer{}
+	d := startDaemonLogging(t, cfg, fakeRuntime(rt, &built{}), slog.New(slog.NewJSONHandler(logs, nil)))
+	token := d.spawn(api.SpawnRequest{Tree: "LEGION-9", Issue: "LEGION-9", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt.Runtime, token)
+	answered := operatorRequest(d, http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/suspend", nil)
+	select {
+	case <-rt.stopping:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the operator's suspension never reached the runtime; log:\n%s", logs)
+	}
+
+	d.stopped = true
+	d.transport.CloseIdleConnections()
+	mark := len(logs.String())
+	d.cancel()
+	testwait.Eventually(t, "the daemon to say it is stopping", func() bool {
+		return strings.Contains(logs.String()[mark:], `"msg":"legion daemon stopping"`)
+	})
+	// The halt runs in microseconds; the agent, already told to shut down, exits a moment after.
+	time.Sleep(100 * time.Millisecond)
+	close(rt.exit)
+	select {
+	case err := <-d.done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(stopBound(stopBudget)):
+		t.Fatalf("run had not returned %s after its context was cancelled; it logged:\n%s", stopBound(stopBudget), logs.String()[mark:])
+	}
+	stopLog := logs.String()[mark:]
+
+	if status := <-answered; status != http.StatusOK {
+		t.Errorf("the operator's suspension was answered %d, want 200; the stop logged:\n%s", status, stopLog)
+	}
+	if c := storedClaim(t, cfg, token); c.State != supervise.StateSuspended || c.Locator != nil {
+		t.Errorf("the store holds %s with locator %+v, want suspended with none; the stop logged:\n%s", c.State, c.Locator, stopLog)
+	}
+	neededNoBudget(t, stopLog)
+	quietStop(t, stopLog)
 }

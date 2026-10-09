@@ -845,6 +845,12 @@ func TestAStopBetweenAReleasedLaunchsAdmissionAndItsLaunchLeavesItQueuedAtItsGen
 				t.Fatalf("the store holds %s at generation %d with locator %+v, want queued at 1 with none",
 					stored.State, stored.Generation, stored.Locator)
 			}
+			if !stored.ReleasedLaunch() {
+				t.Errorf("ReleasedLaunch() is false for the row a release leaves, so the next boot would not finish it: %+v", stored)
+			}
+			if fresh := queuedClaim(); fresh.ReleasedLaunch() {
+				t.Errorf("ReleasedLaunch() is true for a claim created queued and never launched: %+v", fresh)
+			}
 			if tc.pending != nil && stored.Pending != nil {
 				t.Errorf("the store still holds the task whose turn is over: %+v", *stored.Pending)
 			}

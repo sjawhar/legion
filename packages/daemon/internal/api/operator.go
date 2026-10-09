@@ -299,13 +299,13 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	}
 	lifecycle, cleanup, err := s.trees.ReserveOperatorTreeCleanup(ctx, s.project, c.Tree)
 	if err != nil {
-		s.log.Error("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
+		s.logFailure("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("closed %s's root claim, but its durable tree cleanup could not be reserved: %v. Retry legion claims close once that is resolved", c.Tree, err)))
 		return
 	}
 	claims, err := s.supervisor.Claims(ctx)
 	if err != nil {
-		s.log.Error("api: read the claims of a tree the operator closed", "tree", c.Tree, "error", err)
+		s.logFailure("api: read the claims of a tree the operator closed", "tree", c.Tree, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but the daemon could not read the tree's other claims to stop them", c.Tree, token)))
 		return
 	}
@@ -321,7 +321,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err := m.Handle(ctx, supervise.RequestStop{Claim: other.Token}); err != nil {
-			s.log.Error("api: stop a claim of a tree the operator closed", "claim", other.Token, "error", err)
+			s.logFailure("api: stop a claim of a tree the operator closed", "claim", other.Token, "error", err)
 			unstopped = append(unstopped, fmt.Sprintf("%s (%v)", other.Token, err))
 		}
 	}
@@ -332,7 +332,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	}
 	if cleanup {
 		if err := s.trees.CleanupReservedTree(ctx, s.project, c.Tree, lifecycle.Epoch, s.releaser); err != nil {
-			s.log.Error("api: cleanup an operator-closed tree", "tree", c.Tree, "error", err)
+			s.logFailure("api: cleanup an operator-closed tree", "tree", c.Tree, "error", err)
 			writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's claims, but durable resource cleanup is pending: %v. Retry legion claims close after the reported cleanup error is resolved", c.Tree, err)))
 			return
 		}
@@ -372,6 +372,6 @@ func (s *server) operatorFailure(w http.ResponseWriter, request string, token cl
 		writeJSON(w, http.StatusConflict, errorBody(refused.Error()))
 		return
 	}
-	s.log.Error("api: an operator request failed", "request", request, "claim", token, "error", err)
+	s.logFailure("api: an operator request failed", "request", request, "claim", token, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("%s %s: %v", request, token, err)))
 }
