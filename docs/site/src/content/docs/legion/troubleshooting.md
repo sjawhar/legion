@@ -241,8 +241,9 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 These arrive as messages on the Dispatch issue, and the architect is told:
 
-- **`Issue reached review_round_cap=3.`** Three review rounds sent the change back. The architect
-  decides what happens next, often with a question to you.
+- **`Issue reached review_round_cap=3.`** The implementer's round count reached three
+  ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
+  architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
