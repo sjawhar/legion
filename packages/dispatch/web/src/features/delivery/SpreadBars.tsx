@@ -1,6 +1,7 @@
 // The prototype's web/src/components/SpreadBars.tsx, ported as it is; its fills are the
 // `chartBar` tokens, since no component writes a colour utility of its own.
 import { chartBar } from "../../theme/classes";
+import { barScale } from "./lib/barScale";
 
 export interface SpreadBarDay {
   day: string; // YYYY-MM-DD, the tooltip's prefix
@@ -25,12 +26,12 @@ const HEIGHT = 36;
  * and a bar is green under it, red at or over it. Today's partial day is faded. Plain SVG, like
  * `Sparkbars`. */
 export function SpreadBars({ days, target, noun, format }: Props) {
-  const top = Math.max(
+  const y = barScale(
     1,
-    target === undefined ? 0 : target * 1.25,
-    ...days.map((d) => d.p90_minutes ?? 0)
+    target,
+    days.map((d) => d.p90_minutes),
+    HEIGHT
   );
-  const y = (v: number) => HEIGHT - (v / top) * HEIGHT;
   return (
     <svg
       viewBox={`0 0 ${days.length * BAR} ${HEIGHT}`}

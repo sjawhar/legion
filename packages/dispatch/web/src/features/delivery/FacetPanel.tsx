@@ -98,7 +98,7 @@ export function FacetPanel({
   filters,
   onChange,
 }: {
-  data: DeliveryTimelineResponse;
+  data: Pick<DeliveryTimelineResponse, "facet_counts" | "components" | "issue_titles">;
   filters: Filters;
   onChange: (next: Filters) => void;
 }): ReactNode {

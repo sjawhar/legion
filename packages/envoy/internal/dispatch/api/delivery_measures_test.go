@@ -248,6 +248,42 @@ func TestGetDeliveryMeasuresIsAgentReadable(t *testing.T) {
 	}
 }
 
+// TestGetDeliveryTimelineCarriesTheMeasuresOfItsWindow: the timeline's read carries, as
+// `measures`, exactly what GET /api/v1/delivery/measures answers for the same window, search and
+// facets, so the Delivery page reads the population once when no brush narrows the measures.
+// Only computed_at, the moment each answer was computed, may differ.
+func TestGetDeliveryTimelineCarriesTheMeasuresOfItsWindow(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedMeasuresFixture(t, database)
+	for _, query := range []string{
+		measuresFixtureWindow,
+		measuresFixtureWindow + "&repo=acme/widgets",
+		measuresFixtureWindow + "&issue=ACME-101&q=facet",
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/timeline?"+query, nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET timeline?%s: status = %d, body = %s", query, response.Code, response.Body.String())
+		}
+		var timeline struct {
+			Measures *deliveryMeasuresResponse `json:"measures"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &timeline); err != nil {
+			t.Fatalf("decode timeline?%s: %v", query, err)
+		}
+		if timeline.Measures == nil {
+			t.Fatalf("timeline?%s carries no measures", query)
+		}
+		got, want := *timeline.Measures, getDeliveryMeasures(t, handler, query)
+		if got.ComputedAt.IsZero() {
+			t.Errorf("timeline?%s: measures.computed_at is zero", query)
+		}
+		got.ComputedAt, want.ComputedAt = time.Time{}, time.Time{}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("timeline?%s measures = %+v, want the measures route's %+v", query, got, want)
+		}
+	}
+}
+
 // TestGetDeliveryMeasuresComputesTheFixture writes the fixture to Postgres and reads the measures
 // back. The expected numbers are the stored path's: the prototype's own computeDora over the PRs
 // with each deploy derived by the prototype's own containment from the fixture's runs

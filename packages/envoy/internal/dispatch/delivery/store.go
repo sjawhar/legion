@@ -676,6 +676,35 @@ func ListUnfetchableRunIDs(ctx context.Context, pool *store.Pool, repo string, r
 	return unfetchable, rows.Err()
 }
 
+// ListRunIDsSkippingJobs reads, among runIDs, the runs whose jobs the backfill does not list, in
+// one query: a run carrying a MarkRunJobsUnfetchable mark, or one that already has a stored job
+// row. The regular step lists every concluded run's jobs; the backfill exists for the run's own
+// head_branch and event, so it lists jobs only for a run that has none.
+func ListRunIDsSkippingJobs(ctx context.Context, pool *store.Pool, repo string, runIDs []int64) (map[int64]bool, error) {
+	skip := make(map[int64]bool, len(runIDs))
+	if len(runIDs) == 0 {
+		return skip, nil
+	}
+	rows, err := pool.Query(ctx, `
+		select r.run_id from delivery_runs r
+		where r.repo = $1 and r.run_id = any($2)
+			and (r.jobs_unfetchable_at is not null
+				or exists (select 1 from delivery_run_jobs j where j.repo = r.repo and j.run_id = r.run_id))
+	`, repo, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		skip[id] = true
+	}
+	return skip, rows.Err()
+}
+
 // ListRunJobs lists every job of one run, in no particular order (callers that need the jobs in
 // a specific order, e.g. a workflow's declared sequence, sort client-side — GitHub's own job
 // listing order is not guaranteed either).

@@ -72,7 +72,9 @@ shipped a pull request when it shipped any pull request merged in the window, wh
 targets, whether each is met, and the unowned P0 issues. It takes the timeline's parameters:
 `from` and `to` (the last seven days when both are left out, at most 84 days apart), `q` for the
 search, and any filter repeated for several values, such as `&repo=acme/widgets&priority=P0`. Any
-signed-in person or agent token reads it. The page and the route compute from the same stored
-facts on every request, so they always agree. `flags_source` says whether recorded flags fed the
-change failure rate; `none` means no flags are recorded yet. The
-[HTTP API reference](/legion/dispatch/reference/api/) lists it with every other route.
+signed-in person or agent token reads it. `GET /api/v1/delivery/timeline` carries the same
+answer as its `measures` for its own window and filters, so an agent reading both needs only the
+timeline. The page and the route compute from the same stored facts on every request, so they
+always agree. `flags_source` says whether recorded flags fed the change failure rate; `none`
+means no flags are recorded yet. The [HTTP API reference](/legion/dispatch/reference/api/) lists
+it with every other route.

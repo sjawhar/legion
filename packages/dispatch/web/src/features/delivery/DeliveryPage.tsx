@@ -236,14 +236,20 @@ export function DeliveryPage(): ReactNode {
   const data = query.data;
   // The measures follow a brush drag as the prototype's panel does (its App.tsx: computeDora over
   // the brush window), so they read the brush where the timeline keeps reading the whole window.
-  const measuresOptions: DeliveryTimelineOptions = useMemo(
+  // With no brush the timeline's own read carries them (`measures`), so the page reads its
+  // population once; only a brush asks `GET /api/v1/delivery/measures` for its window.
+  const brushOptions: DeliveryTimelineOptions | null = useMemo(
     () =>
       state.brush === null
-        ? timelineOptions
+        ? null
         : { ...timelineOptions, from: state.brush.start, to: state.brush.end },
     [timelineOptions, state.brush]
   );
-  const measures = useQuery(deliveryMeasuresQuery(measuresOptions));
+  const brushed = useQuery({
+    ...deliveryMeasuresQuery(brushOptions ?? timelineOptions),
+    enabled: brushOptions !== null,
+  });
+  const measures = brushOptions === null ? data?.measures : brushed.data;
   // When the answer on screen was read. While a facet change refetches, the previous answer stays
   // on screen (`keepPreviousData`) and the new query reports `dataUpdatedAt` 0, so this keeps the
   // last time an answer arrived instead of reading that as the epoch. The response carries no
@@ -354,13 +360,13 @@ export function DeliveryPage(): ReactNode {
             />
           ) : null}
 
-          {data === undefined ? null : measures.isError ? (
+          {data === undefined ? null : brushOptions !== null && brushed.isError ? (
             <QueryError
               message="Couldn't load the delivery measures."
-              onRetry={() => void measures.refetch()}
+              onRetry={() => void brushed.refetch()}
             />
           ) : (
-            <MeasuresPanel data={measures.data} />
+            <MeasuresPanel data={measures} />
           )}
 
           {data === undefined || activeWindow === null ? null : (

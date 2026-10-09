@@ -2,12 +2,12 @@
 // `formatMinutes` from web/src/lib/dora.ts:34-40, `formatDuration` and `formatRate` from
 // web/src/lib/pipeline.ts:60-83, and `pct` from web/src/components/DoraPanel.tsx:13-15. Pure.
 
-/** Minutes as the measures panel shows durations: "45m", "3.5h", "2.1d"; "n/a" when null. */
+import { formatMinutes as formatLeadTime } from "./prList";
+
+/** Minutes as the measures panel shows durations: the PR list's buckets ("45m", "3.5h", "2.1d"),
+ *  and "n/a" when there is nothing to measure. */
 export function formatMinutes(v: number | null): string {
-  if (v === null) return "n/a";
-  if (v < 60) return `${Math.round(v)}m`;
-  if (v < 1440) return `${(v / 60).toFixed(1)}h`;
-  return `${(v / 1440).toFixed(1)}d`;
+  return v === null ? "n/a" : formatLeadTime(v);
 }
 
 /** Minutes as the Pipeline page shows them: "4.6m" under ten minutes, "93m" under three hours,

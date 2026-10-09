@@ -342,6 +342,87 @@ func TestBackfillProgressNeverMovesBackwards(t *testing.T) {
 	}
 }
 
+// TestStartBackfillProgressRacesToOneRow: two reconciles beginning the same backfill at once, as
+// two tasks overlapping in a rolling deploy do, both succeed, leave exactly one row, and read back
+// the same row, which is one of the two starts whole rather than a mix; a later start on the same
+// scope leaves it standing. Twenty rounds, each released from one barrier, so the two inserts meet
+// on the step's key.
+func TestStartBackfillProgressRacesToOneRow(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	step, scope := backfillStep(DeliveryRunKindDeploy), runsProgressScope("acme/widgets", backfillWorkflow)
+	base := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	starts := [2]struct{ through, beganAt time.Time }{
+		{base.Add(-28 * 24 * time.Hour), base},
+		{base.Add(-28*24*time.Hour + time.Minute), base.Add(time.Minute)},
+	}
+	for round := range 20 {
+		if _, err := pool.Exec(ctx, `delete from delivery_reconcile_progress where step = $1`, step); err != nil {
+			t.Fatalf("round %d: clear progress: %v", round, err)
+		}
+		release := make(chan struct{})
+		var started, wrote sync.WaitGroup
+		var errs [2]error
+		var reads [2]backfillProgress
+		started.Add(2)
+		wrote.Add(2)
+		var done sync.WaitGroup
+		done.Add(2)
+		for i := range 2 {
+			go func() {
+				defer done.Done()
+				started.Done()
+				<-release
+				errs[i] = StartBackfillProgress(ctx, pool, step, scope, starts[i].through, starts[i].beganAt)
+				wrote.Done()
+				wrote.Wait()
+				// Each reconcile reads the row back after starting, as backfillRuns does.
+				reads[i], _ = readBackfillProgress(ctx, pool, step, scope)
+			}()
+		}
+		started.Wait()
+		close(release)
+		done.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: start %d: %v", round, i, err)
+			}
+		}
+		var rows int
+		if err := pool.QueryRow(ctx, `select count(*) from delivery_reconcile_progress where step = $1`, step).Scan(&rows); err != nil {
+			t.Fatalf("round %d: count rows: %v", round, err)
+		}
+		if rows != 1 {
+			t.Fatalf("round %d: %d progress rows, want 1", round, rows)
+		}
+		final, err := readBackfillProgress(ctx, pool, step, scope)
+		if err != nil || !final.found {
+			t.Fatalf("round %d: read the row: %+v, %v", round, final, err)
+		}
+		whole := false
+		for _, start := range starts {
+			if final.through.Equal(start.through) && final.beganAt.Equal(start.beganAt) {
+				whole = true
+			}
+		}
+		if !whole {
+			t.Fatalf("round %d: row {through %v, began_at %v} is neither start whole", round, final.through, final.beganAt)
+		}
+		for i, read := range reads {
+			if !read.found || !read.through.Equal(final.through) || !read.beganAt.Equal(final.beganAt) {
+				t.Fatalf("round %d: reconcile %d read back %+v, want the one row %+v", round, i, read, final)
+			}
+		}
+		later := base.Add(time.Hour)
+		if err := StartBackfillProgress(ctx, pool, step, scope, later.Add(-28*24*time.Hour), later); err != nil {
+			t.Fatalf("round %d: later start: %v", round, err)
+		}
+		after, err := readBackfillProgress(ctx, pool, step, scope)
+		if err != nil || !after.beganAt.Equal(final.beganAt) || !after.through.Equal(final.through) {
+			t.Fatalf("round %d: a later start on the same scope replaced the row: %+v, %v, want %+v", round, after, err, final)
+		}
+	}
+}
+
 // TestBackfillProgressIsNotRecreatedAfterASettingsChange: a settings change deletes every progress
 // row mid-pass, so the pass's next advance updates nothing and inserts nothing, and the next pass
 // starts the backfill afresh with a new began_at.

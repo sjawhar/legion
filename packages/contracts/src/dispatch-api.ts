@@ -2574,7 +2574,9 @@ export interface DeliveryWaitingPR {
  * component, an issue without either under `__no_priority__` / `__no_component__`, and a pull
  * request naming no session under `__no_session__` for parent agent; each placeholder also
  * selects. `components` names every component of the projects the window's issues belong to,
- * `issue_titles` every issue its pull requests name.
+ * `issue_titles` every issue its pull requests name. `measures` is what
+ * `GET /api/v1/delivery/measures` answers for the same window, search and facets, computed from the
+ * pull requests this read already holds, so a page showing both reads them once.
  */
 export interface DeliveryTimelineResponse {
   readonly window: { readonly from: string; readonly to: string };
@@ -2596,6 +2598,7 @@ export interface DeliveryTimelineResponse {
      *  never retried again automatically. */
     readonly unfetchable_count: number;
   };
+  readonly measures: DeliveryMeasuresResponse;
 }
 
 /** One job of `GET /api/v1/delivery/runs/{id}`, with its result and timings. */

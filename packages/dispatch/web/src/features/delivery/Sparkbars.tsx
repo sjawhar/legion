@@ -1,6 +1,7 @@
 // The prototype's web/src/components/Sparkbars.tsx, ported as it is; its fills are the `chartBar`
 // tokens, since no component writes a colour utility of its own.
 import { chartBar } from "../../theme/classes";
+import { barScale } from "./lib/barScale";
 
 export interface SparkbarPoint {
   label: string; // tooltip prefix, e.g. "2026-09-27"
@@ -25,12 +26,12 @@ const HEIGHT = 28;
  * bars miss it, faded bars are days the window only partly covers. Plain SVG,
  * no chart library, so it costs nothing on a filter change. */
 export function Sparkbars({ points, target, max, met, format }: Props) {
-  const top = Math.max(
+  const y = barScale(
     max,
-    target === undefined ? 0 : target * 1.25,
-    ...points.map((p) => p.value ?? 0)
+    target,
+    points.map((p) => p.value),
+    HEIGHT
   );
-  const y = (v: number) => HEIGHT - (v / top) * HEIGHT;
   return (
     <svg
       viewBox={`0 0 ${points.length * BAR} ${HEIGHT}`}

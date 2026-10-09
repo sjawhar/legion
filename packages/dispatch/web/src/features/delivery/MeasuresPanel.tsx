@@ -7,7 +7,7 @@
 // response's computed_at; and the cards and the strip lay themselves out for the panel's own
 // width, since Dispatch's sidebar leaves it narrower than the prototype's page and a phone
 // narrower still, where the prototype is desktop-only.
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { DeliveryMeasuresResponse } from "../../api/types";
@@ -390,6 +390,8 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
 /** The fold's eight definition cards and the per-day table, newest first. */
 function Definitions({ data }: { data: DeliveryMeasuresResponse }): ReactNode {
   const { measures, targets } = data;
+  // Newest first, copied once per answer rather than on every render of the open fold.
+  const newestFirst = useMemo(() => [...measures.daily].reverse(), [measures.daily]);
   const frequency = measures.deploy_frequency;
   const lead = measures.lead_time;
   const perPR = measures.change_failure_rate.per_pr;
@@ -465,7 +467,7 @@ function Definitions({ data }: { data: DeliveryMeasuresResponse }): ReactNode {
               </tr>
             </thead>
             <tbody>
-              {[...measures.daily].reverse().map((d) => (
+              {newestFirst.map((d) => (
                 <tr
                   className={`border-t ${borderDefault} ${d.partial ? textMutedOnSurface : textPrimaryOnSurface}`}
                   key={d.day}

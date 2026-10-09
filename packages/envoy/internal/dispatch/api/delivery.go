@@ -101,7 +101,9 @@ func (s *server) deliverySettings(w http.ResponseWriter, r *http.Request) (deliv
 // and waiting-to-deploy PRs within [from, to) and the given facets and search, computed from
 // stored facts at request time (deployed_status, root_failing_job, the parent_agent/session
 // display labels, the issue facts and every count are never stored -- "the server computes every
-// measure from stored facts on request").
+// measure from stored facts on request"), and the measures of that same window and selection
+// (deliveryMeasuresFor over the population this read already holds), so a page showing both reads
+// the population once. GET /api/v1/delivery/measures is the measures alone, for another window.
 func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -133,12 +135,8 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 
 	// A run's prs[] is every window pull request it shipped first, whatever the facets: the page
 	// sizes a deploy and lists its drill-down by everything it shipped.
-	shippedBy := map[int64][]delivery.DeliveryShippedPRView{}
 	prViews := make([]delivery.DeliveryPRView, 0, len(population.rows))
 	for _, row := range population.rows {
-		if row.view.DeployRun != nil {
-			shippedBy[*row.view.DeployRun] = append(shippedBy[*row.view.DeployRun], delivery.DeliveryShippedPRView{ID: row.view.ID, Title: row.view.Title})
-		}
 		if row.matches(population.selection, "") {
 			prViews = append(prViews, row.view)
 		}
@@ -159,7 +157,7 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		jobs := population.jobsByRun[run.RunID]
-		shipped := shippedBy[run.RunID]
+		shipped := population.shipped[run.RunID]
 		if shipped == nil {
 			// Always a slice, never nil, so it always serializes as `[]`, not `null` -- the
 			// common case for any successful deploy that shipped no in-window population PR.
@@ -180,18 +178,35 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	measured, err := s.deliveryMeasuresFor(ctx, settings, from, to, population, freshness)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 
-	WriteJSON(w, http.StatusOK, delivery.DeliveryTimelineResponse{
-		Window:      delivery.DeliveryWindowView{From: from, To: to},
-		PRs:         prViews,
-		Waiting:     waitingViews,
-		Runs:        runViews,
-		FacetCounts: deliveryFacetCounts(population.rows, population.selection),
-		ColorCounts: deliveryColorCounts(population.rows),
-		Components:  population.components,
-		IssueTitles: population.issueTitles,
-		Freshness:   freshness,
+	WriteJSON(w, http.StatusOK, deliveryTimelineWithMeasures{
+		DeliveryTimelineResponse: delivery.DeliveryTimelineResponse{
+			Window:      delivery.DeliveryWindowView{From: from, To: to},
+			PRs:         prViews,
+			Waiting:     waitingViews,
+			Runs:        runViews,
+			FacetCounts: deliveryFacetCounts(population.rows, population.selection),
+			ColorCounts: deliveryColorCounts(population.rows),
+			Components:  population.components,
+			IssueTitles: population.issueTitles,
+			Freshness:   freshness,
+		},
+		Measures: measured,
 	})
+}
+
+// deliveryTimelineWithMeasures is the timeline's wire shape: delivery.DeliveryTimelineResponse
+// with the window's measures beside it (packages/contracts/src/dispatch-api.ts's
+// DeliveryTimelineResponse.measures). The measures' type lives in this package, since the
+// measures package imports delivery, so the field is added here rather than in delivery/model.go.
+type deliveryTimelineWithMeasures struct {
+	delivery.DeliveryTimelineResponse
+	Measures deliveryMeasuresResponse `json:"measures"`
 }
 
 // deliveryPopulation is one window's population pull requests, each with its view and its facet
@@ -201,10 +216,14 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 // window's pull requests name.
 type deliveryPopulation struct {
 	// rows is every population pull request merged in [from, to), before the facets, in merge
-	// order: the timeline counts facets and colours over it and sizes each deploy by it, and the
-	// measures' deploys_with_prs reads it. A row passing row.matches(selection, "") is one the
-	// timeline's prs[] shows and the measures' pull-request figures count.
-	rows        []deliveryRow
+	// order: the timeline counts facets and colours over it. A row passing
+	// row.matches(selection, "") is one the timeline's prs[] shows and the measures' pull-request
+	// figures count.
+	rows []deliveryRow
+	// shipped is, for each deploy run, every row whose first shipping apply it is, whatever the
+	// facets: the timeline sizes a deploy and lists its drill-down by it, and the measures count a
+	// deploy as one that shipped a pull request by it, so deploys_with_prs belongs to the deploy.
+	shipped     map[int64][]delivery.DeliveryShippedPRView
 	selection   deliverySelection
 	waiting     []deliveryWaitingRow
 	applyRuns   []delivery.DeliveryRun
@@ -316,6 +335,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	}
 
 	rows := make([]deliveryRow, 0, len(prs))
+	shipped := map[int64][]delivery.DeliveryShippedPRView{}
 	for _, pr := range prs {
 		apply := delivery.ContainingRun(pr, settings.DeployRepo, applies)
 		var deployRun *int64
@@ -324,7 +344,11 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 			runID, completedAt := apply.RunID, apply.CompletedAt
 			deployRun, deployedAt = &runID, &completedAt
 		}
-		rows = append(rows, newDeliveryRow(viewOf(pr, delivery.ComputeDeployedStatus(pr, settings.DeployRepo, apply), deployRun, deployedAt)))
+		view := viewOf(pr, delivery.ComputeDeployedStatus(pr, settings.DeployRepo, apply), deployRun, deployedAt)
+		if deployRun != nil {
+			shipped[*deployRun] = append(shipped[*deployRun], delivery.DeliveryShippedPRView{ID: view.ID, Title: view.Title})
+		}
+		rows = append(rows, newDeliveryRow(view))
 	}
 
 	waitingRows := make([]deliveryWaitingRow, 0, len(waiting))
@@ -341,6 +365,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 
 	return deliveryPopulation{
 		rows:        rows,
+		shipped:     shipped,
 		selection:   parseDeliverySelection(query, components),
 		waiting:     waitingRows,
 		applyRuns:   applyRuns,

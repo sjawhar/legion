@@ -29,41 +29,17 @@ const emptyCounts = {
   deployed: {},
 };
 
-const emptyTimeline: DeliveryTimelineResponse = {
-  color_counts: { repo: {}, author: {}, priority: {}, component: {}, parent_agent: {} },
-  components: {},
-  facet_counts: emptyCounts,
-  freshness: {
-    last_error: null,
-    last_event_at: null,
-    last_reconcile_at: null,
-    unfetchable_count: 0,
-  },
-  issue_titles: {},
-  prs: [],
-  runs: [],
-  waiting: [],
-  window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
+const emptyFreshness: DeliveryTimelineResponse["freshness"] = {
+  last_error: null,
+  last_event_at: null,
+  last_reconcile_at: null,
+  unfetchable_count: 0,
 };
 
 const notConfigured = new ApiError(404, {
   code: "DELIVERY_NOT_CONFIGURED",
   error: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 });
-
-function renderPage(url = DELIVERY_URL) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <MemoryRouter initialEntries={[url]}>
-      <QueryClientProvider client={queryClient}>
-        <KeymapProvider>
-          <DeliveryPage />
-        </KeymapProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-  return queryClient;
-}
 
 /** The measures panel's read for the page's window: nothing in it, so every test that is not
  *  about the panel renders it without asserting on it. */
@@ -121,8 +97,35 @@ const emptyMeasures: DeliveryMeasuresResponse = {
     deploy_run_success: null,
     unowned_p0: true,
   },
-  freshness: emptyTimeline.freshness,
+  freshness: emptyFreshness,
 };
+
+const emptyTimeline: DeliveryTimelineResponse = {
+  color_counts: { repo: {}, author: {}, priority: {}, component: {}, parent_agent: {} },
+  components: {},
+  facet_counts: emptyCounts,
+  freshness: emptyFreshness,
+  issue_titles: {},
+  measures: emptyMeasures,
+  prs: [],
+  runs: [],
+  waiting: [],
+  window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
+};
+
+function renderPage(url = DELIVERY_URL) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <MemoryRouter initialEntries={[url]}>
+      <QueryClientProvider client={queryClient}>
+        <KeymapProvider>
+          <DeliveryPage />
+        </KeymapProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return queryClient;
+}
 
 let getDeliveryMeasures: Mock<typeof api.getDeliveryMeasures>;
 beforeEach(() => {
@@ -471,16 +474,24 @@ test("the list sorts by its headers and a row opens the PR's details", async () 
   }
 });
 
-test("the measures panel sits between the freshness row and the view controls and reads the page's window and facets", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+test("the measures panel sits between the freshness row and the view controls and shows the timeline's own measures, fetching no second read", async () => {
+  const withP0 = (repo: readonly string[]) => ({
     ...emptyTimeline,
     facet_counts: { ...emptyCounts, repo: { "acme/widgets": 1 } },
     prs: [listedPR],
+    measures: {
+      ...emptyMeasures,
+      unowned_p0: [
+        {
+          key: repo.length === 0 ? "ACME-103" : "ACME-104",
+          title: "Production deploy gate flakes",
+        },
+      ],
+    },
   });
-  getDeliveryMeasures.mockResolvedValue({
-    ...emptyMeasures,
-    unowned_p0: [{ key: "ACME-103", title: "Production deploy gate flakes" }],
-  });
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockImplementation(
+    async (options) => withP0(options.repo ?? [])
+  );
   try {
     renderPage();
     const p0 = await screen.findByRole("link", { name: "ACME-103" });
@@ -492,13 +503,6 @@ test("the measures panel sits between the freshness row and the view controls an
       freshness.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
     expect(panel.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        from: "2024-06-01T00:00:00Z",
-        to: "2024-06-02T00:00:00Z",
-        repo: [],
-      })
-    );
 
     fireEvent.click(screen.getByRole("button", { name: /^Repository/ }));
     fireEvent.click(
@@ -506,30 +510,37 @@ test("the measures panel sits between the freshness row and the view controls an
         name: /^acme\/widgets/,
       })
     );
-    await waitFor(() =>
-      expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
-        expect.objectContaining({ repo: ["acme/widgets"] })
-      )
+    // The facet refetches the timeline, and the panel follows that one answer.
+    expect(await screen.findByRole("link", { name: "ACME-104" })).toBeDefined();
+    expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+      expect.objectContaining({ repo: ["acme/widgets"] })
     );
+    expect(getDeliveryMeasures).not.toHaveBeenCalled();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();
   }
 });
 
-test("a brush window narrows the measures to it, leaves the timeline's read on the whole window, and clearing it restores the panel's", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+test("a brush window narrows the measures to it with a read of its own, leaves the timeline's read on the whole window, and clearing it returns to the timeline's measures", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    measures: { ...emptyMeasures, unowned_p0: [{ key: "ACME-1", title: "the whole window" }] },
+  });
+  getDeliveryMeasures.mockResolvedValue({
+    ...emptyMeasures,
+    unowned_p0: [{ key: "ACME-2", title: "the brush window" }],
+  });
   const brushStart = "2024-06-01T06:00:00.000Z";
   const brushEnd = "2024-06-01T12:00:00.000Z";
   try {
     renderPage(
       `${DELIVERY_URL}&ws=${encodeURIComponent(brushStart)}&we=${encodeURIComponent(brushEnd)}`
     );
-    await screen.findByLabelText("KPI targets");
-    await waitFor(() =>
-      expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
-        expect.objectContaining({ from: brushStart, to: brushEnd })
-      )
+    expect(await screen.findByRole("link", { name: "ACME-2" })).toBeDefined();
+    expect(getDeliveryMeasures).toHaveBeenCalledTimes(1);
+    expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: brushStart, to: brushEnd })
     );
     for (const [options] of getDeliveryTimeline.mock.calls) {
       expect(options).toEqual(
@@ -538,11 +549,8 @@ test("a brush window narrows the measures to it, leaves the timeline's read on t
     }
 
     fireEvent.click(await screen.findByRole("button", { name: "clear brush window" }));
-    await waitFor(() =>
-      expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
-        expect.objectContaining({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
-      )
-    );
+    expect(await screen.findByRole("link", { name: "ACME-1" })).toBeDefined();
+    expect(getDeliveryMeasures).toHaveBeenCalledTimes(1);
     expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
       expect.objectContaining({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
     );
@@ -552,13 +560,15 @@ test("a brush window narrows the measures to it, leaves the timeline's read on t
   }
 });
 
-test("a measures failure keeps the timeline and offers its own Retry", async () => {
+test("a brushed measures failure keeps the timeline and offers its own Retry", async () => {
   const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
   getDeliveryMeasures
     .mockRejectedValueOnce(new ApiError(503, { code: "INTERNAL", error: "database unavailable" }))
     .mockResolvedValue(emptyMeasures);
   try {
-    renderPage();
+    renderPage(
+      `${DELIVERY_URL}&ws=${encodeURIComponent("2024-06-01T06:00:00.000Z")}&we=${encodeURIComponent("2024-06-01T12:00:00.000Z")}`
+    );
     expect(await screen.findByText("Couldn't load the delivery measures.")).toBeDefined();
     expect(screen.getByText("No PRs in the current filter/window.")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
