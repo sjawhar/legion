@@ -1,10 +1,12 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,6 +20,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -185,6 +188,175 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 		t.Errorf("settings.LastEventAt not recorded after intake processed an event: %+v, %v", got, err)
 	}
 	_ = settings
+}
+
+// TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting: the durable is handed every GitHub
+// notification on the bus (githubIntakeSubject), CI settlements and comments among them. A CI
+// settlement's payload carries arrays (cistore.Summary), which no handler here reads. It and a
+// comment are acknowledged with no ERROR line, no GitHub call and no database write, the freshness
+// row's last_event_at included.
+func TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	logs := captureLogs(t)
+	fake := newFakeGitHub(t)
+	natsClient := intakeTestClient(t)
+	startIntake(t, NewIntake(natsClient, pool, fake.newTestClient()))
+	awaitBoundDurable(t, natsClient)
+
+	checks, err := json.Marshal(cistore.Summary{
+		Kind: "checks", Repo: "acme/widgets", Number: "7", SHA: "abc123",
+		CheckRuns:  []cistore.CheckRunRef{{Name: "test", ID: 11}},
+		Generation: 3, Snapshot: "snapshot",
+		Passed: cistore.StatusGroup{Count: 1, Checks: []string{"test"}},
+		Failed: cistore.StatusGroup{Checks: []string{}}, Running: cistore.StatusGroup{Checks: []string{}},
+		Queued: cistore.StatusGroup{Checks: []string{}}, Cancelled: cistore.StatusGroup{Checks: []string{}},
+		Skipped: cistore.StatusGroup{Checks: []string{}}, FailingChecks: []cistore.FailingCheck{},
+	})
+	if err != nil {
+		t.Fatalf("encode the checks settlement: %v", err)
+	}
+	publishGitHubEnvelope(t, natsClient, contracts.GithubSubject("acme", "widgets", "pr.7.checks"), string(checks))
+	publishGitHubEnvelope(t, natsClient, contracts.GithubSubject("acme", "widgets", "pr.7.comment"),
+		`{"kind":"comment","action":"created","repo":"acme/widgets","number":"7","author":"octocat"}`)
+	awaitAcknowledged(t, natsClient)
+
+	for _, record := range logs() {
+		if record["level"] == "ERROR" && strings.HasPrefix(fmt.Sprint(record["msg"]), "dispatch delivery:") {
+			t.Errorf("intake logged an ERROR for a kind it does not record: %v", record)
+		}
+	}
+	settings, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if settings.LastEventAt != nil {
+		t.Errorf("last_event_at = %v, want null: a kind intake does not record writes nothing", *settings.LastEventAt)
+	}
+	var prs int
+	if err := pool.QueryRow(ctx, "select count(*) from delivery_pull_requests").Scan(&prs); err != nil {
+		t.Fatalf("count pull requests: %v", err)
+	}
+	if runs := countRuns(t, ctx, pool); prs != 0 || runs != 0 {
+		t.Errorf("stored %d pull requests and %d runs, want none", prs, runs)
+	}
+	if mints := fake.tokenMints.Load(); mints != 0 {
+		t.Errorf("minted %d installation tokens, want none: a kind intake does not record calls no GitHub", mints)
+	}
+}
+
+// TestIntakeLogsAMalformedEnvelopeOfAKindItRecords: a pull request's or a workflow run's payload
+// is the flat string map its handler reads. One carrying anything else is malformed: logged at
+// ERROR, as every malformed envelope is, acknowledged, and nothing is written or fetched.
+func TestIntakeLogsAMalformedEnvelopeOfAKindItRecords(t *testing.T) {
+	for _, envelope := range []struct{ name, topic, payload string }{
+		{"pr", contracts.GithubResourceSubject("acme", "widgets", "pr", "7"),
+			`{"kind":"pr","action":"closed","repo":"acme/widgets","number":"7","merged":"true","labels":["non-task"]}`},
+		{"workflow", contracts.GithubWorkflowSubject("acme", "widgets", "deploy_yml", "completed"),
+			`{"kind":"workflow","action":"completed","repo":"acme/widgets","path":".github/workflows/deploy.yml","run_id":["1"]}`},
+	} {
+		t.Run(envelope.name, func(t *testing.T) {
+			pool, ctx := deliveryTestPool(t)
+			seedDeliverySettings(t, ctx, pool)
+			logs := captureLogs(t)
+			fake := newFakeGitHub(t)
+			natsClient := intakeTestClient(t)
+			startIntake(t, NewIntake(natsClient, pool, fake.newTestClient()))
+			awaitBoundDurable(t, natsClient)
+
+			publishGitHubEnvelope(t, natsClient, envelope.topic, envelope.payload)
+			awaitAcknowledged(t, natsClient)
+
+			logged := false
+			for _, record := range logs() {
+				if record["level"] == "ERROR" && record["msg"] == "dispatch delivery: decode envelope payload" && record["subject"] == envelope.topic {
+					logged = true
+				}
+			}
+			if !logged {
+				t.Errorf("no ERROR \"dispatch delivery: decode envelope payload\" for %s; logged %v", envelope.topic, logs())
+			}
+			settings, err := GetSettings(ctx, pool)
+			if err != nil {
+				t.Fatalf("read settings: %v", err)
+			}
+			if settings.LastEventAt != nil || countRuns(t, ctx, pool) != 0 || fake.tokenMints.Load() != 0 {
+				t.Errorf("a malformed envelope wrote or fetched: last_event_at %v, %d runs, %d token mints",
+					settings.LastEventAt, countRuns(t, ctx, pool), fake.tokenMints.Load())
+			}
+		})
+	}
+}
+
+// publishGitHubEnvelope publishes one envelope on topic carrying payload as it stands, for a payload
+// no string map can hold (publishPullRequestEnvelope encodes one).
+func publishGitHubEnvelope(t *testing.T, natsClient *bus.Client, topic, payload string) {
+	t.Helper()
+	id := fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())
+	if err := natsClient.Publish(contracts.Envelope{
+		EventID: id, Source: "github", SourceEventID: id, Topic: topic, Payload: payload,
+		TraceID: "test-trace", IssuedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("publish %s: %v", topic, err)
+	}
+}
+
+// awaitAcknowledged waits for the intake to have acknowledged every message the test's stream
+// holds: the durable's ack floor at the stream's last sequence and nothing outstanding. deliver
+// logs and writes before it acknowledges, so what a message caused is in place by then.
+func awaitAcknowledged(t *testing.T, natsClient *bus.Client) {
+	t.Helper()
+	stream, err := natsClient.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	last := stream.State.LastSeq
+	var info *natsgo.ConsumerInfo
+	waitFor(t, 20*time.Second, func() bool {
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		return err == nil && info.AckFloor.Stream >= last && info.NumAckPending == 0
+	}, func() string {
+		return fmt.Sprintf("intake has not acknowledged through stream sequence %d: %+v, %v", last, info, err)
+	})
+}
+
+// captureLogs sends every slog record from here on to a buffer, as JSON, until the test ends, and
+// answers the records written so far. Intake logs from NATS's delivery goroutine, so the buffer is
+// locked. Call it before startIntake, so the default logger is restored only once intake stops.
+func captureLogs(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var buffer lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buffer, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return func() []map[string]any {
+		var records []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {
+			var record map[string]any
+			if line != "" && json.Unmarshal([]byte(line), &record) == nil {
+				records = append(records, record)
+			}
+		}
+		return records
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe to write from one goroutine while another reads it.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 // TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft holds what bind does to the

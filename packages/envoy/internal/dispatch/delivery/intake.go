@@ -110,10 +110,10 @@ func (in *Intake) Run(ctx context.Context) {
 		if sub != nil {
 			return
 		}
-		newSub, ok := in.bind(func(ctx context.Context, payload map[string]string) error {
+		newSub, ok := in.bind(func(ctx context.Context, payload string) (bool, error) {
 			settings := current.Load()
 			if settings == nil {
-				return nil
+				return false, nil
 			}
 			return in.route(ctx, *settings, payload)
 		})
@@ -141,36 +141,72 @@ func (in *Intake) Run(ctx context.Context) {
 // operator restarting the server. A var so a test can shrink it.
 var settingsPollInterval = 30 * time.Second
 
-// route dispatches one decoded payload to the PR or workflow handler by its kind field, and to
+// route dispatches one envelope payload to the PR or workflow handler by its kind field, and to
 // the right workflow kind (deploy or PR-checks) by comparing the payload's own repository and
 // workflow path against the configured ones. It is the whole filter: the durable is handed every
-// GitHub notification on the bus (githubIntakeSubject), so everything this slice does not want
-// is discarded here, before any GitHub call or database write.
-func (in *Intake) route(ctx context.Context, settings DeliverySettings, payload map[string]string) error {
-	switch payload["kind"] {
+// GitHub notification on the bus (githubIntakeSubject), CI settlements and comments among them,
+// so everything this slice does not want is discarded here, before any GitHub call or database
+// write. It reads the kind alone first, and the whole payload, as the flat string map a handler
+// reads, only for a kind it handles: another kind's payload can hold anything (a CI settlement's
+// holds arrays, cistore.Summary). handled reports whether the kind is one it handles, whatever its
+// handler then decided. A payload whose kind cannot be read, or a handled kind's payload that is
+// not that map, is a malformedPayloadError.
+func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw string) (handled bool, err error) {
+	var head struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(raw), &head); err != nil {
+		return false, malformedPayloadError{err}
+	}
+	switch head.Kind {
 	case "pr":
+		payload, err := flatPayload(raw)
+		if err != nil {
+			return true, err
+		}
 		// Every repository's pull requests: the population spans any repository the configured
 		// authors merge into, not the deploy repository alone, and handlePullRequestEnvelope
 		// decides from the pull request itself.
-		return in.handlePullRequestEnvelope(ctx, settings, payload)
+		return true, in.handlePullRequestEnvelope(ctx, settings, payload)
 	case "workflow":
+		payload, err := flatPayload(raw)
+		if err != nil {
+			return true, err
+		}
 		// The workflow runs this slice records are the deploy repository's own. Another
 		// repository's run of a file with the same path is not one of them, and routing it would
 		// fetch a run this slice never stores.
 		if payload["repo"] != settings.DeployRepo {
-			return nil
+			return true, nil
 		}
 		switch payload["path"] {
 		case settings.DeployWorkflowPath:
-			return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
+			return true, in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
 		case settings.PRChecksWorkflowPath:
-			return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
+			return true, in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
 		default:
-			return nil
+			return true, nil
 		}
 	default:
-		return nil
+		return false, nil
 	}
+}
+
+// malformedPayloadError is a payload route cannot read: its kind is not a string field of a JSON
+// object, or a pull request's or workflow run's payload is not the flat string map its handler
+// reads. Its text is the decoder's own.
+type malformedPayloadError struct{ err error }
+
+func (e malformedPayloadError) Error() string { return e.err.Error() }
+func (e malformedPayloadError) Unwrap() error { return e.err }
+
+// flatPayload decodes a payload as the flat string map the pull-request and workflow handlers read.
+func flatPayload(raw string) (map[string]string, error) {
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, malformedPayloadError{err}
+	}
+	return payload, nil
 }
 
 // deliveryConsumerName is the durable this package's events are read through: one push consumer
@@ -181,7 +217,7 @@ const deliveryConsumerName = "delivery-events"
 
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
 // handler decides what to do with each (route), and discards the ones this slice does not want,
-// which is a JSON decode and two map lookups per envelope.
+// which costs one decode of the payload's kind per envelope.
 //
 // One subject rather than the set this once carried -- the wildcard pull-request subject
 // notifications.github.*.*.pr.* beside one notifications.github.<owner>.<repo>.workflow.<file>.>
@@ -242,7 +278,7 @@ func deliveryConsumerConfig() natsgo.ConsumerConfig {
 // try to change a durable's config out from under itself rather than resuming its cursor.
 // Unlike the listener's own consumer, this package skips the rolling-deploy bind-retry/backoff
 // machinery (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet.
-func (in *Intake) bind(handle func(context.Context, map[string]string) error) (*natsgo.Subscription, bool) {
+func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*natsgo.Subscription, bool) {
 	js := in.nats.JS()
 	info, err := js.ConsumerInfo(bus.Stream, deliveryConsumerName)
 	wanted := deliveryConsumerConfig()
@@ -308,8 +344,10 @@ func (in *Intake) bind(handle func(context.Context, map[string]string) error) (*
 // error (a failed GitHub call, or that deadline passing) is caught up by the next reconcile pass
 // rather than by NATS redelivery -- see the package doc comment. The deadline is what makes
 // intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold an
-// in-flight slot past the ack wait and have the message redelivered underneath it.
-func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, map[string]string) error) {
+// in-flight slot past the ack wait and have the message redelivered underneath it. An envelope of
+// a kind route does not handle is acknowledged and nothing else: no log line, and no freshness
+// write, since it is no event this package processes.
+func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) (bool, error)) {
 	defer func() {
 		err := msg.Ack()
 		if err == nil {
@@ -332,13 +370,16 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, map[stri
 		slog.Error("dispatch delivery: decode envelope", "subject", msg.Subject, "error", err)
 		return
 	}
-	var payload map[string]string
-	if err := json.Unmarshal([]byte(envelope.Payload), &payload); err != nil {
+	handled, err := handle(ctx, envelope.Payload)
+	var malformed malformedPayloadError
+	switch {
+	case errors.As(err, &malformed):
 		slog.Error("dispatch delivery: decode envelope payload", "subject", msg.Subject, "error", err)
 		return
-	}
-	if err := handle(ctx, payload); err != nil {
+	case err != nil:
 		slog.Warn("dispatch delivery: process event", "subject", msg.Subject, "error", err)
+		return
+	case !handled:
 		return
 	}
 	if err := RecordEventAt(ctx, in.pool, time.Now()); err != nil {
