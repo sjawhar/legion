@@ -3691,10 +3691,20 @@ pass
 begin close
 # At linger expiry the tree's cleanup foreground-deletes every Sandbox of tree 1, each with the
 # volume it owns: the root's, and child 2's kept from child-release (child 1's went with its done).
-# The tree label holds: tree 1 never moved, so every Sandbox and PVC of it still carries the label
-# its creation gave it.
-until_true 1500 "tree 1 to close at linger expiry" sh -c \
-  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get sandboxes,pvc -l 'legion.dev/project=$run_label,legion.dev/tree=$tree1' -o name) && [ -z \"\$out\" ]"
+# The Sandboxes are read by the tree label, which the cleanup selects them by; the PVCs by issue,
+# since a claim carries no tree label (the volume is the issue's: its tree changes on re-admission
+# and the claim is never relabelled), one read per issue of tree 1 that still owned a volume.
+# tree_gone TREE ISSUE...: TREE has no Sandbox or pod, and no ISSUE of it a PVC. Each read is held
+# to its exit status (see child1_released).
+tree_gone() {
+  local tree=$1 out issue
+  shift
+  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/tree=$tree" -o name) && [ -z "$out" ] || return 1
+  for issue in "$@"; do
+    out=$(issue_pvcs "$issue") && [ -z "$out" ] || return 1
+  done
+}
+until_true 1500 "tree 1 to close at linger expiry" tree_gone "$tree1" "$tree1" "$child2"
 note "tree 1's Sandboxes and the volumes they owned, the root's and $child2's, are deleted"
 pass
 
@@ -3716,14 +3726,22 @@ begin operator-close
 # workflow's to close: the close of re-admitted tree 1's live root is refused 409, and its claims,
 # Sandboxes and pods are untouched. A tree no workflow issue backs, which the operator spawns here,
 # closes with its worker live: the root and the worker are retired, and the tree's Sandboxes, pods
-# and volume are gone.
+# and volumes (the root's and the worker's issue's) are gone.
+# tree_objects TREE ISSUE... prints, as one sorted JSON array, the Sandboxes and pods labelled with
+# TREE and the PVCs of each ISSUE of it: a claim carries no tree label (the volume is the issue's),
+# so a tree's volumes are read by its issues. A read that fails fails the function.
 tree_objects() {
-  op get sandboxes,pods,pvc -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o json |
-    jq -c '[.items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)'
+  local tree=$1 objects issue
+  shift
+  objects=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/tree=$tree" -o json) || return 1
+  for issue in "$@"; do
+    objects+=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/issue=$issue" -o json) || return 1
+  done
+  jq -cs '[.[].items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)' <<<"$objects"
 }
 root1=$(claim_token "$tree1" architect)
 states1() { claims_cli list --json | jq -c --arg t "$tree1" '[.claims[] | select(.tree == $t) | {token, state, generation}] | sort_by(.token)'; }
-objects_before=$(tree_objects "$tree1")
+objects_before=$(tree_objects "$tree1" "$tree1" "$child2")
 claims_before=$(states1)
 if refusal=$(claims_cli close --claim "$root1" 2>&1 >/dev/null); then
   fail "the operator's close of workflow tree $tree1 through $root1 was accepted"
@@ -3732,7 +3750,7 @@ case "$refusal" in
   *"409"*) ;;
   *) fail "the operator's close of workflow tree $tree1 was refused with '$refusal', not 409" ;;
 esac
-[ "$(tree_objects "$tree1")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1")"
+[ "$(tree_objects "$tree1" "$tree1" "$child2")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1" "$tree1" "$child2")"
 [ "$(states1)" = "$claims_before" ] || fail "the refused close changed tree 1's claims: $claims_before, then $(states1)"
 note "the operator's close of workflow tree $tree1 was refused ($refusal); its claims $claims_before and objects $objects_before are unchanged"
 take_out "$tree1"
@@ -3745,7 +3763,7 @@ op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role i
 claim_live() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state | IN("ready", "idle", "working")' >/dev/null; }
 on_tree "$optree" until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
 on_tree "$optree" until_true 900 "$optree's worker $op_worker to be live" claim_live "$op_worker"
-objects=$(tree_objects "$optree")
+objects=$(tree_objects "$optree" "$optree" "$opchild")
 jq -e 'map(select(.kind == "Pod")) | length == 2' <<<"$objects" >/dev/null || fail "$optree does not have its two pods before the close: $objects"
 for uid in $(jq -r '.[] | select(.kind == "Pod") | .uid' <<<"$objects"); do driver_action close "$uid"; done
 note "before the close, $optree has: $objects"
@@ -3753,9 +3771,8 @@ closed=$(claims_cli close --json --claim "$op_root") || fail "the operator's clo
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close left $optree's root $(jq -c '{state}' <<<"$closed")"
 retired() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state == "retired"' >/dev/null; }
 retired "$op_worker" || fail "the close of $optree left its worker $op_worker $(claims_cli list --json | jq -c --arg t "$op_worker" '.claims[] | select(.token == $t) | {state}')"
-until_true 600 "$optree's Sandboxes, pods and volume to be gone" sh -c \
-  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get sandboxes,pods,pvc -l 'legion.dev/project=$run_label,legion.dev/tree=$optree' -o name) && [ -z \"\$out\" ]"
-note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree")"
+until_true 600 "$optree's Sandboxes, pods and volumes to be gone" tree_gone "$optree" "$optree" "$opchild"
+note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree" "$optree" "$opchild")"
 pass
 
 begin pod-shape

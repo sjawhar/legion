@@ -29,8 +29,8 @@ type podKind interface {
 	// prepare resolves what the kind decides of a launch, its workspace and whether its volume
 	// must already hold what it left, refusing a spec it cannot honour.
 	prepare(l *launch) error
-	// labels are the pod's resource labels, on its Sandbox, pod template, volume claim template and
-	// Secrets, which name its kind (podKindOf).
+	// labels are the pod's resource labels, on its Sandbox, pod template and Secrets, which name
+	// its kind (podKindOf); its volume claim template carries them less the tree (claimLabels).
 	labels(project string, l launch) map[string]string
 	// secretAnnotations are the annotations each of the pod's Secrets carries.
 	secretAnnotations(l launch) map[string]string

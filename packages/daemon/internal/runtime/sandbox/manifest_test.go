@@ -1292,6 +1292,39 @@ func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 	}
 }
 
+// The volume claim template of every Sandbox, an issue's and the controller's alike, carries no
+// tree label: an issue's claim is labelled by project and issue, the controller's by project and
+// role, while the Sandbox itself keeps the tree, which its tree's cleanup selects by. The volume is
+// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and
+// volume, and the relabel (ensureSandbox) patches the Sandbox's labels alone — the daemon's
+// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
+// tree for life (LEGION-632).
+func TestTheClaimTemplateCarriesTheIssueAndNeverTheTree(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := r.sandboxManifest(l)
+			want := map[string]string{labelProject: testProject, labelIssue: labelValue(tc.spec.Issue)}
+			if l.kind == (controllerPod{}) {
+				want = map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
+			} else if s.Labels[labelTree] != labelValue(tc.spec.Tree) {
+				t.Errorf("the Sandbox carries %s=%q, want its tree %q: the tree's cleanup selects it by that label", labelTree, s.Labels[labelTree], tc.spec.Tree)
+			}
+			if got := s.Spec.VolumeClaimTemplates[0].Metadata.Labels; !maps.Equal(got, want) {
+				t.Errorf("the claim template carries %v, want exactly %v", got, want)
+			}
+		})
+	}
+}
+
 // kubeExpand is the kubelet's expansion of a container's command, args, and env values
 // (k8s.io/kubernetes third_party/forked/golang/expansion): `$$` is a literal `$`, and `$(NAME)` is
 // the value of a variable the container defines, left as written when it defines none.

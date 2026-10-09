@@ -84,8 +84,8 @@ const (
 )
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the
-// controller copies pod labels from), its volume claim template (copied to the PVC), and the
-// claim's Secret. The informers select on the project label.
+// controller copies pod labels from), the claim's Secret, and, less the tree (claimLabels), its
+// volume claim template (copied to the PVC). The informers select on the project label.
 const (
 	labelProject = "legion.dev/project"
 	labelTree    = "legion.dev/tree"

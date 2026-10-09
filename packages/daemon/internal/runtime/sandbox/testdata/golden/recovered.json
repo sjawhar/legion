@@ -871,8 +871,7 @@
         "metadata": {
           "labels": {
             "legion.dev/issue": "LEGION-208",
-            "legion.dev/project": "legion",
-            "legion.dev/tree": "LEGION-208"
+            "legion.dev/project": "legion"
           },
           "name": "issue"
         },

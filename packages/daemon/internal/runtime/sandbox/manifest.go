@@ -267,11 +267,24 @@ func (l launch) agentArgv(agent []string) []string {
 // labels are the pod's resource labels, as its kind gives them (podKind.labels).
 func (r *Runtime) labels(l launch) map[string]string { return l.kind.labels(r.project, l) }
 
+// claimLabels are the volume claim template's labels, the pod's (labels) less the tree: an issue's
+// claim carries the project and the issue, the controller's the project and its role. The volume is
+// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and volume
+// under its new tree, and the relabel (ensureSandbox) patches the Sandbox alone — the daemon's
+// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
+// tree for life. A PVC is read by its issue, never by a tree.
+func (r *Runtime) claimLabels(l launch) map[string]string {
+	labels := r.labels(l)
+	delete(labels, labelTree)
+	return labels
+}
+
 // sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
 // before the claim's Secret is written, with the claim template of the volume its pod mounts, the
-// Sandbox's own: an issue's Sandbox owns the issue's volume, the controller's its own. Its pod
-// template never runs: the relaunch's Running patch replaces it with the template the launch
-// computes before the controller creates a pod.
+// Sandbox's own: an issue's Sandbox owns the issue's volume, the controller's its own. The template
+// carries no tree label (claimLabels): the volume is the issue's, its tree changes on re-admission,
+// and the claim is never relabelled. Its pod template never runs: the relaunch's Running patch
+// replaces it with the template the launch computes before the controller creates a pod.
 func (r *Runtime) sandboxManifest(l launch) sandbox {
 	storageClass := r.storageClass
 	return sandbox{
@@ -280,7 +293,7 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 		Spec: sandboxSpec{
 			PodTemplate: r.podTemplate(l), OperatingMode: modeSuspended,
 			VolumeClaimTemplates: []volumeClaimTemplate{{
-				Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.labels(l)},
+				Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.claimLabels(l)},
 				Spec: corev1.PersistentVolumeClaimSpec{
 					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					StorageClassName: &storageClass,

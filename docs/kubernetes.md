@@ -1025,8 +1025,11 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    daemon's command, never a worker process of its own.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
-`runtime.kubernetes.issue_volume` (20Gi by default) and `storage_class`, labelled as the Sandbox is,
-from which Agent Sandbox creates the PVC `issue-legion-<project>-<issue key lowercased>`
+`runtime.kubernetes.issue_volume` (20Gi by default) and `storage_class`, labelled
+`legion.dev/project` and `legion.dev/issue` and never `legion.dev/tree` (`claimLabels`,
+`manifest.go`; the controller's by project and `legion.dev/role`): the volume is the issue's, not
+the tree's — its tree changes when a child is re-admitted as a root, and the claim is never
+relabelled. From it Agent Sandbox creates the PVC `issue-legion-<project>-<issue key lowercased>`
 (`IssueClaimName`, `names.go`) with the Sandbox as its owner, so `kubectl -n legion get pvc -l
 legion.dev/issue=<KEY>` finds it and the Sandbox's deletion takes it. `workspace-init` and every
 role container mount it at `/legion`, and each role container again at Oh My Pi's sessions directory
@@ -1825,10 +1828,10 @@ continuing.`
 
 One PVC per issue, `issue-legion-<project>-<issue key lowercased>` (`ReadWriteOnce`, `issue_volume`,
 `storage_class`), created by Agent Sandbox from the issue Sandbox's one claim template when the
-Sandbox is first created, owned by it and carrying its labels, so
+Sandbox is first created, owned by it and labelled by project and issue, never by tree, so
 `kubectl -n legion get pvc -l legion.dev/issue=<KEY>` finds it; the controller's Sandbox owns one the
-same way, `issue-legion-<project>-controller`. Nothing annotates or ages a volume; it goes with its
-Sandbox, and the Sandbox goes:
+same way, `issue-legion-<project>-controller`, labelled by project and role. Nothing annotates or
+ages a volume; it goes with its Sandbox, and the Sandbox goes:
 
 - at a child issue's close as `done`: its claims are retired with their sessions dropped
   (`issue_close`), and the close's durable effect foreground-deletes the Sandbox, the PVC with it
@@ -1845,10 +1848,11 @@ Sandbox, and the Sandbox goes:
 
 A child of a closed tree re-admitted as a root of its own keeps its Sandbox, its volume and its
 roles' sessions: the Sandbox is relabelled for the new tree (`ensureSandbox`,
-`internal/runtime/sandbox/relaunch.go`). A near-full volume slows jj's working-copy snapshot before a
-push, which is why `legion push`'s grant lives `credential.pushTTL` (5 minutes) in place of the usual
-60 seconds (`internal/credential/grants.go`; `docs/solutions/legion/worker-pane-shell-gotchas.md`
-has the mechanics).
+`internal/runtime/sandbox/relaunch.go`), and the Sandbox alone — the daemon's identity has no PVC
+verb, which is why the claim carries no tree label to go stale. A near-full volume slows jj's
+working-copy snapshot before a push, which is why `legion push`'s grant lives `credential.pushTTL`
+(5 minutes) in place of the usual 60 seconds (`internal/credential/grants.go`;
+`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics).
 
 ### RBAC the daemon needs
 
