@@ -469,6 +469,60 @@ func TestAnUploadClearsOnlyTheEditsItsForkHeld(t *testing.T) {
 	}
 }
 
+// An upload on one process clears only the pending authors whose edits its own room held. Task
+// A's room loads before bob types on task B, so the upload's replacement never saw his paragraph,
+// which the merge keeps: bob stays owed through the upload and a third process's version lists
+// him, the one version that does.
+func TestAnUploadOnOneProcessKeepsAnAuthorOnlyAnotherProcessHeld(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, database)
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+	ctx := context.Background()
+	if err := taskA.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	uploader := model.Actor{Kind: "session", ID: "uploader-on-task-a"}
+	editAsConnectedPeer(t, taskB, artifactID, 1, bob, appendBlocks(t, "Bob's paragraph.\n"))
+	waitForLandedAppends(t, taskB, artifactID)
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Contains(owed, bob) {
+		t.Fatalf("pending authors before the upload = %+v, want bob, whose edit landed on task B", owed)
+	}
+
+	tx, err := taskA.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin task A's upload: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := taskA.Join(ctx, tx)
+	defer ledger.Discard()
+	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
+	if _, err := taskA.ReplaceText(joined, artifactID, uploaded, uploader); err != nil {
+		t.Fatalf("upload the replacement on task A: %v", err)
+	}
+	number := nextVersionNumber(t, database, artifactID)
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, $4)
+	`, artifactID, number, uploaded, []model.Actor{uploader}); err != nil {
+		t.Fatalf("insert the upload's version: %v", err)
+	}
+	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit task A's upload: %v", err)
+	}
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Contains(owed, bob) {
+		t.Fatalf("pending authors after task A's upload = %+v, want bob: task A's room never held his edit", owed)
+	}
+
+	taskC, _ := newTestServiceInstance(t, database)
+	commitNamedVersion(t, taskC, artifactID, model.Actor{Kind: "session", ID: "versioner-on-task-c"})
+	if listed := countVersionAuthor(t, database, artifactID, bob); listed != 1 {
+		t.Fatalf("bob is listed on %d versions, want exactly one", listed)
+	}
+}
+
 // A named version whose transaction is discarded marks nothing it read: alice's edit, observed
 // before the version read the room and appended after, lands owed and is listed once, on the next
 // committed version.
