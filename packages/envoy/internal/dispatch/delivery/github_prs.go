@@ -304,6 +304,12 @@ const installationSearchConcurrency = 8
 // repository belong to two installations of the same App, and every write behind visit is an
 // upsert.
 //
+// listed, when not nil, is called once with every installation the App has, after the listing
+// succeeds and before any installation is searched, so a caller can act on which installations
+// exist -- reconcile prunes the progress of the ones that no longer do. It is not called when the
+// listing fails or names no installation, so a caller never takes an empty or failed listing as
+// "none exist".
+//
 // Installations are searched concurrently through boundedFanOut (reconcile.go) via
 // searchOneInstallation -- see boundedFanOut's own doc comment for the shared
 // fan-out/cancellation mechanics, and note that visit is therefore called from several
@@ -320,7 +326,6 @@ func SearchMergedPullRequestsAcrossInstallation(
 	authors []string,
 	since func(installationID int64) (time.Time, error),
 	until time.Time,
-	// listed is called once with every installation the App has, before any of them is searched.
 	listed func(installations []githubapp.Installation),
 	visit func(installation githubapp.Installation, windowUntil time.Time, prs []FetchedPullRequest) error,
 ) error {

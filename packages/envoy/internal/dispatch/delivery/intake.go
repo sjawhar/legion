@@ -101,12 +101,11 @@ func (in *Intake) Run(ctx context.Context) {
 			slog.Error("dispatch delivery: read settings for intake", "error", err)
 			return
 		}
-		owner, repo, err := splitRepo(settings.DeployRepo)
-		if err != nil {
+		if _, _, err := splitRepo(settings.DeployRepo); err != nil {
 			slog.Error("dispatch delivery: deploy_repo setting", "error", err)
 			return
 		}
-		current.Store(&routeSettings{settings: settings, deployRepo: owner + "/" + repo})
+		current.Store(&routeSettings{settings: settings, deployRepo: settings.DeployRepo})
 		if sub != nil {
 			return
 		}
@@ -142,8 +141,8 @@ func (in *Intake) Run(ctx context.Context) {
 var settingsPollInterval = 30 * time.Second
 
 // routeSettings is what the handler needs to route one envelope: the settings row, and the deploy
-// repository as "owner/repo" -- validated by splitRepo and built once per settings read rather
-// than once per envelope, since route compares every workflow envelope against it.
+// repository as "owner/repo", which refresh has checked with splitRepo and route compares every
+// workflow envelope against.
 type routeSettings struct {
 	settings   DeliverySettings
 	deployRepo string
@@ -201,11 +200,10 @@ const deliveryConsumerName = "delivery-events"
 // runs, by pull fetch or push subscription alike. Each filter alone delivers its own messages,
 // and so do two workflow filters together, or a concrete pull-request subject beside the
 // workflow filter; only the wildcard pull-request filter beside it withholds the workflow
-// messages, in either order. Production showed the same shape: about 990 pull requests reached
-// the timeline against 43 workflow runs. A withheld message is silent -- the consumer reports it
-// pending and never errors -- so this takes the one shape that delivers everything and filters
-// in the handler. It also means the filter no longer depends on the settings row, so a settings
-// change needs no rebind.
+// messages, in either order. A withheld message is silent -- the consumer reports it pending and
+// never errors -- so this takes the one shape that delivers everything and filters in the
+// handler. It also means the filter no longer depends on the settings row, so a settings change
+// needs no rebind.
 const githubIntakeSubject = "notifications.github.>"
 
 // intakeMessageTimeout bounds how long one envelope's own handling may take -- its GitHub calls
