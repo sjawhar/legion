@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assistant,
+  bashEvalWriteContentFirst,
+  bashEvalWriteNearMisses,
   bashSurfaces,
   bashTool,
   type Call,
@@ -112,39 +114,19 @@ describe("merger_self_posted", () => {
     expect(selfPosts(assistant(write("notes/xd://bash.md")))).toHaveLength(0);
   });
 
-  // Each probe below carries a READY `dispatch message` string literal, so the downstream
-  // runs_dispatch and body checks would take it: only calls("bash") rejecting the call keeps it out.
-  const readyCommand = JSON.stringify(message(ready));
-
+  // Each probe carries a READY `dispatch message` command, which the downstream runs_dispatch and
+  // body checks would take: calls("bash") alone decides it.
   test("a READY posted through eval calling tool.write with content built before path counts", () => {
-    const code = `r = await tool.write({"content": json.dumps({"command": ${readyCommand}}), "path": "xd://bash"})\nr`;
-    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(1);
+    for (const call of Object.values(bashEvalWriteContentFirst(message(ready)))) {
+      expect(selfPosts(assistant(call))).toHaveLength(1);
+    }
   });
 
-  test("eval that writes to another device while a comment mentions xd://bash is no self-post", () => {
-    const code = `// writing xd://another_device, not xd://bash here\nawait tool.write({ path: "xd://another_device", content: ${readyCommand} });`;
-    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
-  });
-
-  test("a block comment naming the device inside another device's write is no self-post", () => {
-    const code = `await tool.write({ path: "xd://another_device", /* xd://bash */ content: ${readyCommand} });`;
-    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
-  });
-
-  test("a file write whose content mentions the device as prose is no self-post", () => {
-    const code = `await tool.write({ path: "./notes.md", content: ${readyCommand} + " See xd://bash for the device." });`;
-    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
-  });
-
-  test("a Python kwargs file write, then a print naming the device, is no self-post", () => {
-    const code = `tool.write(path="./notes.md", content=${readyCommand})\nprint("the device is xd://bash")`;
-    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
-  });
-
-  test("a write to a device with bash's name as a prefix is no self-post", () => {
-    const code = `await tool.write({ path: "xd://bash.md", content: ${readyCommand} });`;
-    expect(selfPosts(assistant(evalCall(code)))).toHaveLength(0);
-  });
+  for (const [probe, call] of Object.entries(bashEvalWriteNearMisses(message(ready)))) {
+    test(`${probe} is no self-post`, () => {
+      expect(selfPosts(assistant(call))).toHaveLength(0);
+    });
+  }
 
   test("the completion that carries the packet, and a tool result quoting the command, are no self-post", () => {
     expect(

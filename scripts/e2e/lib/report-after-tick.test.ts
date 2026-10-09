@@ -7,10 +7,11 @@ import {
   bashDevice,
   bashEval,
   bashEvalWrite,
+  bashEvalWriteContentFirst,
+  bashEvalWriteNearMisses,
   bashTool,
   type Call,
   type Entry,
-  evalCall,
   jsonl,
   toolResult,
   turnEnd,
@@ -158,65 +159,26 @@ describe("report_after_tick", () => {
     }
   });
 
-  // The report's command as a string literal of eval code, so the downstream runs_dispatch and
-  // --issue checks would take a probe below: only calls("bash") deciding the call decides it.
-  const reportCommand = JSON.stringify(command(report));
+  // Each probe carries the report's command, which the downstream runs_dispatch and --issue checks
+  // would take: calls("bash") alone decides it.
   const missing = `no session of the controller holds a call running dispatch message --issue ${report}: the bash tool, a write to xd://bash, or eval code calling tool.bash or tool.write whose string literal runs it`;
-  const pyEval = (code: string): Call => ({
-    ...evalCall(code),
-    arguments: { language: "py", code },
-  });
 
-  test("a report posted through eval calling tool.write with content built before path (JS) passes", () => {
-    const code = `const args = { command: ${reportCommand} };\nconst r = await tool.write({ content: JSON.stringify(args), path: "xd://bash", i: "Run" });\nr;`;
-    const { code: exitCode, stdout, stderr } = run(onTickTurn(evalCall(code)));
-    expect(stderr).toBe("");
-    expect(stdout).toBe("");
-    expect(exitCode).toBe(0);
-  });
+  for (const [language, call] of Object.entries(bashEvalWriteContentFirst(command(report)))) {
+    test(`a report posted through eval calling tool.write with content built before path (${language}) passes`, () => {
+      const { code, stdout, stderr } = run(onTickTurn(call));
+      expect(stderr).toBe("");
+      expect(stdout).toBe("");
+      expect(code).toBe(0);
+    });
+  }
 
-  test("a report posted through eval calling tool.write with content built before path (Python) passes", () => {
-    const code = `r = await tool.write({"content": json.dumps({"command": ${reportCommand}}), "path": "xd://bash", "i": "Run"})\nr`;
-    const { code: exitCode, stdout, stderr } = run(onTickTurn(pyEval(code)));
-    expect(stderr).toBe("");
-    expect(stdout).toBe("");
-    expect(exitCode).toBe(0);
-  });
-
-  test("a block comment naming the device inside another device's write is not the report's call", () => {
-    const code = `await tool.write({ path: "xd://another_device", /* xd://bash */ content: ${reportCommand} });`;
-    const { code: exitCode, stdout } = run(onTickTurn(evalCall(code)));
-    expect(stdout).toBe(missing);
-    expect(exitCode).toBe(1);
-  });
-
-  test("a file write whose content mentions the device as prose is not the report's call", () => {
-    const code = `await tool.write({ path: "./notes.md", content: ${reportCommand} + " See xd://bash, the device" });`;
-    const { code: exitCode, stdout } = run(onTickTurn(evalCall(code)));
-    expect(stdout).toBe(missing);
-    expect(exitCode).toBe(1);
-  });
-
-  test("a Python kwargs file write, then a print naming the device, is not the report's call", () => {
-    const code = `tool.write(path="./notes.md", content=${reportCommand})\nprint("the device is xd://bash")`;
-    const { code: exitCode, stdout } = run(onTickTurn(pyEval(code)));
-    expect(stdout).toBe(missing);
-    expect(exitCode).toBe(1);
-  });
-
-  test("a write to a device with bash's name as a prefix is not the report's call", () => {
-    const code = `await tool.write({ path: "xd://bash.md", content: ${reportCommand} });`;
-    const { code: exitCode, stdout } = run(onTickTurn(evalCall(code)));
-    expect(stdout).toBe(missing);
-    expect(exitCode).toBe(1);
-  });
-
-  test("eval code that writes to another device while a comment mentions xd://bash is not the report's call", () => {
-    const code = `// writing another_device, not xd://bash here\nawait tool.write({ path: "xd://another_device", content: ${reportCommand} });`;
-    const { code: exitCode, stdout } = run(onTickTurn(evalCall(code)));
-    expect(stdout).toBe(missing);
-    expect(exitCode).toBe(1);
-  });
+  for (const [probe, call] of Object.entries(bashEvalWriteNearMisses(command(report)))) {
+    test(`${probe} is not the report's call`, () => {
+      const { code, stdout } = run(onTickTurn(call));
+      expect(stdout).toBe(missing);
+      expect(code).toBe(1);
+    });
+  }
 
   test("a session with no call posting on the report issue fails naming what it looked for", () => {
     const { code, stdout } = run(onTickTurn(viaEval("LEGSMOKE-469")));

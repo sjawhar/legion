@@ -21,9 +21,9 @@ export const toolCall = (name: string, args: Record<string, unknown>): Call => (
 export const deviceCall = (name: string, args: Record<string, unknown>): Call =>
   toolCall("write", { path: `xd://${name}`, content: JSON.stringify(args), i: "Post" });
 
-/** Eval code CODE, which calls tools as tool.<name>(...). */
-export const evalCall = (code: string): Call =>
-  toolCall("eval", { language: "js", title: "post", code });
+/** Eval code CODE in LANGUAGE, which calls tools as tool.<name>(...). */
+export const evalCall = (code: string, language: "js" | "py" = "js"): Call =>
+  toolCall("eval", { language, title: "post", code });
 
 /** The four surfaces of one bash call running COMMAND. In both eval forms the command is a string
  * literal of the code, escaped once, as the model writes it. */
@@ -41,6 +41,52 @@ export const bashSurfaces = {
   eval: bashEval,
   evalWrite: bashEvalWrite,
 } as const;
+
+/** Eval cells that run COMMAND through the generic tool.write(...) naming xd://bash with the
+ * content built before the path, which calls("bash") counts: one per language, keyed by it. */
+export const bashEvalWriteContentFirst = (command: string): Record<"JS" | "Python", Call> => {
+  const literal = JSON.stringify(command);
+  return {
+    JS: evalCall(
+      `const args = { command: ${literal} };\nconst r = await tool.write({ content: JSON.stringify(args), path: "xd://bash", i: "Run" });\nr;`,
+      "js"
+    ),
+    Python: evalCall(
+      `r = await tool.write({"content": json.dumps({"command": ${literal}}), "path": "xd://bash", "i": "Run"})\nr`,
+      "py"
+    ),
+  };
+};
+
+/** Eval cells that carry COMMAND as a string literal and name xd://bash, yet run no bash: each
+ * writes somewhere else, or names the device only in a comment, prose or a print. A reader's
+ * downstream checks on the command would take every one, so calls("bash") alone must reject it.
+ * Keyed by what each probe is; each is tagged with the language its code is written in. */
+export const bashEvalWriteNearMisses = (command: string): Record<string, Call> => {
+  const literal = JSON.stringify(command);
+  return {
+    "a block comment naming the device inside another device's write": evalCall(
+      `await tool.write({ path: "xd://another_device", /* xd://bash */ content: ${literal} });`,
+      "js"
+    ),
+    "a file write whose content mentions the device as prose": evalCall(
+      `await tool.write({ path: "./notes.md", content: ${literal} + " See xd://bash for the device." });`,
+      "js"
+    ),
+    "a Python kwargs file write, then a print naming the device": evalCall(
+      `tool.write(path="./notes.md", content=${literal})\nprint("the device is xd://bash")`,
+      "py"
+    ),
+    "a write to a device with bash's name as a prefix": evalCall(
+      `await tool.write({ path: "xd://bash.md", content: ${literal} });`,
+      "js"
+    ),
+    "eval code that writes to another device while a comment names the device": evalCall(
+      `// writing xd://another_device, not xd://bash here\nawait tool.write({ path: "xd://another_device", content: ${literal} });`,
+      "js"
+    ),
+  };
+};
 
 const turn = (stopReason: string, calls: Call[]): Entry => ({
   type: "message",
