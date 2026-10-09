@@ -47,11 +47,15 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	if err := disableCoreDumps(); err != nil {
 		return nil, err
 	}
+	controlling, err := controllingTerminal(fd)
+	if err != nil {
+		return nil, err
+	}
 	watch, ignoredControls, err := watchPromptSignals()
 	if err != nil {
 		return nil, err
 	}
-	tty := promptTerminal{fd: fd, watch: watch, wait: -1, onStop: onStop}
+	tty := promptTerminal{fd: fd, controlling: controlling, watch: watch, wait: -1, onStop: onStop}
 	var saved *unix.Termios // nil until the reader holds the terminal: nothing to restore before
 	defer func() {
 		pending := watch.stop()
@@ -171,13 +175,14 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 }
 
 type promptTerminal struct {
-	fd      int
-	current *unix.Termios // the reader's own mode; nil until it has read the settings it restores
-	watch   *promptWatch
-	death   syscall.Signal
-	wait    int // poll timeout in milliseconds; -1 until the line ends
-	stopped bool
-	onStop  func()
+	fd          int
+	controlling bool          // whether fd was this process's controlling terminal when the prompt began
+	current     *unix.Termios // the reader's own mode; nil until it has read the settings it restores
+	watch       *promptWatch
+	death       syscall.Signal
+	wait        int // poll timeout in milliseconds; -1 until the line ends
+	stopped     bool
+	onStop      func()
 	// mayBeBackground is set at the first stop or resume and never cleared: the reader may
 	// since have been put in the background, so it holds the terminal again before each poll.
 	mayBeBackground bool
@@ -313,15 +318,35 @@ func (t *promptTerminal) holdsTerminal() (bool, error) {
 			continue
 		}
 		if errors.Is(err, unix.ENOTTY) {
-			// fd is not this process's controlling terminal at all (a bare
-			// pseudo-terminal opened directly, as the unit tests do): job
-			// control cannot apply to it.
-			return true, nil
+			if !t.controlling {
+				// fd was never this process's controlling terminal (a bare pseudo-terminal
+				// opened directly, as the unit tests do): job control cannot apply to it.
+				return true, nil
+			}
+			// The terminal was this process's controlling terminal and is no longer: its
+			// session lost it when the leader, the shell, exited. Only a session leader can
+			// take a controlling terminal, so no shell can hand this one back.
+			return false, errNoForeground
 		}
 		if err != nil {
 			return false, err
 		}
 		return foreground == unix.Getpgrp(), nil
+	}
+}
+
+// controllingTerminal reports whether fd is this process's controlling terminal, by a read-only
+// ioctl that answers ENOTTY for any other terminal (Linux's tiocgpgrp, XNU's isctty check).
+func controllingTerminal(fd int) (bool, error) {
+	for {
+		_, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.ENOTTY) {
+			return false, nil
+		}
+		return err == nil, err
 	}
 }
 

@@ -2009,7 +2009,10 @@ settings are not the ones `fg` hands back, so restoring what it read there would
 editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
 orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
 Darwin the group's job-control count), which no shell can foreground and whose stops the kernel
-discards, ends the wait with exit 2 naming the pipe command. The watcher handles SIGINT, SIGQUIT,
+discards, ends the wait with exit 2 naming the pipe command. So does a terminal that was the
+prompt's controlling terminal and no longer is (TIOCGPGRP answers ENOTTY once the session-leader
+shell that started it exits); a terminal that never was, as the unit tests' bare pseudo-terminal,
+counts as held. The watcher handles SIGINT, SIGQUIT,
 SIGTERM, SIGHUP and SIGTSTP; signals whose
 kernel disposition is SIG_IGN remain ignored. Their tty control characters are disabled and
 consumed by the reader instead, since even an ignored tty signal would flush unread input.

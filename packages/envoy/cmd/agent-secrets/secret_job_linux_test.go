@@ -544,6 +544,20 @@ func TestPromptJobStopDiscardsQueuedInputWithoutLeaking(t *testing.T) {
 	s.noShellValue("head", "tail")
 }
 
+// A prompt started with & whose shell then exits has no shell to bring it forward, though the
+// terminal stays open: it refuses, naming the pipe, rather than showing its label to nobody and
+// reading a value there.
+func TestPromptJobShellGoneRefuses(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, true)
+	s.send("exit\r")
+	s.wait("RETURNED no shell can bring the value prompt to the foreground of this terminal; pipe the value in: agent-secrets secret set DEMO_KEY < FILE")
+	s.wait("LABEL_HELD=false")
+	if strings.Contains(s.out.String(), "Value for") {
+		t.Fatalf("a prompt whose shell had gone showed its label: %q", s.out.String())
+	}
+}
+
 func TestPromptHangupRestoresAndAbortCannotDumpTheValue(t *testing.T) {
 	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGTERM, syscall.SIGABRT} {
 		t.Run(sig.String(), func(t *testing.T) {
