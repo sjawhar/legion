@@ -290,11 +290,9 @@ func configure(opts Options) (*Runtime, error) {
 	// Every container of every pod the runtime builds takes its role's entry of Resources — the
 	// init containers the launching role's, the image probe's the controller's — so a role without
 	// a reservation would run with no requests or limits at all, a silently BestEffort pod.
-	for _, kind := range []podKind{issuePod{}, controllerPod{}} {
-		for _, role := range kind.roles() {
-			if err := checkReservation(role, opts.Resources); err != nil {
-				return refuse("%v", err)
-			}
+	for _, role := range launcherRoles {
+		if err := checkReservation(role, opts.Resources); err != nil {
+			return refuse("%v", err)
 		}
 	}
 	if a := opts.AgentSecrets; a != nil {
@@ -899,12 +897,17 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 // credentials; msg and attrs log the delete. Its caller holds the pod's launch turn. One already
 // gone is gone, and one the fence refuses, replaced or written since, is kept and logged with
 // attrs, since its owner's next decision is the orphan sweep's: neither is an error. Deletion
-// propagates in the background, a custom resource's default, so its Secrets and volume go after it
-// through their owner references.
+// propagates in the foreground, as the tree cleanup's does (deleteSandbox): the Sandbox owns its
+// PVC and its role Secrets by owner reference, and the issue's next Sandbox names the same PVC
+// (IssueClaimName), so a background delete, which drops the Sandbox at once and collects the PVC
+// after, would let a re-admission inside that window create a Sandbox asking for a Terminating
+// PVC. In the foreground the Sandbox stays, Terminating, until both are gone, so a launch that
+// waits out a Sandbox being deleted (ensureSandbox) waits for its volume too.
 func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
 	deleting, cancel := call(ctx)
 	defer cancel()
-	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{Preconditions: &fence})
+	policy := metav1.DeletePropagationForeground
+	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})
 	switch {
 	case err == nil:
 		r.forgetLauncherCredentials(name)

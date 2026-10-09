@@ -98,20 +98,22 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	if tools.AgentSecrets != "" {
 		imageOwned = append(imageOwned, tools.AgentSecrets)
 	}
+	// Each owner's forbidden is the tail of its refusal, after "nor above": the first two own a
+	// set of paths, the last one directory.
 	owners := []struct {
-		paths       []string
-		owns, whose string
+		paths           []string
+		owns, forbidden string
 	}{
-		{legionMountPaths(), "Legion mounts in every pod", "Legion's"},
-		{imageOwned, "the worker image owns", "the image's"},
+		{legionMountPaths(), "Legion mounts in every pod", "one of Legion's"},
+		{imageOwned, "the worker image owns", "one of the image's"},
 		{[]string{xdgStateHome}, "every role's agent keeps its Oh My Pi state under", "the agents' state home"},
 	}
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {
 			for _, owned := range owner.paths {
 				if overlaps(mount.MountPath, owned) {
-					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above one of %s",
-						i, mount.MountPath, owned, owner.owns, owner.whose)
+					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above %s",
+						i, mount.MountPath, owned, owner.owns, owner.forbidden)
 				}
 			}
 		}

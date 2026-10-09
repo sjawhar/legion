@@ -44,10 +44,12 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // same commit must declare. The load probe also holds every task agent the
 // prompts dispatch to its own model; the OK line says so (agent-models=resolved), or that the
 // build's probe, which has no operator model configuration, skipped it (--skip-agent-models). The
-// probe Sandbox runs it as a worker runs: with --pod-safety, on the pod's baseline as a worker's
-// shim starts Oh My Pi (podsafety.Apply: the turn-scoping overlay named first in PI_CONFIG_FILES,
-// written to a fresh temporary directory since the probe pod mounts no state volume, and the two
-// session-placing variables where the pod leaves them unset); with --provider-env-dir, each
+// probe Sandbox starts it on the pod baseline's variables and overlay, with no state home of its
+// own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the turn-scoping
+// overlay named first in PI_CONFIG_FILES, written to a fresh temporary directory since the probe
+// pod mounts no state volume, and the two session-placing variables where the pod leaves them
+// unset), but not the per-role state home the shim makes (podsafety.EnsureStateHome): the probe
+// pod runs one container, so no broker lock collides; with --provider-env-dir, each
 // provider key exported after it as the shim exports them (shim.ReadProviderEnv); and with
 // --role-references, the references of the role prompts the daemon inlines into its pods
 // (promptrefs.Encode's encoding, decoded as the flags are read). Without it, the probe resolves the

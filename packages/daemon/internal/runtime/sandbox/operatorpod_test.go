@@ -37,7 +37,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
 	}
 	overlapsStateHome := func(path string) string {
-		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps /home/legion/.local/state, which every role's agent keeps its Oh My Pi state under: a mount may be neither at, under, nor above one of the agents' state home"
+		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps /home/legion/.local/state, which every role's agent keeps its Oh My Pi state under: a mount may be neither at, under, nor above the agents' state home"
 	}
 	keyNames := func(name, who string) string {
 		return "provider_keys names " + name + ", which " + who + ": a provider key must name a variable nothing else in the pod sets"

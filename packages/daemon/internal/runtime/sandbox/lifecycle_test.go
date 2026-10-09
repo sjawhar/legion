@@ -288,9 +288,11 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 }
 
 // The sweep deletes the project's Sandboxes of a tree whose cleanup confirmed (or that has no
-// lifecycle), only past the grace. A Sandbox of a live tree survives whatever claims are known,
-// with or without a locator: a suspended role holds its session on the issue's volume the Sandbox
-// owns (N3), and a claim launched after the daemon read its claims is missing from known. The image
+// lifecycle), only past the grace, and in the foreground, as the tree cleanup does: the issue's
+// next Sandbox names the same PVC, which a background delete would leave Terminating for a
+// re-admission to ask for. A Sandbox of a live tree survives whatever claims are known, with or
+// without a locator: a suspended role holds its session on the issue's volume the Sandbox owns
+// (N3), and a claim launched after the daemon read its claims is missing from known. The image
 // probe's Sandbox is no claim's and is the probe's own to delete (#1266), and one whose labels name
 // no issue and tree is kept and reported: what cannot be told apart from a live tree's is never
 // deleted.
@@ -306,6 +308,12 @@ func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.
 		sandboxObject(t, unlabelled, "uid-sandbox-unlabelled", modeSuspended, map[string]string{labelProject: testProject}),
 	})
 	g.store.close("LEGION-9")
+	deletes := map[string]metav1.DeleteOptions{}
+	g.dyn.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		delete := action.(k8stesting.DeleteAction)
+		deletes[delete.GetName()] = delete.GetDeleteOptions()
+		return false, nil, nil
+	})
 	created := g.sandbox(SandboxName(orphan)).CreationTimestamp.Time
 	g.now.Store(new(created.Add(time.Minute)))
 	if err := g.r.ReconcileOrphans(g.ctx, nil, 2*time.Minute); err != nil {
@@ -320,6 +328,9 @@ func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.
 	}
 	if g.sandbox(SandboxName(orphan)) != nil {
 		t.Fatal("an orphan of a closed tree past the grace survived")
+	}
+	if policy := deletes[SandboxName(orphan)].PropagationPolicy; policy == nil || *policy != metav1.DeletePropagationForeground {
+		t.Fatalf("the orphan's delete propagation = %v, want foreground, so its PVC is gone before its Sandbox is", policy)
 	}
 	if g.sandbox(SandboxName(rootToken)) == nil {
 		t.Fatal("the live tree's root Sandbox, and with it the issue's volume, was deleted though no claim of it was known")

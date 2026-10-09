@@ -1029,8 +1029,8 @@ names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-
 after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a
 daemon that would not run its pods would itself keep workers from working, so a gap is the
 operator's to close or to decide, by name and with the reason. The example `legion.yaml`
-(`deploy/kubernetes/daemon/legion.yaml.example`) reserves CPU and memory for every role and decides
-`secrets`.
+(`deploy/kubernetes/daemon/legion.yaml.example`) leaves its `resources` block commented out, so the
+daemon's defaults reserve CPU and memory for every role, and decides `secrets`.
 
 ### Anatomy of a Sandbox pod
 
@@ -1258,9 +1258,10 @@ jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/
 ```
 
 The shell runs as the issue's agents do, user 1000 under gVisor, but it carries the container's
-environment, not the agent's: a role container's spec holds only what the kubelet resolves
-(`POD_UID`, the operator's Secret references), and every other variable the agent is told, among
-them `XDG_STATE_HOME=/home/legion/.local/state/<role>`, the role's state home, arrives in its
+environment, not the agent's: a role container's spec holds only what the kubelet resolves, which
+is `POD_UID` from the downward API, and every other variable the agent is told — the operator's
+`runtime.kubernetes.pod.env` included, and among them
+`XDG_STATE_HOME=/home/legion/.local/state/<role>`, the role's state home — arrives in its
 launcher's start command (`launchEnvironment`, `manifest.go`). The `export` above sets that one, so
 an `omp` started in the shell roots its state where the role's agent does rather than under the
 profile's config root; for the agent's whole environment, read `/proc/<agent pid>/environ`, the
@@ -1408,10 +1409,12 @@ other claim of that issue `workspaceLost`, dropping the session each recorded on
 touches no other issue of the tree, whose volumes are their own; each stamped claim's replacement
 starts fresh from the committed issue bookmark until its own fresh session registers, even after the
 new pod rebuilt the clone, and a role first created later uses the ordinary fresh-worker path. A
-pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt begins:
-`Your workspace was recreated from `legion/<KEY>` because the issue's volume was lost. Anything you
-had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before
-continuing.`
+pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt says nothing
+of the loss: the relaunch names the ref the workspace is recovered from in the init container's
+`LEGION_WORKSPACE_RECOVERED_FROM` (`initEnvironment`, `manifest.go`), and `workspace-init provision`
+records it, with the commit it recreated the workspace at and the reason `volume-missing`, in the
+workspace's `.legion/<KEY>/workspace-recovered.json` (`writeRecoveryMarker`,
+`cmd/legion/workspace_init.go`), the directory the issue's committed handoffs live in.
 
 One PVC per issue, `issue-legion-<project>-<issue key lowercased>` (`ReadWriteOnce`, `issue_volume`,
 `storage_class`), created by Agent Sandbox from the issue Sandbox's one claim template when the

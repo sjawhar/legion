@@ -1,17 +1,23 @@
 // Package podsafety is what a Legion pod's Oh My Pi starts with beyond the operator's pod, and
 // nothing in it names a model, a provider, or a route, nor holds a repository's settings off. It is
-// two things. The two turn-scoping keys supervise.Machine.Quiesce depends on (TurnScopeOverlay,
-// turnscope.yml, which says why), written as the one settings overlay Legion names first in
-// PI_CONFIG_FILES, before the operator's own (runtime.kubernetes.pod): by Oh My Pi's order the
-// operator's overlay outranks it, and both outrank a repository's .omp/config.yml, so a repository's
-// settings reach a pod's agent as they reach any agent session, under the operator's. And the two
-// variables that decide where a pod's Oh My Pi keeps its sessions, set on the agent where the pod
-// leaves them unset — when Oh My Pi would otherwise fill them from the working directory's .env —
-// and never on the shim; the Sandbox runtime refuses them in the operator's pod, since a pod keeps
-// its sessions as files on the tree volume, where a resume reads them (sandbox.CheckPod). Apply,
-// the whole of it, runs only in a pod (`legion worker-shim --pod-safety`, `legion probe-image
-// --pod-safety`); a pane gets the same overlay alone, which runtime/tmux writes and names itself
-// (writeTurnScopeOverlay, panePairs).
+// three things. The turn-scoping overlay: the two keys supervise.Machine.Quiesce depends on
+// (TurnScopeOverlay, turnscope.yml, which says why), written as the one settings overlay Legion
+// names first in PI_CONFIG_FILES, before the operator's own (runtime.kubernetes.pod): by Oh My Pi's
+// order the operator's overlay outranks it, and both outrank a repository's .omp/config.yml, so a
+// repository's settings reach a pod's agent as they reach any agent session, under the operator's.
+// The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions
+// (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would otherwise fill
+// them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them
+// in the operator's pod, since a pod keeps its sessions as files on the issue's volume, where a
+// resume reads them (sandbox.CheckPod). And the state-home directory: the one Oh My Pi's state
+// root resolves to under the role's XDG_STATE_HOME (EnsureStateHome), made before Oh My Pi starts,
+// since Oh My Pi reads the variable only where that directory exists. Apply, the overlay and the
+// baseline together, runs only in a pod, for a worker's shim (`legion worker-shim --pod-safety`)
+// and for the image probe (`legion probe-image --pod-safety`), which certifies the baseline a
+// worker's Oh My Pi starts on. The state home is the shim's alone: every role the shim starts is
+// told one of its own (sandbox.roleStateHome), which in an issue pod keeps a role's browser broker
+// lock apart from its siblings', and the probe pod runs one container and is told none. A pane gets
+// the overlay alone, which runtime/tmux writes and names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -42,7 +48,7 @@ const TurnScopeFile = "podsafety-turnscope-overlay.yml"
 const settingsOverlays = "PI_CONFIG_FILES"
 
 // placesSessions is why an operator's pod may not set a variable that decides where Oh My Pi keeps
-// a session: a pod keeps its sessions as files on the tree volume, where a resume reads them.
+// a session: a pod keeps its sessions as files on the issue's volume, where a resume reads them.
 const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
 
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,
