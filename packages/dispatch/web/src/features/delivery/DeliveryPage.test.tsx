@@ -307,7 +307,8 @@ test("the header names the window and the freshness row the prototype's six sour
   try {
     renderPage();
     expect(await screen.findByRole("heading", { name: "Delivery timeline" })).toBeDefined();
-    expect(screen.getByText(/^Generated .* · window/)).toBeDefined();
+    const generated = screen.getByText(/^Generated .* · window/);
+    expect(generated.textContent).not.toContain("1970");
     // No brush window in the URL: nothing to clear.
     expect(screen.queryByRole("button", { name: "clear brush window" })).toBeNull();
     const row = screen.getByRole("region", { name: "Source freshness" });
@@ -316,6 +317,39 @@ test("the header names the window and the freshness row the prototype's six sour
     );
     expect(sources).toEqual(["prs", "runs", "ci", "dispatch", "agents", "events"]);
     expect(within(row).getByText("Deploy runs never checked: rate limited")).toBeDefined();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("while a facet pick refetches, the header and freshness keep the last answer's time, never the epoch", async () => {
+  const refetch = Promise.withResolvers<DeliveryTimelineResponse>();
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
+    .mockResolvedValueOnce({
+      ...emptyTimeline,
+      facet_counts: { ...emptyCounts, priority: { P0: 1 } },
+      prs: [listedPR],
+    })
+    .mockReturnValueOnce(refetch.promise);
+  try {
+    renderPage();
+    await screen.findByText(/^Generated .* · window/);
+    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
+    fireEvent.click(
+      within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
+        name: /^P0/,
+      })
+    );
+    await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(2));
+
+    // The previous answer stays on screen while the new read is in flight.
+    expect(screen.getByText(/^Generated .* · window/).textContent).not.toContain("1970");
+    const row = screen.getByRole("region", { name: "Source freshness" });
+    expect(row.querySelector('[data-source="dispatch"]')?.textContent).toMatch(
+      /^Dispatch \d+ s ago$/
+    );
+    refetch.resolve({ ...emptyTimeline, prs: [listedPR] });
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();

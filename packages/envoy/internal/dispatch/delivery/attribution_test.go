@@ -269,12 +269,11 @@ func TestReconcileBackfillsAttributionInputsOnce(t *testing.T) {
 	}
 }
 
-// TestCompletingAPullRequestWhoseCommitsFailLeavesItsInputsUnread: a completion whose commit
-// read fails (a 500 here) still writes the row complete, but leaves its attribution inputs null
-// rather than storing an empty commit-key list for good, so the backfill reads it again once the
-// commits answer (the same pass's backfill too, which here still meets the 500) and stores what
-// they name.
-func TestCompletingAPullRequestWhoseCommitsFailLeavesItsInputsUnread(t *testing.T) {
+// TestCompletingAPullRequestWhoseCommitsFailLeavesItPartial: a completion whose commit read fails
+// (a 500 here, which readGitHubPage does not retry) writes nothing, so the row stays partial with
+// no sessions and no attribution inputs rather than recording them short for good, and the next
+// pass completes it once the commits answer.
+func TestCompletingAPullRequestWhoseCommitsFailLeavesItPartial(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-181"}, nil)
@@ -322,9 +321,9 @@ func TestCompletingAPullRequestWhoseCommitsFailLeavesItsInputsUnread(t *testing.
 	if err != nil {
 		t.Fatalf("read #180 after the first pass: %v", err)
 	}
-	if first.Partial || first.Attribution != nil || first.IssueKey != nil {
-		t.Fatalf("#180 after its commits failed: partial = %v, inputs = %+v, issue = %v; want complete, inputs unread, no issue",
-			first.Partial, first.Attribution, first.IssueKey)
+	if !first.Partial || first.Attribution != nil || first.IssueKey != nil || len(first.Sessions) != 0 {
+		t.Fatalf("#180 after its commits failed: partial = %v, inputs = %+v, issue = %v, sessions = %v; want still partial with nothing written",
+			first.Partial, first.Attribution, first.IssueKey, first.Sessions)
 	}
 
 	commitsFailing.Store(false)
@@ -333,8 +332,9 @@ func TestCompletingAPullRequestWhoseCommitsFailLeavesItsInputsUnread(t *testing.
 	if err != nil {
 		t.Fatalf("read #180 after the second pass: %v", err)
 	}
-	if second.Attribution == nil || len(second.Attribution.CommitKeys) != 1 || second.IssueKey == nil || *second.IssueKey != "ATTR-181" {
-		t.Fatalf("#180 after the backfill: inputs = %+v, issue = %v; want ATTR-181 from its commit message", second.Attribution, second.IssueKey)
+	if second.Partial || second.Attribution == nil || len(second.Attribution.CommitKeys) != 1 || second.IssueKey == nil || *second.IssueKey != "ATTR-181" {
+		t.Fatalf("#180 after the commits answer: partial = %v, inputs = %+v, issue = %v; want complete with ATTR-181 from its commit message",
+			second.Partial, second.Attribution, second.IssueKey)
 	}
 }
 

@@ -120,15 +120,17 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
+	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now))
+	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
+		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now))
+	}
+	// The attribution backfill runs last, within its own call budget: it is the one step whose
+	// work can wait a pass, so the timeline's own facts take the rate limit first.
 	record("read attribution inputs of stored pull requests", r.reconcileAttributionInputs(ctx))
 	if changed, err := AttributePullRequests(ctx, r.pool, AttributionResolveBatch); err != nil {
 		record("attribute stored pull requests", err)
 	} else if changed > 0 {
 		slog.Info("dispatch delivery: attributed stored pull requests", "changed", changed)
-	}
-	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now))
-	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now))
 	}
 
 	if len(failures) > 0 {
@@ -394,22 +396,84 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	return nil
 }
 
-// attributionBackfillBatch bounds how many stored rows reconcileAttributionInputs reads from
-// GitHub in one pass: each costs one call for the pull request plus one per 100 commits, and the
-// backfill of a 28-day population's thousands of rows spreads over passes rather than spending
-// one pass's share of the rate limit. Each row is read exactly once (its inputs are then stored).
-const attributionBackfillBatch = 200
+// attributionBackfillCalls bounds the GitHub calls reconcileAttributionInputs makes in one pass. A
+// row costs one call for the pull request and one per page of 100 commits
+// (fetchAttributionFacts): two for nearly every row, at most maxAttributionCalls. At twelve passes
+// an hour that is at most 1,440 calls an hour, under a third of an installation's 5,000, and the
+// rest of each pass (the merged-PR search, partial rows, the workflow runs and their jobs) keeps
+// the remainder. A 28-day population's ~4,000 rows then backfill over about 70 passes, six hours.
+const attributionBackfillCalls = 120
+
+// maxAttributionCalls is the most one row's attribution read can cost: the pull request and every
+// commits page fetchCommitMessagesWithToken reads.
+const maxAttributionCalls = 1 + maxCommitPages
+
+// attributionBackfillRows is how many unread rows a pass lists for the backfill: as many as the
+// call budget can read at two calls a row.
+const attributionBackfillRows = attributionBackfillCalls / 2
+
+// callBudget is one pass's allowance of GitHub calls, shared by concurrent reads. A read reserves
+// the most it can cost before it starts and gives back what it did not use, waiting while other
+// reads hold reservations, so the calls made never exceed the allowance however the reads
+// interleave, and a read gives up only once the allowance is spent.
+type callBudget struct {
+	mu       sync.Mutex
+	changed  *sync.Cond
+	left     int
+	reserved int
+	spent    int
+}
+
+func newCallBudget(calls int) *callBudget {
+	budget := &callBudget{left: calls}
+	budget.changed = sync.NewCond(&budget.mu)
+	return budget
+}
+
+// reserve takes n calls from the allowance, waiting for reads in flight to give theirs back, or
+// answers false when the allowance cannot cover n.
+func (b *callBudget) reserve(n int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.left < n && b.reserved > 0 {
+		b.changed.Wait()
+	}
+	if b.left < n {
+		return false
+	}
+	b.left -= n
+	b.reserved += n
+	return true
+}
+
+// settle records that a read which reserved `reserved` calls made `used`, and gives the rest back.
+func (b *callBudget) settle(reserved, used int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.left += reserved - used
+	b.reserved -= reserved
+	b.spent += used
+	b.changed.Broadcast()
+}
 
 // reconcileAttributionInputs reads, once each, the attribution inputs of complete rows stored
-// before those inputs were, or whose commits could not be read when they were completed
-// (ListUnreadAttributionPullRequests, newest first), and stores them with the row's issue
-// resolved from them. A rate limit stops the batch and fails the pass, as for partial rows.
+// before those inputs were (ListUnreadAttributionPullRequests, newest first), within
+// attributionBackfillCalls, and stores them with the row's issue resolved from them. A rate limit
+// stops the batch and fails the pass, as for partial rows; a row the budget does not reach waits
+// for a later pass.
 func (r *Reconcile) reconcileAttributionInputs(ctx context.Context) error {
-	unread, err := ListUnreadAttributionPullRequests(ctx, r.pool, attributionBackfillBatch)
+	unread, err := ListUnreadAttributionPullRequests(ctx, r.pool, attributionBackfillRows)
 	if err != nil {
 		return fmt.Errorf("list pull requests with unread attribution inputs: %w", err)
 	}
-	if err := boundedFanOut(ctx, reconcilePartialConcurrency, unread, r.readAttributionInputs); err != nil {
+	budget := newCallBudget(attributionBackfillCalls)
+	err = boundedFanOut(ctx, reconcilePartialConcurrency, unread, func(ctx context.Context, pr DeliveryPullRequest) error {
+		return r.readAttributionInputs(ctx, pr, budget)
+	})
+	if len(unread) > 0 {
+		slog.Info("dispatch delivery: read attribution inputs", "listed", len(unread), "calls", budget.spent)
+	}
+	if err != nil {
 		return fmt.Errorf("rate-limited reading attribution inputs: %w", err)
 	}
 	return nil
@@ -417,16 +481,21 @@ func (r *Reconcile) reconcileAttributionInputs(ctx context.Context) error {
 
 // readAttributionInputs is reconcileAttributionInputs' per-row body, run as its own boundedFanOut
 // goroutine: it reads only what the attribution needs (fetchAttributionFacts), since the row
-// already holds every other fact. Like completePartialPullRequest, it returns non-nil only for a
-// *githubapp.RateLimitError, marks a row GitHub no longer has unfetchable, and logs and skips
-// any other failure, leaving the row unread for a later pass.
-func (r *Reconcile) readAttributionInputs(ctx context.Context, pr DeliveryPullRequest) error {
+// already holds every other fact, and only when budget still covers the most that read can cost.
+// Like completePartialPullRequest, it returns non-nil only for a *githubapp.RateLimitError, marks
+// a row GitHub no longer has unfetchable, and logs and skips any other failure, leaving the row
+// unread for a later pass.
+func (r *Reconcile) readAttributionInputs(ctx context.Context, pr DeliveryPullRequest, budget *callBudget) error {
 	owner, repo, err := splitRepo(pr.Repo)
 	if err != nil {
 		slog.Warn("dispatch delivery: read attribution inputs", "repo", pr.Repo, "number", pr.Number, "error", err)
 		return nil
 	}
-	facts, err := fetchAttributionFacts(ctx, r.github, owner, repo, pr.Repo, pr.Number)
+	if !budget.reserve(maxAttributionCalls) {
+		return nil
+	}
+	facts, calls, err := fetchAttributionFacts(ctx, r.github, owner, repo, pr.Repo, pr.Number)
+	budget.settle(maxAttributionCalls, calls)
 	if err != nil {
 		if limited, ok := githubapp.AsRateLimit(err); ok {
 			slog.Warn("dispatch delivery: stopped reading attribution inputs: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
@@ -488,10 +557,10 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 	}
 	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched); err != nil {
 		if limited, ok := githubapp.AsRateLimit(err); ok {
-			slog.Warn("dispatch delivery: stopped fetching session trailers for a partial pull request: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
+			slog.Warn("dispatch delivery: stopped completing partial pull requests: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited
 		}
-		slog.Warn("dispatch delivery: upsert completed pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
+		slog.Warn("dispatch delivery: complete partial pull request; it stays partial for the next pass", "repo", pr.Repo, "number", pr.Number, "error", err)
 	}
 	return nil
 }
