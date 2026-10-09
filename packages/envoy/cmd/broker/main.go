@@ -71,21 +71,17 @@ func main() {
 	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
-	// An IAM-form BROKER_DATABASE_URL signs every connection in with an RDS IAM token, minted
-	// from the AWS config, so that config is loaded before the database is opened, and the
-	// Secrets Manager and KMS clients below reuse it.
-	var awsCfg *aws.Config
-	loadAWS := func() aws.Config {
-		if awsCfg == nil {
-			loaded, err := awsconfig.LoadDefaultConfig(ctx)
-			fatal(err)
-			awsCfg = &loaded
-		}
-		return *awsCfg
+	// The AWS config, loaded once when anything needs it: an IAM-form BROKER_DATABASE_URL, whose
+	// connections sign in with RDS IAM tokens minted from it (so it is loaded before the database
+	// is opened), and the Secrets Manager and KMS clients, unless the fake secrets file stands in.
+	var awsCfg aws.Config
+	if cfg.DatabaseIAM || fakeSecrets == "" {
+		awsCfg, err = awsconfig.LoadDefaultConfig(ctx)
+		fatal(err)
 	}
 	var storeOpts []store.Option
 	if cfg.DatabaseIAM {
-		mint, err := store.RDSAuthTokens(loadAWS())
+		mint, err := rdsAuthTokens(awsCfg)
 		fatal(err)
 		storeOpts = append(storeOpts, store.WithTokenMinter(mint))
 	}
@@ -99,8 +95,8 @@ func main() {
 		fatal(err)
 		loader.Secrets, loader.Describer, loader.Aliases, reader = local, local, local, secrets.AWS{Client: local}
 	} else {
-		sm := secretsmanager.NewFromConfig(loadAWS())
-		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(loadAWS()), secrets.AWS{Client: sm}
+		sm := secretsmanager.NewFromConfig(awsCfg)
+		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
 	}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
