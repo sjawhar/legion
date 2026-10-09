@@ -330,7 +330,7 @@ func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
 	// textLevel-2, and the paragraph level textLevel-1.
 	chain := func(textLevel int) *Node {
 		text := &Node{Type: "text", Text: "a", Marks: []Mark{{
-			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": nestedValue(expectedMaxMarkAttrNesting)},
+			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": docstest.NestedValue(expectedMaxMarkAttrNesting)},
 		}}}
 		node := &Node{Type: "paragraph", Children: []*Node{text}}
 		for range textLevel - 2 {
@@ -462,14 +462,14 @@ func TestAttributesNestedPastTheBoundAreOutsideTheSchema(t *testing.T) {
 	}
 	for _, nesting := range []int{expectedMaxNodeAttrNesting, expectedMaxNodeAttrNesting + 1} {
 		t.Run(fmt.Sprintf("a node attribute nesting %d", nesting), func(t *testing.T) {
-			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": nestedValue(nesting)}, Children: []*Node{{Type: "text", Text: "a"}}}}}
+			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": docstest.NestedValue(nesting)}, Children: []*Node{{Type: "text", Text: "a"}}}}}
 			check(t, "a node attribute", nesting, expectedMaxNodeAttrNesting, node.Validate())
 		})
 	}
 	for _, nesting := range []int{expectedMaxMarkAttrNesting, expectedMaxMarkAttrNesting + 1} {
 		t.Run(fmt.Sprintf("a mark attribute nesting %d", nesting), func(t *testing.T) {
-			check(t, "a mark attribute", nesting, expectedMaxMarkAttrNesting, linkedText(nestedValue(nesting)).Validate())
-			_, err := Read(liveLinkedText(t, nestedValue(nesting)).GetXmlFragment("prosemirror"))
+			check(t, "a mark attribute", nesting, expectedMaxMarkAttrNesting, linkedText(docstest.NestedValue(nesting)).Validate())
+			_, err := Read(liveLinkedText(t, docstest.NestedValue(nesting)).GetXmlFragment("prosemirror"))
 			check(t, "a live mark attribute", nesting, expectedMaxMarkAttrNesting, err)
 		})
 	}
@@ -522,7 +522,7 @@ func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
 	}
 	plainText := func() *Node { return &Node{Type: "text", Text: "a"} }
 	linked := func(nesting int) *Node {
-		return &Node{Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: linkAttrs(nestedValue(nesting))}}}
+		return &Node{Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: linkAttrs(docstest.NestedValue(nesting))}}}
 	}
 	level := func(nested any) Attrs { return Attrs{"level": float64(1), "nested": nested} }
 	for _, test := range []struct {
@@ -541,19 +541,19 @@ func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
 			return Update(txn, fragment, heading(linked(nesting), level(nil)))
 		}},
 		{"Update writing a node attribute", expectedMaxNodeAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
-			return Update(txn, fragment, heading(plainText(), level(nestedValue(nesting))))
+			return Update(txn, fragment, heading(plainText(), level(docstest.NestedValue(nesting))))
 		}},
 		{"Update changing a node attribute", expectedMaxNodeAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
 			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
 				t.Fatalf("write the heading: %v", err)
 			}
-			return Update(txn, fragment, heading(plainText(), level(nestedValue(nesting))))
+			return Update(txn, fragment, heading(plainText(), level(docstest.NestedValue(nesting))))
 		}},
 		{"MarkRange", expectedMaxMarkAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
 			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
 				t.Fatalf("write the text: %v", err)
 			}
-			return MarkRange(txn, fragment, Range{From: 1, To: 2}, Mark{Type: "link", Attrs: linkAttrs(nestedValue(nesting))})
+			return MarkRange(txn, fragment, Range{From: 1, To: 2}, Mark{Type: "link", Attrs: linkAttrs(docstest.NestedValue(nesting))})
 		}},
 	} {
 		for _, nesting := range []int{test.bound, test.bound + 1} {
@@ -584,13 +584,4 @@ func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
 			})
 		}
 	}
-}
-
-// nestedValue is a string inside depth arrays nested one inside another.
-func nestedValue(depth int) any {
-	var value any = "x"
-	for range depth {
-		value = []any{value}
-	}
-	return value
 }

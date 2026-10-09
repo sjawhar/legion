@@ -614,9 +614,12 @@ func New(deps Deps) *Service {
 	// checks peers alone too (Server.CloseRoom), and the service still calls it to close an
 	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
 	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
-	// stranded persistence, on the committing goroutine (persistence.go:126-164). The service's
-	// CloseRoom waits for a repair's commit (roomServer), so a repair never meets it; a published
-	// write's suppression slot is finished before ygo's persistence observer runs
+	// stranded persistence, on the committing goroutine: the room's doc.OnUpdate observer, which
+	// loadRoom registers (provider/websocket/server.go:1784-1826) and which runs on the goroutine
+	// that committed once the commit has released the document's lock (crdt/doc.go:647-652), calls
+	// persistStranded (persistence.go:126-164) after the room's persistence worker retires. The
+	// service's CloseRoom waits for a repair's commit (roomServer), so a repair never meets it; a
+	// published write's suppression slot is finished before ygo's persistence observer runs
 	// (onLoadDocument), so that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
 

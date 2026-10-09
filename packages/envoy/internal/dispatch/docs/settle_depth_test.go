@@ -31,15 +31,11 @@ func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
 			return nil
 		}},
 		{"a mark nested past the bound", func(t *testing.T, doc *crdt.Doc, _ func(func(*crdt.Transaction))) error {
-			var nested any = "x"
-			for range 100 {
-				nested = []any{nested}
-			}
 			peer := crdt.New()
 			if err := crdt.ApplyUpdateV1(peer, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
 				return err
 			}
-			return crdt.ApplyUpdateV1(doc, docstest.NestedLinkUpdate(t, peer, nested), "peer")
+			return crdt.ApplyUpdateV1(doc, docstest.NestedLinkUpdate(t, peer, docstest.NestedValue(100)), "peer")
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

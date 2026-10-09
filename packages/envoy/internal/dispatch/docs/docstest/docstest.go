@@ -185,7 +185,7 @@ func WriteDeepChain(txn *crdt.Transaction, fragment *crdt.YXmlFragment, textLeve
 // copy the caller throws away.
 func NestedLinkUpdate(t testing.TB, doc *crdt.Doc, nested any) []byte {
 	t.Helper()
-	text := firstText(doc.GetXmlFragment("prosemirror"))
+	text := FirstText(doc.GetXmlFragment("prosemirror"))
 	if text == nil {
 		t.Fatal("the document holds no text to link")
 	}
@@ -204,9 +204,7 @@ func NestedLinkUpdate(t testing.TB, doc *crdt.Doc, nested any) []byte {
 		if err != nil {
 			t.Fatalf("encode %T as JSON: %v", v, err)
 		}
-		encoder := encoding.NewEncoder()
-		encoder.WriteVarString(string(text))
-		return encoder.Bytes()
+		return encoding.EncodeBytes(func(encoder *encoding.Encoder) { encoder.WriteVarString(string(text)) })
 	}
 	placeholder := written(link("placeholder"))
 	if count := bytes.Count(update, placeholder); count != 1 {
@@ -215,17 +213,28 @@ func NestedLinkUpdate(t testing.TB, doc *crdt.Doc, nested any) []byte {
 	return bytes.Replace(update, placeholder, written(link(nested)), 1)
 }
 
-// firstText is the first text in document order under fragment, or nil.
-func firstText(fragment *crdt.YXmlFragment) *crdt.YXmlText {
+// FirstText is the first text node in document order under fragment, or nil for a fragment
+// without one.
+func FirstText(fragment *crdt.YXmlFragment) *crdt.YXmlText {
 	for _, child := range fragment.Children() {
 		switch node := child.(type) {
 		case *crdt.YXmlText:
 			return node
 		case *crdt.YXmlElement:
-			if text := firstText(&node.YXmlFragment); text != nil {
+			if text := FirstText(&node.YXmlFragment); text != nil {
 				return text
 			}
 		}
 	}
 	return nil
+}
+
+// NestedValue is a string inside depth arrays nested one inside another: an attribute value that
+// nests depth arrays and objects.
+func NestedValue(depth int) any {
+	var value any = "x"
+	for range depth {
+		value = []any{value}
+	}
+	return value
 }

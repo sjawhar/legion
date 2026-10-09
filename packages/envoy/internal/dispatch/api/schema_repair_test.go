@@ -76,11 +76,7 @@ func appendNestedLink(t *testing.T, database *store.Store, artifactID string) {
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		t.Fatalf("decode document before crafted link: %v", err)
 	}
-	var nested any = "x"
-	for range 100 {
-		nested = []any{nested}
-	}
-	if _, err := persistence.AppendUpdate(context.Background(), artifactID, docstest.NestedLinkUpdate(t, doc, nested)); err != nil {
+	if _, err := persistence.AppendUpdate(context.Background(), artifactID, docstest.NestedLinkUpdate(t, doc, docstest.NestedValue(100))); err != nil {
 		t.Fatalf("append crafted link: %v", err)
 	}
 }
