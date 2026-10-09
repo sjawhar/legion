@@ -217,7 +217,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
           }
           title={"Merge \u2192 production"}
         >
-          <div className="flex items-baseline gap-3">
+          <div className="flex flex-wrap items-baseline gap-x-3">
             <span className="flex items-baseline gap-1">
               <BigNumber className={toneOf((d) => d.status.merge_to_production_median)}>
                 {show((d) =>
@@ -245,7 +245,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
           }
           title={"PR open \u2192 merge"}
         >
-          <div className="flex items-baseline gap-3">
+          <div className="flex flex-wrap items-baseline gap-x-3">
             <span className="flex items-baseline gap-1">
               <BigNumber className={toneOf((d) => d.status.opened_to_merge)}>
                 {show((d) => formatMinutes(d.measures.lead_time.opened_to_merge.median_minutes))}
