@@ -188,6 +188,11 @@ fixture_branch=
 # The run's own text in the fixture's two skills: a skill read in a pod is this run's, not a stale
 # checkout's.
 fixture_skill_nonce=
+# When set, claim_session_text prints a claim's session from the first line holding it on: a
+# checkpoint's reads scoped to its own instruction (the nonce the delivery carries), since a
+# negative over the whole session (no bash result names the other App, no notebook ran) would read
+# the role's earlier work in the same session too.
+session_from=
 pair_recorded=
 pair_session=
 # The daemon's configured default bounds launch failures and deaths with work outstanding alike.
@@ -646,11 +651,17 @@ claim_session_file() {
     jq -er --arg issue "$1" --arg role "$2" \
       '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
 }
+# claim_session_text ISSUE ROLE prints the claim's session as the pod holds it, from the first line
+# holding $session_from on when that is set.
 claim_session_text() {
   local issue=$1 role=$2 file pod
   file=$(claim_session_file "$issue" "$role") || return 1
   pod=$(claim_sandbox "$issue" "$role") || return 1
-  pod_exec "$pod" "$role" cat -- "$file"
+  if [ -n "$session_from" ]; then
+    pod_exec "$pod" "$role" cat -- "$file" | awk -v mark="$session_from" 'found || index($0, mark) { found = 1; print }'
+  else
+    pod_exec "$pod" "$role" cat -- "$file"
+  fi
 }
 workspace_jj() {
   local issue=$1 pod
@@ -1582,6 +1593,64 @@ codegraph_control() {
     [tool_results("codegraph")[] | select(.arguments | contains("NoSuchSymbol"))]
     | length > 0 and all(.[]; .isError or (.text | test("greet_test\\.go|GreetWorld|caller\\.go") | not))' <<<"$text" >/dev/null
 }
+# full_agent_message ROLE NONCE prints the full-agent instruction for ROLE: eight items, each one
+# tool call, whose answers carry NONCE wherever a tool returns text the checkpoint can hold it to.
+# The Python and JavaScript evals print distinct lines (`NONCE py 42`, `NONCE js 42`), since
+# call_arguments is {} for eval (lib/omp-tool-calls.jq) and the two are told apart by their results
+# alone. The reply's lines start with NONCE-answer, a mark no tool call's arguments hold: the eval
+# code and the edit carry NONCE itself, which assistant_said reads too, so NONCE alone would be
+# answered by the first eval call. The pieces are printf formats, so the quotes and braces the
+# model must pass to the tools survive bash; send_agent hands the text to jq --arg, unexpanded.
+full_agent_message() {
+  local role=$1 nonce=$2 standing
+  case $role in
+    architect) standing='your tree is in merging and its merger waits for the driver' ;;
+    *) standing='your phase is finished' ;;
+  esac
+  printf 'Stage 4b proof full-agent operation: %s; change no tracked file and call no legion operation. Run each item as its own tool call, in order, and then reply to this message with one line per item, each starting with %s-answer, then wait for the next instruction. ' "$standing" "$nonce"
+  printf '(1) eval, language py: print(f"%s py {6*7}"). (2) eval, language js: console.log("%s js", 6*7). ' "$nonce" "$nonce"
+  printf '(3) write /tmp/full-agent-%s.html containing <title>full-agent %s</title>, then eval, language js: const tab = await browser.open({ url: "file:///tmp/full-agent-%s.html" }); console.log("title:", await tab.title()); await tab.close(); ' "$role" "$nonce" "$role"
+  printf '(4) web_search for: Jujutsu version control. (5) bash: go version && bun --version && python3 --version && curl --version | head -1 && gh --version | head -1 && git --version. '
+  printf '(6) edit /tmp/full-agent-%s.html so its title reads edited %s, then read the file back. ' "$role" "$nonce"
+  printf "(7) bash: gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login. "
+  printf '(8) task: one subagent named FullAgentGh whose only instruction is to run that same gh api graphql command in bash and reply with the login it printed.'
+}
+# full_agent_merger_message NONCE is the merger's shorter instruction: it is live for the driver's
+# READY (done) and must not merge yet, so it writes, edits and reads a file and prints its App login.
+full_agent_merger_message() {
+  printf 'Stage 4b proof full-agent operation for the merger: do not merge and call no legion operation yet. (1) write /tmp/full-agent-merger.html containing <title>full-agent %s</title>, edit it so the title reads edited %s, and read it back; ' "$1" "$1"
+  printf "(2) bash: gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login; "
+  printf 'reply to this message with one line per item, each starting with %s-answer, then wait for the next instruction.' "$1"
+}
+# full_agent_task_id ISSUE ROLE LOGIN prints the id of the first task-result block, in a task result
+# of ROLE's session that returned without error, whose text carries LOGIN; nothing when none does.
+# The id is the task's name, and the subagent's own session lies beside its parent's at <session
+# stem>/<id>.jsonl, where review-pair reads the pair's.
+full_agent_task_id() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -r -L "$root/scripts/e2e/lib" --arg want "$3" 'include "stage4b-tools";
+    [tool_result_texts("task")[] | select(contains($want)) | capture("<task-result id=\"(?<id>[^\"]+)\"") | .id] | first // ""' <<<"$text"
+}
+# full_agent_subagent_verdict APP OTHER reads a subagent's session (JSONL on stdin) and prints
+# whether one of its own bash calls returned APP (login), whether its yield was accepted (yield: an
+# accepted yield ends a subagent, as review-pair reads it), whether any bash returned OTHER (other,
+# the other App, which must be false), and its bash results trimmed.
+full_agent_subagent_verdict() {
+  jq -R -s -c -L "$root/scripts/e2e/lib" --arg app "$1" --arg other "$2" 'include "stage4b-tools";
+    {login: tool_result_said("bash"; $app), yield: tool_ran("yield"), other: tool_result_said("bash"; $other),
+     bash: [tool_results("bash")[] | (if .isError then "error " else "" end) + (.text | gsub("\\s+"; " ") | .[0:200])]}'
+}
+# full_agent_summary ISSUE ROLE APP prints one line of what ROLE's tools returned: the login, the
+# browser's title line, the toolchain's versions and the first search hit, each trimmed.
+full_agent_summary() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -r -L "$root/scripts/e2e/lib" --arg app "$3" 'include "stage4b-tools";
+    def said(name; $text): [tool_result_texts(name)[] | select(contains($text))] | first // "none";
+    def line: split("\n")[0] | .[0:120];
+    "login \(said("bash"; $app) | line); browser \(said("eval"; "title: ") | line); toolchain \(said("bash"; "go version") | gsub("\\s+"; " ") | .[0:200]); search \(said("web_search"; "https://") | line)"' <<<"$text"
+}
 # agent_pid POD ROLE prints the pid of ROLE's Oh My Pi in POD: the process whose command line
 # starts with /opt/omp/bin/omp and carries --mode rpc. The shim's own command line carries that
 # text too, after its --, so the match is on how the line starts; Oh My Pi's eval worker starts the
@@ -2240,6 +2309,35 @@ start_interests_sampler
 probe=$(log_lines "sandbox runtime: the worker image passed its probe" | tail -1)
 [ -n "$probe" ] || fail "the daemon booted with no image probe pass logged"
 note "image probe: $(jq -c '{image, model, sandbox}' <<<"$probe")"
+# The daemon's capability report (capabilities.Deployment.Report, `.capabilities` of `legion state
+# --json`), once the probe's verdict is in it: the probe logs its pass before the daemon records it,
+# so the read waits for no image row to be unchecked. Every image row is present and none installed,
+# codegraph included (a pod's agent loads the profile's plugins, as repository-tools holds); every
+# live row is live, its detail naming this proof as what proves it and not the daemon (the
+# sentence deployment.go's liveDetail renders); and the open rows are exactly secrets: the proof's
+# legion.yaml (write_legion_config) configures no runtime.kubernetes.agent_secrets and no
+# capabilities.decided, while model-fallback and resource-limits are present, since the operator
+# fixture's overlay turns retry.modelFallback on and its pod gives every role a reservation. A gap
+# is reported, never refused: the daemon that reports secrets open is the one that runs the rest.
+capabilities_probed() { daemon_state | jq -e '[.capabilities[] | select(.status == "unchecked")] | length == 0' >/dev/null; }
+until_true 60 "the capability report to carry the probe's verdict on every image row" capabilities_probed
+daemon_state | jq '.capabilities' >"$evidence/capabilities-at-boot.json"
+# capability_row NAME prints NAME's row as `status: detail`, or that there is none.
+capability_row() { jq -r --arg n "$1" '[.[] | select(.name == $n)] | first // {status: "absent", detail: "no such row"} | "\(.status): \(.detail)"' "$evidence/capabilities-at-boot.json"; }
+for row in eval-js eval-python browser lsp codegraph skills toolchain; do
+  jq -e --arg n "$row" 'any(.[]; .name == $n and .status == "present")' "$evidence/capabilities-at-boot.json" >/dev/null ||
+    fail "the image row $row reads '$(capability_row "$row")' after the image probe passed, not present"
+done
+live_detail='proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon'
+for row in subagents web-search mcp repository-extensions dispatch-envoy-tools github; do
+  jq -e --arg n "$row" --arg d "$live_detail" 'any(.[]; .name == $n and .status == "live" and (.detail | startswith($d)))' "$evidence/capabilities-at-boot.json" >/dev/null ||
+    fail "the live row $row reads '$(capability_row "$row")', not live with a detail starting '$live_detail'"
+done
+open_rows=$(jq -c '[.[] | select(.status == "open") | .name]' "$evidence/capabilities-at-boot.json")
+[ "$open_rows" = '["secrets"]' ] ||
+  fail "the open capabilities are $open_rows, not [\"secrets\"]: $(jq -c '[.[] | select(.status == "open") | {name, detail, configLine}]' "$evidence/capabilities-at-boot.json")"
+note "capabilities at boot ($evidence/capabilities-at-boot.json): every image row present, codegraph included, and none installed; every live row live, naming this proof; open: secrets ($(capability_row secrets))"
+note "model-fallback reads '$(capability_row model-fallback)'; resource-limits reads '$(capability_row resource-limits)'"
 [ ! -e "$state/workspaces" ] || fail "the daemon's state_dir has a workspaces/ directory under the Sandbox runtime"
 probe_pod=$(jq -r '.sandbox' <<<"$probe")
 kubectl --context "$operator" get events -n "$namespace" --field-selector "involvedObject.name=$probe_pod" -o json 2>/dev/null |
@@ -2880,6 +2978,109 @@ issue_phase "$tree1" merging >/dev/null || fail "the planner's answer moved $tre
 note "tree 1's finished planner answered $nonce in its first pod and session $(cat "$work/resident-$tree1-planner.json"); $tree1 stayed in merging"
 pass
 
+begin full-agent
+# Tree 1 is in merging: planner, implementer, tester and reviewer finished their phases and are
+# resident, the architect owns its tree, and the merger is live, waiting for the driver (done). Every
+# role is asked, in its own session, to use Oh My Pi's tools and the image's toolchain, and each
+# answer is read from the tool's result (lib/stage4b-tools.jq), never from the model's words: eval in
+# Python and in JavaScript, the browser driven from eval, web_search, bash over the toolchain, write,
+# edit and read, and a task subagent. The GitHub identity is the App login GraphQL's viewer answers
+# (REST /user is refused for an installation token), in the role's own bash and in the subagent it
+# dispatches, which must act as the same App and never the other: the implementer and the merger are
+# legion-implementer[bot], every other role legion-reviewer[bot] (role_app). The subagent's own
+# session, beside its parent's, must hold that bash result and end in an accepted yield. The
+# control: notebook, a tool nothing asked for, has no result in any session, since a result is the
+# tool's by the call it answers. This is dispatch://LEGION-578's integration check on a running pod:
+# criteria 1 (the tools), 3 (the toolchain), 4 (no role refused) and 5 (plain gh as the role's App,
+# in subagents too). The five instructions are sent first and waited for after, so the roles run at
+# once; the browser is asserted in every role, since the criterion is every role, not one per pod.
+# The merger does less, and is left waiting for the READY instruction done sends.
+issue_phase "$tree1" merging >/dev/null || fail "$tree1 left merging before the full-agent operation: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
+on_tree "$tree1" wait_for_worker "$tree1" merger
+mkdir -p "$evidence/full-agent"
+declare -A fa_nonce=()
+for role in architect planner implementer tester reviewer; do
+  fa_nonce[$role]="full-agent-$role-$RANDOM$RANDOM"
+  message=$(full_agent_message "$role" "${fa_nonce[$role]}")
+  printf '%s\n' "$message" >"$evidence/full-agent/message-$role.txt"
+  send_agent "$tree1" "$role" "$message"
+done
+note "the architect's instruction, as sent: $(cat "$evidence/full-agent/message-architect.txt")"
+merger_nonce="full-agent-merger-$RANDOM$RANDOM"
+message=$(full_agent_merger_message "$merger_nonce")
+printf '%s\n' "$message" >"$evidence/full-agent/message-merger.txt"
+send_agent "$tree1" merger "$message"
+for role in architect planner implementer tester reviewer; do
+  on_tree "$tree1" until_true 900 "tree 1's $role to answer ${fa_nonce[$role]}-answer" assistant_said "$tree1" "$role" "${fa_nonce[$role]}-answer"
+done
+on_tree "$tree1" until_true 900 "tree 1's merger to answer $merger_nonce-answer" assistant_said "$tree1" merger "$merger_nonce-answer"
+for role in architect planner implementer tester reviewer; do
+  nonce=${fa_nonce[$role]}
+  app=$(role_app "$role")
+  case $app in 'legion-implementer[bot]') other='legion-reviewer[bot]' ;; *) other='legion-implementer[bot]' ;; esac
+  # Every read below is scoped to the session from the instruction's delivery on: the negatives
+  # (the other App, notebook) would otherwise read the role's earlier work, where a reviewer's
+  # gh pr view names the implementer's App as the author. The excerpt is kept for the record.
+  session_from=$nonce
+  text=$(claim_session_text "$tree1" "$role") || fail "$role on $tree1 has no readable session"
+  printf '%s\n' "$text" >"$evidence/full-agent/$role.jsonl"
+  tool_result_said "$tree1" "$role" eval "$nonce py 42" ||
+    fail "$role: no eval result carries '$nonce py 42', so Python did not run; its eval results: $(tool_result_quotes "$tree1" "$role" eval)"
+  tool_result_said "$tree1" "$role" eval "$nonce js 42" ||
+    fail "$role: no eval result carries '$nonce js 42', so JavaScript did not run; its eval results: $(tool_result_quotes "$tree1" "$role" eval)"
+  tool_result_said "$tree1" "$role" eval "title: full-agent $nonce" ||
+    fail "$role: no eval result carries 'title: full-agent $nonce', so the browser did not open its page; its eval results: $(tool_result_quotes "$tree1" "$role" eval)"
+  tool_result_said "$tree1" "$role" web_search "https://" ||
+    fail "$role: no web_search result carries an https:// URL; its web_search results: $(tool_result_quotes "$tree1" "$role" web_search)"
+  for want in "go version go" "Python 3" "curl " "gh version" "git version"; do
+    tool_result_said "$tree1" "$role" bash "$want" ||
+      fail "$role: no bash result carries '$want', so the toolchain chain did not run through; its bash results: $(tool_result_quotes "$tree1" "$role" bash)"
+  done
+  tool_result_said "$tree1" "$role" read "edited $nonce" || tool_result_said "$tree1" "$role" edit "edited $nonce" ||
+    fail "$role: neither a read nor an edit result carries 'edited $nonce', so the edit did not land; its edit results: $(tool_result_quotes "$tree1" "$role" edit); its reads: $(tool_result_quotes "$tree1" "$role" read /tmp/full-agent)"
+  tool_result_said "$tree1" "$role" bash "$app" ||
+    fail "$role: no bash result carries $app, so gh api graphql did not answer as the role's App; its bash results: $(tool_result_quotes "$tree1" "$role" bash)"
+  ! tool_result_said "$tree1" "$role" bash "$other" ||
+    fail "$role: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$tree1" "$role" bash)"
+  tool_result_said "$tree1" "$role" task "$app" ||
+    fail "$role: no task result carries $app, so its FullAgentGh subagent did not answer as the role's App; its task results: $(tool_result_quotes "$tree1" "$role" task)"
+  id=$(full_agent_task_id "$tree1" "$role" "$app")
+  [ -n "$id" ] || fail "$role: the task result carrying $app holds no <task-result id=…> block; its task results: $(tool_result_quotes "$tree1" "$role" task)"
+  session=$(claim_session_file "$tree1" "$role") || fail "$role on $tree1 has no session file"
+  pod=$(claim_sandbox "$tree1" "$role") || fail "$role on $tree1 has no Sandbox"
+  container=$(claim_container "$tree1" "$role") || fail "$role on $tree1 has no role container"
+  sub="$evidence/full-agent/$role-$id.jsonl"
+  pod_exec "$pod" "$container" cat -- "${session%.jsonl}/$id.jsonl" >"$sub" ||
+    fail "$role: its subagent's session ${session%.jsonl}/$id.jsonl is not beside its parent's in $pod/$container"
+  verdict=$(full_agent_subagent_verdict "$app" "$other" <"$sub")
+  jq -e '.login and .yield and (.other | not)' <<<"$verdict" >/dev/null ||
+    fail "$role: its subagent $id's session must hold a bash result carrying $app, an accepted yield, and no bash result carrying $other: $verdict"
+  ! tool_ran "$tree1" "$role" notebook || fail "$role's session shows the notebook tool ran, which nothing asked for"
+  note "$role as $app: $(full_agent_summary "$tree1" "$role" "$app"); its subagent $id answered $app and yielded"
+  session_from=
+done
+session_from=$merger_nonce
+text=$(claim_session_text "$tree1" merger) || fail "the merger on $tree1 has no readable session"
+printf '%s\n' "$text" >"$evidence/full-agent/merger.jsonl"
+tool_result_said "$tree1" merger read "edited $merger_nonce" || tool_result_said "$tree1" merger edit "edited $merger_nonce" ||
+  fail "merger: neither a read nor an edit result carries 'edited $merger_nonce'; its edit results: $(tool_result_quotes "$tree1" merger edit); its reads: $(tool_result_quotes "$tree1" merger read /tmp/full-agent)"
+tool_result_said "$tree1" merger bash 'legion-implementer[bot]' ||
+  fail "merger: no bash result carries legion-implementer[bot], so gh api graphql did not answer as the merger's App; its bash results: $(tool_result_quotes "$tree1" merger bash)"
+! tool_result_said "$tree1" merger bash 'legion-reviewer[bot]' ||
+  fail "merger: a bash result carries legion-reviewer[bot], the other App; its bash results: $(tool_result_quotes "$tree1" merger bash)"
+! tool_ran "$tree1" merger notebook || fail "the merger's session shows the notebook tool ran, which nothing asked for"
+note "merger as legion-implementer[bot]: $(full_agent_summary "$tree1" merger 'legion-implementer[bot]')"
+session_from=
+# The operation changed nothing of the tree: the finished workers go idle again in the process they
+# first registered with, and tree 1 is still in merging.
+for role in planner implementer tester reviewer; do
+  on_tree "$tree1" until_true 300 "tree 1's $role to go idle again after full-agent" resident_idle "$tree1" "$role"
+  resident_kept "$tree1" "$role" || fail "the full-agent operation relaunched or replaced tree 1's $role: $(resident_lost "$tree1" "$role")"
+done
+issue_phase "$tree1" merging >/dev/null || fail "the full-agent operation moved $tree1 out of merging: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
+note "architect, planner, implementer, tester, reviewer and merger of $tree1 each used the tools and toolchain as their own App; the finished workers are idle in their first processes and $tree1 stays in merging; sessions kept under $evidence/full-agent"
+pass
+
 begin review-pair
 # The reviewer's two review passes are the image's thermonuclear agents, dispatched by name, and each
 # must have run: one of its runs completed, by the task-result block the reviewer received (a
@@ -3435,6 +3636,34 @@ note "the controller session received 'todo on $walk_candidate' with $free slot(
 # (3) The daemon's periodic tick (controller_wake_interval_seconds: 60) reaches it too.
 until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_received "$(notice_needle tick "$project")"
 note "the controller session received 'tick on $project'"
+# The tick's payload is `{kind: "tick", openCapabilities: [...]}` (record.ControllerNotice;
+# admit.Admission.wakeController puts the deployment's open rows on a tick alone, and none on a tick
+# with no gap), the one notice that carries the daemon's capability report to the controller
+# (skill://legion-controller). The pi-envoy plugin renders a delivery into the session as TOON
+# (envoy-client's renderInbound): the payload, parsed, is the card's `message` block, where a list
+# of one reads `openCapabilities[1]: secrets` and a list of two `openCapabilities[2]: a,b`, so the
+# list is read from that line, and a tick without it names no gap. Every tick the controller has
+# received names exactly boot's open row, secrets: model-fallback and resource-limits are present,
+# so the daemon names neither. The daemon that reported the gap keeps running: every checkpoint
+# after this one is that evidence. tick_open_capabilities prints one object per tick delivery in
+# the controller's sessions: the list, and the delivery trimmed.
+tick_open_capabilities() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    jq -R -s -c --arg tick "$(notice_needle tick "$project")" '
+      [split("\n")[] | fromjson? | select(.type == "custom_message" and .customType == "envoy-message")
+        | (if (.content | type) == "string" then .content else ([.content[]? | select(.type == "text") | .text] | join("\n")) end)
+        | select(contains($tick))
+        | {open: ((capture("\\n *openCapabilities\\[[0-9]+\\]: *(?<list>[^\\n]*)") // {list: ""}).list
+                  | split(",") | map(ltrimstr(" ") | rtrimstr(" ") | select(. != ""))),
+           delivery: (gsub("\\s+"; " ") | .[0:300])}][]' "$file"
+  done
+}
+tick_open_capabilities | jq -s . >"$evidence/controller-ticks.json"
+jq -e 'length > 0 and all(.[]; .open == ["secrets"])' "$evidence/controller-ticks.json" >/dev/null ||
+  fail "the tick deliveries in the controller session do not each carry openCapabilities [\"secrets\"]: $(jq -c . "$evidence/controller-ticks.json")"
+note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities $(jq -c '[.[].open] | unique | .[]' "$evidence/controller-ticks.json"), the open row boot reported"
 # (4) The walk takes nothing: this proof's scope line says the controller hands Legion no issue
 # itself. The controller has a minute after the tick to act on either wake, and the candidate must
 # still be unlabelled and unrecorded when it ends.
