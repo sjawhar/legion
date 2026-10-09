@@ -71,7 +71,7 @@ const inboxRow: InboxRow = {
   multiple: false,
   opened_event_id: 1,
   options: [],
-  thread: { edits: [], followers: [], replies: [] },
+  thread: { answers: [], edits: [], followers: [], replies: [] },
   priority: null,
   snoozed_until: null,
   question: "Which layout?",

@@ -65,7 +65,10 @@ func Current(t testing.TB, store *secrets.Local, services ...string) *policy.Cur
 
 // CaptureLog points the default slog handler, which the broker logs through, at a buffer with no
 // timestamp until t ends, so a test reads the exact lines the broker writes; the reload ticker's
-// goroutine may write while the test reads.
+// goroutine may write while the test reads. The log output is global, so a goroutine that outlives
+// t and logs writes into whichever capture is live then: another test's. synctest.Test returns only
+// once every goroutine it started has returned, which is how the policy package's reload tests keep
+// their ticker's lines in their own capture.
 func CaptureLog(t testing.TB) fmt.Stringer {
 	t.Helper()
 	logged := &lockedBuffer{}

@@ -381,9 +381,9 @@ func TestAClaimsEnrollmentRoundTrips(t *testing.T) {
 	c := supervise.Claim{
 		Token: "legion-LEGION-209-implementer", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
 		Role: claim.RoleImplementer, Generation: 3, State: supervise.StateRegistered,
-		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3",
-			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209-implementer"}},
-		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3"},
+		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3/3",
+			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-3", Container: "implementer", Generation: 3}},
+		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3/3"},
 	}
 	if err := s.PutClaim(ctx, c); err != nil {
 		t.Fatal(err)

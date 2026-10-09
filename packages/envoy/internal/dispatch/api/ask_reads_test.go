@@ -151,6 +151,7 @@ type openAsksRead struct {
 	Asks           []struct {
 		ID           string `json:"id"`
 		Question     string `json:"question"`
+		Ref          string `json:"ref"`
 		HumanReplied bool   `json:"human_replied"`
 		Priority     *int   `json:"priority"`
 		WaitingOn    string `json:"waiting_on"`
@@ -267,12 +268,16 @@ func TestListOpenAsksForSession(t *testing.T) {
 			gotIssue = ask.Question == "Issue question" &&
 				ask.Owner.Issue != nil && ask.Owner.Issue.Key == issue.Key && ask.Owner.Issue.Title == "Open-ask owner" &&
 				ask.Owner.Document == nil && ask.HumanReplied && ask.WaitingOn == "human" &&
-				ask.LastReply != nil && ask.LastReply.Author.Kind == "session" && ask.LastReply.Author.ID == ownerSession
+				ask.LastReply != nil && ask.LastReply.Author.Kind == "session" && ask.LastReply.Author.ID == ownerSession &&
+				// The SPA's item route: the bare issue page reads no `?ask=`, so `/issues/KEY?ask=ID`
+				// would land an agent following it on the issue and not the ask.
+				ask.Ref == "/issues/"+issue.Key+"/asks/"+issueAsk.ID
 		case documentAsk.ID:
 			gotDocument = ask.Question == "Document question" && ask.Owner.Issue == nil &&
 				ask.Owner.Document != nil && ask.Owner.Document.Project == "TEST" && ask.Owner.Document.Slug == "runbook" &&
 				ask.Owner.Document.Name == "Runbook" && ask.HumanReplied && ask.WaitingOn == "agent" &&
-				ask.LastReply != nil && ask.LastReply.Author.Kind == "user" && ask.LastReply.Author.ID == "alice"
+				ask.LastReply != nil && ask.LastReply.Author.Kind == "user" && ask.LastReply.Author.ID == "alice" &&
+				ask.Ref == "/projects/TEST/documents/runbook?ask="+documentAsk.ID
 		case priorityAsk.ID:
 			gotPriority = ask.Question == "Priority question" && ask.Priority != nil && *ask.Priority == 0 &&
 				ask.Owner.Issue != nil && ask.Owner.Issue.Key == priorityIssue.Key && ask.WaitingOn == "human"

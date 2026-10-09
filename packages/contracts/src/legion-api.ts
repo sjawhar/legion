@@ -81,8 +81,9 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * `runtime.Locator` — where a claim's process is: the runtime word, the claim token, the process
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
- * `<pane pid>:<start ticks>`) or `sandbox` (the Agent Sandbox object; the incarnation is its pod's
- * uid).
+ * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
+ * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
   z.strictObject({
@@ -95,7 +96,13 @@ const legionLocator = z.discriminatedUnion("runtime", [
     runtime: z.literal("sandbox"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    sandbox: z.strictObject({ namespace: nonEmptyString, name: nonEmptyString }),
+    sandbox: z.strictObject({
+      namespace: nonEmptyString,
+      name: nonEmptyString,
+      podUid: nonEmptyString,
+      container: nonEmptyString,
+      generation: z.number().int().positive(),
+    }),
   }),
 ]);
 
@@ -212,10 +219,26 @@ const legionAgentSecretsLoginView = z.strictObject({
   code: z.string(),
 });
 
+/** `api.CapabilityState` — one row of the deployment's capability report
+ * (`capabilities.Deployment.Report`), in the table's order: `present`, `installed` (the image
+ * carries the row's tooling, but a pod's agent cannot use it yet; `detail` says why), `unchecked`
+ * (no probe has checked the image row), `live` (a live check is to prove it), `withheld` (a ruling,
+ * cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open row
+ * carrying `configLine`, the `legion.yaml` line that records a decision. A gap is reported here,
+ * never refused (contract 16). */
+const legionCapabilityState = z.strictObject({
+  name: nonEmptyString,
+  status: z.enum(["present", "installed", "unchecked", "live", "withheld", "decided", "open"]),
+  detail: nonEmptyString,
+  decision: nonEmptyString.optional(),
+  configLine: nonEmptyString.optional(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
- * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9). */
+ * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
+ * `capabilities` is the deployment's report, never null (contract 16). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -223,6 +246,7 @@ export const LegionStateResponse = z.strictObject({
   pendingStatusWrites: z.array(legionPendingStatusWrite),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
+  capabilities: z.array(legionCapabilityState),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

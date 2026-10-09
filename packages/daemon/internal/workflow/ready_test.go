@@ -16,7 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-const readyPacket = "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nno file changes above the approved head"
+const readyPacket = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nA docs/solutions/legion/retro-LEGION-208.md\nD .legion/LEGION-208/review.json"
 
 // The daemon, not the merger, tells the human a pull request is ready to merge: the merger's READY
 // completion carries the packet as its summary, and merging -> awaiting_merge posts it verbatim on
