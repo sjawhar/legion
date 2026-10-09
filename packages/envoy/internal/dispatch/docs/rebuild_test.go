@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -157,6 +158,8 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	}
 }
 
+// rebuildCaptureStore counts rebuilds, and while invalid loads the stored document once, of either
+// kind (a room's or a cold read's), as a history that does not decode.
 type rebuildCaptureStore struct {
 	VersionedStore
 	invalid  bool
@@ -169,6 +172,16 @@ func (s *rebuildCaptureStore) Load(ctx context.Context, room string) (persistenc
 		return persistence.LoadResult{Update: []byte{0xff}}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s *rebuildCaptureStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.invalid {
+		s.invalid = false
+		if err := crdt.ApplyUpdateV1(newDocumentCopy(), []byte{0xff}, nil); err != nil {
+			return LoadedDocument{}, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+		}
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
 }
 
 func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {

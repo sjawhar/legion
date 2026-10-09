@@ -375,17 +375,29 @@ func readingServer(t *testing.T, database *store.Store, persist docs.VersionedSt
 	return mux
 }
 
-// outsideSchemaStore loads every document as a live tree the Proof schema refuses: an empty
-// callout, which needs at least one block.
+// outsideSchemaStore loads every document, for a room or a cold read, as a live tree the Proof
+// schema refuses: an empty callout, which needs at least one block.
 type outsideSchemaStore struct {
 	docs.VersionedStore
 }
 
-func (outsideSchemaStore) Load(context.Context, string) (persistence.LoadResult, error) {
+func outsideSchemaDocument() *crdt.Doc {
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment("prosemirror")
 	doc.Transact(func(txn *crdt.Transaction) {
 		fragment.InsertElement(txn, 0, crdt.NewYXmlElement("callout"))
 	})
-	return persistence.LoadResult{Update: crdt.EncodeStateAsUpdateV1(doc, nil)}, nil
+	return doc
+}
+
+func (outsideSchemaStore) Load(context.Context, string) (persistence.LoadResult, error) {
+	return persistence.LoadResult{Update: crdt.EncodeStateAsUpdateV1(outsideSchemaDocument(), nil)}, nil
+}
+
+func (s outsideSchemaStore) LoadDocument(ctx context.Context, room string) (docs.LoadedDocument, error) {
+	loaded, err := s.VersionedStore.LoadDocument(ctx, room)
+	if err != nil {
+		return docs.LoadedDocument{}, err
+	}
+	return docs.LoadedDocument{Doc: outsideSchemaDocument(), Stamp: loaded.Stamp}, nil
 }

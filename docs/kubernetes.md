@@ -31,7 +31,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   explicit extensions, the Envoy plugin first, with discovery off;
 - `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
   CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
-  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`);
+  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`).
+  A pod's agent gets that tool once its launch loads profile plugins (dispatch://LEGION-629): with
+  discovery off, the profile's plugin does not load today, which the capability report's `codegraph`
+  row says ([The deployment's capability report](#the-deployments-capability-report));
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -40,18 +43,39 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
 - a generic toolchain for the repositories the workers work, specific to none of them: `uv` and `uvx`;
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
-  to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); and the AWS CLI
+  to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
+  at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
+  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); and the AWS CLI
   v2's `aws` — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned
   release whose linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the
   `ARG`s at the top of `worker.Dockerfile`). A corepack shim runs the version a project's
   `packageManager` names, or else the default that corepack ships (the image sets
   `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
-  corepack cache.
-  The image bakes no Python: `uv` installs each project's own, from its `.python-version` or
-  `requires-python`, the first time the project runs (`uv sync`, `uv run`). In a Sandbox pod that is on
-  the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
-  `~/.local/share/uv/python`. Node and the AWS CLI keep their trees at `/opt/node` and `/opt/aws-cli`,
-  outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it.
+  corepack cache. Node, Go and the AWS CLI keep their trees at `/opt/node`, `/opt/go` and
+  `/opt/aws-cli`, outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it;
+- what the capability check (`packages/daemon/internal/capabilities`, which `legion probe-image` runs —
+  [the probe subsection](#the-image-is-probed-before-it-publishes)) requires of the image, each outside
+  `HOME` for the same reason: the language servers Oh My Pi's LSP tools start when a working directory
+  carries their root markers — `gopls` (built static in the Dockerfile's `go` stage, at
+  `/usr/local/bin/gopls`), `typescript-language-server` and `pyright-langserver`, the latter two npm
+  global packages under `/opt/node/lib/node_modules` with their launchers (and TypeScript's `tsc` and
+  `tsserver`, and the `pyright` CLI) linked at `/usr/local/bin`. TypeScript is pinned to the version
+  this repository's lockfile holds, since `typescript-language-server` runs `tsserver`, which TypeScript
+  7 no longer ships; the server resolves the TypeScript installed beside it unless the repository's own
+  `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
+  (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
+  on it), `curl`, `wget`, and `chromium` for the browser tools, installed without its Recommends (no
+  setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
+  its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
+  `PATH`, and downloads Chrome for Testing into its cache only with none of those — so the image's
+  `chromium` is the one every worker gets, with nothing downloaded, and the probe runs that same
+  resolution. The image sets no `PUPPETEER_EXECUTABLE_PATH`: a variable the image's `ENV` sets is one
+  `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
+  probe checks (it runs that executable), not something to refuse. `uv` still installs each project's own Python, from its
+  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
+  Sandbox pod that is on the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
+  elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
+  own eval, not a project's interpreter.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -59,8 +83,29 @@ alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, lo
 itself: everything the image-time probe proved lives under `HOME` — the two plugin links and their lock at
 `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
-the OMP fork release has no linux/arm64 build. One commit ⇒ one image: nothing in it is pinned to an npm
-version.
+the OMP fork release has no linux/arm64 build. One commit ⇒ one image: Legion's own plugins come from
+the commit, never from an npm release; what the image does take from npm (the CodeGraph plugin and
+CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
+`worker.Dockerfile`.
+
+### Image size and pull time
+
+A node that has never run the image pulls it whole before the pod's init containers start, so the
+image's compressed size is a cold launch's first cost. Before the capability tools above,
+`ghcr.io/sjawhar/legion-worker:1.18.1` was 12 layers and 369 MiB compressed (386,510,448 bytes). With
+them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
+pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
+Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
+tree with the two npm language servers is 66 MiB. How long a node takes to pull that is not
+recorded here: the stage 4a launch below is where it is measured. The bound that pull must fit,
+with the init containers' clone and Oh My Pi's boot after it, is the registration deadline:
+`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`
+(`packages/daemon/internal/config/config.go`; 120 s × 3 = 360 s by default), which the Sandbox
+runtime widens by its provisioning bound while the claim is still launching (`armRegistration`,
+`packages/daemon/internal/supervise/machine.go`); a pod that has not registered by then is retired and
+a launch failure counted. The stage 4a harness's `image-probe` and `root-ready` checks
+(`scripts/e2e/README.md`) are where a launch of the published image on the production cluster is
+measured. This change moves no deadline.
 
 ### The image is probed before it publishes
 
@@ -80,20 +125,44 @@ planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's r
 `ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
 `dispatch`, `dispatch-first`, `dispatch-brainstorming` and `envoy` skills in its), so a build whose OMP or plugins are
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
-leaves those agents' models unresolved (`--skip-agent-models`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The daemon's Agent Sandbox runtime runs the same command in a probe
+leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
+the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
+would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
+`PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun` and `uv` on `PATH` with `go version`
+running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
+row, before the OK line:
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
+(`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
+An image row the image carries prints `present` with its evidence, but for `codegraph`, which prints
+`installed`: the CLI and the plugin are in the image, and a pod's agent gets the tool once its launch
+loads profile plugins (dispatch://LEGION-629; a pod runs `--no-extensions` with the Envoy and Legion
+plugins as its explicit extensions today, so the profile's plugin never loads). A live row prints
+`live` with the check still to prove it, a deployment row `reported`, a withheld row `withheld` with
+its ruling, and an image row the image lacks `missing` with why.
+A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
-tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). To run it yourself:
+tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). It requires
+`capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
+is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
+check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
+is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
+`missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
+pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). The runtime keeps the line's `model-fallback`
+mark for the deployment's capability report ([The deployment's capability report](#the-deployments-capability-report)). To run it yourself:
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
-the image `PATH`, the corepack shims fetching their shipped default pnpm and yarn into a scratch
-directory the step removes. It reruns only when the toolchain or an earlier layer changes, so a commit
-that only rebuilds `legion` needs no package registry.
-To check a published image's toolchain end to end, Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
+`tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
+version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, and trixie's `python3`, `curl`, `wget`
+and `chromium --version` included — the corepack shims fetching their shipped default pnpm and yarn
+into a scratch directory the step removes. It reruns only when the toolchain or an earlier layer
+changes, so a commit that only rebuilds `legion` needs no package registry.
+To check a published image's toolchain end to end, a project Python install included:
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && go version && gopls version && python3 --version && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -203,9 +272,9 @@ set to public — a package-settings action on GitHub with no API.
 ### Per-deployment toolchains layer on top
 
 The base image carries Legion's own tools and the generic toolchain listed above, and nothing in it is
-specific to one repository, so a Python or Node repository runs on the published image as it is. A
+specific to one repository, so a Go, Python or Node repository runs on the published image as it is. A
 deployment whose repositories need more than that (a system library, another language, a different Node
-line) builds its own image in **its** repo:
+or Go line) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
@@ -539,7 +608,8 @@ carries over (below), so the upgrade drains the deployment while it still runs t
    - `runtime.kubernetes.image` pinned to a worker image built from it, since the image probe
      refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
      `internal/runtime/sandbox/probe.go`); and
-   - for an operator-launched controller, every operator's `legion` and `pi-legion` at contract 16.
+   - for an operator-launched controller, every operator's `legion` and `pi-legion` at this
+     release's daemon API contract (`DaemonAPIVersion` in `internal/api/version.go`).
      `legion controller start` refuses a `pi-legion` speaking another contract (`probeAndMint` in
      `cmd/legion/controller.go`), and the daemon refuses a `legion` or `pi-legion` of another
      contract with 409 (`internal/api/controller.go`). That `pi-legion` release must be published
@@ -589,9 +659,10 @@ runtime:
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
       priority_class: legion
-    resources:                  # optional; a role absent here gets no requests or limits
-      tester: { limits: { memory: 8Gi } }
-      controller: { requests: { cpu: 250m, memory: 1Gi }, limits: { memory: 2Gi } }   # controller: daemon only
+    resources:                  # optional; a role absent here gets no requests or limits. A role is covered for the
+                                # resource-limits capability when it sets CPU and memory in both requests and limits
+      tester: { requests: { cpu: 2, memory: 4Gi }, limits: { cpu: 4, memory: 12Gi } }
+      controller: { requests: { cpu: 250m, memory: 1Gi }, limits: { cpu: 1, memory: 2Gi } }   # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
@@ -601,6 +672,8 @@ bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: 13371
 daemon_url: http://<the address pods reach the daemon at>:13370
+capabilities:                   # optional: the deployment capabilities decided by name, with the reason (The deployment's capability report, below); a gap is reported, never refused
+  decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>" }
 ```
 
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
@@ -643,7 +716,12 @@ all of it without starting the daemon, writing a file or running a key command, 
 refusal boot makes from the files and the environment before its first write, in boot's words: the
 operator, Envoy and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the
 runtime's own reads (the kubeconfig and every value's translation; under tmux, the OMP invocation,
-through `mise where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it
+through `mise where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). After its
+`Config OK: project=…` line it prints one line per deployment capability the file alone leaves open
+with no decision — `resource-limits` while a role reserves no CPU and memory, and `secrets` when no
+broker is configured — in boot's words (`capability <name> is open: <detail>; to record a decision,
+add to legion.yaml: capabilities.decided.<name>: "<reason>"`), and still exits 0: a report, not a
+refusal ([The deployment's capability report](#the-deployments-capability-report)). What it
 does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin
 gate and the image probe.
 
@@ -799,6 +877,55 @@ consumes both events, and that error line is its only sign. `legion-pane` is nev
 daemon's subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as
 `legion-pane`, and each refused subject logs the error line above (a refused consumer or
 subscription never delivers).
+
+### The deployment's capability report
+
+`packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
+every worker is a full agent), 19 rows, each checked at one site. The image rows (`eval-js`,
+`eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
+([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once
+the probe passed — but for `codegraph`, which reads `installed`: the CLI and plugin are in the image,
+and a pod's agent gets the tool once its launch loads profile plugins (dispatch://LEGION-629; a pod's
+agent runs `--no-extensions` today, so no worker has the tool yet, and the report's job is to name
+what a worker lacks); the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
+`dispatch-envoy-tools`, `github`) are to be proved by a live check against a running pod —
+dispatch://LEGION-633's integration check and dispatch://LEGION-629's checks, none of which runs
+yet, so each reads `live` with the check it awaits, never as proved; the withheld rows carry the ruling that keeps them from
+every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
+dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
+and dispatch://LEGION-205); and the three deployment rows are the daemon's to measure from its own
+configuration, since no image or pod can show them:
+
+- `secrets`: `runtime.kubernetes.agent_secrets` is configured and the daemon's broker login is
+  `issued`. Under tmux it is open unless decided: no process is enrolled with the broker.
+- `model-fallback`: the pod's Oh My Pi has `retry.modelFallback` true, as the probe's OK line's
+  `model-fallback` mark reports it; under tmux the plugin gate reads the host's Oh My Pi once the gate
+  has passed. The example overlay turns it on ([Operator configuration](#operator-configuration)).
+- `resource-limits`: every workflow role — and the controller's, under `controller: daemon` — sets
+  CPU and memory in both requests and limits under `runtime.kubernetes.resources`
+  (`config.RoleResources.Reserved`); the row names each role that does not. Under tmux it is open
+  unless decided: a pane has no requests or limits.
+
+A deployment row is `present` when the deployment satisfies it, `decided` when `legion.yaml`'s
+`capabilities.decided.<name>: "<reason>"` records a decision on it (the report shows the reason in
+the gap's place; a decision on a satisfied row is moot and the row reads present), and `open`
+otherwise, carrying the line that records one. A name that is not one of the three is refused at
+load naming them; a blank reason too. The report appears in four places: the daemon's log, one
+warning per open row at boot and again at the first controller tick after the set of open rows
+changed (the tick asks only when it wakes the controller — one registered, no tick pending — and the
+broker login reaching `issued` is the one change a running daemon sees), as `capability <name> is open: <detail>;
+to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
+--json` under `capabilities` (daemon API contract 16: every row as `{name, status, detail,
+decision?, configLine?}`, `status` one of `present`, `installed`, `unchecked`, `live`, `withheld`,
+`decided` or `open`, the image rows `present` once the probe passed — `codegraph` `installed`, as
+above — and `unchecked` before it or under tmux);
+the controller's `tick` notice, whose `openCapabilities` names the open rows so the day's report
+names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-config`, which prints
+after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a
+daemon that would not run its pods would itself keep workers from working, so a gap is the
+operator's to close or to decide, by name and with the reason. The example `legion.yaml`
+(`deploy/kubernetes/daemon/legion.yaml.example`) reserves CPU and memory for every role and decides
+`secrets`.
 
 ### Anatomy of a Sandbox pod
 
@@ -1021,7 +1148,8 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 ### Tree sizing: one tree per node
 
 The pool's floor, not the pod, decides node size. Legion pods carry no
-`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
+`karpenter.k8s.aws/instance-cpu` selector, and only the requests and limits
+`runtime.kubernetes.resources` gives their role. The `legion` NodePool's
 `karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
 
 Every tree pod carries two rules:
@@ -1029,8 +1157,13 @@ Every tree pod carries two rules:
 - a required anti-affinity against the pods of every other tree (`legion.dev/tree Exists` and
   `NotIn [<own tree>]`, at `kubernetes.io/hostname`).
 
-So concurrent trees never share a node. Requests stay unset because under required colocation the
-first pod placed decides the node, and a request on a later pod would strand it.
+So concurrent trees never share a node. Under required colocation the first pod placed decides the
+node, so a request on a later pod that the node cannot fit beside the tree's resident pods strands
+it: requests, when set, must fit the tree's node alongside the pods resident at once — an architect
+and one phase worker at a time — which is how the example `legion.yaml` sizes them for the 4-vCPU
+node (the `resource-limits` capability, LEGION-578's ruling; [The deployment's capability
+report](#the-deployments-capability-report)). A pod per issue, with a reservation of its own and the
+node spread that allows, is dispatch://LEGION-632's.
 
 **The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
 trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
@@ -1257,7 +1390,14 @@ issue's pod (every role container of it alike) and the image probe's.
   ConfigMap `legion-operator-route` in namespace `legion`, its only writer. To change a role's
   model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
   Pods started after that use it; a running pod keeps the files it started with until it restarts,
-  since both are mounted by `subPath`, which the kubelet never refreshes.
+  since both are mounted by `subPath`, which the kubelet never refreshes. The example overlay also
+  turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried on another
+  model; which model is the repository's `retry.fallbackChains` to name): the probe pod reads the
+  effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its
+  OK line's `model-fallback` mark, and the daemon reports the `model-fallback` capability open while
+  a deployment's copy turns it off — a report, not a refusal; a `capabilities.decided.model-fallback:
+  "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability
+  report](#the-deployments-capability-report)).
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
@@ -1282,7 +1422,13 @@ issue's pod (every role container of it alike) and the image probe's.
   approver at all; each secret's owner and tier tags pick the approver for the pod's later
   credential requests at request time) — hands the enrollment id back to the shim, and revokes it
   wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the
-  tree's close). Without the block, pods carry none of this. An older worker image is refused at
+  tree's close). The daemon's login is the service `legion-daemon`'s, and its pods run as the
+  ServiceAccount `runtime.kubernetes.pod.service_account` names (`default` when unset, above). A
+  broker configured with that account for `legion-daemon`, such as
+  `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for pods running as
+  `legion-worker`, gives a secret tagged `owner=legion-daemon` to every such pod at once and to no
+  other session (the broker's concepts page, "Owner and tier").
+  Without the block, pods carry none of this. An older worker image is refused at
   the image probe: the block's pod variables are daemon API contract 8. A pod's agent-secrets
   volumes are fixed when it is created, so turning the block on, or changing its `audience` or
   `token_expiry_seconds`, reports every running workflow role stale at the restart that brings the

@@ -10,9 +10,9 @@ your own.
 
 You own the child issue named by `LEGION_ISSUE` from its first decision through close, exactly as
 the root architect owns its tree — read and follow `skill://legion-architect` before taking
-lifecycle action. The extension blocks direct `edit`, `write`, `apply_patch`, and general `bash`
-in this session: every code or repository mutation is a phase worker's, and the daemon starts every
-phase worker itself. You may dispatch `task` subagents for your own work, for example to measure or
+lifecycle action. Every code or repository mutation is a phase worker's, which you delegate rather
+than do, and the daemon starts every phase worker itself. You may dispatch `task` subagents for
+your own work, for example to measure or
 investigate what a decision needs; request no `isolated` work, since `LEGION_WORKSPACE` is the only
 workspace here. A subagent claims no Legion role and mints no grant of its own, so its GitHub reads
 and writes work only within 60 seconds of your own last credentialed call; code changes stay the

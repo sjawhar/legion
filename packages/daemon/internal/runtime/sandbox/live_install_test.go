@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -259,7 +260,9 @@ func (r *liveRig) checkBootRefusal() error {
 }
 
 // image-probe: the probe Sandbox, carrying the operator's pod, passes on the stage image, confirms
-// the daemon API contract, and resolved the model of every task agent the prompts dispatch.
+// the daemon API contract, resolved the model of every task agent the prompts dispatch, and checked
+// the capability list, every image-site capability present; the report carries the model-fallback
+// mark the pod read.
 func (r *liveRig) checkImageProbe() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -270,7 +273,8 @@ func (r *liveRig) checkImageProbe() error {
 		return err
 	}
 	p := r.imageProbe()
-	if err := r.rt.ProbeImage(r.ctx, p); err != nil {
+	report, err := r.rt.ProbeImage(r.ctx, p)
+	if err != nil {
 		return err
 	}
 	passed, ok := r.logs.find("sandbox runtime: the worker image passed its probe")
@@ -287,6 +291,14 @@ func (r *liveRig) checkImageProbe() error {
 		return fmt.Errorf("the probe log says agent-models=%q, want %q: %s", models, bootprobe.AgentModelsResolved, passed["log"])
 	}
 	note("runtime", "agent-models=%s parsed: every task agent the prompts dispatch resolved its model under the operator's pod", bootprobe.AgentModelsResolved)
+	if !bootprobe.CapabilitiesChecked(passed["log"]) {
+		return fmt.Errorf("the probe log carries no capabilities=checked: %s", passed["log"])
+	}
+	note("runtime", "capabilities=checked parsed: every image-site capability present under the operator's pod")
+	if report.ModelFallback != "on" && report.ModelFallback != "off" {
+		return fmt.Errorf("the probe reports model-fallback=%q, want on or off: %s", report.ModelFallback, passed["log"])
+	}
+	note("runtime", "model-fallback=%s reported: the image's retry.modelFallback under the operator's pod", report.ModelFallback)
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+name+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(name)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
@@ -329,7 +341,7 @@ func (r *liveRig) checkImageProbeRefusal() error {
 	}
 	note("operator", "ConfigMap %s: modelRoles.oracle removed from overlay.yml", name)
 	p := r.imageProbe()
-	refusal := r.rt.ProbeImage(r.ctx, p)
+	_, refusal := r.rt.ProbeImage(r.ctx, p)
 	if err := patch(overlay); err != nil {
 		return fmt.Errorf("restore ConfigMap %s: %w", name, err)
 	}
@@ -341,6 +353,52 @@ func (r *liveRig) checkImageProbeRefusal() error {
 		if !strings.Contains(refusal.Error(), want) {
 			return fmt.Errorf("the probe's refusal does not say %q: %v", want, refusal)
 		}
+	}
+	note("runtime", "refused: %s", firstLine(refusal.Error()))
+	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
+	probe := probeName(r.env.project, digest)
+	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
+		_, err := r.getSandbox(probe)
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	}); err != nil {
+		return err
+	}
+	note("runtime", "probe Sandbox %s deleted after the attempt", probe)
+	return nil
+}
+
+// image-probe-capability-negative: with PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium in the
+// operator's pod env, the probe on the same image refuses naming the browser capability missing:
+// the probe honours the variable as Oh My Pi does, so a wrong value in an operator's pod env is
+// caught at boot rather than in a worker's first browser call. The probe runs on a second runtime,
+// built from the run's Options with that variable added to a copy of the pod env, so the shared
+// runtime's pod is never changed; it shares the run's listener, which no probe uses, and ends with
+// the check.
+func (r *liveRig) checkImageProbeCapabilityRefusal() error {
+	if err := r.startRuntimeOnce(); err != nil {
+		return err
+	}
+	opts := r.runtimeOptions(r.streamAddress(), r.ln)
+	env := maps.Clone(r.pod.Env)
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["PUPPETEER_EXECUTABLE_PATH"] = "/nonexistent/chromium"
+	opts.Pod.Env = env
+	ctx, stop := context.WithCancel(r.ctx)
+	defer stop()
+	rt, err := New(ctx, r.rc, opts)
+	if err != nil {
+		return fmt.Errorf("a runtime whose pod env sets PUPPETEER_EXECUTABLE_PATH: %w", err)
+	}
+	note("operator", "pod env for this probe: the fixture's %d variables and PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium", len(r.pod.Env))
+	p := r.imageProbe()
+	_, refusal := rt.ProbeImage(ctx, p)
+	if refusal == nil {
+		return errors.New("ProbeImage passed with PUPPETEER_EXECUTABLE_PATH naming nothing")
+	}
+	if want := "capability browser is missing"; !strings.Contains(refusal.Error(), want) {
+		return fmt.Errorf("the probe's refusal does not say %q: %v", want, refusal)
 	}
 	note("runtime", "refused: %s", firstLine(refusal.Error()))
 	_, digest, _ := strings.Cut(r.env.image, "@sha256:")

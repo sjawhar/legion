@@ -56,8 +56,20 @@ package api
 // issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
 // generation, with the incarnation `<pod uid>/<generation>`.
 //
-// 16: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
+// 16: LEGION-578 -- api.State gains `capabilities`, the deployment's capability report
+// (capabilities.Deployment.Report): one row per capability of the table, each `present`,
+// `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`, an open row carrying the
+// legion.yaml line that records a decision. Never null, so a plugin built before it refuses the
+// state, and the bump is why the two never meet. (This branch first took 15; LEGION-462 landed at
+// 15 first, and pi-legion 8.3.0 declares it without `capabilities`, so a daemon at 15 would pass
+// the gate against a plugin whose strict reader refuses its state. Renumbered, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md says.)
+//
+// 17: LEGION-588 -- the role prompts the daemon embeds name the `dispatch` command an agent runs in
 // its shell, which the Envoy plugin puts on the pane's PATH, rather than the `dispatch_*` tools it
 // no longer registers: a daemon and a plugin from either side of that change would hand agents
-// instructions for a surface they lack.
-const DaemonAPIVersion = 16
+// instructions for a surface they lack. (This branch first took 16; LEGION-578 landed at 16
+// first, and pi-legion 8.4.0 declares it beside a pi-envoy 8.4.0 that still registers the native
+// tools and puts no `dispatch` on the PATH, so a daemon at 16 would pass the gate against panes
+// that lack the command its prompts name. Renumbered, as the same note says.)
+const DaemonAPIVersion = 17

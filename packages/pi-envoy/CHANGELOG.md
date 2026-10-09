@@ -49,7 +49,7 @@
 ### Changed
 
 - `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
-  native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 16, which
+  native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which
   makes the daemon's role prompts name that command; install both packages from the same commit.
 
 - `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the

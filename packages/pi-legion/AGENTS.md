@@ -82,11 +82,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 16 for contract 16's `dispatch` command instructions in every daemon role prompt
-(LEGION-588), after contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract
-14's daemon-launched controller pod (LEGION-592) and contract 13's `push` grant and
-`LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries no `legion`
-key, and the gate reads only this package's.
+number is 17 for contract 17's `dispatch` command instructions in every daemon role prompt
+(LEGION-588), after contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578),
+contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract 14's daemon-launched
+controller pod (LEGION-592) and contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES`
+payload (LEGION-583); the Envoy plugin's manifest carries no `legion` key, and the gate reads only
+this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
@@ -257,17 +258,18 @@ later phase needs goes in the handoff; a question for another live role goes to 
 omitted: one argv string is capped at 128 KiB (Linux's `MAX_ARG_STRLEN`), and a tester's handoff that
 accumulates review rounds outgrows it.
 
-The shell's completion is closed: the tool_call hook refuses `legion handoff complete` (by name or by
-a path ending `/legion`) in a phase-worker pane, a sub-architect's included, and a root architect's,
-ahead of every role gate so that it binds a `task` subagent too — a `bash` command in any position of
-a chain (a supervised service's start included), and `eval` code or stdin written to a supervised
+The tool_call hook holds every tree pane — a phase worker's, a sub-architect's, a root architect's —
+to one pane rule, the jj operation-log rule (`PANE_RULES` in `extensions/legion.ts`), judged from the
+pane's environment so that it binds a `task` subagent too: a `bash` command in any position of a
+chain (a supervised service's start included), and `eval` code or stdin written to a supervised
 service (a `write` to `proc://<id>`, the path in a pasted `read` header, `[proc://<id>#XXXX]`,
-included, since Oh My Pi's `write` strips that before it routes) by a plain-text rule, exactly as
-it refuses the jj operation-log rewrites (`PANE_RULES` in `extensions/legion.ts`). A completion run
-from the shell would never reach the phase stall below. `legion handoff write` and `read` stay open
-to the shell: they leave no phase open, a root architect reads committed handoffs with
-`legion handoff read`, and a worker can pipe a handoff built from the one on disk to
-`legion handoff write` on stdin (`skills/legion-worker/SKILL.md`, the handoff write section).
+included, since Oh My Pi's `write` strips that before it routes) by a plain-text rule. No role is
+refused a tool (LEGION-630). `legion handoff write` and `read` from the shell leave no phase open: a
+root architect reads committed handoffs with `legion handoff read`, and a worker can pipe a handoff
+built from the one on disk to `legion handoff write` on stdin (`skills/legion-worker/SKILL.md`, the
+handoff write section). A completion run from the shell completes the phase at the daemon but never
+reaches the phase stall below, which then sends its one follow-up; the tool call made on it is
+refused by the daemon, since the phase has already moved.
 
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), `src/phase-stall.ts`
@@ -310,7 +312,7 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 
 - Register every schema through the injected `pi.zod` (`toolSchema` in `src/tools.ts`). Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load.
 - Nothing under `extensions/` or `src/` imports `packages/pi-envoy`: what both plugins need lives in `@legion/pi-shared`, and this entry reaches the Envoy plugin through the interface alone (`src/no-cross-import.test.ts`). The tests may load the sibling's entry by path.
-- A `task` subagent's session shares its parent's identity (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, installs no tool gate, and never exits (`extensions/legion.ts`). The check asks the host's own roster first (`AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`) and falls back to the transcript; the process-local signal it reads is the transcript path the claim session's boot and a launched controller's claim record on the shared interface (`bootstrappedSession`), so a later `session_start` in the same process with a different transcript path is a subagent even under `OMP_SESSION_STORAGE=sql`. The full account is the subagent convention in `packages/pi-envoy/AGENTS.md`.
+- A `task` subagent's session shares its parent's identity (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, mints no grant and is held only to the pane rule, and never exits (`extensions/legion.ts`). The check asks the host's own roster first (`AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`) and falls back to the transcript; the process-local signal it reads is the transcript path the claim session's boot and a launched controller's claim record on the shared interface (`bootstrappedSession`), so a later `session_start` in the same process with a different transcript path is a subagent even under `OMP_SESSION_STORAGE=sql`. The full account is the subagent convention in `packages/pi-envoy/AGENTS.md`.
 - `claim-session.ts` registers the heartbeat's regain listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it; the regain re-runs `claims/ready` with bounded retries, and the controller re-runs nothing.
 - A daemon refusal of the boot registration itself — `/legion/v1/claims/register` — ends the process (`exitOnRegistrationRefusal` in `src/claim-session.ts`: one log line naming the route, the status, and the daemon's sentence, then `exitProcess(1)`) for every 4xx: a 400 or 404 (a request or a route the daemon does not have), a 403 (the boot token is stale, consumed, or unknown), and a 409 (the same-agent rule, `Worker respawn must resume the same agent session`: this session is not the one the resumed claim recorded; under a database session store that is Oh My Pi having started a fresh session at a path whose row is gone). None changes on retry, and a process that stayed up unregistered would sit alive under the daemon's registration deadline with nothing ever retiring it; exiting hands the outcome to the daemon, which counts the launch failure. Every other error there — a 5xx, a transport failure — propagates out of `session_start` without exiting (LEGION-81; `extensions/legion.test.ts` pins 400, 403, 404 and 409, and 500/503 as the negative control). The Envoy-plugin refusals above take the same exit.
 - Do not alter `~/.omp` from this package. The README documents the development install.

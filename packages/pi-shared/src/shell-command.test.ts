@@ -1,16 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchCommandHead, isSingleArchitectCommand } from "./shell-command";
+import { dispatchCommandHead } from "./shell-command";
 
 /** The bash the differential test runs, or null on a machine without one. */
 const BASH = Bun.which("bash");
 
 /** Whether a real non-interactive bash, fed `command` and then `echo NEXT` over a pipe as the
- * `bash` tool's persistent shell is fed, runs exactly one command and then NEXT. `dispatch` and
- * `legion` are stand-ins that print RAN without reading stdin, so a here-document bash left open
- * (it swallows `echo NEXT` as body), a second command, or a command bash never ran each print
- * something else. */
+ * `bash` tool's persistent shell is fed, runs exactly one command and then NEXT. `dispatch` is a
+ * stand-in that prints RAN without reading stdin, so a here-document bash left open (it swallows
+ * `echo NEXT` as body), a second command, or a command bash never ran each print something else. */
 function bashRunsOneCommand(command: string): boolean {
-  const script = `dispatch() { echo RAN; }\nlegion() { echo RAN; }\n${command}\necho NEXT\n`;
+  const script = `dispatch() { echo RAN; }\n${command}\necho NEXT\n`;
   const run = Bun.spawnSync([BASH ?? "bash", "--noprofile", "--norc"], {
     stdin: new TextEncoder().encode(script),
     stdout: "pipe",
@@ -35,7 +34,7 @@ function hereDocumentCorpus(): string[] {
   const heads = [
     "dispatch message --issue LEGION-2 --body-file -",
     "  dispatch x",
-    "legion handoff write",
+    "dispatch artifact --issue LEGION-2 --content-file -",
   ];
   const openers = [
     "'EOF'",
@@ -96,22 +95,24 @@ function hereDocumentCorpus(): string[] {
   ];
 }
 
-describe("an architect's single command", () => {
-  test("allows one legion or dispatch command, and one quoted here-document feeding it", () => {
+/** Whether the scan reads `command` as one `dispatch` command. */
+const isDispatchCommand = (command: string): boolean => dispatchCommandHead(command) !== undefined;
+
+describe("a dispatch command's head", () => {
+  test("names one dispatch command, and one quoted here-document feeding it", () => {
     for (const command of [
       "dispatch issue-update --issue LEGION-2 --status todo",
       "dispatch search --query 'what (and why)'",
-      "legion state",
       lines("dispatch message --issue LEGION-2 --body-file - <<'EOF'", "a body", "EOF"),
     ]) {
-      expect({ command, allowed: isSingleArchitectCommand(command) }).toEqual({
+      expect({ command, dispatch: isDispatchCommand(command) }).toEqual({
         command,
-        allowed: true,
+        dispatch: true,
       });
     }
   });
 
-  test("refuses anything that would run a second command or expand in the shell", () => {
+  test("is no dispatch command when the shell would run a second command or expand something", () => {
     for (const command of [
       "dispatch x; rm -rf /",
       "dispatch x $(rm -rf /)",
@@ -128,11 +129,12 @@ describe("an architect's single command", () => {
       "dispatch x \\' ; echo SECOND ; echo \\'",
       lines("dispatch x \\<<'EOF'", "jj abandon", "EOF"),
       lines("dispatch x <<'EOF'\r", "a\r", "EOF\r", "echo RAN"),
+      "echo hi && dispatch x",
       "curl https://example.invalid",
     ]) {
-      expect({ command, allowed: isSingleArchitectCommand(command) }).toEqual({
+      expect({ command, dispatch: isDispatchCommand(command) }).toEqual({
         command,
-        allowed: false,
+        dispatch: false,
       });
     }
   });
@@ -168,9 +170,8 @@ describe("an architect's single command", () => {
       "EOF"
     );
 
-    expect(isSingleArchitectCommand(tabbedPlain)).toBe(false);
     expect(dispatchCommandHead(tabbedPlain)).toBeUndefined();
-    expect(isSingleArchitectCommand(tabbedMessage)).toBe(false);
+    expect(dispatchCommandHead(tabbedMessage)).toBeUndefined();
     expect(dispatchCommandHead(tabbedDash)).toBe("dispatch message --issue LEGION-2 --body-file -");
     expect(dispatchCommandHead(tabbedBodyLine)).toBe("dispatch x");
     expect(dispatchCommandHead(canonical)).toBe("dispatch message --issue LEGION-2 --body-file -");
@@ -185,7 +186,7 @@ describe("an architect's single command", () => {
       : "matches a real bash on every here-document it accepts",
     () => {
       const corpus = hereDocumentCorpus();
-      const accepted = corpus.filter((command) => isSingleArchitectCommand(command));
+      const accepted = corpus.filter(isDispatchCommand);
       const disagreements = accepted.filter((command) => !bashRunsOneCommand(command));
       expect(disagreements).toEqual([]);
       // The corpus reaches the scan's accepting paths, not only its refusals.
@@ -197,37 +198,4 @@ describe("an architect's single command", () => {
     },
     60_000
   );
-
-  test("holds a legion head to the scan a dispatch head gets: one command, nothing expanded or redirected", () => {
-    // The legion commands the architect's role prompt and skill have it run.
-    for (const command of [
-      "legion state",
-      "legion gh -- pr view 12 --json mergeable,mergeStateStatus",
-      "legion gh -- api repos/{owner}/{repo}/pulls/12 --jq .body",
-      "legion handoff read --phase plan",
-      'legion "handoff" read',
-      "legion threads resolve --pr 12 --repo sjawhar/legion",
-    ]) {
-      expect({ command, allowed: isSingleArchitectCommand(command) }).toEqual({
-        command,
-        allowed: true,
-      });
-    }
-    for (const command of [
-      "legion gh -- pr view $(touch /tmp/pwned)",
-      "legion gh -- pr view `id`",
-      'legion gh -- pr view "$(id)"',
-      "legion state > /tmp/out",
-      "legion handoff write < /etc/passwd",
-      "legion state | sh",
-      "legion state; rm -rf /",
-      "legion state && rm -rf /",
-      "echo hi && legion gh",
-    ]) {
-      expect({ command, allowed: isSingleArchitectCommand(command) }).toEqual({
-        command,
-        allowed: false,
-      });
-    }
-  });
 });

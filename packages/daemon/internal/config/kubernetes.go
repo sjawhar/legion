@@ -60,6 +60,13 @@ type Toleration struct{ Key, Operator, Value, Effect string }
 // RoleResources are one role's container requests and limits.
 type RoleResources struct{ Requests, Limits Quantities }
 
+// Reserved reports whether the role's pod reserves its CPU and memory and is bounded in both:
+// requests and limits each set CPU and memory. It is the resource-limits capability's measure
+// (capabilities.Deployment.RolesWithoutResources).
+func (r RoleResources) Reserved() bool {
+	return r.Requests.CPU != "" && r.Requests.Memory != "" && r.Limits.CPU != "" && r.Limits.Memory != ""
+}
+
 // Quantities are Kubernetes quantities for the three resources a role may set; "" leaves one unset.
 type Quantities struct{ CPU, Memory, EphemeralStorage string }
 

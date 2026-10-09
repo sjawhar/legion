@@ -16,23 +16,34 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- An architect's one shell command is held to one scan whatever its head: a `legion` command now
-  refuses `$()`, backticks, redirects and comments as a `dispatch` command does, where it refused
-  only `;`, `&`, `|` and a newline (found in LEGION-588's review). A here-document ends only where
-  bash ends it: at a line that is exactly its delimiter, with leading tabs stripped under `<<-`
-  alone and no line's trailing blanks dropped, and the scan splits words on space and tab only,
-  never a no-break space, byte-order mark or ideographic space, which bash reads as part of a word.
-  A test holds the scan to a real bash over 2,822 generated commands.
-- `legion.daemonApiVersion` is 16 (LEGION-588). Contract 16 moves the daemon's role prompts from
+- A `dispatch` command's quoted here-document is data on its stdin: the operation-log pane rule
+  reads only the command's head line, so a message body that names `jj abandon` is not refused,
+  and the command mints no grant, since the CLI authenticates with the pane's Dispatch token. The
+  head is found by one scan held to bash: a here-document ends only where bash ends it, at a line
+  that is exactly its delimiter, with leading tabs stripped under `<<-` alone and no line's
+  trailing blanks dropped; the scan splits words on space and tab only, never a no-break space,
+  byte-order mark or ideographic space, which bash reads as part of a word; and a head carrying
+  `$()`, backticks, a redirect, a comment or a second command is no `dispatch` head, so the whole
+  command is held to the pane rule. A test holds the scan to a real bash over 2,822 generated
+  commands.
+- `legion.daemonApiVersion` is 17 (LEGION-588). Contract 17 moves the daemon's role prompts from
   native Dispatch tools to the `dispatch` command bundled by `@sjawhar/pi-envoy`; pair this
   release with a Go `legion` built from the same commit, so an agent is never instructed to use a
-  surface its installed plugin does not provide.
+  surface its installed plugin does not provide. The daemon's image probe refuses a worker image
+  whose plugin declares 16 (the 8.4.0 release, whose `@sjawhar/pi-envoy` registers the native
+  tools and bundles no `dispatch`).
+- `legion.daemonApiVersion` is 16 (LEGION-578). Contract 16 adds `capabilities` to
+  `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
+  `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its
+  `detail`, and on an open row the `configLine` to write into `legion.yaml`. Install this release
+  with a Go `legion` built from the same commit; the daemon's image probe refuses a worker image
+  whose plugin declares 15 (the 8.3.0 release, whose strict state reader has no `capabilities`).
 - `legion.daemonApiVersion` is 15. Contract 15 changes a Sandbox locator on the daemon's
   `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
   `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
   generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The client's strict
-  state parse needs this release beside a daemon at 15; the daemon's boot gate refuses any earlier
-  contract.
+  state parse needs a daemon at this release's contract (the `legion.daemonApiVersion` entry
+  above); the daemon's boot gate refuses any earlier contract.
 - Every phase worker stays live from its role's first assignment until its issue closes
   (LEGION-462): no move between phases suspends it, so a role that finished its phase still
   answers questions through Envoy, and its next assignment arrives in the same session. The worker
@@ -52,9 +63,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 16 (LEGION-588, above) after main's 15 (LEGION-462) and 14 (LEGION-592). The
-  Envoy messaging and Dispatch command every session uses are `@sjawhar/pi-envoy`'s, installed
-  beside this package; a Legion pane needs both.
+  release declares 17 (LEGION-588, above; 16 since LEGION-578, 15 since LEGION-462, 14 since
+  LEGION-592). The Envoy messaging and Dispatch command every session uses are
+  `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
   through the in-process interface the Envoy entry publishes (`@legion/pi-shared/interface`, version
   1), and in a Legion session refuses to run, naming the remedy, when no `@sjawhar/pi-envoy` is
@@ -64,3 +75,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   a Legion skill into the `dispatch` skill are `skill://dispatch/...`, which resolve once both plugins
   are installed. Install both into the daemon's Oh My Pi profile:
   `omp plugin install @sjawhar/pi-envoy && omp plugin install @sjawhar/pi-legion`.
+
+### Removed
+
+- The extension's role gate — the architect's bash restriction to a single `legion` command, and
+  the architect's, reviewer's and merger's refusal of `edit`, `write` and `apply_patch` — and the
+  shell refusal of `legion handoff complete` are removed (LEGION-630). No role is refused a tool:
+  the role prompts alone say who edits what, and the operation-log rule (`jj undo`, `jj abandon`,
+  `jj op restore|revert|abandon|undo` refused in every tree pane and its `task` subagents) stays.
+  `legion.daemonApiVersion` is unchanged.

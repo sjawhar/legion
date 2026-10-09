@@ -2,7 +2,7 @@ package workflow
 
 import (
 	"context"
-	"slices"
+	"reflect"
 	"testing"
 	"time"
 
@@ -40,7 +40,7 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 		t.Fatalf("root phase = %s held from %v, want planning and not held", gotPhase, heldFrom)
 	}
 	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 }
@@ -125,7 +125,7 @@ func TestAFinishedRolesFailedClaimIsNoticedAndHoldsNothing(t *testing.T) {
 			if wantHeld := tc.child.Hold != nil; gotPhase != tc.wantPhase || (heldFrom != nil) != wantHeld {
 				t.Fatalf("after the %s's failure the child is in %s held from %v, want %s held %t", tc.role, gotPhase, heldFrom, tc.wantPhase, wantHeld)
 			}
-			if got := noticeRows(t, pool); !slices.Equal(got, tc.want) {
+			if got := noticeRows(t, pool); !sameNotices(got, tc.want) {
 				t.Fatalf("notice rows = %+v, want %+v", got, tc.want)
 			}
 		})
@@ -146,7 +146,7 @@ func TestAnEscalationIsRecordedOnTheHoldForAControllerThatStartsLater(t *testing
 		t.Fatalf("after the escalation the state reads phase %s hold reason %q, want held and escalated", got, reason)
 	}
 	escalated := record.Notice{Kind: "held", Phase: phase.Planning, Reason: "escalated"}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{escalated, record.ControllerNotice(escalated)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{escalated, record.ControllerNotice(escalated)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "architect", "retry", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
@@ -240,7 +240,7 @@ func TestALingeringTreesFailedClaimHoldsNothingAndItsArchitectsIsStillTold(t *te
 		t.Fatalf("ApplyFact the architect's failed claim: %v", err)
 	}
 	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Done}
-	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !slices.Equal(got, want) {
+	if got, want := noticeRows(t, pool), []record.OutboxPayload{died, record.ControllerNotice(died)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("notice rows = %+v, want %+v, to the issue and then to the controller", got, want)
 	}
 }
@@ -284,6 +284,12 @@ func projectedHold(t *testing.T, pool *pgxpool.Pool, key string) (phase.Phase, s
 		t.Fatalf("project the state: %v", err)
 	}
 	return state.Issues[key].Phase, state.Issues[key].HoldReason
+}
+
+// sameNotices compares two notice-row lists as slices.Equal would — an empty list equals a nil
+// want — through reflect.DeepEqual, since record.Notice holds a slice and is not comparable.
+func sameNotices(got, want []record.OutboxPayload) bool {
+	return len(got) == 0 && len(want) == 0 || reflect.DeepEqual(got, want)
 }
 
 // noticeRows is every notice and controller notice row's payload, oldest first.
