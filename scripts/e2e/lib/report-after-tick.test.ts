@@ -2,24 +2,35 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  assistant,
+  bashDevice,
+  bashEval,
+  bashEvalWrite,
+  bashEvalWriteContentFirst,
+  bashEvalWriteNearMisses,
+  bashTool,
+  type Call,
+  type Entry,
+  jsonl,
+  toolResult,
+  turnEnd,
+} from "./omp-session-fixtures";
 import { scriptFunctions } from "./script-functions";
 
 // report_after_tick, taken from stage4b-sandbox-tree.sh by name and run against controller sessions
-// written as Oh My Pi writes them: the daily-report checkpoint passes only when the controller's
-// call that posted its report came on a turn a tick started while the controller was idle. Oh My
-// Pi gives the model three ways to make that call, and each must count: the dispatch_message tool
-// itself, a write to its xd://dispatch_message device, and eval code that calls
-// tool.dispatch_message(...).
+// written as Oh My Pi writes them (omp-session-fixtures.ts): the daily-report checkpoint passes
+// only when the controller's call that posted its report came on a turn a tick started while the
+// controller was idle. The report is a `dispatch message` command the controller runs through
+// bash, and each of the four ways Oh My Pi gives the model to call bash must count: the bash tool,
+// a write to xd://bash, eval code calling tool.bash(...), and eval code calling the generic
+// tool.write(...) naming xd://bash.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "report-after-tick-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const report = "LEGSMOKE-472";
 const body = "Legion daily report for 2026-10-06 (UTC). Running: LEGSMOKE-469. Slots: 0 free.";
-type Entry = Record<string, unknown>;
-type Call = Record<string, unknown>;
-let ids = 0;
-const callId = () => `toolu_${++ids}`;
 
 const start: Entry = {
   type: "message",
@@ -28,14 +39,6 @@ const start: Entry = {
     content: [{ type: "text", text: "Legion controller start: follow the start procedure now." }],
   },
 };
-const assistant = (stopReason: "toolUse" | "stop" | "error", ...calls: Call[]): Entry => ({
-  type: "message",
-  message: { role: "assistant", stopReason, content: [{ type: "text", text: "…" }, ...calls] },
-});
-const result = (text: string): Entry => ({
-  type: "message",
-  message: { role: "toolResult", content: [{ type: "text", text }] },
-});
 // tick is pi-envoy's delivery of the daemon's tick, idle or steered into a running turn alike.
 const tick: Entry = {
   type: "custom_message",
@@ -43,65 +46,49 @@ const tick: Entry = {
   content: "envoy:\n  from: agent\n  summary: tick on LEGSMOKE\n  message:\n    kind: tick",
   display: true,
 };
-const bash: Call = {
-  type: "toolCall",
-  id: callId(),
-  name: "bash",
-  arguments: { command: "legion state --json" },
-};
-// The three surfaces of one dispatch_message call on ISSUE.
-const viaTool = (issue: string): Call => ({
-  type: "toolCall",
-  id: callId(),
-  name: "dispatch_message",
-  arguments: { issue, body },
-});
-const viaDevice = (issue: string): Call => ({
-  type: "toolCall",
-  id: callId(),
-  name: "write",
-  arguments: { path: "xd://dispatch_message", content: JSON.stringify({ issue, body }), i: "Post" },
-});
-const viaEval = (issue: string): Call => ({
-  type: "toolCall",
-  id: callId(),
-  name: "eval",
-  arguments: {
-    language: "js",
-    title: "post daily report",
-    code: `const body = \`${body}\`;\nconst r = await tool.dispatch_message({ issue: "${issue}", body });\nr;`,
-  },
-});
-const surfaces = { tool: viaTool, device: viaDevice, eval: viaEval } as const;
-const posted = result(`Posted message 2adbdb49 (dispatch://${report}/message/2adbdb49)`);
+const bash = bashTool("legion state --json");
+// The four surfaces of one bash call running `dispatch message` on ISSUE.
+const command = (issue: string) =>
+  `dispatch message --issue ${issue} --body-file - <<'EOF'\n${body}\nEOF`;
+const viaTool = (issue: string): Call => bashTool(command(issue));
+const viaDevice = (issue: string): Call => bashDevice(command(issue));
+const viaEval = (issue: string): Call => bashEval(command(issue));
+const viaEvalWrite = (issue: string): Call => bashEvalWrite(command(issue));
+const surfaces = {
+  tool: viaTool,
+  device: viaDevice,
+  eval: viaEval,
+  evalWrite: viaEvalWrite,
+} as const;
+const posted = toolResult(`Posted message 2adbdb49 (dispatch://${report}/message/2adbdb49)`);
 
 // onTickTurn: the start turn has a tick steered into it and ends; the next tick finds the
 // controller idle and starts the turn that posts the report with CALL.
 const onTickTurn = (call: Call, startTurn: Entry[] = []): Entry[] => [
   start,
-  assistant("toolUse", bash),
-  result("{}"),
+  assistant(bash),
+  toolResult("{}"),
   tick,
   ...startTurn,
-  assistant("stop"),
+  turnEnd("stop"),
   tick,
-  assistant("toolUse", bash),
-  result("{}"),
-  assistant("toolUse", call),
+  assistant(bash),
+  toolResult("{}"),
+  assistant(call),
   posted,
-  assistant("stop"),
+  turnEnd("stop"),
 ];
 // inStartTurn: the report is posted with CALL in the start turn, after a tick was steered into it.
 const inStartTurn = (call: Call): Entry[] => [
   start,
-  assistant("toolUse", bash),
-  result("{}"),
+  assistant(bash),
+  toolResult("{}"),
   tick,
-  assistant("toolUse", call),
+  assistant(call),
   posted,
-  assistant("stop"),
+  turnEnd("stop"),
   tick,
-  assistant("stop"),
+  turnEnd("stop"),
 ];
 
 let sessions = 0;
@@ -109,10 +96,7 @@ function run(entries: Entry[]) {
   const agent = join(dir, `agent-${++sessions}`);
   const sessionDir = join(agent, "sessions", "-tmp-controller-state-controller-");
   mkdirSync(sessionDir, { recursive: true });
-  writeFileSync(
-    join(sessionDir, "2026-10-06T18-39-06-031Z_session.jsonl"),
-    `${entries.map((e) => JSON.stringify(e)).join("\n")}\n`
-  );
+  writeFileSync(join(sessionDir, "2026-10-06T18-39-06-031Z_session.jsonl"), jsonl(entries));
   const ran = Bun.spawnSync([
     "bash",
     "-c",
@@ -152,19 +136,15 @@ describe("report_after_tick", () => {
   test("a start turn that ends in an unretried error is no idle turn for the next tick", () => {
     const entries = onTickTurn(viaEval(report));
     // entries[4] is the start turn's last message, its stop.
-    entries[4] = assistant("error");
+    entries[4] = turnEnd("error");
     const { code, stdout } = run(entries);
     expect(stdout).toBe(notOnTick);
     expect(code).toBe(1);
   });
 
-  test("a skill file that quotes the device in the start turn is not the report's call", () => {
-    const skill = result(
-      "Post the report with a write to xd://dispatch_message, or tool.dispatch_message in eval."
-    );
-    const { code, stdout } = run(
-      onTickTurn(viaDevice(report), [assistant("toolUse", bash), skill])
-    );
+  test("a skill file that quotes the command in the start turn is not the report's call", () => {
+    const skill = toolResult(`Post the report with ${command(report)}.`);
+    const { code, stdout } = run(onTickTurn(viaDevice(report), [assistant(bash), skill]));
     expect(stdout).toBe("");
     expect(code).toBe(0);
   });
@@ -172,18 +152,37 @@ describe("report_after_tick", () => {
   test("a message the start turn posts on another issue is not the report's call", () => {
     for (const call of Object.values(surfaces)) {
       const { code, stdout } = run(
-        onTickTurn(viaEval(report), [assistant("toolUse", call("LEGSMOKE-469")), posted])
+        onTickTurn(viaEval(report), [assistant(call("LEGSMOKE-469")), posted])
       );
       expect(stdout).toBe("");
       expect(code).toBe(0);
     }
   });
 
+  // Each probe carries the report's command, which the downstream runs_dispatch and --issue checks
+  // would take: calls("bash") alone decides it.
+  const missing = `no session of the controller holds a call running dispatch message --issue ${report}: the bash tool, a write to xd://bash, or eval code calling tool.bash or tool.write whose string literal runs it`;
+
+  for (const [language, call] of Object.entries(bashEvalWriteContentFirst(command(report)))) {
+    test(`a report posted through eval calling tool.write with content built before path (${language}) passes`, () => {
+      const { code, stdout, stderr } = run(onTickTurn(call));
+      expect(stderr).toBe("");
+      expect(stdout).toBe("");
+      expect(code).toBe(0);
+    });
+  }
+
+  for (const [probe, call] of Object.entries(bashEvalWriteNearMisses(command(report)))) {
+    test(`${probe} is not the report's call`, () => {
+      const { code, stdout } = run(onTickTurn(call));
+      expect(stdout).toBe(missing);
+      expect(code).toBe(1);
+    });
+  }
+
   test("a session with no call posting on the report issue fails naming what it looked for", () => {
     const { code, stdout } = run(onTickTurn(viaEval("LEGSMOKE-469")));
-    expect(stdout).toBe(
-      `no session of the controller holds a call posting a dispatch_message on ${report}: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message`
-    );
+    expect(stdout).toBe(missing);
     expect(code).toBe(1);
   });
 });

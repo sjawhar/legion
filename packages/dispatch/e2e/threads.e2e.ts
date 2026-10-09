@@ -18,7 +18,7 @@ import { asUser } from "./users";
 // "bob" names the session that opened the ask - authenticated over the API with
 // the agent bearer token, not a human's signed-in session - so its own reply
 // (clause 2 below) exercises the same "agent replies live" path a real Legion
-// session would use via dispatch_comment(reply_to_ask).
+// session would use via `dispatch comment --reply-to-ask`.
 const bobSession = {
   actor: { kind: "session" as const, id: "e2e-session-bob", origin: { tmux: "dispatch:1.3" } },
   as: "agent" as const,

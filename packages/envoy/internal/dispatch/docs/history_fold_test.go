@@ -14,6 +14,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -429,19 +430,24 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	}
 }
 
-// The read-back check passes a state whose clocks are the ones the document that made it held, and
-// names a client whose clock differs: one the state holds short of the document's clock or not at
-// all, and one the state holds that the document did not.
+// The read-back check passes a state whose clocks are the ones the document that made it held,
+// handing back the document it decoded, and names a client whose clock differs: one the state
+// holds short of the document's clock or not at all, and one the state holds that the document did
+// not.
 func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
 	writer := crdt.New(crdt.WithClientID(7))
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })
 	state := crdt.EncodeStateAsUpdateV1(writer, nil)
-	if err := readsBackOtherwise(state, crdt.StateVector{7: 3}); err != nil {
+	decoded, err := readsBackOtherwise(state, crdt.StateVector{7: 3})
+	if err != nil {
 		t.Fatalf("a state read back at the clocks that made it: %v", err)
 	}
+	if got := decoded.GetText("t").ToString(); got != "abc" {
+		t.Fatalf("the read-back document reads %q, want %q", got, "abc")
+	}
 	for _, made := range []crdt.StateVector{{7: 4}, {7: 3, 8: 1}, {}} {
-		if err := readsBackOtherwise(state, made); err == nil {
+		if _, err := readsBackOtherwise(state, made); err == nil {
 			t.Errorf("a state made at %v that reads back at {7:3}: no error, want the client that differs", made)
 		}
 	}
@@ -516,7 +522,7 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 	if err := crdt.ApplyUpdateV1(browser, initial, nil); err != nil {
 		t.Fatalf("open the second client: %v", err)
 	}
-	browserText := firstXMLText(browser.GetXmlFragment(fragmentName))
+	browserText := docstest.FirstText(browser.GetXmlFragment(fragmentName))
 
 	history := [][]byte{initial}
 	step := func(what string, change func(*crdt.Transaction) error) {
@@ -550,21 +556,6 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 		return pmdoc.Update(txn, fragment, initialTree)
 	})
 	return history
-}
-
-// firstXMLText is the first text node in document order, or nil for a document without one.
-func firstXMLText(fragment *crdt.YXmlFragment) *crdt.YXmlText {
-	for _, child := range fragment.Children() {
-		switch node := child.(type) {
-		case *crdt.YXmlText:
-			return node
-		case *crdt.YXmlElement:
-			if text := firstXMLText(&node.YXmlFragment); text != nil {
-				return text
-			}
-		}
-	}
-	return nil
 }
 
 // documentReading is everything a reader of a document state sees: its markdown (or why it has

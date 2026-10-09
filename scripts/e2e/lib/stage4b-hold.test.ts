@@ -210,9 +210,12 @@ echo "MISSES $hold_misses"`;
       "--task",
     ]);
     // The deployment instructions let a worker read its role and reply WAITING to any task but a
-    // targeted human message, so the task asks for that reading and nothing else.
-    expect(task).toContain("handoff_read");
-    expect(task).toContain("reply WAITING");
+    // targeted human message, so the task asks for that reading in the instructions' own words, and
+    // names no tool, since the tools a worker reads with change with its plugin.
+    const reading = "Read what your role says to read, then reply WAITING";
+    expect(script).toContain(`phase and is not that message. ${reading} and wait for`);
+    expect(task).toContain(reading);
+    expect(task).not.toMatch(/dispatch_\w+|handoff_read/);
   });
 
   test("a miss past the bound fails the loop loudly, and delivers nothing", () => {

@@ -1,10 +1,13 @@
 package delivery
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
 func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
@@ -46,7 +49,7 @@ func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	runs, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", ".github/workflows/deploy.yml",
+	runs, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", ".github/workflows/deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("ListWorkflowRuns: %v", err)
@@ -106,7 +109,7 @@ func TestListWorkflowRunsPaginatesAcrossPages(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	runs, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
+	runs, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("ListWorkflowRuns: %v", err)
@@ -155,7 +158,7 @@ func TestListWorkflowRunsHalvesOnOverflowWithoutGapOrOverlap(t *testing.T) {
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	runs, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml", since, until)
+	runs, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml", since, until)
 	if err != nil {
 		t.Fatalf("ListWorkflowRuns: %v", err)
 	}
@@ -186,7 +189,7 @@ func TestListWorkflowRunsUpstream404IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
+	_, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("ListWorkflowRuns: err = %v, want an error naming the 404 status", err)
@@ -200,7 +203,7 @@ func TestListWorkflowRunsUpstream500IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
+	_, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("ListWorkflowRuns: err = %v, want an error naming the 500 status", err)
@@ -305,4 +308,20 @@ func TestListWorkflowRunJobsUpstream500IsWrapped(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("ListWorkflowRunJobs: err = %v, want an error naming the 500 status", err)
 	}
+}
+
+// collectWorkflowRuns is ListWorkflowRuns for a test that wants every run at once rather than one
+// window at a time, with the full 1,000-result window the GitHub cap allows (reconcile's own
+// runsWindow is smaller, and its per-window progress is reconcile_test.go's subject, not this
+// file's).
+func collectWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo, workflowPath string, since, until time.Time) ([]FetchedRun, error) {
+	var runs []FetchedRun
+	err := ListWorkflowRuns(ctx, client, owner, repo, workflowPath, since, until, githubResultCap, func(_ time.Time, window []FetchedRun) error {
+		runs = append(runs, window...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runs, nil
 }

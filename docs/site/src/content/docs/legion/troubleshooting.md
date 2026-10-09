@@ -31,6 +31,7 @@ legion start --config legion.yaml --check-config
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay. Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -54,7 +55,15 @@ legion start --config legion.yaml --check-config
   - the probe pod cannot mount the providers Secret (`… cannot mount the providers Secret
     legion-<project>-providers …`): create the Secret with every key `provider_keys` names;
   - the image names another NATS user than the daemon's seed: put the agents' seed in the providers
-    Secret's `NATS_NKEY_SEED` key.
+    Secret's `NATS_NKEY_SEED` key;
+  - `capability <name> is missing: <detail>` in the quoted log: the image lacks a tool the capability
+    check looks for (`chromium`, a language server, `go`, …), or an operator pod env such as
+    `PUPPETEER_EXECUTABLE_PATH` names one that does not run. Rebuild the image from a commit whose
+    Dockerfile carries it, or fix the variable; the worker-image workflow fails the same way on an
+    image that lacks one;
+  - `Succeeded without checking the capability list (its legion CLI predates the check)`: the image's
+    `legion` is older than this daemon's capability check. Build the image from this daemon's
+    commit.
 
   A model key that fails at boot refuses the boot even when the cause is a passing network blip,
   since the probe cannot tell the two apart. Start the daemon again once the cause is gone.
@@ -237,8 +246,9 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 These arrive as messages on the Dispatch issue, and the architect is told:
 
-- **`Issue reached review_round_cap=3.`** Three review rounds sent the change back. The architect
-  decides what happens next, often with a question to you.
+- **`Issue reached review_round_cap=3.`** The implementer's round count reached three
+  ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
+  architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
@@ -256,10 +266,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   installation a review author's repository permission`, naming the installation's owner: the
   review App's installation cannot read the repository's collaborators, so until it can, no review
   but the review App's decides a round.
-- **`READY` refused.** The merger's `READY` is refused until every check the base branch requires
-  has succeeded on the pull request's head, and every workflow its rulesets require has a run on
-  the head that succeeded, and while the design gate is closed. The refusal names the head and the
-  check or workflow, or the spec version that needs approval.
+- **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
+  the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
+  to `retro`); until every check the base branch requires has succeeded on the head, and every
+  workflow its rulesets require has a run on the head that succeeded; and while the design gate is
+  closed. The refusal names the head and the directory, the check or workflow, or the spec version
+  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
+  failure, and the merger completes again. None of the head checks applies to a pull request a
+  person already merged: its `READY` is published unread, and the issue goes on to its production
+  check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  for a pull request that deletes it.
 
 An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
 or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no

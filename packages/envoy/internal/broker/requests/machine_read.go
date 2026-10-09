@@ -19,10 +19,12 @@ import (
 )
 
 // Values releases the values of a live grant to its own enrollment. Every call re-checks the
-// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and —
-// when the policy has changed since the grant's request was decided — that the current policy
-// still allows the session, with the names its operator withheld from it, every granted name under
-// the login that decided it (stillAllowed). Each value is read from the secret the request froze.
+// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
+// the policy has changed since the grant's request was decided, or any granted name is a service's
+// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
+// current policy still allows the session, with the names its operator withheld from it, every
+// granted name under the login that decided it (stillAllowed). Each value is read from the secret
+// the request froze.
 // It holds no pooled connection across a Secrets Manager read: the grant's names are read into
 // memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, time.Time, error) {
@@ -31,9 +33,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.operator
-		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Operator)
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.kind, e.operator, e.subject, c.service
+		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
+		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, time.Time{}, ErrGrantNotLive
 	}
@@ -53,8 +56,8 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	if set := m.Policy.Get(); policyVersion != set.Version {
-		requester, err := enr.requester(ctx, m.Store.Pool)
+	if set := m.Policy.Get(); policyVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
 			return nil, time.Time{}, err
 		}

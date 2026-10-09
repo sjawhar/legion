@@ -4,23 +4,33 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 const (
 	// requestMemoryBound is the most one request may raise a fresh server's resident memory above
 	// what it held idle, and concurrentMemoryBound the most two at once may (LEGION-481). Production
-	// runs one task of 1,024 MiB.
+	// runs one task of 4,096 MiB.
 	requestMemoryBound    = 256 << 20
 	concurrentMemoryBound = 512 << 20
 	documentCap           = 1 << 20
+	// documentReadBudgetForTest mirrors docs.documentReadBudget. The cache's test hook supplies
+	// each entry's real accounting weight, so this process can build two complete cache fills.
+	documentReadBudgetForTest = 256 << 20
 	// marginEditAllowance is the most a margin filled to its bounds may add to what a cold edit of
 	// its document holds: two cold edits of one heaviest document, with a full margin and without,
 	// differed by -10 to +88 MiB over four runs (the four-column table the most), where a margin of
@@ -108,6 +118,139 @@ func TestTheHeaviestStoredDocumentsStayWithinTheMemoryBound(t *testing.T) {
 	}
 }
 
+// appendColdReadMemoryUpdates leaves several durable Yjs updates after the source server's
+// shutdown compaction. The updates touch an unrelated map: a cold document fold must still apply
+// them, while the rendered Proof document stays the admitted heavyweight the test uploaded.
+func appendColdReadMemoryUpdates(t *testing.T, memory *memoryHarness, artifactID string, count int) {
+	t.Helper()
+	versioned := docs.NewPgVersioned(memory.database)
+	loaded, err := versioned.Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load compacted source for extra updates: %v", err)
+	}
+	document := crdt.New()
+	if err := crdt.ApplyUpdateV1(document, loaded.Update, nil); err != nil {
+		t.Fatalf("decode compacted source for extra updates: %v", err)
+	}
+	meta := document.GetMap("cold-read-memory")
+	for index := range count {
+		before := document.StateVector()
+		document.Transact(func(txn *crdt.Transaction) {
+			meta.Set(txn, fmt.Sprintf("update-%d", index), "x")
+		})
+		if _, err := versioned.AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(document, before)); err != nil {
+			t.Fatalf("append cold-read memory update %d: %v", index, err)
+		}
+	}
+	if _, err := memory.database.Pool.Exec(context.Background(), `delete from doc_settlements_pending where artifact_id = $1`, artifactID); err != nil {
+		t.Fatalf("clear synthetic updates' settlement marker: %v", err)
+	}
+}
+
+func TestAColdReadOfAHeavyMultiUpdateHistoryStaysWithinTheMemoryBound(t *testing.T) {
+	memory := newMemoryHarness(t)
+	shape := admittedShape{
+		name:     `\)\_`,
+		markdown: heaviestAdmitted(t, func(units int) string { return strings.Repeat(`\)\_`, units) }),
+	}
+	writer := memory.start(t)
+	upload := writer.upload(t, "json", memory.issue, shape.markdown)
+	if upload.status != http.StatusCreated {
+		t.Fatalf("upload %s: status %d body %.300s, want 201", shape.name, upload.status, upload.body)
+	}
+	memory.waitForSettlement(t, upload)
+	writer.stop(t)
+	appendColdReadMemoryUpdates(t, memory, upload.artifactID, 4)
+	var updates int
+	if err := memory.database.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, upload.artifactID).Scan(&updates); err != nil {
+		t.Fatalf("count multi-update history: %v", err)
+	}
+	if updates < 2 {
+		t.Fatalf("multi-update history has %d row, want at least 2", updates)
+	}
+
+	reader := memory.start(t)
+	peak := reader.peakAboveIdle(t, func() {
+		reader.get(t, "/api/v1/artifacts/"+upload.artifactID+"/text")
+	})
+	t.Logf("%s: %d durable updates, cold text peak %d MiB above idle", shape.name, updates, peak>>20)
+	if peak > requestMemoryBound {
+		t.Errorf("cold text read of %s with %d updates held %d MiB above idle, want at most %d MiB", shape.name, updates, peak>>20, requestMemoryBound>>20)
+	}
+}
+
+func cloneColdReadArtifact(t *testing.T, memory *memoryHarness, sourceID string, number int) string {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := memory.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin clone %d: %v", number, err)
+	}
+	defer tx.Rollback(ctx)
+	slug := fmt.Sprintf("cold-cache-%03d", number)
+	var artifactID string
+	if err := tx.QueryRow(ctx, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		select issue_key, project_key, $2, $2 || '.md', kind, false, created_by
+		from artifacts where id = $1
+		returning id::text
+	`, sourceID, slug).Scan(&artifactID); err != nil {
+		t.Fatalf("clone artifact %d: %v", number, err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed)
+		select $1, version, update, content_changed
+		from doc_updates where artifact_id = $2
+	`, artifactID, sourceID); err != nil {
+		t.Fatalf("clone updates %d: %v", number, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit clone %d: %v", number, err)
+	}
+	return artifactID
+}
+
+func TestColdReadCacheEvictionPlateaus(t *testing.T) {
+	memory := newMemoryHarness(t)
+	markdown := heaviestAdmitted(t, func(units int) string { return strings.Repeat("# a\n", units) })
+	weight, err := docs.DocumentReadWeightForTest(markdown)
+	if err != nil {
+		t.Fatalf("weigh cache-fill document: %v", err)
+	}
+	if weight > documentReadBudgetForTest/8 {
+		t.Fatalf("cache-fill document weighs %d MiB, want at most documentReadBudget/8 (%d MiB)", weight>>20, (documentReadBudgetForTest/8)>>20)
+	}
+	perFill := int((2*int64(documentReadBudgetForTest) + weight - 1) / weight)
+	writer := memory.start(t)
+	upload := writer.upload(t, "json", memory.issue, markdown)
+	if upload.status != http.StatusCreated {
+		t.Fatalf("upload cache-fill document: status %d body %.300s, want 201", upload.status, upload.body)
+	}
+	memory.waitForSettlement(t, upload)
+	writer.stop(t)
+
+	artifactIDs := make([]string, perFill*2)
+	for index := range artifactIDs {
+		artifactIDs[index] = cloneColdReadArtifact(t, memory, upload.artifactID, index)
+	}
+	reader := memory.start(t)
+	read := func(ids []string) {
+		for _, artifactID := range ids {
+			reader.get(t, "/api/v1/artifacts/"+artifactID+"/text")
+		}
+	}
+	firstPeak := reader.peakAboveIdle(t, func() { read(artifactIDs[:perFill]) })
+	retained := reader.resident(t, "VmRSS") - reader.idle
+	secondPeak := reader.peakAboveIdle(t, func() { read(artifactIDs[perFill:]) })
+	t.Logf("cache eviction: weight %d MiB, %d documents/fill, first peak %d MiB, second peak %d MiB, retained %d MiB", weight>>20, perFill, firstPeak>>20, secondPeak>>20, retained>>20)
+	if retained < documentReadBudgetForTest/2 {
+		t.Errorf("first cache fill retained %d MiB above idle, want at least %d MiB so a no-store cache cannot pass", retained>>20, (documentReadBudgetForTest/2)>>20)
+	}
+	if secondPeak > firstPeak+requestMemoryBound {
+		t.Errorf("second cache fill peaked %d MiB above idle after first peak %d MiB, want at most one request (%d MiB) more", secondPeak>>20, firstPeak>>20, requestMemoryBound>>20)
+	}
+}
+
 // Two uploads at once hold at most twice the bound together: two of a cap-sized `)_`, which the
 // element limit refuses, and two of the heaviest `)_` document it admits, which are stored.
 func TestTwoUploadsAtOnceStayWithinTheMemoryBound(t *testing.T) {
@@ -150,7 +293,7 @@ func TestTwoUploadsAtOnceStayWithinTheMemoryBound(t *testing.T) {
 // one inline node, held 565 MiB for two reads and 1,190 MiB for four, images, of which four cold
 // reads held up to 1,044 MiB while an image weighed one, and escaped syntax, of which four cold
 // reads of a stored `\)\_` held 973 MiB before an escape weighed an element. Four reads at once are
-// logged beside them, the production task being 1,024 MiB.
+// logged beside them, the production task being 4,096 MiB.
 func TestConcurrentColdReadsStayWithinTheMemoryBound(t *testing.T) {
 	memory := newMemoryHarness(t)
 	var shapes []admittedShape
@@ -706,5 +849,54 @@ func TestASpecOfFrontMatterAndTheMostHeadingsIsStored(t *testing.T) {
 	issue := server.createIssue(t, "Front matter", "---\ntitle: a spec\n---\n\n"+strings.Repeat("# a\n", 16_384))
 	if text := server.text(t, issue.PrimaryArtifactID); !strings.HasPrefix(text, "---\ntitle: a spec\n---\n") || strings.Count(text, "# a\n") != 16_384 {
 		t.Fatalf("the spec reads back %d bytes opening %q, want its front matter and 16,384 headings", len(text), text[:min(len(text), 40)])
+	}
+}
+
+// Every block's path in one walk (pmdoc.BlockPaths, which a cold read caches beside the document's
+// text and blocks) allocates at most the bound for the heaviest tables the element limit admits:
+// the two- and four-column tables of the most rows, and the widest table, one header and one body
+// row of the most cells. Every row, cell and cell paragraph carries a block id, so a walk that
+// copied a row's cells for every id or laid the rows above out for every cell would cost the
+// square of the width in strings, and its cube in grid steps.
+func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
+	shapes := []admittedShape{{
+		name: "the widest table",
+		markdown: heaviestAdmitted(t, func(cells int) string {
+			return strings.Repeat("| a ", cells) + "|\n" + strings.Repeat("| - ", cells) + "|\n" + strings.Repeat("| b ", cells) + "|\n"
+		}),
+	}}
+	for _, shape := range heaviestAdmittedShapes(t) {
+		if strings.HasSuffix(shape.name, "table") {
+			shapes = append(shapes, shape)
+		}
+	}
+	if len(shapes) != 3 {
+		t.Fatalf("found %d table shapes, want the widest table and the two- and four-column tables", len(shapes))
+	}
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			tree, err := pmdoc.Parse(shape.markdown)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			started := time.Now()
+			paths, err := pmdoc.BlockPaths(tree)
+			elapsed := time.Since(started)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("BlockPaths: %v", err)
+			}
+			allocated := int64(after.TotalAlloc - before.TotalAlloc)
+			t.Logf("%s: %d paths, %d MiB allocated in %s", shape.name, len(paths), allocated>>20, elapsed)
+			if len(paths) < 3*pmdoc.MaxDocumentElements/16 {
+				t.Errorf("%s: %d paths, want the table's every row, cell and paragraph", shape.name, len(paths))
+			}
+			if allocated > requestMemoryBound {
+				t.Errorf("BlockPaths of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
+			}
+		})
 	}
 }

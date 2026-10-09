@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -40,6 +41,34 @@ type State struct {
 	// (runtime.kubernetes.agent_secrets), absent when the deployment configures
 	// no broker.
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
+	// Capabilities is the deployment's capability report (capabilities.Deployment.Report), one row
+	// per capability in the table's order: what the worker image was probed for, what a live check
+	// proves, what a ruling withholds, and what the deployment's own configuration closes, decides
+	// or leaves open — each open row with the legion.yaml line that records a decision. Never
+	// null; a gap is reported here, never refused (contract 16).
+	Capabilities []CapabilityState `json:"capabilities"`
+}
+
+// CapabilityState is one row of that report. Status is "present", "installed" (the image carries
+// the row's tooling, but a pod's agent cannot use it yet; Detail says why), "unchecked", "live",
+// "withheld", "decided" or "open"; Detail is the row's evidence whatever the status; Decision is
+// the operator's reason on a decided row; ConfigLine is, on an open row, the legion.yaml line
+// that records a decision (`capabilities.decided.<name>: "<reason>"`).
+type CapabilityState struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Detail     string `json:"detail"`
+	Decision   string `json:"decision,omitempty"`
+	ConfigLine string `json:"configLine,omitempty"`
+}
+
+// CapabilityStatesOf is report as the state shows it, row for row.
+func CapabilityStatesOf(report []capabilities.State) []CapabilityState {
+	states := make([]CapabilityState, len(report))
+	for i, row := range report {
+		states[i] = CapabilityState{Name: string(row.Name), Status: row.Status, Detail: row.Detail, Decision: row.Decision, ConfigLine: row.ConfigLine}
+	}
+	return states
 }
 
 // ControllerLocator is the record of the session registered as the project's controller: the
@@ -75,8 +104,8 @@ type AgentSecretsLoginView struct {
 	Code  string `json:"code"`
 }
 
-// MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's
-// strict reader refuses.
+// MarshalJSON keeps `issues` an object and `pendingStatusWrites` and `capabilities` arrays on the
+// wire: a nil Go map or slice is `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -85,6 +114,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
+	}
+	if out.Capabilities == nil {
+		out.Capabilities = []CapabilityState{}
 	}
 	return json.Marshal(out)
 }

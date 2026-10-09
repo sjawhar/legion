@@ -468,12 +468,22 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 	}
 }
 
+// failingLoadStore is a store that cannot serve any read of a document: a room's load, a cold
+// read's stamp, or its load.
 type failingLoadStore struct {
 	docs.VersionedStore
 }
 
 func (failingLoadStore) Load(context.Context, string) (persistence.LoadResult, error) {
 	return persistence.LoadResult{}, errors.New("persistence unavailable")
+}
+
+func (failingLoadStore) DocumentStamp(context.Context, string) (docs.DocumentStamp, error) {
+	return docs.DocumentStamp{}, errors.New("persistence unavailable")
+}
+
+func (failingLoadStore) LoadDocument(context.Context, string) (docs.LoadedDocument, error) {
+	return docs.LoadedDocument{}, errors.New("persistence unavailable")
 }
 
 func TestDocumentEditRejectsInvalidOperationField(t *testing.T) {
