@@ -75,7 +75,8 @@ AWS_REGION=<region>
 ```
 
 Each new connection signs in with a token the broker mints for that user and host, signed with
-the AWS SDK's default credentials in `AWS_REGION`. A token is good for 15 minutes from its mint and
+the AWS SDK's default credentials in the region `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS
+config names; with none, the broker refuses to start. A token is good for 15 minutes from its mint and
 is checked only when a connection signs in, so a connection the broker holds longer keeps working,
 and the next connection it opens brings a fresh token. The broker's AWS identity needs
 `rds-db:connect` on the database user,
@@ -83,17 +84,19 @@ and the next connection it opens brings a fresh token. The broker's AWS identity
 must be a member of `rds_iam`. The cluster needs IAM database authentication turned on.
 
 A token is a password to the database until it expires, so the broker sends one only to a server
-it has verified. The URL must name that one host, with `sslmode=verify-full` and `sslrootcert`
-naming the RDS CA bundle; otherwise the broker refuses to start, naming the host:
-`sslmode=require` encrypts but verifies nothing. The Envoy image ships the bundle at
-`/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so nothing else in the image
-trusts it. It is the
+it has verified. The URL must name that one host, with `sslmode=verify-full` and an `sslrootcert`
+file (the Envoy image ships the RDS CA bundle at `/etc/ssl/rds/global-bundle.pem`); otherwise the
+broker refuses to start, naming the host: `sslmode=require` encrypts but verifies nothing, and
+`sslrootcert=system` (in the URL or `PGSSLROOTCERT`) names the system trust store, which holds no RDS
+CA, so every sign-in would fail. The bundle sits outside the system trust store, so nothing else in
+the image trusts it. It is the
 [global bundle](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem) AWS publishes,
 vendored as `packages/envoy/docker/rds-global-bundle.pem` with the date it was fetched and its
 checksum.
 
-A URL with a password, the `${BROKER_DATABASE_PASSWORD}` placeholder, or a host that is not an RDS
-endpoint (a local Postgres that trusts its clients, say) connects as given and mints nothing.
+A URL with a password, the `${BROKER_DATABASE_PASSWORD}` placeholder, a passwordless URL whose
+password libpq supplies (`PGPASSWORD` or a passfile), or a host that is not an RDS endpoint (a
+local Postgres that trusts its clients, say) connects as given and mints nothing.
 
 ## What it depends on
 
