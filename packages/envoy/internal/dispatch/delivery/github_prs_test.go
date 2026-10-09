@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -372,7 +373,7 @@ func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *
 	// repository the installation's GET /installation/repositories lists, since an unqualified
 	// query is NOT scoped by the authenticating token for public-repository content (it searches
 	// all of public GitHub).
-	if _, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, []string{"alice", "bob"}, since, until); err != nil {
+	if _, err := searchAllInstallations(t.Context(), client, []string{"alice", "bob"}, since, until); err != nil {
 		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
 	}
 
@@ -411,7 +412,7 @@ func TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation(t *
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	results, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, []string{"alice"}, since, until)
+	results, err := searchAllInstallations(t.Context(), client, []string{"alice"}, since, until)
 	if err != nil {
 		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
 	}
@@ -613,4 +614,24 @@ func TestSearchMergedPullRequestsNormalizesABotAuthorToRESTForm(t *testing.T) {
 	if results[0].Author != "acme-agent[bot]" {
 		t.Fatalf("Author = %q, want the REST form %q (GitHub's GraphQL login carries no [bot] suffix)", results[0].Author, "acme-agent[bot]")
 	}
+}
+
+// searchAllInstallations is SearchMergedPullRequestsAcrossInstallation for a test that wants
+// every result at once, from one window start, rather than per-installation windows with their
+// own recorded progress (reconcile_test.go's subject).
+func searchAllInstallations(ctx context.Context, client *githubapp.Client, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+	var mu sync.Mutex
+	var found []FetchedPullRequest
+	err := SearchMergedPullRequestsAcrossInstallation(ctx, client, authors,
+		func(int64) time.Time { return since }, until,
+		func(_ githubapp.Installation, _ time.Time, prs []FetchedPullRequest) error {
+			mu.Lock()
+			defer mu.Unlock()
+			found = append(found, prs...)
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
 }

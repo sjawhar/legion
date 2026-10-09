@@ -184,34 +184,77 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, owner, r
 // bind" is not a concern this package needs to handle.
 const deliveryConsumerName = "delivery-events"
 
+// intakeMessageTimeout bounds how long one envelope's own handling may take -- its GitHub calls
+// (a pull request plus its commit pages, or a workflow run plus its jobs pages, each with this
+// package's own bounded page retries) and its Postgres writes. A handler that runs past it is
+// cancelled, logged and acked: the five-minute reconcile is this package's catch-up mechanism,
+// so one slow envelope must not hold the consumer.
+const intakeMessageTimeout = time.Minute
+
+// intakeMaxAckPending bounds how many messages NATS may have outstanding with this consumer at
+// once. This is the fix for the production incident this package's reconcile work came from: the
+// handler does its GitHub calls inline on the subscription's own delivery goroutine, one message
+// at a time, so with the server default of 1,000 outstanding messages and a 30-second ack wait,
+// every message past roughly the thirtieth was redelivered before the handler had even reached
+// it. Each redelivery was another copy in nats.go's per-subscription pending buffer, which filled
+// its 64 MiB limit and started dropping messages as a slow consumer (6,900 drops over four
+// hours, 543,070 deliveries against an ack floor of 41,575 for about 10,000 distinct messages).
+// Four outstanding messages is what a handler taking up to intakeMessageTimeout can acknowledge
+// well inside intakeAckWait, so the server never redelivers a message this consumer is still
+// working on and the pending buffer never holds more than a handful of envelopes.
+const intakeMaxAckPending = 4
+
+// intakeAckWait is how long NATS waits for an acknowledgement before redelivering. Derived from
+// the two constants above rather than chosen: the last of intakeMaxAckPending outstanding
+// messages waits for the ones before it, so the bound is their total handling time, plus a
+// minute for the acknowledgement itself to land.
+const intakeAckWait = intakeMaxAckPending*intakeMessageTimeout + time.Minute
+
+// deliveryConsumerConfig is the policy bind stamps on the durable, whether it creates it or
+// finds one an earlier release left with the server's defaults.
+func deliveryConsumerConfig(subjects []string) natsgo.ConsumerConfig {
+	return natsgo.ConsumerConfig{
+		Durable:        deliveryConsumerName,
+		DeliverSubject: natsgo.NewInbox(),
+		FilterSubjects: subjects,
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		AckWait:        intakeAckWait,
+		MaxAckPending:  intakeMaxAckPending,
+	}
+}
+
 func (in *Intake) bind(subjects []string, handle func(context.Context, map[string]string) error) (*natsgo.Subscription, bool) {
 	info, err := in.nats.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	wanted := deliveryConsumerConfig(subjects)
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
-		if _, err := in.nats.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
-			Durable:        deliveryConsumerName,
-			DeliverSubject: natsgo.NewInbox(),
-			FilterSubjects: subjects,
-			AckPolicy:      natsgo.AckExplicitPolicy,
-		}); err != nil {
+		if _, err := in.nats.JS().AddConsumer(bus.Stream, &wanted); err != nil {
 			slog.Error("dispatch delivery: create NATS consumer", "name", deliveryConsumerName, "subjects", subjects, "error", err)
 			return nil, false
 		}
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", deliveryConsumerName, "error", err)
 		return nil, false
-	case !slices.Equal(info.Config.FilterSubjects, subjects):
+	case !slices.Equal(info.Config.FilterSubjects, subjects) ||
+		info.Config.AckWait != wanted.AckWait ||
+		info.Config.MaxAckPending != wanted.MaxAckPending:
 		// A settings change (a different deploy repository, a different workflow path) moved
-		// these subjects: update the existing durable's filter in place, preserving its
-		// DeliverSubject and delivery cursor, so a settings PUT takes effect on its own --
-		// without an operator having to notice a log line and restart the server.
+		// these subjects, or the durable still carries an earlier release's flow control (the
+		// server's own defaults, which redelivered faster than the handler could work -- see
+		// intakeMaxAckPending): update the existing durable in place, preserving its
+		// DeliverSubject and delivery cursor, so neither a settings PUT nor this policy needs an
+		// operator to notice a log line and restart the server. Every field here is one NATS
+		// lets an existing consumer change; nothing touches its deliver policy or ack policy,
+		// which it does not.
 		config := info.Config
 		config.FilterSubjects = subjects
+		config.AckWait = wanted.AckWait
+		config.MaxAckPending = wanted.MaxAckPending
 		if _, err := in.nats.JS().UpdateConsumer(bus.Stream, &config); err != nil {
-			slog.Error("dispatch delivery: update NATS consumer subjects after a settings change", "name", deliveryConsumerName, "configured_subjects", info.Config.FilterSubjects, "wanted_subjects", subjects, "error", err)
+			slog.Error("dispatch delivery: update NATS consumer policy", "name", deliveryConsumerName, "configured_subjects", info.Config.FilterSubjects, "wanted_subjects", subjects, "error", err)
 			return nil, false
 		}
-		slog.Info("dispatch delivery: NATS consumer subjects updated after a settings change", "name", deliveryConsumerName, "subjects", subjects)
+		slog.Info("dispatch delivery: NATS consumer policy updated", "name", deliveryConsumerName, "subjects", subjects, "ack_wait", wanted.AckWait, "max_ack_pending", wanted.MaxAckPending)
 	}
 	sub, err := in.nats.Subscribe("", func(msg *natsgo.Msg) {
 		in.deliver(msg, handle)
@@ -223,12 +266,17 @@ func (in *Intake) bind(subjects []string, handle func(context.Context, map[strin
 	return sub, true
 }
 
-// deliver unwraps one NATS message into its envelope payload, calls handle, and always acks: a
-// malformed envelope has nothing to retry, and a handle error (a failed GitHub call) is caught up
-// by the next reconcile pass rather than by NATS redelivery -- see the package doc comment.
+// deliver unwraps one NATS message into its envelope payload, calls handle under
+// intakeMessageTimeout, and always acks: a malformed envelope has nothing to retry, and a handle
+// error (a failed GitHub call, or that deadline passing) is caught up by the next reconcile pass
+// rather than by NATS redelivery -- see the package doc comment. The deadline is what makes
+// intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold this
+// consumer's only in-flight slot past the ack wait and have the message redelivered underneath
+// it.
 func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, map[string]string) error) {
 	defer func() { _ = msg.Ack() }()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), intakeMessageTimeout)
+	defer cancel()
 
 	var envelope contracts.Envelope
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil {

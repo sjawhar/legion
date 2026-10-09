@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -68,10 +69,15 @@ func (r *Reconcile) Run(ctx context.Context) {
 // runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests
 // grant is named, never confused with a transient failure), the population pull-request search,
 // the deploy and PR-checks workflows' runs and jobs, and any partial row left over from a
-// completing fetch that failed earlier. last_reconcile_at advances ONLY when every step that ran
-// succeeded; any failure (a missing permission, a rate limit, any other GitHub or store error) is
-// recorded by name in last_error instead, and the previous last_reconcile_at is left untouched --
-// so the freshness row can never report a healthy timestamp for a pass that silently did nothing.
+// completing fetch that failed earlier. Each windowed step keeps its own progress
+// (delivery_reconcile_progress), so a step that fails part way through resumes where it stopped
+// rather than restarting its whole window: a 28-day backfill of a busy deploy repository is tens
+// of thousands of GitHub requests, well past one installation's hourly rate limit, so no single
+// pass can finish one and a pass that forgets what it did could never converge. last_reconcile_at
+// advances ONLY when every step that ran succeeded; any failure (a missing permission, a rate
+// limit, any other GitHub or store error) is recorded by name in last_error instead, and the
+// previous last_reconcile_at is left untouched -- so the freshness row can never report a healthy
+// timestamp for a pass that silently did nothing.
 func (r *Reconcile) runOnce(ctx context.Context) {
 	now := time.Now()
 	settings, err := GetSettings(ctx, r.pool)
@@ -100,7 +106,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 		return
 	}
 
-	since := r.windowStart(settings, now)
+	searchScope := searchProgressScope(settings)
 
 	var failures []string
 	record := func(step string, err error) {
@@ -111,11 +117,11 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 		failures = append(failures, fmt.Sprintf("%s: %s", step, err))
 	}
 
-	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, since, now))
+	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
-	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, since, now))
+	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, since, now))
+		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now))
 	}
 
 	if len(failures) > 0 {
@@ -146,48 +152,119 @@ func (r *Reconcile) fail(ctx context.Context, cause error) {
 	}
 }
 
-// windowStart is the 28-day backfill on the first pass (no recorded last_reconcile_at), else the
-// last pass's own time minus reconcileOverlap.
-func (r *Reconcile) windowStart(settings DeliverySettings, now time.Time) time.Time {
-	if settings.LastReconcileAt == nil {
-		return now.Add(-BackfillWindow)
-	}
-	return settings.LastReconcileAt.Add(-reconcileOverlap)
+// searchProgressScope names what the merged-PR search's recorded progress was measured against:
+// a change to the population, the exclusions or the deploy repository (which decides how a
+// result is classified) makes a window imported under the old settings say nothing about the new
+// ones, so the step backfills afresh rather than resuming it.
+func searchProgressScope(settings DeliverySettings) string {
+	return fmt.Sprintf("authors=%s excluded=%s deploy=%s",
+		strings.Join(settings.PopulationAuthors, ","), strings.Join(settings.ExcludedRepos, ","), settings.DeployRepo)
 }
 
-// reconcileMergedPullRequests searches every population pull request merged in [since, until)
-// across every installation the App has (LEGION-294's population spans any repository the three
-// authors merge into, not just the deploy repository), classifies each with the labels the
-// search result already carries, and upserts the ones that belong -- complete, except for
-// MergeCommitSHA, Additions, Deletions and FirstCommitAt, which the search response never
-// carries. SearchMergedPullRequestsAcrossInstallation returns both a partial result set and a
-// non-nil error when some (not every) installation failed: every result it did gather is still
-// processed here, and the search's own error plus every per-PR classify/upsert failure are
-// errors.Joined into one returned error -- not stringified into a plain errors.New, so a
-// *githubapp.RateLimitError among them still answers errors.As for a caller that needs to tell it
-// apart from an ordinary failure, the same reason reconcileWorkflow's own per-run aggregation
-// keeps its typed error with %w -- so the pass is reported unhealthy without throwing away
-// whatever this pass did manage to reconcile.
-func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, since, until time.Time) error {
-	found, searchErr := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until)
-	var failures []error
-	if searchErr != nil {
-		failures = append(failures, fmt.Errorf("search merged pull requests: %w", searchErr))
+// runsProgressScope names what a run listing's recorded progress was measured against.
+func runsProgressScope(repoFull, workflowPath string) string {
+	return repoFull + " " + workflowPath
+}
+
+// stepSince is where one step's window starts: the 28-day backfill when the step has no usable
+// progress, else where it last imported through, minus reconcileOverlap so a merge or run
+// GitHub's index was still catching up on at that boundary is re-read rather than permanently
+// missed. Never earlier than the backfill window: a step whose progress is older than that (a
+// server down for a month) catches up to the window the timeline actually shows rather than
+// re-reading history nothing displays.
+func (r *Reconcile) stepSince(ctx context.Context, step, scope string, now time.Time) (time.Time, error) {
+	floor := now.Add(-BackfillWindow)
+	through, err := ReconcileProgressThrough(ctx, r.pool, step, scope)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read %s progress: %w", step, err)
 	}
-	for _, pr := range found {
-		if pr.MergedAt == nil {
-			continue
-		}
-		repoFull, err := r.searchResultRepo(pr)
+	if through.IsZero() {
+		return floor, nil
+	}
+	if since := through.Add(-reconcileOverlap); since.After(floor) {
+		return since, nil
+	}
+	return floor, nil
+}
+
+// mergedPullRequestsStep names one installation's merged-PR search progress. Per installation
+// rather than one step for the whole search: the installations are searched concurrently and
+// fail independently, so one that cannot be searched must not make every other one redo what it
+// already imported.
+func mergedPullRequestsStep(installationID int64) string {
+	return fmt.Sprintf("merged_pull_requests/installation/%d", installationID)
+}
+
+// reconcileMergedPullRequests searches every population pull request merged since each
+// installation's own recorded progress across every installation the App has (LEGION-294's
+// population spans any repository the three authors merge into, not just the deploy
+// repository), classifies each with the labels the search result already carries, and upserts
+// the ones that belong -- complete, except for MergeCommitSHA, Additions, Deletions and
+// FirstCommitAt, which the search response never carries.
+//
+// Each completed search window records that installation's progress, but only while every
+// window before it in this pass succeeded: a pull request this pass could not classify (a
+// deploy-repo PR GitHub's own classifier workflow has not labelled yet, IsTaskPR's "neither
+// label") must be reachable again on a later pass, so progress stops at the window holding it
+// while every later window is still imported. The search's own error and every per-PR
+// classify/upsert failure are errors.Joined into one returned error -- not stringified into a
+// plain errors.New, so a *githubapp.RateLimitError among them still answers errors.As for a
+// caller that needs to tell it apart from an ordinary failure, the same reason
+// reconcileWorkflow's own per-run aggregation keeps its typed error with %w.
+func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, scope string, until time.Time) error {
+	var mu sync.Mutex
+	var failures []error
+	blocked := map[int64]bool{}
+
+	since := func(installationID int64) time.Time {
+		start, err := r.stepSince(ctx, mergedPullRequestsStep(installationID), scope, until)
 		if err != nil {
-			slog.Warn("dispatch delivery: merged-PR search result", "number", pr.Number, "error", err)
-			failures = append(failures, fmt.Errorf("pull request #%d: %w", pr.Number, err))
-			continue
+			mu.Lock()
+			failures = append(failures, err)
+			blocked[installationID] = true
+			mu.Unlock()
+			return until.Add(-BackfillWindow)
 		}
-		if err := r.reconcilePullRequest(ctx, settings, repoFull, pr); err != nil {
-			slog.Warn("dispatch delivery: reconcile pull request", "repo", repoFull, "number", pr.Number, "error", err)
-			failures = append(failures, fmt.Errorf("%s#%d: %w", repoFull, pr.Number, err))
+		return start
+	}
+
+	visit := func(installation githubapp.Installation, windowUntil time.Time, prs []FetchedPullRequest) error {
+		var windowFailures []error
+		for _, pr := range prs {
+			if pr.MergedAt == nil {
+				continue
+			}
+			repoFull, err := r.searchResultRepo(pr)
+			if err != nil {
+				slog.Warn("dispatch delivery: merged-PR search result", "number", pr.Number, "error", err)
+				windowFailures = append(windowFailures, fmt.Errorf("pull request #%d: %w", pr.Number, err))
+				continue
+			}
+			if err := r.reconcilePullRequest(ctx, settings, repoFull, pr); err != nil {
+				slog.Warn("dispatch delivery: reconcile pull request", "repo", repoFull, "number", pr.Number, "error", err)
+				windowFailures = append(windowFailures, fmt.Errorf("%s#%d: %w", repoFull, pr.Number, err))
+			}
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		failures = append(failures, windowFailures...)
+		if len(windowFailures) > 0 {
+			blocked[installation.ID] = true
+		}
+		if blocked[installation.ID] {
+			return nil
+		}
+		if err := RecordReconcileProgress(ctx, r.pool, mergedPullRequestsStep(installation.ID), scope, windowUntil); err != nil {
+			failures = append(failures, fmt.Errorf("record installation %d progress: %w", installation.ID, err))
+			blocked[installation.ID] = true
+		}
+		return nil
+	}
+
+	if err := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until, visit); err != nil {
+		mu.Lock()
+		failures = append(failures, fmt.Errorf("search merged pull requests: %w", err))
+		mu.Unlock()
 	}
 	return errors.Join(failures...)
 }
@@ -341,53 +418,95 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 	return nil
 }
 
-// reconcileWorkflow lists kind's workflow runs created in [since, until) and upserts each one
-// plus (for a concluded run) its jobs. Returns a combined error naming every run reconcileRun
-// failed on, rather than only logging it: a rate-limited or otherwise-failed per-run fetch (most
-// often the jobs listing, since the runs listing above it already succeeded) must not let this
-// pass report itself healthy -- runOnce's record() must see the failure so last_reconcile_at
-// does not advance past a window this pass left incompletely fetched, and the next pass's
-// smaller overlap re-reads it instead of the gap becoming permanent. Reads which of this
-// window's completed runs already carry a jobs-unfetchable mark in one bulk query
-// (ListUnfetchableRunIDs) before the loop, instead of reconcileRun running its own
+// runsWindow bounds how many runs one window of a run listing hands to reconcileWorkflow's
+// visitor, and so how much work a failed pass redoes. Unlike a search window, every completed
+// run in it costs its own jobs request, so 100 runs is about ten listing pages plus a hundred
+// jobs requests -- a couple of minutes -- where GitHub's own 1,000-result cap would be most of
+// an hour and a rate limit part way through would throw all of it away.
+const runsWindow = 100
+
+// runsStep names one workflow kind's run-listing progress.
+func runsStep(kind DeliveryRunKind) string {
+	return "runs/" + string(kind)
+}
+
+// reconcileWorkflow walks kind's workflow runs created since this step's own recorded progress,
+// in windows, and upserts each run plus (for a concluded run) its jobs. Each completed window
+// records the step's progress, but only while every window before it in this pass succeeded: a
+// run whose jobs this pass could not fetch must be reachable again on a later pass, so progress
+// stops at the window holding it while every later window is still imported.
+//
+// Returns a combined error naming every run reconcileRun failed on, rather than only logging
+// it: a rate-limited or otherwise-failed per-run fetch (most often the jobs listing, since the
+// runs listing above it already succeeded) must not let this pass report itself healthy.
+// Reads which of a window's completed runs already carry a jobs-unfetchable mark in one bulk
+// query (ListUnfetchableRunIDs) per window, instead of reconcileRun running its own
 // RunJobsUnfetchable point query once per completed run on every pass -- the overwhelming
 // majority of runs were never marked, and this package already bulk-fetches this way one
 // function away (ListPartialPullRequests feeding reconcilePartialPullRequests).
-func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, since, until time.Time) error {
-	runs, err := ListWorkflowRuns(ctx, r.github, owner, repo, workflowPath, since, until)
+func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, until time.Time) error {
+	step, scope := runsStep(kind), runsProgressScope(repoFull, workflowPath)
+	since, err := r.stepSince(ctx, step, scope, until)
 	if err != nil {
-		return fmt.Errorf("list %s workflow runs: %w", kind, err)
+		return err
 	}
-	completedRunIDs := make([]int64, 0, len(runs))
-	for _, run := range runs {
-		if run.CompletedAt != nil {
-			completedRunIDs = append(completedRunIDs, run.RunID)
-		}
-	}
-	jobsUnfetchable, err := ListUnfetchableRunIDs(ctx, r.pool, repoFull, completedRunIDs)
-	if err != nil {
-		return fmt.Errorf("list unfetchable %s run jobs: %w", kind, err)
-	}
+
 	var failures []string
-	for _, run := range runs {
-		err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run, jobsUnfetchable)
-		if err == nil {
-			continue
+	attempted := 0
+	blocked := false
+
+	visit := func(windowUntil time.Time, runs []FetchedRun) error {
+		completedRunIDs := make([]int64, 0, len(runs))
+		for _, run := range runs {
+			if run.CompletedAt != nil {
+				completedRunIDs = append(completedRunIDs, run.RunID)
+			}
 		}
-		slog.Warn("dispatch delivery: reconcile run", "repo", repoFull, "run_id", run.RunID, "error", err)
-		failures = append(failures, fmt.Sprintf("run %d: %s", run.RunID, err))
-		// A rate limit is a global condition on this installation token's budget, not one run's
-		// own problem: Rev's probe showed the un-fixed loop sending 197 of 200 requests after the
-		// first rate-limited one, each adding its own failure text to last_error (57 KB by the
-		// end). Stop here instead, preserving the typed error so a caller checking errors.As for
-		// it still can, unlike every other per-run failure joined into one string.
-		if limited, ok := githubapp.AsRateLimit(err); ok {
-			return fmt.Errorf("%d of %d %s runs attempted before a rate limit stopped the rest: %s: %w",
-				len(failures), len(runs), kind, strings.Join(failures, "; "), limited)
+		jobsUnfetchable, err := ListUnfetchableRunIDs(ctx, r.pool, repoFull, completedRunIDs)
+		if err != nil {
+			blocked = true
+			return fmt.Errorf("list unfetchable %s run jobs: %w", kind, err)
 		}
+		windowFailed := false
+		for _, run := range runs {
+			attempted++
+			err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run, jobsUnfetchable)
+			if err == nil {
+				continue
+			}
+			slog.Warn("dispatch delivery: reconcile run", "repo", repoFull, "run_id", run.RunID, "error", err)
+			failures = append(failures, fmt.Sprintf("run %d: %s", run.RunID, err))
+			windowFailed = true
+			// A rate limit is a global condition on this installation token's budget, not one
+			// run's own problem: Rev's probe showed the un-fixed loop sending 197 of 200
+			// requests after the first rate-limited one, each adding its own failure text to
+			// last_error (57 KB by the end). Stop the whole walk here instead, preserving the
+			// typed error so a caller checking errors.As for it still can, unlike every other
+			// per-run failure joined into one string.
+			if limited, ok := githubapp.AsRateLimit(err); ok {
+				blocked = true
+				return fmt.Errorf("%d of %d %s runs attempted before a rate limit stopped the rest: %s: %w",
+					len(failures), attempted, kind, strings.Join(failures, "; "), limited)
+			}
+		}
+		if windowFailed {
+			blocked = true
+		}
+		if blocked {
+			return nil
+		}
+		if err := RecordReconcileProgress(ctx, r.pool, step, scope, windowUntil); err != nil {
+			blocked = true
+			failures = append(failures, fmt.Sprintf("record %s progress: %s", kind, err))
+		}
+		return nil
+	}
+
+	if listErr := ListWorkflowRuns(ctx, r.github, owner, repo, workflowPath, since, until, runsWindow, visit); listErr != nil {
+		return fmt.Errorf("list %s workflow runs: %w", kind, listErr)
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("%d of %d %s runs failed: %s", len(failures), len(runs), kind, strings.Join(failures, "; "))
+		return fmt.Errorf("%d of %d %s runs failed: %s", len(failures), attempted, kind, strings.Join(failures, "; "))
 	}
 	return nil
 }

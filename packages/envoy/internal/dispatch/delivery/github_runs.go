@@ -48,13 +48,22 @@ type FetchedJob struct {
 	Conclusion  *string
 }
 
-// githubListPageSize bounds every Actions-API list page this file requests. GitHub's own
-// per_page cap is 100, but a page of 100 full workflow-run objects measures roughly 1.3 MB live
-// (githubapp.Client's own 1 MiB response-size cap, meant to guard against abuse, would then
-// refuse the read at around 75-80 results per page -- an order of magnitude below the 1,000-
-// result cap the windowed-bisection logic is built for) -- so pages here are sized well under
-// that measured ceiling instead of raising the shared security-relevant response limit.
-const githubListPageSize = 40
+// workflowRunsPageSize bounds one page of the Actions run listing. A run object carries its head
+// commit's whole message, which GitHub truncates at 65,536 characters, so one run measures up to
+// about 80 KB: measured against the live API over 300 runs of a busy deploy repository, a run is
+// 13.7 KB at its smallest, 16 KB at the median, 77 KB at the 99th percentile and 79,943 bytes at
+// its largest. A page of 40 therefore fits comfortably most of the time and does not when a few
+// long squash-merge messages land together -- which is exactly what happened: one page of 40 in
+// a week of that repository's history measured past githubapp's 1 MiB response cap and failed
+// the pass every time it was retried. Ten runs is 800 KB at that measured worst case and
+// 148-208 KB in practice, so the cap bounds the page rather than the other way round.
+const workflowRunsPageSize = 10
+
+// runJobsPageSize bounds one page of a run's jobs listing, which is a different shape and sized
+// separately: measured live, one job with its steps is at most 12,376 bytes and a run carries
+// 27-33 jobs, so 40 jobs is 33-55 KB in practice and under 500 KB at that worst case -- one
+// request per run, with the same margin under the 1 MiB cap.
+const runJobsPageSize = 40
 
 // workflowRunsPayload is GET /repos/{owner}/{repo}/actions/workflows/{workflow_path}/runs's
 // answer, limited to the fields ListWorkflowRuns reads.
@@ -109,16 +118,21 @@ func fetchedRunFromItem(item workflowRunItem) FetchedRun {
 	return run
 }
 
-// ListWorkflowRuns lists every run of the workflow at workflowPath in owner/repo created in
-// [since, until), via GET
+// ListWorkflowRuns walks every run of the workflow at workflowPath in owner/repo created in
+// [since, until], oldest window first, via GET
 // /repos/{owner}/{repo}/actions/workflows/{workflow_path}/runs?created=ISO..ISO (GitHub accepts
 // the workflow file's path, URL-encoded, in place of its numeric id). Paginated fully and halved
-// on overflow through the same fetchWindowed (windowed.go) SearchMergedPullRequests uses -- the
+// on overflow through the same walkWindowed (windowed.go) searchMergedPullRequests uses -- the
 // Actions API shares the same 1,000-result-per-query cap.
-func ListWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo, workflowPath string, since, until time.Time) ([]FetchedRun, error) {
+//
+// visit is called once per window with that window's own upper bound and its runs, so the caller
+// can record how far it has imported after each one rather than only at the end: maxRuns bounds
+// how much work one window is, and so how much a failed pass redoes. Every completed run costs
+// its own jobs request, so a window is far more work than its listing pages alone.
+func ListWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo, workflowPath string, since, until time.Time, maxRuns int, visit func(windowUntil time.Time, runs []FetchedRun) error) error {
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
-		return nil, fmt.Errorf("mint installation token for %s/%s workflow runs: %w", owner, repo, err)
+		return fmt.Errorf("mint installation token for %s/%s workflow runs: %w", owner, repo, err)
 	}
 	scope := fmt.Sprintf("%s workflow runs for %s/%s", workflowPath, owner, repo)
 	newFetcher := func(since, until time.Time) func() ([]FetchedRun, int, error) {
@@ -128,19 +142,19 @@ func ListWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo
 			return fetchWorkflowRunsPage(ctx, client, token, owner, repo, workflowPath, since, until, page)
 		}
 	}
-	return fetchWindowed(since, until, scope, newFetcher)
+	return walkWindowed(since, until, scope, maxRuns, newFetcher, visit)
 }
 
 func fetchWorkflowRunsPage(ctx context.Context, client *githubapp.Client, token, owner, repo, workflowPath string, since, until time.Time, page int) ([]FetchedRun, int, error) {
 	created := since.UTC().Format(time.RFC3339) + ".." + until.UTC().Format(time.RFC3339)
 	path := fmt.Sprintf("/repos/%s/%s/actions/workflows/%s/runs?created=%s&per_page=%d&page=%d",
-		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(workflowPath), url.QueryEscape(created), githubListPageSize, page)
-	body, status, header, err := client.Read(ctx, token, path)
+		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(workflowPath), url.QueryEscape(created), workflowRunsPageSize, page)
+	body, status, header, err := readGitHubPage(ctx, client, token, path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("page %d: %w", page, err)
+		return nil, 0, fmt.Errorf("page %d (%s): %w", page, pageAttemptsNote(), err)
 	}
 	if err := githubapp.CheckResponse(status, header, body); err != nil {
-		return nil, 0, fmt.Errorf("page %d: %w", page, err)
+		return nil, 0, fmt.Errorf("page %d (%s): %w", page, pageAttemptsNote(), err)
 	}
 	var payload workflowRunsPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -207,10 +221,10 @@ func ListWorkflowRunJobs(ctx context.Context, client *githubapp.Client, owner, r
 	total := -1
 	for page := 1; total < 0 || len(jobs) < total; page++ {
 		path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d",
-			url.PathEscape(owner), url.PathEscape(repo), runID, githubListPageSize, page)
-		body, status, header, err := client.Read(ctx, token, path)
+			url.PathEscape(owner), url.PathEscape(repo), runID, runJobsPageSize, page)
+		body, status, header, err := readGitHubPage(ctx, client, token, path)
 		if err != nil {
-			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
+			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d, %s): %w", owner, repo, runID, page, pageAttemptsNote(), err)
 		}
 		if status == http.StatusNotFound {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w (status %d)", owner, repo, runID, page, ErrRunNotFound, status)
