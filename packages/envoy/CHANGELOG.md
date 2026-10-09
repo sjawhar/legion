@@ -323,6 +323,23 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A document opens in the editor however many documents the process has touched: the 1,000-room
+  cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
+  nothing still holds it. Before, every document opened since a restart kept its state and counted
+  against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
+- A document's pending authors now survive room release, process restart and overlapping Dispatch
+  tasks in `doc_pending_authors` (migration `0084`). A browser update is first an in-flight,
+  room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
+  document lock. A joined write records its authors in R in its content transaction. A version
+  reads R under that lock and may capture F only from its own room; after its transaction commits,
+  it deletes the R rows it listed and consumes the F credits it listed. The scoped rule means a
+  task can list another task's durable R records but never that task's F, while the same task can
+  consume F before its queued append can re-record an author. Each author is consequently pending
+  in F or R, or listed on one committed version, rather than in more than one of them. A settlement
+  that writes no version leaves R intact, and an upload that writes a replacement clears all R and
+  only the F credits present at its last room read. The document room can therefore go idle without
+  retaining author state or losing the authors a later version, ask or event must name
+  (LEGION-513).
 - `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's
