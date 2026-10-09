@@ -7,13 +7,16 @@
 -- committed version deletes the rows it lists. Every one of those writes holds the document's
 -- advisory lock (lockDocumentRoom), so a version that reads the rows under that lock lists each
 -- author once. An actor key joins its kind and id with a NUL byte, which text refuses, so the key
--- is stored as the two columns.
+-- is stored as the two columns. written_through is the greatest doc_updates version whose write
+-- recorded the row: an upload deletes only the rows its room holds every such update of, since
+-- another process's room can have stored an update the upload's room never took.
 create table doc_pending_authors (
   artifact_id uuid not null references artifacts(id) on delete cascade,
   actor_kind text not null,
   actor_id text not null,
   actor jsonb not null,
-  primary key (artifact_id, actor_kind, actor_id)
+  written_through bigint not null,
+  primary key (artifact_id, actor_kind, actor_id, written_through)
 );
 
 -- The latest edit source of a document whose settlement is owed: the settlement names it on its

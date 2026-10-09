@@ -61,9 +61,13 @@ type servicePersistenceAdapter struct {
 	service *Service
 }
 
+// LoadDoc is the durable state a room loads, and records the head it was read at, which the
+// room's load (onLoadDocument) takes next on the same goroutine (ygo's loadRoom) to start the
+// instance's roomHold.
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
-	if update, ok := a.service.takePreload(room); ok {
-		return update, nil
+	if loaded, ok := a.service.takePreload(room); ok {
+		a.service.loadedHeads.Store(room, loaded.Version)
+		return loaded.Update, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
@@ -73,6 +77,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		a.service.failRoom(room, err)
 		return nil, err
 	}
+	a.service.loadedHeads.Store(room, result.Version)
 	return result.Update, nil
 }
 
@@ -139,17 +144,17 @@ type preloadedDocument struct {
 // still the one it loaded: every write that changes a document's stored state raises its head (an
 // append, a rebuild), and compaction keeps both the head and the state. A stale or absent preload
 // is no answer, and the caller loads the room itself.
-func (s *Service) takePreload(room string) ([]byte, bool) {
+func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
-		return nil, false
+		return persistence.LoadResult{}, false
 	}
 	preload := value.(*preloadedDocument)
 	head, err := s.persistence.Head(context.Background(), room)
 	if err != nil || head != preload.loaded.Version {
-		return nil, false
+		return persistence.LoadResult{}, false
 	}
-	return preload.loaded.Update, true
+	return preload.loaded, true
 }
 
 // documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema
@@ -445,6 +450,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	s.unlockState(room, state)
 	replica := s.keepReplica(doc, contentMarkdown)
+	var head persistence.Version
+	if loaded, ok := s.loadedHeads.LoadAndDelete(room); ok {
+		head = loaded.(persistence.Version)
+	}
+	hold := s.keepHold(doc, head)
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
 		// before ygo's persistence observer, which the room registers after OnLoadDocument, hands
@@ -465,7 +475,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		})
 		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
-			class.credit = s.creditContentChange(room, origin)
+			class.credit = s.creditContentChange(room, origin, hold)
 			if s.afterCreditUpdate != nil {
 				s.afterCreditUpdate(room)
 			}
@@ -524,7 +534,7 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
 // (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
 // no advisory lock and touches no database: nothing reads F without holding state.mu.
-func (s *Service) creditContentChange(room string, origin any) *UpdateCredit {
+func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return nil
 	}
@@ -541,7 +551,7 @@ func (s *Service) creditContentChange(room string, origin any) *UpdateCredit {
 	state.inflight[record.seq] = record
 	state.lastActor = record.lastActor
 	state.unsettled = true
-	return &UpdateCredit{service: s, room: room, state: state, record: record}
+	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold}
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

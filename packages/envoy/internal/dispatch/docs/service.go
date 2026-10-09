@@ -202,6 +202,12 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
+	// holds holds, for each resident room document, the durable updates that instance holds
+	// (*roomHold), keyed by a weak pointer to the document (keepHold). loadedHeads passes the head a
+	// room's load read (servicePersistenceAdapter.LoadDoc) to the hook ygo calls next on the same
+	// goroutine (onLoadDocument).
+	holds       sync.Map
+	loadedHeads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads
@@ -1402,7 +1408,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// version but credited after the take; its credit stays pending, and the next version lists
 		// its author. The same is true when the copy holds an edit whose update observer had not yet
 		// credited it - ygo runs the observer only once the edit's transaction has released the
-		// document (commitVersion).
+		// document.
 		versioned, credit, err = s.readSettlementTree(state, owed, doc, room, s.afterSettleAuthorsTake)
 		if err != nil {
 			abandon(err)
@@ -1492,7 +1498,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return
 		}
 		// The version lists the pending authors this settlement read, so its commit deletes them.
-		if err := deletePendingAuthors(ctx, tx, room, credit.capture.rKeys); err != nil {
+		if err := deleteCapturedPendingAuthors(ctx, tx, room, credit.capture); err != nil {
 			abandon(err)
 			return
 		}
@@ -1531,29 +1537,27 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		abandon(err)
 		return
 	}
-	// state.mu is held from before the commit until the in-flight credits the version listed are
-	// marked consumed, for the reason Ledger.commit holds it: an append queued behind the
-	// document's advisory lock, which this commit holds until it returns, takes that lock the
-	// instant this commit drops it, and must find its credit consumed.
-	state.mu.Lock()
-	if err := tx.Commit(ctx); err != nil {
-		state.mu.Unlock()
+	// The commit marks the in-flight credits the version listed consumed before it releases the
+	// room's state (commitConsuming); a settlement that writes no version takes out none.
+	committed := authorCapture{state: state}
+	if versioning {
+		committed = credit.capture
+	}
+	if err := s.commitConsuming(ctx, tx, []roomCapture{{room: room, capture: committed}}, func(err error) {
+		// This runs before the publish below, the order Ledger.Commit keeps for every other
+		// version write, so a subscriber acting on this version's artifact.version event acts
+		// after it.
+		if err == nil && state.roomGeneration == generation {
+			state.settleFailures = 0
+			state.unsettled = len(state.inflight) > 0
+			if !state.unsettled {
+				state.lastActor = nil
+			}
+		}
+	}); err != nil {
 		abandon(fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
-	// This runs before the publish below, the order Ledger.Commit keeps for every other version
-	// write, so a subscriber acting on this version's artifact.version event acts after it.
-	if versioning {
-		credit.capture.consumeLocked()
-	}
-	if state.roomGeneration == generation {
-		state.settleFailures = 0
-		state.unsettled = len(state.inflight) > 0
-		if !state.unsettled {
-			state.lastActor = nil
-		}
-	}
-	state.mu.Unlock()
 	credit.consumeAskAuthors(reconciliation.indexedAskBlocks)
 	finishSlots()
 	for _, event := range published {

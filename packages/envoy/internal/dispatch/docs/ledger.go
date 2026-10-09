@@ -133,13 +133,6 @@ func (l *Ledger) publishEvents() {
 
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
-//
-// Each version's capture's state is locked (state.mu) from before the commit until the in-flight
-// credits the version listed are marked consumed: an append queued behind the document's advisory
-// lock, which this commit holds until it returns, takes that lock the instant this commit drops
-// it, and must find its credit consumed when it reads it (UpdateCredit.take), or it writes an
-// author this version listed to the pending authors. The states are locked in their artifacts'
-// sorted order, so two transactions versioning the same two documents cannot deadlock.
 func (l *Ledger) commit(ctx context.Context) error {
 	if err := l.recordSettlementCredit(ctx); err != nil {
 		_ = l.tx.Rollback(context.Background())
@@ -147,32 +140,15 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
-	versions := slices.Clone(l.versions)
-	slices.SortStableFunc(versions, func(a, b ledgerVersion) int { return strings.Compare(a.artifactID, b.artifactID) })
-	type lockedState struct {
-		artifactID string
-		state      *roomState
+	captures := make([]roomCapture, 0, len(l.versions))
+	for _, written := range l.versions {
+		captures = append(captures, roomCapture{room: written.artifactID, capture: written.capture})
 	}
-	locked := make([]lockedState, 0, len(versions))
-	for _, written := range versions {
-		state := written.capture.state
-		if !slices.ContainsFunc(locked, func(held lockedState) bool { return held.state == state }) {
-			state.mu.Lock()
-			locked = append(locked, lockedState{artifactID: written.artifactID, state: state})
-		}
-	}
-	err := l.tx.Commit(ctx)
-	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
-	// history the commit left from here.
-	l.endRebuilds()
-	if err == nil {
-		for _, written := range l.versions {
-			written.capture.consumeLocked()
-		}
-	}
-	for _, held := range locked {
-		l.service.unlockState(held.artifactID, held.state)
-	}
+	err := l.service.commitConsuming(ctx, l.tx, captures, func(error) {
+		// The transaction has ended whichever way the commit went, so a rebuild's room reads the
+		// history the commit left from here.
+		l.endRebuilds()
+	})
 	l.versions = nil
 	if err != nil {
 		l.fail(err)
@@ -180,6 +156,46 @@ func (l *Ledger) commit(ctx context.Context) error {
 	}
 	l.creditRooms()
 	return nil
+}
+
+// roomCapture is a version's capture with the document it versions.
+type roomCapture struct {
+	room    string
+	capture authorCapture
+}
+
+// commitConsuming commits tx, which wrote the versions captures lists, and marks the in-flight
+// credits each listed consumed once it has committed. Each capture's state is locked (state.mu)
+// from before the commit until then: an append queued behind the document's advisory lock, which
+// tx holds until it commits, takes that lock the instant the commit drops it, and must find its
+// credit consumed when it reads it (UpdateCredit.take), or it writes an author a version listed
+// to the pending authors. The states are locked in their documents' sorted order, so two
+// transactions versioning the same two documents cannot deadlock. ended runs once the commit
+// returns, with its error and the states still locked; a capture with no state locks nothing.
+func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roomCapture, ended func(error)) error {
+	sorted := slices.Clone(captures)
+	slices.SortStableFunc(sorted, func(a, b roomCapture) int { return strings.Compare(a.room, b.room) })
+	locked := make([]roomCapture, 0, len(sorted))
+	for _, written := range sorted {
+		state := written.capture.state
+		if state != nil && !slices.ContainsFunc(locked, func(held roomCapture) bool { return held.capture.state == state }) {
+			state.mu.Lock()
+			locked = append(locked, written)
+		}
+	}
+	err := tx.Commit(ctx)
+	if err == nil {
+		for _, written := range captures {
+			written.capture.consumeLocked()
+		}
+	}
+	if ended != nil {
+		ended(err)
+	}
+	for _, held := range locked {
+		s.unlockState(held.room, held.capture.state)
+	}
+	return err
 }
 
 // Discard drops what a transaction that did not commit left behind: its live writes, which no
@@ -205,35 +221,34 @@ func (l *Ledger) endRebuilds() {
 }
 
 // recordVersion records a version this transaction wrote, with whom it listed (capture), which
-// its commit takes out of the pending authors (recordSettlementCredit, Ledger.commit). The version
-// holds every change the transaction's write to the document has made so far and lists their
-// authors, so the commit does not record them as pending again unless the write changes the
-// document after it (creditLiveWrite).
+// its commit takes out of the pending authors (recordSettlementCredit, commitConsuming). The
+// version holds every change the transaction's write to the document has made so far, so the
+// authors it lists leave the write's credits: a change the write makes after it credits its author
+// again (creditLiveWrite), and that author is pending once the transaction commits.
 func (l *Ledger) recordVersion(artifactID string, version model.Version, capture authorCapture) {
 	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, capture: capture})
 	if write := l.liveWriteFor(artifactID); write != nil {
-		write.versioned = true
+		for _, author := range version.Authors {
+			delete(write.credits, actorKey(author))
+		}
 	}
 }
 
 // WroteVersion records version, of artifactID, which the caller wrote itself in this transaction,
 // outside the document service, over the transaction's own write to the document - an upload,
 // whose version lists its uploader alone. Once this transaction commits, it has cleared every
-// author whose change the write's last read of the room held (liveWrite.forkSeq), whether its
-// replacement removed that edit or kept it: every pending author row, since the write held the
-// document's advisory lock from before that read (ReplaceText), and each in-flight credit observed
-// by then. A credit observed after that read stays pending for the next version. An upload that
-// changed nothing has no write to hold and nothing to clear.
+// author whose change the write's last read of the room held, whether its replacement removed
+// that edit or kept it (uploadCapture): each pending author row whose writing update that room
+// held, and each in-flight credit observed by then. The write held the document's advisory lock
+// from before that read (ReplaceText), so nothing landed between them. A row another process's
+// room stored, and a credit observed after the read, stay pending for the next version. An upload
+// that changed nothing has no write to hold and nothing to clear.
 func (l *Ledger) WroteVersion(artifactID string, version model.Version) {
 	write := l.liveWriteFor(artifactID)
 	if write == nil || len(write.updates) == 0 {
 		return
 	}
-	state := write.state
-	state.mu.Lock()
-	inflight := state.unconsumedInflightLocked(write.forkSeq)
-	state.mu.Unlock()
-	l.recordVersion(artifactID, version, authorCapture{state: state, inflight: inflight, full: true})
+	l.recordVersion(artifactID, version, uploadCapture(write))
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -266,21 +281,15 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 }
 
 // recordSettlementCredit records, in the transaction that wrote the documents, who owes what once
-// it commits. It first deletes the pending authors each version this transaction wrote read (all
-// of them for an upload's), then records each write's own authors, less those its own versions
-// list, and each write's and seed's latest edit source on the document's pending-settlement row.
-// Deleting first means the write's own authors are recorded after the delete that would otherwise
-// take them out. Both commit or roll back with the content, before the request context can be
-// canceled after commit.
+// it commits. It first deletes the pending authors each version this transaction wrote takes out
+// (deleteCapturedPendingAuthors), then records each write's authors no version of the transaction
+// lists (recordVersion) as written by the write's latest update, and each write's and seed's latest
+// edit source on the document's pending-settlement row. Deleting first means the write's own
+// authors are recorded after the delete that would otherwise take them out. Both commit or roll
+// back with the content, before the request context can be canceled after commit.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
-		if written.capture.full {
-			if err := deleteAllPendingAuthors(ctx, l.tx, written.artifactID); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := deletePendingAuthors(ctx, l.tx, written.artifactID, written.capture.rKeys); err != nil {
+		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
 			return err
 		}
 	}
@@ -289,29 +298,19 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if _, listed := released[artifactID][actorKey(seed.actor)]; listed {
 			continue
 		}
-		if err := markSettlementPending(ctx, l.tx, artifactID, &seed.actor, true, false); err != nil {
+		if err := recordLatestEditSource(ctx, l.tx, artifactID, &seed.actor); err != nil {
 			return err
 		}
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
-		if len(write.credits) == 0 {
+		if write.actor == nil {
 			continue
 		}
-		listed := released[artifactID]
-		pending := write.credits
-		if len(listed) > 0 {
-			pending = make(map[string]model.Actor, len(write.credits))
-			for key, credited := range write.credits {
-				if _, done := listed[key]; !done {
-					pending[key] = credited
-				}
-			}
-		}
-		if err := upsertPendingAuthors(ctx, l.tx, artifactID, pending); err != nil {
+		if err := upsertPendingAuthors(ctx, l.tx, artifactID, write.credits, write.versions[len(write.versions)-1]); err != nil {
 			return err
 		}
-		if err := markSettlementPending(ctx, l.tx, artifactID, write.actor, true, false); err != nil {
+		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.actor); err != nil {
 			return err
 		}
 	}
@@ -319,7 +318,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 }
 
 // releasedAuthors is, per artifact, the keys of the authors this transaction's own versions
-// listed, which the same transaction's own write does not record as pending again.
+// listed, which a seed of the same transaction does not record as the latest edit source again.
 func (l *Ledger) releasedAuthors() map[string]map[string]struct{} {
 	released := make(map[string]map[string]struct{}, len(l.versions))
 	for _, written := range l.versions {
@@ -350,7 +349,7 @@ func (l *Ledger) creditRooms() {
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
-		if len(write.credits) == 0 {
+		if write.actor == nil {
 			continue
 		}
 		state := l.service.lockState(artifactID)

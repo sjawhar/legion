@@ -5,8 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"runtime"
+	"slices"
+	"sync"
+	"weak"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -45,7 +52,10 @@ type UpdateCredit struct {
 	room    string
 	state   *roomState
 	record  *inflightCredit
-	done    bool
+	// hold is the room instance whose update this is (roomHold), which holds the update once its
+	// append commits.
+	hold *roomHold
+	done bool
 }
 
 // take is what the update's append writes: the credit's authors and latest edit source, and
@@ -81,18 +91,137 @@ func (credit *UpdateCredit) landed() {
 	credit.service.unlockState(credit.room, state)
 }
 
+// held records that the credit's room instance holds the update its append stored as version.
+// The caller holds the document's advisory lock and has committed the append, so no other
+// process's append can take that version.
+func (credit *UpdateCredit) held(version persistence.Version) {
+	if credit != nil {
+		credit.hold.add(int64(version))
+	}
+}
+
+// roomHold is which durable updates one instance of a room holds: every update through loaded,
+// the head the instance loaded at, and each later update the instance itself took whose write
+// can have recorded a pending author - a browser update it appended, and a committed live write
+// it published. Another process's append after the load is in neither, since only a reload brings
+// it into this instance. An upload deletes only the pending-author rows whose writing update its
+// room's instance holds (heldUpdates).
+type roomHold struct {
+	mu     sync.Mutex
+	loaded int64
+	since  []int64
+}
+
+func (hold *roomHold) add(version int64) {
+	if hold == nil {
+		return
+	}
+	hold.mu.Lock()
+	hold.since = append(hold.since, version)
+	hold.mu.Unlock()
+}
+
+// heldUpdates is a roomHold as of one moment, which an upload's commit deletes the pending
+// authors of.
+type heldUpdates struct {
+	through int64
+	since   []int64
+}
+
+func (hold *roomHold) snapshot() heldUpdates {
+	if hold == nil {
+		return heldUpdates{}
+	}
+	hold.mu.Lock()
+	defer hold.mu.Unlock()
+	return heldUpdates{through: hold.loaded, since: slices.Clone(hold.since)}
+}
+
+// keepHold starts the roomHold of live, a room instance loaded at head, and lists it for the
+// instance's writes (holdOf) while live is resident: the listing holds live weakly and goes once
+// live is collected, as the replica's does (keepReplica).
+func (s *Service) keepHold(live *crdt.Doc, head persistence.Version) *roomHold {
+	hold := &roomHold{loaded: int64(head)}
+	key := weak.Make(live)
+	s.holds.Store(key, hold)
+	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { s.holds.Delete(key) }, key)
+	return hold
+}
+
+// holdOf is live's roomHold, nil for a document no room load listed.
+func (s *Service) holdOf(live *crdt.Doc) *roomHold {
+	if listed, ok := s.holds.Load(weak.Make(live)); ok {
+		return listed.(*roomHold)
+	}
+	return nil
+}
+
 // authorCapture is whom a version credits and what its commit takes out of the pending authors:
-// rKeys, the R rows it read (all of them when full), and inflight, the unconsumed F credits it
-// read from state. authors is the version's own list, those and the writing transaction's own
-// credits and actor. full is an upload's capture: its version lists the uploader alone, and its
-// commit deletes every R row, since its replacement holds or removed every change made before its
-// last read of the room.
+// rAuthors, the authors of the R rows it read, and inflight, the unconsumed F credits it read from
+// state. authors is the version's own list, those and the writing transaction's own credits and
+// actor. upload is an upload's capture (uploadCapture): its version lists the uploader alone, and
+// its commit deletes the R rows its room's instance holds the writing update of, whose changes
+// its replacement holds or removed.
 type authorCapture struct {
 	state    *roomState
 	authors  map[string]model.Actor
-	rKeys    []model.Actor
+	rAuthors []model.Actor
 	inflight []*inflightCredit
-	full     bool
+	upload   *heldUpdates
+}
+
+// capturePendingAuthors reads R in tx, which holds the document's advisory lock, and takes whom a
+// version lists (captureAuthors) under room's state lock.
+func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor) (authorCapture, error) {
+	owed, err := readPendingAuthors(ctx, tx, room)
+	if err != nil {
+		return authorCapture{}, err
+	}
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	return captureAuthors(state, owed, write, actor), nil
+}
+
+// captureAuthors is whom a version lists: owed, the pending authors its transaction read under
+// the document's advisory lock; the room's in-flight credits no committed version has listed; the
+// authors the calling transaction's own write records once it commits; and actor. The version's
+// commit deletes the pending authors it read and marks the in-flight credits it took consumed
+// (commitConsuming); a credit observed after this take is not among them and stays pending for
+// the next version. The caller holds state.mu.
+func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
+	capture := authorCapture{
+		state:    state,
+		authors:  make(map[string]model.Actor, len(owed)+1),
+		rAuthors: make([]model.Actor, 0, len(owed)),
+	}
+	for key, author := range owed {
+		capture.authors[key] = author
+		capture.rAuthors = append(capture.rAuthors, author)
+	}
+	capture.inflight = state.unconsumedInflightLocked(state.creditSeq.Load())
+	for _, record := range capture.inflight {
+		maps.Copy(capture.authors, record.authors)
+	}
+	if write != nil {
+		maps.Copy(capture.authors, write.credits)
+	}
+	if actor != nil {
+		capture.authors[actorKey(*actor)] = *actor
+	}
+	return capture
+}
+
+// uploadCapture is an upload's capture over write: the in-flight credits observed by its last read
+// of the room (liveWrite.forkSeq), and the updates the room instance it read held then
+// (liveWrite.forkHold). The upload holds the document's advisory lock from before that read, so no
+// append lands between it and the commit.
+func uploadCapture(write *liveWrite) authorCapture {
+	state := write.state
+	state.mu.Lock()
+	inflight := state.unconsumedInflightLocked(write.forkSeq)
+	state.mu.Unlock()
+	held := write.forkHold.snapshot()
+	return authorCapture{state: state, inflight: inflight, upload: &held}
 }
 
 // unconsumedInflightLocked is state's F credits no committed version has listed, observed no later
@@ -115,24 +244,40 @@ func (capture authorCapture) consumeLocked() {
 	}
 }
 
-// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock.
-func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[string]model.Actor) error {
+// deleteCapturedPendingAuthors deletes, in tx, the R rows a committed version's capture takes out:
+// the rows of the authors it read, or for an upload the rows whose writing update its room held.
+func deleteCapturedPendingAuthors(ctx context.Context, tx pgx.Tx, room string, capture authorCapture) error {
+	if capture.upload != nil {
+		return deleteHeldPendingAuthors(ctx, tx, room, *capture.upload)
+	}
+	return deletePendingAuthors(ctx, tx, room, capture.rAuthors)
+}
+
+// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, as
+// recorded by the update stored at version. An author keeps one row per update that recorded it,
+// so an upload that holds one of those updates and not another deletes only the first.
+func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[string]model.Actor, version persistence.Version) error {
 	if len(authors) == 0 {
 		return nil
 	}
-	actors := make([]model.Actor, 0, len(authors))
-	for _, actor := range authors {
-		actors = append(actors, actor)
-	}
-	encoded, err := json.Marshal(actors)
-	if err != nil {
-		return fmt.Errorf("encode the document's pending authors: %w", err)
+	actors := actorSlice(authors)
+	kinds := make([]string, 0, len(actors))
+	ids := make([]string, 0, len(actors))
+	encoded := make([]string, 0, len(actors))
+	for _, actor := range actors {
+		raw, err := json.Marshal(actor)
+		if err != nil {
+			return fmt.Errorf("encode the document's pending authors: %w", err)
+		}
+		kinds = append(kinds, actor.Kind)
+		ids = append(ids, actor.ID)
+		encoded = append(encoded, string(raw))
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor)
-		select $1::uuid, author->>'kind', author->>'id', author from jsonb_array_elements($2::jsonb) author
-		on conflict (artifact_id, actor_kind, actor_id) do update set actor = excluded.actor
-	`, room, string(encoded)); err != nil {
+		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
+		select $1::uuid, kind, id, actor, $5 from unnest($2::text[], $3::text[], $4::jsonb[]) as author(kind, id, actor)
+		on conflict (artifact_id, actor_kind, actor_id, written_through) do update set actor = excluded.actor
+	`, room, kinds, ids, encoded, int64(version)); err != nil {
 		return fmt.Errorf("record the document's pending authors: %w", err)
 	}
 	return nil
@@ -185,12 +330,24 @@ func deletePendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors [
 	return nil
 }
 
-// deleteAllPendingAuthors deletes every R row of room in tx, an upload's transaction.
-func deleteAllPendingAuthors(ctx context.Context, tx pgx.Tx, room string) error {
-	if _, err := tx.Exec(ctx, `delete from doc_pending_authors where artifact_id = $1`, room); err != nil {
-		return fmt.Errorf("delete the document's pending authors: %w", err)
+// deleteHeldPendingAuthors deletes, in an upload's transaction, every R row of room whose writing
+// update the upload's room instance held: written through the head it loaded, or by an update it
+// took since.
+func deleteHeldPendingAuthors(ctx context.Context, tx pgx.Tx, room string, held heldUpdates) error {
+	if _, err := tx.Exec(ctx, `
+		delete from doc_pending_authors
+		where artifact_id = $1 and (written_through <= $2 or written_through = any($3::bigint[]))
+	`, room, held.through, held.since); err != nil {
+		return fmt.Errorf("delete the pending authors an upload's room held: %w", err)
 	}
 	return nil
+}
+
+// recordLatestEditSource records lastActor as the latest edit source on room's pending-settlement
+// row in tx, which holds the document's advisory lock, without moving the row's age: a committed
+// write, a seed, or an issue's close names who made the document's latest change.
+func recordLatestEditSource(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor) error {
+	return markSettlementPending(ctx, tx, room, lastActor, true, false)
 }
 
 // markSettlementPending records, in the transaction that appends a document update, that the

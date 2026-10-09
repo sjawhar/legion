@@ -30,9 +30,10 @@ type roomState struct {
 	connected map[uint64]model.Actor
 	// inflight is F (pending_authors.go): each browser edit's credit from the moment the room's
 	// update observer records it (creditContentChange) until the edit's append lands, keyed by its
-	// creditSeq. creditSeq is atomic so forkLive, which every document write calls, can read it
-	// for forkSeq without taking the state lock the far rarer upload route is its only consumer
-	// of; it is process-local and orders only this state's own in-flight credits.
+	// creditSeq. creditSeq is atomic so forkLive, which every document write calls, reads it for
+	// forkSeq without taking the state lock; captures, an upload's included, read it to bound the
+	// credits they take, and closing an issue compares it as a change token. It is process-local
+	// and orders only this state's own in-flight credits.
 	inflight  map[uint64]*inflightCredit
 	creditSeq atomic.Uint64
 	// askBlocks are the ask blocks the room's document held when its update observer last

@@ -69,9 +69,11 @@ behind that commit finds a consumed credit and writes nothing to R. Each author 
 exactly one of F, R, or a committed version's list. A later edit gets a new credit and remains
 pending for the next version, even when the earlier edit's version is still committing. A
 settlement that writes no version leaves R intact. An upload whose replacement changed the document
-lists its uploader, deletes every R row and consumes only the F credits that existed at its last
-room read (`liveWrite.forkSeq`); a later credit remains pending. An upload that changed nothing
-clears nothing.
+lists its uploader, deletes only the R rows whose writing update its room's instance held (each row
+records that update's version, `written_through`; the instance holds every update through the head
+it loaded and each it took since, `roomHold`), and consumes only the F credits that existed at its
+last room read (`liveWrite.forkSeq`); a row another task's room stored, and a later credit, remain
+pending. An upload that changed nothing clears nothing.
 
 The cross-task rule is scoped: a task can list and remove only R from another task. A version may
 also list F from its own room, the within-task exception, because its commit holds that room's

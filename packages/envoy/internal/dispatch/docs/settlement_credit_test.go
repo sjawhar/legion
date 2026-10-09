@@ -695,8 +695,8 @@ func TestAnUploadsFullReleaseKeepsABrowserEditCreditedWhileItsTransactionWasOpen
 	// The upload's forkLive has already read a low forkSeq; its transaction is still open,
 	// uncommitted. A real browser edit lands here: ygo applies it to the live room, which
 	// credits it in-memory (creditContentChange) at a newer sequence the upload's forkSeq never
-	// saw - editAsBrowser itself waits for that credit to land before it returns (round 12's own
-	// fix). Its durable append cannot complete yet: it needs the document's advisory lock the
+	// saw - editAsBrowser itself waits for that credit to land before it returns. Its durable
+	// append cannot complete yet: it needs the document's advisory lock the
 	// upload's own transaction already holds, so it queues behind this transaction's eventual
 	// commit rather than racing it - waiting for it here would deadlock against the open
 	// transaction below, so the only wait is the final one, after that commit.

@@ -129,6 +129,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit document update: %w", err)
 		}
+		credit.held(version)
 		return nil
 	})
 	return version, err
@@ -222,7 +223,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		return 0, err
 	}
 	if include {
-		if err := upsertPendingAuthors(ctx, tx, room, authors); err != nil {
+		if err := upsertPendingAuthors(ctx, tx, room, authors, version); err != nil {
 			return 0, err
 		}
 	}

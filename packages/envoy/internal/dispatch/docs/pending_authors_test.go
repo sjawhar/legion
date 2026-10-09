@@ -50,24 +50,13 @@ func pendingAuthorRows(t *testing.T, database *store.Store, artifactID string) [
 	return actors
 }
 
-// commitNamedVersion names a version of the live document as actor in a transaction of its own,
-// as POST /artifacts/{id}/versions does, and returns it.
+// commitNamedVersion names a version of the live document as actor (namedVersion), failing the
+// test on any error, and returns it.
 func commitNamedVersion(t *testing.T, service *Service, artifactID string, actor model.Actor) model.Version {
 	t.Helper()
-	ctx := context.Background()
-	tx, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin %s's version: %v", actor.ID, err)
-	}
-	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
-	defer ledger.Discard()
-	result, err := service.NamedVersion(joined, artifactID, actor.ID+"'s version", actor)
+	result, err := namedVersion(t, service, artifactID, actor.ID+"'s version", actor)
 	if err != nil {
 		t.Fatalf("name %s's version: %v", actor.ID, err)
-	}
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit %s's version: %v", actor.ID, err)
 	}
 	return result.Version
 }
@@ -175,8 +164,7 @@ func TestASettlementsListedEditIsNotOwedAgainWhenItsHeldAppendLands(t *testing.T
 
 // A browser edit made after a named version took its authors and before that version commits
 // arms a settlement, and the version still owes nothing it listed: the settlement lists the later
-// editor alone. W4: the version's commit skipped its in-memory release when the edit moved the
-// room's generation, after its durable release had run.
+// editor alone.
 func TestABrowserEditBeforeAVersionCommitsLeavesOnlyItsOwnAuthorOwed(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -225,9 +213,8 @@ const roomSeedEnv = "DISPATCH_TEST_PENDING_AUTHORS_SEED"
 // Two Dispatch processes serve one document's rooms at once, as a rolling deploy's overlap does.
 // Browser edits from new peers, named versions, settlements and evictions interleave on both, in an
 // order a logged seed draws, and a last version on each process lists whatever is still owed.
-// Every editor is listed on exactly one version: W1 (memory kept credits after their append
-// committed, and a lease delete let the other process list them again) and W3 (a load's
-// generation bump discarded the first process's later credits) each break that.
+// Every editor is listed on exactly one version, however two processes' edits, versions and
+// settlements interleave on one document.
 func TestTwoProcessesListEveryEditorOnExactlyOneVersion(t *testing.T) {
 	seed := time.Now().UnixNano()
 	if fixed := os.Getenv(roomSeedEnv); fixed != "" {
@@ -330,8 +317,7 @@ func TestAnAuthorANoVersionSettlementDidNotListSurvivesARestart(t *testing.T) {
 }
 
 // A room whose settlement wrote no version is released once it idles out, like any other: the
-// state holds nothing the durable record does not (LEGION-513). W5: the settlement left the room's
-// pending authors in memory and marked the state unsettled for good.
+// state holds nothing the durable record does not (LEGION-513).
 func TestARoomWhoseSettlementWroteNoVersionIsReleasedWhenIdle(t *testing.T) {
 	service, database := newRoomReleaseService(t)
 	artifactID := createDocument(t, database, "# First")
@@ -520,6 +506,119 @@ func TestAnUploadOnOneProcessKeepsAnAuthorOnlyAnotherProcessHeld(t *testing.T) {
 	commitNamedVersion(t, taskC, artifactID, model.Actor{Kind: "session", ID: "versioner-on-task-c"})
 	if listed := countVersionAuthor(t, database, artifactID, bob); listed != 1 {
 		t.Fatalf("bob is listed on %d versions, want exactly one", listed)
+	}
+}
+
+// uploadOn writes markdown over the document on service as uploader, as the upload route does: the
+// replacement, the version it inserts itself, and WroteVersion, in one committed transaction.
+func uploadOn(t *testing.T, service *Service, artifactID, markdown string, uploader model.Actor) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the upload: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, markdown, uploader); err != nil {
+		t.Fatalf("upload the replacement: %v", err)
+	}
+	number := nextVersionNumber(t, service.store, artifactID)
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, $4)
+	`, artifactID, number, markdown, []model.Actor{uploader}); err != nil {
+		t.Fatalf("insert the upload's version: %v", err)
+	}
+	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the upload: %v", err)
+	}
+}
+
+// A room loaded from a compacted history holds every update the compaction folded, so an upload
+// on it consumes exactly the pending authors of those updates: alice's, which landed before the
+// room loaded, and not bob's, which another task's room landed after.
+func TestAnUploadOnARoomLoadedFromACompactedHistoryConsumesExactlyItsRoomsAuthors(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, database)
+	seedServiceText(t, taskB, artifactID, "First.\n\nSecond.\n")
+	ctx := context.Background()
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-b"}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	editAsConnectedPeer(t, taskB, artifactID, 1, alice, appendBlocks(t, "Alice's paragraph.\n"))
+	waitForLandedAppends(t, taskB, artifactID)
+	if _, err := NewPgVersioned(database).Compact(ctx, artifactID, compactKeep); err != nil {
+		t.Fatalf("compact the document: %v", err)
+	}
+	if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
+		t.Fatalf("stored updates after compaction = %d, want 1", rows)
+	}
+	if err := taskA.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load task A's room from the compacted history: %v", err)
+	}
+	editAsConnectedPeer(t, taskB, artifactID, 2, bob, appendBlocks(t, "Bob's paragraph.\n"))
+	waitForLandedAppends(t, taskB, artifactID)
+
+	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded on task A.\n\nAlice's paragraph.\n", model.Actor{Kind: "session", ID: "uploader-on-task-a"})
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{bob}) {
+		t.Fatalf("pending authors after task A's upload = %+v, want bob alone: task A's room held alice's edit and not his", owed)
+	}
+}
+
+// A write its own transaction makes after that transaction's version is in no version: its author
+// is pending once the transaction commits, though the version listed the same author for the
+// write's earlier change.
+func TestAWriteAfterItsOwnTransactionsVersionStaysPending(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the write: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, "First.\n\nSecond, once.\n", agent); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	version, err := service.NamedVersion(joined, artifactID, "checkpoint", agent)
+	if err != nil || !slices.Contains(version.Version.Authors, agent) {
+		t.Fatalf("version = %+v (%v), want one listing the agent", version.Version, err)
+	}
+	if _, err := service.ReplaceText(joined, artifactID, "First.\n\nSecond, twice.\n", agent); err != nil {
+		t.Fatalf("write after the version: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if owed := pendingAuthorRows(t, service.store, artifactID); !slices.Contains(owed, agent) {
+		t.Fatalf("pending authors = %+v, want the agent: no version holds the write after the version", owed)
+	}
+}
+
+// An upload whose version lists its uploader alone leaves no pending author, and records the
+// uploader as the latest edit source on the settlement its append owes, as every durable update
+// owes one (markSettlementPending).
+func TestAnUploadLeavesNoPendingAuthorAndNamesItsUploader(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	uploader := model.Actor{Kind: "session", ID: "uploader-session"}
+	uploadOn(t, service, artifactID, "First.\n\nSecond, uploaded.\n", uploader)
+	if owed := pendingAuthorRows(t, service.store, artifactID); len(owed) != 0 {
+		t.Fatalf("pending authors after the upload = %+v, want none", owed)
+	}
+	owed, lastActor, err := readOwedSettlement(context.Background(), service.store.Pool, artifactID)
+	if err != nil || !owed || lastActor == nil || *lastActor != uploader {
+		t.Fatalf("pending settlement = %t naming %+v (%v), want one naming the uploader", owed, lastActor, err)
 	}
 }
 
