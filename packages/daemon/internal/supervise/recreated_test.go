@@ -45,6 +45,29 @@ func TestTheNextTaskAfterAHelloFromARecreatedWorkspaceTellsTheAgent(t *testing.T
 	}
 }
 
+// The notice ends at the agent's first turn whoever sent it, as the shim's hello does: a turn the
+// daemon did not send, such as one an Envoy event starts before any task, goes untold, and the task
+// sent after it carries no notice that would call that turn's workspace "recreated since your last
+// turn".
+func TestATurnTheDaemonDidNotSendEndsTheRecreatedNotice(t *testing.T) {
+	h := newHarness(t)
+	h.launch()
+	h.conns.Register(h.token, h.conn)
+	h.must(StreamHello{Claim: h.token, Generation: h.generation(), WorkspaceRecreated: true})
+	h.register()
+	h.ready()
+
+	h.must(StreamTurnStart{Claim: testToken})
+	h.wantState(StateWorking)
+	h.must(StreamTurnEnd{Claim: testToken})
+	h.wantState(StateIdle)
+
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
+	if sent := h.wantPrompts(1)[0]; sent.Message != "implement the plan" {
+		t.Errorf("the task after the agent's own first turn was sent as %q, want it alone", sent.Message)
+	}
+}
+
 // A hello that says nothing of the workspace adds no notice: the ordinary resume, the fresh agent,
 // and a tmux pane, whose shim no launcher starts.
 func TestATaskAfterAnOrdinaryHelloCarriesNoNotice(t *testing.T) {

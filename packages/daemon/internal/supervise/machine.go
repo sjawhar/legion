@@ -332,9 +332,10 @@ type Machine struct {
 	enrollmentSent bool
 	// workspaceRecreated is a shim's hello saying its agent resumed a session in a workspace
 	// recreated since the session was last written, and has had no turn since: the next task is
-	// sent behind workspaceRecreatedNotice until a turn of it starts (confirm). It is memory only: a
-	// shim says it again in every hello until its agent's first turn, a redial to a restarted daemon
-	// included, and says nothing once that turn has run.
+	// sent behind workspaceRecreatedNotice until the agent's first turn starts, whoever sent it
+	// (turnStarted), as the shim stops saying it at that turn. It is memory only: a shim says it
+	// again in every hello until its agent's first turn, a redial to a restarted daemon included,
+	// and says nothing once that turn has run.
 	workspaceRecreated bool
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool

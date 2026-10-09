@@ -60,14 +60,16 @@ type importedClaim struct {
 // finding no row to resume; marked, it starts a fresh session in a workspace recovered from its
 // issue's branch, as file storage starts it once its volume is gone. Run it with the daemon that
 // owns that database stopped, since a running daemon holds its claims in memory and writes them
-// back. Only a claim still recording the session the list says is marked.
+// back; stopped, its database is the record, so a claim it records with a session file the list
+// does not give that claim refuses the run before anything is marked (unlistedClaims). Only a claim
+// still recording the session the list says is marked.
 func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sessions import", sessionsImportUsage, stderr)
 	dsnFile := flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)")
 	claimsFile := flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)")
 	tree := flags.String("tree", "", "copy the sessions of this tree's claims alone")
-	claimToken := flags.String("claim", "", "copy this claim's session alone (the daemon-launched controller's, which belongs to no tree)")
-	treeVolume := flags.String("tree-volume", "", "read each session from the volume mounted here (a tree's, or the controller's) rather than at its recorded path")
+	claimToken := flags.String("claim", "", "copy this claim's session alone (one that belongs to no tree)")
+	treeVolume := flags.String("tree-volume", "", "read each session from the volume mounted here (a tree's, or the claim's) rather than at its recorded path")
 	markLost := flags.Bool("mark-lost", false, "copy nothing; mark each claim whose session the table lacks lost in the daemon's database")
 	daemonDSNFile := flags.String("daemon-dsn-file", "", "with --mark-lost, file holding the stopped daemon's own postgres_dsn")
 	if code, ok := parseFlags(flags, args); !ok {
@@ -190,7 +192,9 @@ func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim
 }
 
 // markLostSessions is --mark-lost: every claim whose recorded session the table lacks is marked lost
-// in the daemon's database, by token and only while it still records that session file.
+// in the daemon's database, by token and only while it still records that session file. It first
+// refuses, marking nothing, a database that records a session file the list does not give its claim
+// (unlistedClaims): the list was saved before that claim launched, so the list is stale.
 func markLostSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim, daemonDSNFile string, stdout, stderr io.Writer) int {
 	missing, err := missingSessions(ctx, conn, claims)
 	if err != nil {
@@ -208,6 +212,18 @@ func markLostSessions(ctx context.Context, conn *pgx.Conn, claims []importedClai
 		return 1
 	}
 	defer daemon.Close(context.Background())
+	unlisted, err := unlistedClaims(ctx, daemon, claims)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions import: the daemon's database: %v\n", err)
+		return 1
+	}
+	for _, c := range unlisted {
+		fmt.Fprintf(stdout, "%s records %s in the daemon's database, which the claims list does not give it\n", c.Token, c.SessionFile)
+	}
+	if len(unlisted) > 0 {
+		fmt.Fprintf(stderr, "legion sessions import: the daemon's database records %d session file(s) the claims list lacks, so a claim launched after the list was saved; marked nothing: stop every writer, save the list again and copy again\n", len(unlisted))
+		return 1
+	}
 	marked, failed := 0, 0
 	for _, c := range missing {
 		tag, err := daemon.Exec(ctx, "UPDATE claims SET session = '', session_file = '', workspace_lost = true WHERE token = $1 AND session_file = $2",
@@ -230,6 +246,54 @@ func markLostSessions(ctx context.Context, conn *pgx.Conn, claims []importedClai
 		return 1
 	}
 	return 0
+}
+
+// unlistedClaims are the claims the daemon's database records a session file for that the claims
+// list does not give them, among the claims of the projects the list's claims belong to, since a
+// database two legions share holds both: a claim the daemon launched, or relaunched onto a new
+// session, after the list was saved. Neither the copy nor --mark-lost reaches such a claim, and
+// under SQL storage it would fail every launch. A database that holds none of the list's claims is
+// refused: it is not the database of the daemon that printed the list.
+func unlistedClaims(ctx context.Context, daemon *pgx.Conn, claims []importedClaim) ([]importedClaim, error) {
+	if len(claims) == 0 {
+		return nil, nil
+	}
+	listed := make(map[string]string, len(claims))
+	tokens := make([]string, 0, len(claims))
+	for _, c := range claims {
+		listed[c.Token] = c.SessionFile
+		tokens = append(tokens, c.Token)
+	}
+	rows, err := daemon.Query(ctx, "SELECT DISTINCT project FROM claims WHERE token = ANY($1)", tokens)
+	if err != nil {
+		return nil, fmt.Errorf("read the projects of the listed claims: %w", err)
+	}
+	projects, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read the projects of the listed claims: %w", err)
+	}
+	if len(projects) == 0 {
+		return nil, fmt.Errorf("it holds none of the %d claims the list names, so it is not the database of the daemon that printed the list", len(claims))
+	}
+	rows, err = daemon.Query(ctx, "SELECT token, session_file FROM claims WHERE project = ANY($1) AND session_file <> '' ORDER BY token", projects)
+	if err != nil {
+		return nil, fmt.Errorf("read the claims of %s: %w", strings.Join(projects, ", "), err)
+	}
+	defer rows.Close()
+	var unlisted []importedClaim
+	for rows.Next() {
+		var c importedClaim
+		if err := rows.Scan(&c.Token, &c.SessionFile); err != nil {
+			return nil, fmt.Errorf("read the claims of %s: %w", strings.Join(projects, ", "), err)
+		}
+		if file, ok := listed[c.Token]; !ok || file != c.SessionFile {
+			unlisted = append(unlisted, c)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the claims of %s: %w", strings.Join(projects, ", "), err)
+	}
+	return unlisted, nil
 }
 
 // readImportedClaims reads the claims list from file, or from stdin when file is `-`, in token

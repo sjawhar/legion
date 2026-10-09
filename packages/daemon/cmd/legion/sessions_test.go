@@ -151,50 +151,64 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	}
 }
 
-// --mark-lost copies nothing and marks, in the stopped daemon's own database, each claim whose
-// recorded session the table lacks as the daemon marks a claim whose volume was lost: no session,
-// no session file, its workspace lost. A claim the table holds, and one whose record no longer
-// names that session, are left as they are.
-func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
-	copied := agentSessions + "/--a--/2026-10-08T12-00-00-000Z_0001.jsonl"
-	gone := agentSessions + "/--b--/2026-10-08T12-00-00-000Z_0002.jsonl"
-	moved := agentSessions + "/--c--/2026-10-08T12-00-00-000Z_0003.jsonl"
-	r := newSessionsImportRig(t, []map[string]string{
-		{"token": "legion-legion-legion-1-architect", "tree": "LEGION-1", "sessionFile": copied},
-		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": gone},
-		{"token": "legion-legion-legion-3-architect", "tree": "LEGION-3", "sessionFile": moved},
-	})
-	r.write(copied, "{\"type\":\"session\",\"id\":\"0001\"}\n")
-	if code, out, _ := r.run("--tree", "LEGION-1"); code != 0 || !strings.Contains(out, "missing 2\n") {
-		t.Fatalf("import = %d:\n%s\nwant two claims of other trees missing, exit 0", code, out)
-	}
+// stoppedDaemon is a daemon's database, migrated, holding claims, as `--mark-lost` finds it with
+// the daemon stopped; and the file holding its URL.
+func stoppedDaemon(t *testing.T, claims ...supervise.Claim) (*store.Store, string) {
+	t.Helper()
 	daemonDSN, daemonDSNFile := testpg.DSNFile(t, "legion_sessions_mark_test")
 	st, err := store.Open(context.Background(), daemonDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(st.Close)
 	if _, err := st.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
-		token       legionclaim.Token
-		issue, file string
-	}{
-		{"legion-legion-legion-1-architect", "LEGION-1", copied},
-		{"legion-legion-legion-2-architect", "LEGION-2", gone},
-		{"legion-legion-legion-3-architect", "LEGION-3", moved + ".newer"},
-	} {
-		if err := st.PutClaim(context.Background(), supervise.Claim{Token: c.token, Project: "legion", Tree: c.issue, TreeEpoch: 1, Issue: c.issue,
-			Role: legionclaim.RoleArchitect, Generation: 2, State: supervise.StateSuspended, Session: "ses-" + c.issue, SessionFile: c.file}); err != nil {
+	for _, c := range claims {
+		if err := st.PutClaim(context.Background(), c); err != nil {
 			t.Fatal(err)
 		}
 	}
+	return st, daemonDSNFile
+}
+
+// suspendedClaim is a claim of project on issue's role, suspended with the session file it records.
+func suspendedClaim(project, token, issue string, role legionclaim.Role, file string) supervise.Claim {
+	c := supervise.Claim{Token: legionclaim.Token(token), Project: project, Tree: issue, TreeEpoch: 1, Issue: issue,
+		Role: role, Generation: 2, State: supervise.StateSuspended, SessionFile: file}
+	if file != "" {
+		c.Session = "ses-" + issue
+	}
+	return c
+}
+
+// --mark-lost copies nothing and marks, in the stopped daemon's own database, each claim whose
+// recorded session the table lacks as the daemon marks a claim whose volume was lost: no session,
+// no session file, its workspace lost. A claim the table holds, and one whose record no longer
+// names a session, are left as they are.
+func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
+	copied := agentSessions + "/--a--/2026-10-08T12-00-00-000Z_0001.jsonl"
+	gone := agentSessions + "/--b--/2026-10-08T12-00-00-000Z_0002.jsonl"
+	cleared := agentSessions + "/--c--/2026-10-08T12-00-00-000Z_0003.jsonl"
+	r := newSessionsImportRig(t, []map[string]string{
+		{"token": "legion-legion-legion-1-architect", "tree": "LEGION-1", "sessionFile": copied},
+		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": gone},
+		{"token": "legion-legion-legion-3-architect", "tree": "LEGION-3", "sessionFile": cleared},
+	})
+	r.write(copied, "{\"type\":\"session\",\"id\":\"0001\"}\n")
+	if code, out, _ := r.run("--tree", "LEGION-1"); code != 0 || !strings.Contains(out, "missing 2\n") {
+		t.Fatalf("import = %d:\n%s\nwant two claims of other trees missing, exit 0", code, out)
+	}
+	st, daemonDSNFile := stoppedDaemon(t,
+		suspendedClaim("legion", "legion-legion-legion-1-architect", "LEGION-1", legionclaim.RoleArchitect, copied),
+		suspendedClaim("legion", "legion-legion-legion-2-architect", "LEGION-2", legionclaim.RoleArchitect, gone),
+		suspendedClaim("legion", "legion-legion-legion-3-architect", "LEGION-3", legionclaim.RoleArchitect, ""),
+	)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "sessions", "import", "--dsn-file", r.dsnFile, "--claims", r.claims, "--mark-lost", "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
 	for _, want := range []string{
 		"legion-legion-legion-2-architect marked lost: the session table holds no " + gone,
-		"legion-legion-legion-3-architect failed to mark lost: the daemon's database holds no such claim recording " + moved,
+		"legion-legion-legion-3-architect failed to mark lost: the daemon's database holds no such claim recording " + cleared,
 		"legion sessions import: marked lost 1, failed 1\n",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -213,6 +227,70 @@ func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
 		if lost != (c.Session == "" && c.SessionFile == "" && c.WorkspaceLost) {
 			t.Errorf("claim %s: session %q, session file %q, workspace lost %t; want it marked lost %t", c.Token, c.Session, c.SessionFile, c.WorkspaceLost, lost)
 		}
+	}
+}
+
+// With the daemon stopped its database is the record, and a claim it records with a session file
+// the claims list does not give that claim — one launched, or relaunched onto a new session, after
+// the list was saved — is one neither the copy nor --mark-lost would reach, and under SQL storage
+// it would fail every launch. --mark-lost names each such claim of the list's project, another
+// project's in a shared database aside, and marks nothing; and a database that holds none of the
+// list's claims is not that daemon's.
+func TestSessionsImportMarkLostRefusesAClaimTheListDoesNotHave(t *testing.T) {
+	gone := agentSessions + "/--a--/2026-10-08T12-00-00-000Z_0001.jsonl"
+	relaunched := agentSessions + "/--b--/2026-10-08T12-00-00-000Z_0002.jsonl"
+	r := newSessionsImportRig(t, []map[string]string{
+		{"token": "legion-legion-legion-1-architect", "tree": "LEGION-1", "sessionFile": gone},
+		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": relaunched},
+	})
+	newer := agentSessions + "/--b--/2026-10-09T08-00-00-000Z_0004.jsonl"
+	launched := agentSessions + "/--c--/2026-10-09T08-00-00-000Z_0005.jsonl"
+	st, daemonDSNFile := stoppedDaemon(t,
+		suspendedClaim("legion", "legion-legion-legion-1-architect", "LEGION-1", legionclaim.RoleArchitect, gone),
+		suspendedClaim("legion", "legion-legion-legion-2-architect", "LEGION-2", legionclaim.RoleArchitect, newer),
+		suspendedClaim("legion", "legion-legion-legion-3-planner", "LEGION-3", legionclaim.RolePlanner, launched),
+		suspendedClaim("other", "legion-other-other-1-architect", "OTHER-1", legionclaim.RoleArchitect, agentSessions+"/--o--/0009.jsonl"),
+	)
+	markLost := func(claims string) (int, string, string) {
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", "sessions", "import", "--dsn-file", r.dsnFile, "--claims", claims, "--mark-lost", "--daemon-dsn-file", daemonDSNFile}, &out, &errb)
+		return code, out.String(), errb.String()
+	}
+
+	code, out, errb := markLost(r.claims)
+	if code != 1 {
+		t.Errorf("--mark-lost = %d, want 1 for a list the daemon's database outgrew", code)
+	}
+	for _, want := range []string{
+		"legion-legion-legion-2-architect records " + newer + " in the daemon's database, which the claims list does not give it\n",
+		"legion-legion-legion-3-planner records " + launched + " in the daemon's database, which the claims list does not give it\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--mark-lost printed\n%s\nwant a line %q", out, want)
+		}
+	}
+	if strings.Contains(out, "legion-other-other-1-architect") || strings.Contains(out, "marked lost") {
+		t.Errorf("--mark-lost printed\n%s\nwant no other project's claim and nothing marked", out)
+	}
+	if !strings.Contains(errb, "records 2 session file(s) the claims list lacks") || !strings.Contains(errb, "marked nothing") {
+		t.Errorf("--mark-lost said %q, want the count it refused for and that it marked nothing", errb)
+	}
+	stored, err := st.Claims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range stored {
+		if c.WorkspaceLost || c.SessionFile == "" {
+			t.Errorf("claim %s was marked (session file %q, workspace lost %t) by a run that refused", c.Token, c.SessionFile, c.WorkspaceLost)
+		}
+	}
+
+	foreign := filepath.Join(t.TempDir(), "claims.json")
+	if err := os.WriteFile(foreign, []byte(`{"claims": [{"token": "legion-acme-acme-9-architect", "tree": "ACME-9", "sessionFile": "`+gone+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errb := markLost(foreign); code != 1 || !strings.Contains(errb, "holds none of the 1 claims the list names") || strings.Contains(out, "marked lost") {
+		t.Errorf("--mark-lost against another daemon's database = %d, %q, %q; want 1 naming the mismatch, nothing marked", code, out, errb)
 	}
 }
 

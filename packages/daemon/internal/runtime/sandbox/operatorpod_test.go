@@ -80,6 +80,8 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "Oh My Pi's config root", pod: env("PI_CONFIG_DIR", ".elsewhere"), want: envSets("PI_CONFIG_DIR", bySessions)},
 		{name: "Oh My Pi's session store", pod: env("OMP_SESSION_STORAGE", "sql"), want: envSets("OMP_SESSION_STORAGE", byStore)},
 		{name: "Oh My Pi's session database", pod: env("OMP_SESSION_SQL_DSN_FILE", "/etc/operator/dsn"), want: envSets("OMP_SESSION_SQL_DSN_FILE", byStore)},
+		{name: "the name the session database's URL is mounted under", pod: env("OMP_SESSION_SQL_DSN", "postgres://operator.internal.example/sessions"),
+			want: envSets("OMP_SESSION_SQL_DSN", "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)")},
 		{name: "a variable of the App's git identity", pod: env("JJ_USER", "operator"), want: envSets("JJ_USER", byIdentity)},
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
@@ -111,7 +113,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key for the session store", keys: map[string]string{"OMP_SESSION_STORAGE": "store"},
 			want: keyNames("OMP_SESSION_STORAGE", byStore)},
 		{name: "a provider key for the session database's URL", keys: map[string]string{"OMP_SESSION_SQL_DSN": "dsn"},
-			want: keyPointer("OMP_SESSION_SQL_DSN", byStore)},
+			want: "provider_keys names OMP_SESSION_SQL_DSN, the file the providers volume mounts the session database's URL as (runtime.kubernetes.session_store): two of the volume's items would share that path"},
 		{name: "a provider key of the App's git identity", keys: map[string]string{"GIT_AUTHOR_NAME": "author"},
 			want: keyNames("GIT_AUTHOR_NAME", byIdentity)},
 		{name: "a provider key a launch secret's pointer names", keys: map[string]string{"ENVOY_TOKEN": "envoy"},

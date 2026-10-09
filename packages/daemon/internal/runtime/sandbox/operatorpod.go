@@ -29,7 +29,8 @@ type setter struct {
 
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
-// store's two variables named apart, since they are Legion's under either store), the worker image
+// store's two variables named apart, since they are Legion's under either store, and the name the
+// providers volume mounts the session database's URL under, sessionDSNFile), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
 // name is the one named.
@@ -43,6 +44,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	for _, name := range sessionStoreVariables {
 		add(name, "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)", false)
 	}
+	add(sessionDSNFile, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}
@@ -121,6 +123,9 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(providerKeys)) {
+		if name == sessionDSNFile {
+			return fmt.Errorf("provider_keys names %s, the file the providers volume mounts the session database's URL as (runtime.kubernetes.session_store): two of the volume's items would share that path", name)
+		}
 		if s, set := variables[name]; set {
 			return fmt.Errorf("provider_keys names %s, which %s: a provider key must name a variable nothing else in the pod sets", name, s.who)
 		}

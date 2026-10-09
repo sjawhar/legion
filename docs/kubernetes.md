@@ -387,7 +387,8 @@ With `postgres` on, every generation a launcher starts gets two variables in its
 `OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/OMP_SESSION_SQL_DSN`. The pod baseline
 (`internal/podsafety`) keeps them, where it would otherwise set `OMP_SESSION_STORAGE=file`, and the
 worker shim, seeing the pointer in its environment, never exports the URL file into Oh My Pi's
-environment. Neither variable may be the operator's (`pod.env`) or a provider key's. Oh My Pi
+environment. Neither variable may be the operator's (`pod.env`) or a provider key's, and neither
+may `OMP_SESSION_SQL_DSN`, the name the URL file is mounted under (`CheckPod`). Oh My Pi
 creates and migrates its own two tables, `omp_session_files` and `omp_session_files_parts`, when it
 starts, so the deployment's login needs `CREATE` on its database; Legion manages no schema.
 
@@ -415,9 +416,11 @@ record (one provisioned before the record was kept). The worker shim says so in 
 My Pi starts a turn, so a redial to a restarted daemon before that turn says it again and one after
 it does not, and the daemon sends the claim's next task behind one paragraph: `Your workspace was
 recreated since your last turn: it holds what was pushed to legion/<KEY> (main if nothing was), and
-anything you had not pushed is gone. …` (`workspaceRecreatedNotice`, `internal/supervise`), until a
-turn of that task starts. A creation record that is not one RFC 3339 instant in a regular file
-refuses the resume, naming the file, since every agent of the tree can write the volume.
+anything you had not pushed is gone. …` (`workspaceRecreatedNotice`, `internal/supervise`). Both
+stop at the agent's first turn, whichever turn it is: a task's turn, or one the daemon did not send,
+such as an Envoy event that woke the agent, which goes untold, as does every turn after it. A
+creation record that is not one RFC 3339 instant in a regular file refuses the resume, naming the
+file, since every agent of the tree can write the volume.
 
 The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
 volume projects another session store than a pod created now would — one created before
@@ -441,6 +444,17 @@ the same session under SQL storage. The order below is what keeps a copy current
 at a resume, that a row still matches the file it was copied from, so a session written after its
 copy would resume from the older row without a word. Do not drain the deployment by lowering the
 linger instead: a closed tree's cleanup deletes its volume, and with it any session not yet copied.
+On a deployment at the release before issue pods (`legion-v10.0.0`), steps 1 to 5 below take the
+place of steps 1 to 3 of [Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees):
+its steps 1 and 2 drain every tree and so delete its volume, and its step 3 runs before step 1
+here (below). Step 6 here hands back to that section.
+
+**A daemon-launched controller is cleared first.** Under `controller: daemon` the earlier release
+resumes a suspended controller at its next look, within a minute (`keep` in
+`internal/daemon/controller.go` at `legion-v10.0.0`), so the controller cannot be held still for
+the copy. Clear its claim before step 1 with step 3 of the upgrade section. Its Sandbox goes, and
+its volume and session go with it, so step 5 marks the claim lost and the controller this release
+launches starts a fresh session.
 
 1. **Stop every writer, keeping the linger as it is.** Tell every agent to push its work, then
    suspend every claim (`legion claims suspend`) until each tree is at a pushed boundary: no pod
@@ -458,11 +472,17 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
 
    `scripts/sessions-import-pods.sh <claims.json> <namespace> <worker image@sha256> <project>
    <url secret> <url key> [--context <context>]` runs it for every tree the list names: one pod
-   of the worker image per tree, on the Legion pool under gVisor, mounting the earlier release's
-   tree volume (`tree-legion-<project token>-<root issue>-architect`) read-only at `/legion` and
-   the URL key, printing the import's lines, then deleted. It exits 1 when any tree's import did,
-   names a tree whose volume is gone, and names every claim that records a session and belongs to
-   no tree, which it leaves to `--claim` below.
+   of the worker image per tree, under gVisor and scheduled as the tree's own pods were, with the
+   node selector, tolerations, priority class and service account of the pod template of the
+   tree's root Sandbox (`legion-<project token>-<root issue>-architect`, shortened past 63
+   characters to a prefix and a hash as the earlier release's `SandboxName` does), mounting that
+   Sandbox's tree volume (`tree-<root Sandbox>`) read-only at `/legion` and the URL key, printing
+   the import's lines, then deleted. It exits 1 when any tree's import did, names a tree whose
+   volume or root Sandbox is gone, and names every claim that records a session and belongs to no
+   tree, the cleared controller's among them, which step 5 marks. `--claim <token> --pvc
+   <volume>` ahead of its other arguments copies the one claim from the volume you name instead,
+   scheduled as that claim's own Sandbox is, and refuses a claim the list does not name before it
+   creates anything.
 
    For each claim of that tree it reads the recorded session file from the volume (its path below
    the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads
@@ -477,19 +497,15 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
    on a `missing` of the claims it was asked to copy (another tree's is reported only), and when
    `--tree` or `--claim` selects no claim of the list, which is a mistyped key.
 4. **Copy every tree again.** Each run must print only `copied before` or `recorded no session`
-   for its tree's claims, and the last one `missing 0`. A `copied` here means a session changed
-   after step 3: a writer was still running, so go back to step 1. A `refused` means the table
-   holds other content for that session: either an agent wrote it under SQL storage, or a copy
-   from another file landed there. Find out which before going on. The table is the newer one
-   only when an agent wrote it. To copy the file over a row that is not newer, delete that row
-   and its parts (`DELETE FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM
-   omp_session_files WHERE path = '<path>'`) and run the import again.
-   **The daemon-launched controller** (`controller: daemon`) belongs to no tree: copy its session
-   from its own volume, `tree-legion-<project token>-controller` in the earlier release, mounted at
-   `/legion`, with `--claim legion-<project token>-controller --tree-volume /legion` in place of
-   `--tree`. The script does that in one pod with `--claim legion-<project token>-controller --pvc
-   tree-legion-<project token>-controller` ahead of its other arguments, and refuses a claim the
-   list does not name before it creates anything.
+   for its tree's claims, and its `missing` lines may name only claims step 5 is to mark: one
+   whose volume was gone before step 3 (the cleared controller's, or a claim of a tree closed
+   earlier), or a `failed` you cannot fix. A `copied` here means a session changed after step 3: a
+   writer was still running, so go back to step 1. A `refused` means the table holds other content
+   for that session: either an agent wrote it under SQL storage, or a copy from another file
+   landed there. Find out which before going on. The table is the newer one only when an agent
+   wrote it. To copy the file over a row that is not newer, delete that row and its parts (`DELETE
+   FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM omp_session_files WHERE path =
+   '<path>'`) and run the import again.
 5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
    tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
    under SQL storage, where a file store starts it fresh. With the daemon still stopped, mark each
@@ -499,14 +515,20 @@ linger instead: a closed tree's cleanup deletes its volume, and with it any sess
    legion sessions import --dsn-file <url file> --claims claims.json --mark-lost --daemon-dsn-file <file holding the daemon's postgres_dsn>
    ```
 
-   It copies nothing. For every claim of the list whose recorded session the table lacks, it
-   clears the claim's session and session file and marks its workspace lost, as the daemon marks a
-   claim whose volume was lost, but only while the claim still records that session file. It
-   prints `marked lost` or `failed to mark lost` per claim, then a count, and exits 1 on any
-   failure. Each such claim starts a fresh session in a workspace recovered from its issue's
-   branch.
-6. **Only then delete the old Sandboxes and their volumes**, dump the daemon's database (`pg_dump`
-   with its `postgres_dsn`), and deploy with `session_store: postgres`.
+   It copies nothing. It first reads every claim of the list's project from the daemon's
+   database, the record once the daemon is stopped, and refuses, marking nothing, when one records
+   a session file the list does not give it: a claim the earlier daemon launched, or relaunched
+   onto a new session, after step 2 saved the list. It names each such claim; go back to step 1.
+   Then, for every claim of the list whose recorded session the table lacks, it clears the
+   claim's session and session file and marks its workspace lost, as the daemon marks a claim
+   whose volume was lost, but only while the claim still records that session file. It prints
+   `marked lost` or `failed to mark lost` per claim, then a count, and exits 1 on any failure.
+   Each such claim starts a fresh session, a workflow role's in a workspace recovered from its
+   issue's branch.
+6. **Only then delete the old Sandboxes and their volumes**, then finish with steps 4 to 6 of
+   [Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees): its
+   two checks must come back empty, then the dump, then the rollout, with `session_store:
+   postgres` and `session_dsn_secret` set in it.
 
 ### The image guard
 
@@ -637,6 +659,14 @@ write is `Migrate`, after both checks. So a refused boot leaves the database as 
 left it, and re-pinning the earlier release's image recovers. In the cluster a refused boot is a
 crash-looping Deployment: the earlier release's pods keep running, but nothing supervises them.
 
+**A rollout that also turns on `session_store: postgres` does not drain.** It replaces steps 1 to 3
+below with steps 1 to 5 of [Copying file sessions before turning it on](#copying-file-sessions-before-turning-it-on),
+which keep every tree's volume until its sessions are in the table. When `controller: daemon` ran,
+step 3 below runs before copy step 1: the earlier release resumes a suspended controller within a
+minute, so it cannot be held still for the copy, and copy step 5 marks its claim lost. Copy step 6
+deletes the per-claim Sandboxes and hands back to steps 4, 5 and 6 below: the two checks, the dump,
+and the rollout, with `session_store: postgres` set.
+
 No migration turns a per-claim Sandbox or locator into an issue pod's, and nothing on a tree volume
 carries over (below), so the upgrade drains the deployment while it still runs the earlier release:
 
@@ -652,9 +682,10 @@ carries over (below), so the upgrade drains the deployment while it still runs t
 3. **Clear the controller's claim, if `controller: daemon` ran.** Set `controller: operator` and
    boot the earlier release once. It stops the controller its earlier boot launched, logging
    `controller: stopping the controller an earlier boot under controller: daemon launched; this
-   daemon leaves the controller to its operator`: the stop deletes the claim's Sandbox and retires
-   the claim, so `legion claims list` shows `legion-<project>-controller` `retired`. In the cluster
-   each of these boots is a configuration change of its own through the deploy path.
+   daemon leaves the controller to its operator`: the stop deletes the claim's Sandbox, and with it
+   the controller's volume and session, and retires the claim, so `legion claims list` shows
+   `legion-<project>-controller` `retired`. In the cluster each of these boots is a configuration
+   change of its own through the deploy path.
 4. **Check that nothing is left.** `<project>` below is `legion.yaml`'s `project` lowercased with
    every non-alphanumeric removed (`claim.ProjectToken`), the value of every Sandbox's
    `legion.dev/project` label and of the `claims.project` column. Both of these must come back
@@ -689,8 +720,11 @@ carries over (below), so the upgrade drains the deployment while it still runs t
 the root Sandbox's `volumeClaimTemplates` entry, so Agent Sandbox creates the volume's claim with
 that Sandbox as its owner, and deleting the root Sandbox deletes the volume (`sandboxManifest` in
 `internal/runtime/sandbox/manifest.go` and `Release` in `sandbox.go`, both at `legion-v10.0.0`).
-That loses every session recorded on the volume and every change in its working copies that was
-not pushed. A volume kept anyway is never mounted again: the earlier release names a tree's claim
+That loses every change in its working copies that was not pushed and, under `session_store: pvc`,
+every session recorded on the volume. Under `postgres` a session copied into the table first
+([Copying file sessions before turning it on](#copying-file-sessions-before-turning-it-on)) is
+kept, and its agent resumes it in a workspace recovered from its issue's pushed branch. A volume
+kept anyway is never mounted again: the earlier release names a tree's claim
 `tree-legion-<project>-<root issue>-architect`, from the root architect's own Sandbox
 (`SandboxName` and `TreeClaimName` in `names.go` at `legion-v10.0.0`), and this release
 `tree-legion-<project>-<root issue>`, from the root issue's Sandbox (`SandboxName` and
