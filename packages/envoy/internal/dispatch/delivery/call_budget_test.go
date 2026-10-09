@@ -2,7 +2,6 @@ package delivery
 
 import (
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,39 +52,61 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 
 // TestConcurrentReadsNeverOverspendACallBudget: ten reads reserving 6 calls each against 20 (60
 // reserved against 20 available) all start at once, and every granted read holds its reservation
-// until all ten have asked, so the rest must wait. Each makes 2 calls: exactly 8 are granted (the
-// ninth would need 6 with 4 left), the other two give up, and no more than 20 calls are made.
+// until the test releases them, so the rest must wait. Each makes 2 calls: exactly 8 are granted
+// (the ninth would need 6 with 4 left), the other two give up, and no more than 20 calls are made.
 func TestConcurrentReadsNeverOverspendACallBudget(t *testing.T) {
 	const reads, cost, used, allowance = 10, 6, 2, 20
 	budget := newCallBudget(allowance)
 	gate := make(chan struct{})
-	var asked, granted, refused atomic.Int32
+	// Each read reports its reservation's answer the moment reserve returns.
+	answered := make(chan bool, reads)
 	var wg sync.WaitGroup
 	for range reads {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			asked.Add(1)
 			if !budget.reserve(cost) {
-				refused.Add(1)
+				answered <- false
 				return
 			}
-			granted.Add(1)
+			answered <- true
 			<-gate
 			budget.settle(cost, used)
 		}()
 	}
-	for asked.Load() < reads {
-		time.Sleep(time.Millisecond)
+
+	// The first three to ask fit (18 of 20). Nothing settles until the gate opens, so every other
+	// read is waiting on a reservation and none may answer.
+	held := allowance / cost
+	for i := range held {
+		select {
+		case granted := <-answered:
+			if !granted {
+				t.Fatalf("reservation %d of %d was refused with %d of %d calls free", i+1, held, allowance-i*cost, allowance)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d reservations answered before any settled", i, held)
+		}
 	}
-	time.Sleep(100 * time.Millisecond)
-	if g := granted.Load(); g != allowance/cost {
-		t.Fatalf("%d reads hold reservations before any settles; want %d (the rest wait)", g, allowance/cost)
+	select {
+	case granted := <-answered:
+		t.Fatalf("a reservation answered %v while %d reads held %d of %d calls; want it to wait", granted, held, held*cost, allowance)
+	case <-time.After(200 * time.Millisecond):
 	}
+
 	close(gate)
 	wg.Wait()
-	if g, r := granted.Load(), refused.Load(); g != 8 || r != 2 {
-		t.Fatalf("granted %d and refused %d of %d reads; want 8 and 2", g, r, reads)
+	close(answered)
+	granted, refused := held, 0
+	for answer := range answered {
+		if answer {
+			granted++
+		} else {
+			refused++
+		}
+	}
+	if granted != 8 || refused != 2 {
+		t.Fatalf("granted %d and refused %d of %d reads; want 8 and 2", granted, refused, reads)
 	}
 	if budget.spent > allowance || budget.spent != 16 {
 		t.Fatalf("spent %d calls; want 16, never more than %d", budget.spent, allowance)

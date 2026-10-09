@@ -248,6 +248,15 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	// loses no consistency they had. Each takes one connection under a hold mark of its own
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
+	//
+	// A timeline request therefore holds up to four of the pool's 16 connections
+	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
+	// is fine because none of the four holds a lock or opens a transaction, so none waits on
+	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to
+	// prevent needs a caller already holding a connection, which ForConcurrentRead refuses. A read
+	// past the pool's free connections waits for one, as any request does. The page reads the
+	// timeline on load, a filter change and the event stream's refresh, so concurrent timeline
+	// requests are a handful of open tabs, not a load the pool must be sized against.
 	var (
 		prs              []delivery.DeliveryPullRequest
 		waiting          []delivery.WaitingPullRequest
