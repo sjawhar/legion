@@ -673,6 +673,71 @@ func TestPromptJobPasteAfterTheLineDrainsThroughItsEnd(t *testing.T) {
 	}
 }
 
+// A bracketed paste that begins in the same read as the line's end is read on through its closing
+// mark, not given back to the shell after the line: the prompt keeps the terminal, so the paste's
+// rest, arriving after the quiet window would have ended, is discarded rather than run by the shell.
+// The entry is refused as more than one line. At f7e1c781 feed returned at the line's end and never
+// saw the paste, so the prompt gave the terminal back after the quiet window and the rest ran.
+func TestPromptJobPasteInTheLineEndReadDrainsThroughItsEnd(t *testing.T) {
+	for _, key := range []string{"\x03", "\x1c", "\x1a", ""} {
+		name := fmt.Sprintf("%x", key)
+		if key == "" {
+			name = "no-key"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newPromptShell(t)
+			s.start(false, false)
+			// One write carries the line's end and the paste's start; the prompt reads both at
+			// once, so a paste the prompt only watches for after the line would be missed.
+			s.send("headtail\r\x1b[200~pastelate" + key)
+			s.wait("QUIET_READY")
+			// Longer than the quiet window: a prompt that did not see the paste gives the
+			// terminal back before this arrives, and the shell runs it.
+			time.Sleep(300 * time.Millisecond)
+			s.send("echo PASTE_$((2+3))\r\x1b[201~")
+			s.wait("RETURNED a value of more than one line must be piped in")
+			// Clear the shell's line, where a leaked paste mark would leave text that breaks
+			// the history check's own command, so a leak shows as the markers below.
+			s.send("\x15")
+			s.noShellValue("headtail", "pastelate", "PASTE_$((", "PASTE_5")
+		})
+	}
+}
+
+// A paste-start mark split so that only its first bytes arrive in the read that ends the line is
+// held as pending and completed from the next read: the paste opens, so a Ctrl-C after its content
+// is pasted text, not a keypress, and the entry is refused as more than one line rather than its
+// content run by the shell. At f7e1c781 the split mark was dropped at the line's end, so the
+// completion was plain text and the Ctrl-C a signal that killed the prompt. The helper shortens the
+// paste bound so the refusal does not wait the full bound for a close mark that never comes.
+func TestPromptJobSplitPasteMarkAfterTheLineIsRead(t *testing.T) {
+	s := newPromptShell(t)
+	s.env = "AGENT_SECRETS_JOB_HOLD_QUIET=1 AGENT_SECRETS_JOB_PASTE_BOUND=1s "
+	s.start(false, false)
+	s.send("headtail\r\x1b[20")
+	s.wait("QUIET_READY")
+	s.send("0~pastelate\x03")
+	s.wait("RETURNED a value of more than one line must be piped in")
+	s.noShellValue("headtail", "pastelate")
+}
+
+// A second bracketed paste that begins in the same read that closes a pasted line opens like any
+// other: the prompt keeps reading, so its rest, arriving after the quiet window would have ended,
+// is discarded rather than run by the shell, and the pasted line is refused as more than one line.
+// At f7e1c781 feed returned at the first paste's close and never saw the second, and the drain was
+// skipped after a pasted line, so the first paste was stored and the rest ran in the shell.
+func TestPromptJobSecondPasteInThePastedLinesCloseIsRead(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, false)
+	s.send("\x1b[200~firstpaste\r\x1b[201~\x1b[200~pastelate")
+	s.wait("QUIET_READY")
+	time.Sleep(300 * time.Millisecond)
+	s.send("echo PASTE_$((2+3))\r\x1b[201~")
+	s.wait("RETURNED a value of more than one line must be piped in")
+	s.send("\x15")
+	s.noShellValue("firstpaste", "pastelate", "PASTE_$((", "PASTE_5")
+}
+
 // A paste whose closing mark never comes, as from a terminal that sends only the start mark, is
 // given up once maxPasteDrain has passed since it began: the prompt ends, refusing the entry,
 // though the signal keys pressed meanwhile are pasted text. The helper shortens the bound.

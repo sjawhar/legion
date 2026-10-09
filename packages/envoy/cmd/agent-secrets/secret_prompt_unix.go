@@ -184,7 +184,7 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			break
 		}
 	}
-	if !r.pasted || r.err != nil {
+	if !r.pasted || len(r.pending) > 0 || r.err != nil {
 		if err := drainAfterTheLine(&tty, &r, buf); err != nil {
 			return nil, err
 		}
@@ -574,11 +574,13 @@ func (r *promptReader) key(c byte) (promptKey, bool) {
 	return promptKey{}, false
 }
 
-// feed takes one read's bytes and reports whether the read is over: the line ended outside a paste,
-// or a paste in which it ended has closed. A signal key outside a paste ends the read there and
-// answers its signal; the bytes after it are discarded. Inside a paste it is pasted text, a
-// control byte refused like any other. A signal key in the rest of the read in which the line or
-// its paste ends still sends its signal, as it would in a read of its own.
+// feed scans a whole read's bytes and reports whether the read is over: the line has ended and no
+// bracketed paste is open (r.ended && !r.inPaste). The line's end does not stop the scan, so a
+// paste, a paste mark split across reads, or more text that begins in the same read as the line's
+// end is handled as it would be in a read of its own: the paste opens and is read on through its
+// close, and anything but line endings after the line is more than one line (r.more). A signal key
+// outside a paste answers its signal and ends the scan there, the bytes after it discarded. Inside
+// a paste it is pasted text, a control byte refused like any other.
 func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 	b = append(r.pending, b...)
 	r.pending = nil
@@ -593,25 +595,23 @@ func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 			if r.inPaste && bytes.HasPrefix(rest, pasteEnd) {
 				r.inPaste = false
 				i += len(pasteEnd) - 1
-				if r.ended {
-					return true, r.keyIn(b[i+1:])
-				}
 				continue
 			}
 			if bytes.HasPrefix(pasteStart, rest) || bytes.HasPrefix(pasteEnd, rest) {
 				r.pending = append(r.pending, rest...)
-				return false, 0
+				return r.ended && !r.inPaste, 0
 			}
 		}
 		c := b[i]
 		if k, ok := r.key(c); ok && !r.inPaste {
 			if k.sig != 0 {
-				return false, k.sig
+				return r.ended, k.sig
 			}
 			continue // an inherited ignored signal: its key does nothing
 		}
 		if r.ended {
-			// The line ended inside a paste: outside one, feed returned as it ended.
+			// The line has ended; anything but line endings after it, typed or pasted, is
+			// more than one line.
 			if c != '\r' && c != '\n' {
 				r.more = true
 			}
@@ -622,10 +622,7 @@ func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 			r.ended = true
 			if r.inPaste {
 				r.pasted = true
-				continue
 			}
-			r.more = r.more || !onlyLineEndings(b[i+1:])
-			return true, r.keyIn(b[i+1:])
 		case !r.inPaste && (r.special(c, unix.VERASE) || c == 0x7f || c == '\b'):
 			if len(r.line) > 0 {
 				_, size := utf8.DecodeLastRune(r.line)
@@ -646,21 +643,7 @@ func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 			}
 		}
 	}
-	return false, 0
-}
-
-// keyIn answers the signal of the first signal key in b, the rest of a read after the line, outside
-// a paste that begins there; 0 if there is none.
-func (r *promptReader) keyIn(b []byte) syscall.Signal {
-	for i, c := range b {
-		if bytes.HasPrefix(b[i:], pasteStart) {
-			return 0
-		}
-		if k, ok := r.key(c); ok && k.sig != 0 {
-			return k.sig
-		}
-	}
-	return 0
+	return r.ended && !r.inPaste, 0
 }
 
 // eraseWord removes trailing blanks, then the preceding word, by rune as canonical terminal
@@ -723,17 +706,6 @@ func drainAfterTheLine(tty *promptTerminal, r *promptReader, buf []byte) error {
 	}
 	r.more = r.more || r.inPaste || len(r.pending) > 0
 	return nil
-}
-
-// onlyLineEndings reports whether b holds nothing but carriage returns and newlines: what a
-// terminal sends for a pasted line ending in CR LF.
-func onlyLineEndings(b []byte) bool {
-	for _, c := range b {
-		if c != '\r' && c != '\n' {
-			return false
-		}
-	}
-	return true
 }
 
 // readTerminal waits for input, a watcher event or the quiet window's end. A result of -1 means
