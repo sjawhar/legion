@@ -2000,8 +2000,10 @@ Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 value
 on either path.
 
 The reader alone changes the terminal, including its final flushing restore and bracketed-paste
-disable. It joins the signal watcher before restoring, and does not restore a terminal another
-process group owns. It reads the settings it restores only once its process group holds the
+disable. It joins the signal watcher before restoring. A terminating signal that arrives while
+another process group holds the terminal (after Ctrl-Z and `bg`) skips the restore, which would
+stop the job until `fg`, and ends the CLI by that signal; bash resets its own terminal when a job
+dies by a signal. It reads the settings it restores only once its process group holds the
 terminal (`holdTerminal`): a prompt started with `&` waits behind the shell's line editor, whose
 settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
 editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
@@ -2023,15 +2025,16 @@ own terminal while the job is stopped. On Linux the stop is sent to the watcher'
 `tgkill` under `runtime.LockOSThread`, with SIG_DFL installed and the saved action restored.
 Darwin sends the stop to the process and reinstalls Go's handler through `signal.Ignore` and
 `signal.Notify`; its stop/resume behavior remains unverified on Darwin.
-After a terminating signal the reader restores, then re-raises it: SIGHUP, SIGINT, SIGQUIT and
-SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the kernel default, not Go's
+After a terminating signal the reader restores, when its group holds the terminal, then re-raises
+it: SIGHUP, SIGINT, SIGQUIT and SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the
+kernel default, not Go's
 goroutine dump. Core dumps are disabled once, before the first value byte is read, for the rest
 of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
 `secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with
 `&` (the restored settings are compared with those bash hands a foreground job, and the label with
 the terminal's owner and echo when it is printed), a stop before the label, an orphaned group,
-ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
-restoration.
+SIGTERM and SIGHUP after `bg`, ignored SIGTSTP wrappers, quiet-window stops, refusal draining,
+shell history and terminal restoration.
 
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in

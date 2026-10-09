@@ -92,7 +92,8 @@ count of lost bytes, so a resumed value could be silently incomplete. The CLI re
 than storing a partial secret. After `fg`, input stays hidden only while the remainder is
 discarded: press Enter, then run the command shown in the message and type the whole value again.
 The command exits 2 and stores nothing. After `bg`, the reader waits without touching the
-terminal until `fg` gives it back, then discards the entry in the same way.
+terminal until `fg` gives it back, then discards the entry in the same way. SIGTERM or SIGHUP
+while it waits there ends it at once by that signal, leaving the terminal to your shell.
 A wrapper that ignores SIGTSTP keeps it ignored, without discarding the entry. The macOS
 stop/resume path has not been verified on a macOS machine.
 

@@ -74,15 +74,16 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 				err = errPromptStopped
 			}
 		}
-		// A tcsetattr from the background blocks, by the kernel's own job control
-		// (SIGTTOU is no longer caught), until the job is foregrounded, then
-		// completes: that block is the ordinary outcome here, not a race to route
-		// around with a foreground snapshot of our own. It can only fail to ever
-		// complete when the group is orphaned (EIO, discarded rather than
-		// blocked) or fd is not this process's controlling terminal at all
-		// (ENOTTY, as the unit tests' bare pseudo-terminal): neither leaves
-		// anything to restore to.
-		if saved != nil {
+		// A signal that ends the prompt while another process group holds the terminal leaves
+		// the terminal as that group has it: a restore from the background would stop the job
+		// until fg. When the check itself fails (EIO on a hung-up terminal), the restore runs,
+		// and answers that failure as having nothing to restore to.
+		restore := saved != nil
+		if restore && tty.death != 0 {
+			held, err := tty.holdsTerminal()
+			restore = held || err != nil
+		}
+		if restore {
 			_, _ = unix.Write(fd, bracketedPasteOff)
 			if restoreErr := tty.restoreTerminal(saved); restoreErr != nil && err == nil {
 				line, err = nil, restoreErr
@@ -212,18 +213,15 @@ func (t *promptTerminal) apply() error {
 	return nil
 }
 
-// restoreTerminal puts the terminal back to saved, reached only after the signal watcher has
-// joined. A tcsetattr from a background process group blocks, by the kernel's own job control,
-// until the job is foregrounded, then completes normally; ENOTTY (fd is not this process's
-// controlling terminal, as the unit tests' bare pseudo-terminal) or EIO (the group is orphaned,
-// which the kernel discards rather than blocks) mean there is nothing to restore to.
+// restoreTerminal puts the terminal back to saved, once the signal watcher has joined. A
+// tcsetattr from a background process group blocks, by the kernel's own job control, until the
+// job is foregrounded, then completes; ENOTTY (fd is not this process's controlling terminal, as
+// the unit tests' bare pseudo-terminal) or EIO (the group is orphaned, which the kernel discards
+// rather than blocks) mean there is nothing to restore to.
 func (t *promptTerminal) restoreTerminal(saved *unix.Termios) error {
 	for {
 		err := unix.IoctlSetTermios(t.fd, ioctlSetTermiosFlush, saved)
 		if errors.Is(err, unix.EINTR) {
-			if err := t.waitForeground(); err != nil {
-				return err
-			}
 			continue
 		}
 		if errors.Is(err, unix.ENOTTY) || errors.Is(err, unix.EIO) {

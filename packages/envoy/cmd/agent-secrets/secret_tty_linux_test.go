@@ -61,6 +61,17 @@ func lflag(t *testing.T, fd int) uint32 {
 	return tio.Lflag
 }
 
+// testBinary is the running test binary's absolute path, for a helper started in another
+// directory, where os.Args[0] as `go test -c` and a relative path run it would name nothing.
+func testBinary(t *testing.T) string {
+	t.Helper()
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // promptRead is what readHidden returned.
 type promptRead struct {
 	line []byte
@@ -406,7 +417,7 @@ func TestPromptQuitEndsTheProcessBySIGQUITWithNoCore(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command("bash", "-c",
 		`ulimit -c "$(ulimit -Hc)" && exec env --default-signal=QUIT "$0" -test.run='^TestPromptSignalHelper$'`,
-		os.Args[0])
+		testBinary(t))
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_PROMPT_HELPER=1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
