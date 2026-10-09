@@ -243,7 +243,7 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 // generation 1's hello by that second resolve. This process writes generation 1's claim before
 // generation 2's however the claim reaches the restart: supervisor.restore rewrites one stored
 // launching, or queued after a release, to StateLaunchUncertain, and one already stored
-// StateLaunchUncertain is written by its relaunch's admission (supervise's revive), before the
+// StateLaunchUncertain is written by its release (supervise's ReleaseUncertainLaunch), before the
 // launch writes generation 2. Every write goes through the Recording-wrapped store, which records
 // generation 1's hash in this process's own BootTokens though it never minted it, so the second
 // resolve comes back Stale, refused as "stale worker generation", and generation 2's own, freshly
@@ -258,10 +258,9 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 		c.State = supervise.StateLaunchUncertain
 		return recording.PutClaim(ctx, c)
 	}
-	admit := func(ctx context.Context, recording supervise.Store, c supervise.Claim) error {
+	release := func(ctx context.Context, recording supervise.Store, c supervise.Claim) error {
 		c.State = supervise.StateQueued
-		_, err := recording.AdmitClaim(ctx, c)
-		return err
+		return recording.PutClaim(ctx, c)
 	}
 
 	for _, tc := range []struct {
@@ -273,7 +272,7 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 	}{
 		{name: "generation 1 stored launching: restore's rewrite records it", seeded: supervise.StateLaunching, first: rewrite},
 		{name: "generation 1 stored queued after a release: restore's rewrite records it", seeded: supervise.StateQueued, first: rewrite},
-		{name: "generation 1 stored launch_uncertain: its relaunch's admission records it", seeded: supervise.StateLaunchUncertain, first: admit},
+		{name: "generation 1 stored launch_uncertain: its release records it", seeded: supervise.StateLaunchUncertain, first: release},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &relaunchingStore{}

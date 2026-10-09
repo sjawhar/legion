@@ -29,8 +29,10 @@ import (
 
 const (
 	defaultConfigPath = "./legion.yaml"
-	// stopTimeout bounds the wait for a stopping daemon, whose own exit is two bounded steps —
-	// draining the API and stamping the boot.
+	// stopTimeout bounds the wait for a stopping daemon, which returns at most 22 s after its stop
+	// begins once its boot is recorded: its stop budget, the boot's stamp and the store's close
+	// (the daemon package's stopBudget). A signal before then waits out the boot step under way
+	// first, each bounded by the boot's own 30 s (the daemon package's Run).
 	stopTimeout = 30 * time.Second
 	// requestTimeout bounds a CLI read of a daemon's HTTP API.
 	requestTimeout = 5 * time.Second

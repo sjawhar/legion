@@ -182,6 +182,9 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, decided := s.decision(r, token)
 	defer decided()
+	if s.stopped(w, "spawn") {
+		return
+	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
 		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
@@ -234,6 +237,9 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 		status := http.StatusOK
 		ctx, decided := s.decision(r, token)
 		defer decided()
+		if s.stopped(w, request) {
+			return
+		}
 		if err := m.Handle(ctx, ev); errors.Is(err, supervise.ErrSuspendHeld) {
 			status = http.StatusAccepted
 		} else if err != nil {
@@ -270,7 +276,10 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // would stay for good. A workflow issue's tree is the workflow's to close, and a worker's claim is
 // stopped, not closed.
 //
-// The root goes first, since its close is where the supervisor answers both of the questions that
+// The tree's claims are read first and held as this route's decisions (RouteDecisions), so a
+// daemon's stop that begins during the close keeps their worker stream connections; a read that
+// fails there closes nothing, and a close the daemon's stop has already begun is refused. Then the
+// root goes first, since its close is where the supervisor answers both of the questions that
 // decide it — whether a workflow issue backs the tree, and whether this claim is its tree's root
 // at all — where the answers and the close they decide sit together; a refused close stops
 // nothing, and the refusal an operator sees is the machine's. A close of a tree already retired
@@ -304,6 +313,9 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.decisions.begin(treeOthers(claims, c.Tree, token))()
+	if s.stopped(w, "close") {
+		return
+	}
 	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
 		s.operatorFailure(w, "close", token, err)
 		return

@@ -55,8 +55,10 @@ type Options struct {
 	// and a registration registers the controller only from a launch of the controller's claim.
 	// Unset (`controller: operator`), only the operator's capability registers it.
 	ControllerLaunched bool
-	// Stopping is done once the daemon's stop begins: a route whose decision fails from then on
-	// logs it at Info (logFailure), since the stop is what cut it short. Nil is never.
+	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
+	// connections no route holds (RouteDecisions): an operator's request that would change a claim
+	// is refused from then on (stopped), and a route whose decision fails logs it at Info
+	// (logFailure), since the stop is what cut it short. Nil is never.
 	Stopping context.Context
 	// Drained is done once the daemon's stop has drained the API, or the drain ran out, and ends
 	// every decision a route asked of a machine (decision). A decision in flight at the stop's
@@ -306,6 +308,20 @@ func (s *server) logFailure(msg string, args ...any) {
 		return
 	}
 	s.log.Error(msg, args...)
+}
+
+// stopped answers 503 and reports true once the daemon's stop has begun (Options.Stopping): an
+// operator's request that would change a claim is refused then, rather than decided without the
+// claim's worker stream connection, which the stop closes for every claim no route holds. The
+// caller asks only after it has recorded its claims (decision, RouteDecisions.begin), so a request
+// recorded too late for the stop to keep its connections always finds the stop begun.
+func (s *server) stopped(w http.ResponseWriter, request string) bool {
+	if s.stopping.Err() == nil {
+		return false
+	}
+	s.log.Info("api: refused an operator request: the daemon is stopping", "request", request)
+	writeJSON(w, http.StatusServiceUnavailable, errorBody(request+" refused: the daemon is stopping; ask again once it is back"))
+	return true
 }
 
 func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {

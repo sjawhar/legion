@@ -709,12 +709,14 @@ type supervision struct {
 	// draining is the worker stream's life and what the API's routes run their decisions on
 	// (api.Options.Drained), one context because they end together: when the API's drain does
 	// (endDrain). decided is the claims those routes are deciding (api.RouteDecisions), whose
-	// connections the halt keeps open.
-	draining context.Context
-	endDrain context.CancelFunc
-	decided  *api.RouteDecisions
-	wg       sync.WaitGroup
-	stopOnce sync.Once
+	// connections the halt keeps open. stopping ends when the stop begins (api.Options.Stopping).
+	draining  context.Context
+	endDrain  context.CancelFunc
+	decided   *api.RouteDecisions
+	stopping  context.Context
+	beginStop context.CancelFunc
+	wg        sync.WaitGroup
+	stopOnce  sync.Once
 
 	// halted closes when the stop begins (halt). stopBy is when the stop must end by, and drainBy
 	// when the API's drain must, both set before.
@@ -865,9 +867,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Stop:                  cfg.WorkerStopTimeout,
 		},
 	}
+	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
-		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(), halted: make(chan struct{}),
+		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
+		stopping: stopping, beginStop: beginStop, halted: make(chan struct{}),
 	}, nil
 }
 
@@ -977,7 +981,15 @@ func (s *supervision) launchUnfinished(tokens []claim.Token) {
 		if !ok {
 			continue
 		}
-		if !m.ReleaseUncertainLaunch() {
+		released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
+		switch {
+		case err != nil && s.supervisor.ctx.Err() != nil:
+			s.log.Info("supervise: the daemon's stop ended the release of an uncertain launch; the next boot takes the claim up", "claim", token, "error", err)
+			continue
+		case err != nil:
+			s.log.Error("supervise: release an uncertain launch", "claim", token, "error", err)
+			continue
+		case !released:
 			c := m.Claim()
 			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
 			continue
@@ -1042,8 +1054,9 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 }
 
 // halt begins the stop, once. It sets when the stop and the API's drain must end by (stopBy,
-// drainBy), says the daemon is stopping, why (cause) and which claims are deciding, and closes
-// halted. Then, in this order:
+// drainBy), says the daemon is stopping, why (cause) and which claims are deciding, closes halted,
+// and tells the API's routes the stop has begun (api.Options.Stopping), from when an operator's
+// request that would change a claim is refused. Then, in this order:
 //
 //  1. No machine is fed another event (supervisor.halt).
 //  2. The worker stream stops answering a shim's hello and closes every shim connection except
@@ -1058,13 +1071,15 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 //     waits minutes for the previous pod to go, the tree's other pods to finish workspace-init and
 //     the new pod to appear. A decision an API route asked for runs on until the drain ends.
 //
-// Two of those orderings are required: the first step comes before the second, so the Closed
-// events of the connections Narrow ends reach no machine; and the second before the third, so a
-// hello whose resolve the cancellation fails is already the stop's, and closes unrefused. A launch
-// the cancellation cuts short leaves its claim launching with no process recorded, which the next
-// boot relaunches once its orphan reconciliation has run. Nothing in halt waits, so the stop's
-// budget (stopBudget) runs from the moment it begins. A nil cause is a boot that refused before it
-// was recorded, which served nothing and says nothing more.
+// Three orderings are required. The routes learn the stop has begun before the second step, so an
+// operator's request that records its claim too late for Narrow to keep its connection finds the
+// stop begun and is refused, rather than decided without the connection. The first step comes
+// before the second, so the Closed events of the connections Narrow ends reach no machine. The
+// second comes before the third, so a hello whose resolve the cancellation fails is already the
+// stop's, and closes unrefused. A launch the cancellation cuts short leaves its claim launching
+// with no process recorded, which the next boot relaunches once its orphan reconciliation has run.
+// Nothing in halt waits, so the stop's budget (stopBudget) runs from the moment it begins. A nil
+// cause is a boot that refused before it was recorded, which served nothing and says nothing more.
 func (s *supervision) halt(cause error) {
 	s.haltOnce.Do(func() {
 		now := time.Now()
@@ -1074,6 +1089,7 @@ func (s *supervision) halt(cause error) {
 				"deciding", s.supervisor.inDecision(), "cause", cause.Error())
 		}
 		close(s.halted)
+		s.beginStop()
 		s.supervisor.halt()
 		s.stream.Narrow(s.decided.Holds)
 		s.cancel()
@@ -1146,7 +1162,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
-		Stopping:           s.supervisor.ctx,
+		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,
 		Log:                s.log,

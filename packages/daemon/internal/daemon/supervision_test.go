@@ -560,9 +560,8 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 // it again rather than leave a claim that waits on a process nothing knows. The previous daemon
 // left one of two rows: launching with no locator, its process (if one opened at all) never
 // recorded; or queued at the generation it had, a launch it released at boot (supervise's
-// ReleaseUncertainLaunch) and stopped before the relaunch wrote its next generation, since the
-// relaunch's admission, and the retirement of a finished task before it, write the claim queued
-// first (LEGION-650).
+// ReleaseUncertainLaunch writes the release) and stopped before the relaunch wrote its next
+// generation (LEGION-650).
 func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
