@@ -62,6 +62,11 @@ func walkWindowed[T any](
 		return fmt.Errorf("%s in [%s, %s]: %w", scope, formatWindowBound(since), formatWindowBound(until), err)
 	}
 
+	// A window under two seconds is the floor: GitHub's date qualifiers cannot split finer than a
+	// second, so it cannot be halved into two windows that do not overlap. Such a window whose
+	// total is past maxResults but within githubResultCap is visited whole, so visit can receive
+	// up to githubResultCap results at once, past the maxResults it was asked to bound. Only one
+	// past githubResultCap is an error, since its results past the cap are unreachable.
 	if total > maxResults && until.Sub(since) >= 2*minimumSearchWindow {
 		mid := since.Add(until.Sub(since) / 2)
 		if err := walkWindowed(since, mid, scope, maxResults, newFetcher, visit); err != nil {

@@ -58,25 +58,23 @@ func (in *Intake) HasApp() bool {
 	return in != nil && in.github != nil
 }
 
-// Run subscribes to the GitHub events this slice needs and processes them until ctx is
-// cancelled. Idle (logged once) without GitHub App credentials or a configured delivery_settings
-// row, mirroring architecture.Run's shape. Subject resolution (which repository, which workflow
-// filenames) reads delivery_settings on every settingsPollInterval tick (not once at startup): a
-// settings change rebinds the durable consumer's filter subjects in place (bind's UpdateConsumer
-// path) within one poll interval, with no restart needed.
+// Run binds the durable consumer and processes GitHub events until ctx is cancelled. Idle
+// (logged once) without GitHub App credentials or a configured delivery_settings row, mirroring
+// architecture.Run's shape.
 //
-// The PR-checks workflow subscription is live-reachable only for a fork-originated pull request:
-// Envoy's own webhook normalizer (internal/contracts/normalize.go, untouched by this package)
-// drops a workflow_run envelope whose pull_requests array is non-empty, which GitHub populates
-// for a same-repo PR's run but reports empty for a cross-fork one. For the common same-repo case
-// this subscription never fires at all; the five-minute reconcile is the only path that ever
-// records those runs. Kept rather than removed because it is the only live-update path for the
-// fork case, which does reach it.
+// The durable carries one filter subject, githubIntakeSubject, which no setting changes, so it is
+// bound once and never rebound. delivery_settings is read on every settingsPollInterval tick and
+// published to the running handler, so a settings change -- a different deploy repository or
+// workflow path -- takes effect within one poll interval with no restart. route does all the
+// filtering, from those settings.
 //
-// bus.Client holds only one JetStream subscription at a time (a later Subscribe call
-// unsubscribes an earlier one, per its own doc comment) -- so this is one durable consumer with
-// several filter subjects (NATS 2.10's FilterSubjects), not one consumer per subject, and the
-// single handler dispatches on the decoded payload's own kind field.
+// The PR-checks workflow path is live-reachable only for a fork-originated pull request: Envoy's
+// own webhook normalizer (internal/contracts/normalize.go, untouched by this package) drops a
+// workflow_run envelope whose pull_requests array is non-empty, which GitHub populates for a
+// same-repo PR's run but reports empty for a cross-fork one. For the common same-repo case those
+// runs never arrive here at all; the five-minute reconcile is the only path that ever records
+// them. Routed rather than ignored because it is the only live-update path for the fork case,
+// which does reach it.
 func (in *Intake) Run(ctx context.Context) {
 	if !in.HasApp() {
 		slog.Info("dispatch delivery: no GitHub App key — intake is idle")
@@ -108,7 +106,7 @@ func (in *Intake) Run(ctx context.Context) {
 			slog.Error("dispatch delivery: deploy_repo setting", "error", err)
 			return
 		}
-		current.Store(&routeSettings{settings: settings, owner: owner, repo: repo})
+		current.Store(&routeSettings{settings: settings, deployRepo: owner + "/" + repo})
 		if sub != nil {
 			return
 		}
@@ -117,7 +115,7 @@ func (in *Intake) Run(ctx context.Context) {
 			if routing == nil {
 				return nil
 			}
-			return in.route(ctx, routing.settings, routing.owner, routing.repo, payload)
+			return in.route(ctx, *routing, payload)
 		})
 		if !ok {
 			return
@@ -143,12 +141,12 @@ func (in *Intake) Run(ctx context.Context) {
 // operator restarting the server. A var so a test can shrink it.
 var settingsPollInterval = 30 * time.Second
 
-// routeSettings is what the handler needs to route one envelope: the settings row and the deploy
-// repository split into its owner and name.
+// routeSettings is what the handler needs to route one envelope: the settings row, and the deploy
+// repository as "owner/repo" -- validated by splitRepo and built once per settings read rather
+// than once per envelope, since route compares every workflow envelope against it.
 type routeSettings struct {
-	settings DeliverySettings
-	owner    string
-	repo     string
+	settings   DeliverySettings
+	deployRepo string
 }
 
 // route dispatches one decoded payload to the PR or workflow handler by its kind field, and to
@@ -156,7 +154,8 @@ type routeSettings struct {
 // workflow path against the configured ones. It is the whole filter: the durable is handed every
 // GitHub notification on the bus (githubIntakeSubject), so everything this slice does not want
 // is discarded here, before any GitHub call or database write.
-func (in *Intake) route(ctx context.Context, settings DeliverySettings, owner, repo string, payload map[string]string) error {
+func (in *Intake) route(ctx context.Context, routing routeSettings, payload map[string]string) error {
+	settings := routing.settings
 	switch payload["kind"] {
 	case "pr":
 		// Every repository's pull requests: the population spans any repository the configured
@@ -167,7 +166,7 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, owner, r
 		// The workflow runs this slice records are the deploy repository's own. Another
 		// repository's run of a file with the same path is not one of them, and routing it would
 		// fetch a run this slice never stores.
-		if payload["repo"] != owner+"/"+repo {
+		if payload["repo"] != routing.deployRepo {
 			return nil
 		}
 		switch payload["path"] {
@@ -193,15 +192,20 @@ const deliveryConsumerName = "delivery-events"
 // handler decides what to do with each (route), and discards the ones this slice does not want,
 // which is a JSON decode and two map lookups per envelope.
 //
-// One subject rather than the narrow set this once carried -- the PR subject plus one per
-// configured workflow file, through NATS 2.10's FilterSubjects -- because a consumer carrying
-// that set matches nothing: with twelve messages on a subject one of those filters names, the
-// durable reports NumPending 0 and is handed none of them, while a consumer carrying that one
-// subject alone reports all twelve (TestIntakeDrainsABacklogPublishedBeforeItBinds). A filter
-// the server does not apply is silent -- the consumer looks healthy and simply never receives
-// anything -- so this takes the shape the server demonstrably serves and filters in the handler.
-// It also means the filter no longer depends on the settings row, so a settings change needs no
-// rebind.
+// One subject rather than the set this once carried -- the wildcard pull-request subject
+// notifications.github.*.*.pr.* beside one notifications.github.<owner>.<repo>.workflow.<file>.>
+// per configured workflow file, through FilterSubjects -- because nats-server 2.10.29 does not
+// hand that set's workflow messages over. Measured on one stream holding five pull-request and
+// twelve workflow-run messages (TestWhichFilterShapeDeliversAWorkflowSubject): a durable carrying
+// the set reports all of them in NumPending, then delivers the five pull requests and none of the
+// runs, by pull fetch or push subscription alike. Each filter alone delivers its own messages,
+// and so do two workflow filters together, or a concrete pull-request subject beside the
+// workflow filter; only the wildcard pull-request filter beside it withholds the workflow
+// messages, in either order. Production showed the same shape: about 990 pull requests reached
+// the timeline against 43 workflow runs. A withheld message is silent -- the consumer reports it
+// pending and never errors -- so this takes the one shape that delivers everything and filters
+// in the handler. It also means the filter no longer depends on the settings row, so a settings
+// change needs no rebind.
 const githubIntakeSubject = "notifications.github.>"
 
 // intakeMessageTimeout bounds how long one envelope's own handling may take -- its GitHub calls
@@ -262,10 +266,11 @@ func (in *Intake) bind(handle func(context.Context, map[string]string) error) (*
 		slog.Error("dispatch delivery: look up NATS consumer", "name", deliveryConsumerName, "error", err)
 		return nil, false
 	case len(info.Config.FilterSubjects) > 0:
-		// A durable an earlier release left carrying the filter-subject set the server does not
-		// apply (githubIntakeSubject). A consumer's filter cannot be moved from that set to one
-		// subject in place, so it is replaced -- at its own ack floor, so the replacement neither
-		// replays what it acknowledged nor skips what it had not.
+		// A durable an earlier release left carrying a filter-subject set, which withholds the
+		// workflow runs this slice exists to record (githubIntakeSubject). It is replaced rather
+		// than updated in place, and replaced at its own ack floor, so the replacement neither
+		// replays what the old durable acknowledged nor skips what it had not
+		// (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
 		recreate := wanted
 		recreate.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
 		recreate.OptStartSeq = info.AckFloor.Stream + 1

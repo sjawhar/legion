@@ -124,9 +124,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	t.Cleanup(natsClient.Close)
 
 	intake := NewIntake(natsClient, pool, client)
-	runCtx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	go intake.Run(runCtx)
+	startIntake(t, intake)
 
 	envelopeFields := map[string]string{
 		"kind": "pr", "action": "closed", "repo": "acme/widgets", "number": "42",

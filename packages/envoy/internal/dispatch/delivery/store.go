@@ -187,8 +187,8 @@ func PruneMergedPullRequestProgress(ctx context.Context, pool *store.Pool, keep 
 	}
 	_, err := pool.Exec(ctx, `
 		delete from delivery_reconcile_progress
-		where step like 'merged_pull_requests/installation/%' and not (step = any($1))
-	`, steps)
+		where starts_with(step, $1) and not (step = any($2))
+	`, mergedPullRequestsStepPrefix, steps)
 	return err
 }
 

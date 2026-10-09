@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -13,9 +14,11 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -27,6 +30,49 @@ func fastPageRetries(t *testing.T) {
 	previous := githubPageRetryWait
 	githubPageRetryWait = time.Millisecond
 	t.Cleanup(func() { githubPageRetryWait = previous })
+}
+
+// TestWalkWindowedVisitsAWindowItCannotHalveWhole pins the one case where visit receives more
+// than maxResults at once. GitHub's date qualifiers cannot split finer than a second, so a window
+// under two seconds is the floor: one whose total is past maxResults but within githubResultCap
+// is visited whole rather than halved or refused, and one past githubResultCap is refused, since
+// its results past the cap are unreachable however the window is asked for.
+func TestWalkWindowedVisitsAWindowItCannotHalveWhole(t *testing.T) {
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := since.Add(minimumSearchWindow)
+	const maxResults = 10
+
+	walk := func(total int) (fetchedWindows, visited int, err error) {
+		err = walkWindowed(since, until, "test", maxResults,
+			func(time.Time, time.Time) func() ([]int, int, error) {
+				fetchedWindows++
+				served := false
+				return func() ([]int, int, error) {
+					if served {
+						return nil, total, nil
+					}
+					served = true
+					return make([]int, total), total, nil
+				}
+			},
+			func(_ time.Time, items []int) error {
+				visited += len(items)
+				return nil
+			})
+		return fetchedWindows, visited, err
+	}
+
+	windows, visited, err := walk(githubResultCap)
+	if err != nil {
+		t.Fatalf("a %s window holding %d results (past maxResults %d, at githubResultCap) failed: %v", minimumSearchWindow, githubResultCap, maxResults, err)
+	}
+	if windows != 1 || visited != githubResultCap {
+		t.Fatalf("a %s window holding %d results was fetched as %d windows and visited %d results, want 1 window visited whole", minimumSearchWindow, githubResultCap, windows, visited)
+	}
+
+	if _, visited, err := walk(githubResultCap + 1); err == nil || visited != 0 {
+		t.Fatalf("a %s window holding %d results visited %d and returned %v, want it refused with nothing visited", minimumSearchWindow, githubResultCap+1, visited, err)
+	}
 }
 
 // maximalRun is one workflow run as big as GitHub serves them: its head commit's message is the
@@ -381,12 +427,12 @@ func countRuns(t *testing.T, ctx context.Context, pool *store.Pool) int {
 }
 
 // TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft holds what bind does to the
-// durable production already has. An earlier release left it with the filter-subject set the
-// server does not apply -- so the consumer was handed nothing at all -- and with the server's
-// own flow control, 1,000 messages outstanding against a 30-second ack wait, which redelivers
-// faster than a handler doing its GitHub calls inline can acknowledge. Neither can be set once
-// and forgotten, since the durable already exists: bind has to correct both without an operator
-// noticing a log line, which is what this holds.
+// durable production already has. An earlier release left it with a filter-subject set that
+// withholds every workflow run (TestWhichFilterShapeDeliversAWorkflowSubject), and with the
+// server's own flow control, 1,000 messages outstanding against a 30-second ack wait, which
+// redelivers faster than a handler doing its GitHub calls inline can acknowledge. Neither can be
+// set once and forgotten, since the durable already exists: bind has to correct both without an
+// operator noticing a log line, which is what this holds.
 func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	settings := seedDeliverySettings(t, ctx, pool)
@@ -419,29 +465,31 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	}
 
 	intake := NewIntake(natsClient, pool, newFakeGitHub(t).newTestClient())
-	runCtx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	go intake.Run(runCtx)
+	startIntake(t, intake)
 
-	deadline := time.Now().Add(20 * time.Second)
+	// bind replaces this durable (it carries a filter-subject set), deleting it and creating its
+	// replacement, so a read can land between the two and find no durable at all; that is "not
+	// yet", not a failure.
 	var info *natsgo.ConsumerInfo
-	for {
-		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	waitFor(t, 20*time.Second, func() bool {
+		read, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		if errors.Is(err, natsgo.ErrConsumerNotFound) {
+			return false
+		}
 		if err != nil {
 			t.Fatalf("read consumer info: %v", err)
 		}
-		if info.Config.MaxAckPending == intakeMaxAckPending && info.Config.AckWait == intakeAckWait() {
-			break
+		info = read
+		return info.Config.MaxAckPending == intakeMaxAckPending && info.Config.AckWait == intakeAckWait()
+	}, func() string {
+		if info == nil {
+			return fmt.Sprintf("no durable named %s after %s", deliveryConsumerName, 20*time.Second)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("durable ack_wait/max_ack_pending = %s/%d after %s, want %s/%d (bind must correct an earlier release's flow control in place)",
-				info.Config.AckWait, info.Config.MaxAckPending, 20*time.Second, intakeAckWait(), intakeMaxAckPending)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return fmt.Sprintf("durable ack_wait/max_ack_pending = %s/%d after %s, want %s/%d (bind must correct an earlier release's flow control)",
+			info.Config.AckWait, info.Config.MaxAckPending, 20*time.Second, intakeAckWait(), intakeMaxAckPending)
+	})
 	if info.Config.FilterSubject != githubIntakeSubject || len(info.Config.FilterSubjects) > 0 {
-		t.Fatalf("durable filter = %q / %v, want the one subject the server applies (%q)",
-			info.Config.FilterSubject, info.Config.FilterSubjects, githubIntakeSubject)
+		t.Fatalf("durable filter = %q / %v, want %q", info.Config.FilterSubject, info.Config.FilterSubjects, githubIntakeSubject)
 	}
 	// The bound this release holds: what NATS may have outstanding has to be acknowledgeable
 	// inside the ack wait, handled one at a time under intakeMessageTimeout.
@@ -450,10 +498,13 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	}
 }
 
-// TestWhichFilterShapeMatchesAWorkflowSubject pins why the durable an earlier release left was
-// handed nothing: it probes the same stored messages with each filter shape in turn and reports
-// what each one matches.
-func TestWhichFilterShapeMatchesAWorkflowSubject(t *testing.T) {
+// TestWhichFilterShapeDeliversAWorkflowSubject pins why the durable an earlier release left never
+// recorded a workflow run. It stores the same workflow-run messages, then reads them through each
+// filter shape in turn, and reports both what each shape claims (NumPending) and what it hands
+// over. Every shape claims all of them. The old filter set -- the wildcard pull-request subject
+// beside the workflow subject -- hands over none of the runs while handing over every pull
+// request, and the comment on githubIntakeSubject rests on that.
+func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	natsClient := intakeTestClient(t)
 	const stored = 12
 	for i := range stored {
@@ -501,6 +552,56 @@ func TestWhichFilterShapeMatchesAWorkflowSubject(t *testing.T) {
 	pushWide := probe("push, FilterSubject = "+githubIntakeSubject,
 		natsgo.ConsumerConfig{DeliverSubject: natsgo.NewInbox(), FilterSubject: githubIntakeSubject})
 
+	// NumPending is what the server reports; what it hands over is a separate question. Fetch
+	// from a fresh pull durable of each shape by name, through the jetstream package, which binds
+	// no subject, and count what actually arrives.
+	js, err := jetstream.New(natsClient.Conn)
+	if err != nil {
+		t.Fatalf("open the jetstream API: %v", err)
+	}
+	fetches := 0
+	delivered := func(name string, filters ...string) int {
+		t.Helper()
+		fetches++
+		config := jetstream.ConsumerConfig{Durable: fmt.Sprintf("probe-fetch-%d", fetches), AckPolicy: jetstream.AckExplicitPolicy}
+		if len(filters) == 1 && !strings.HasPrefix(name, "plural") {
+			config.FilterSubject = filters[0]
+		} else {
+			config.FilterSubjects = filters
+		}
+		consumer, err := js.CreateConsumer(t.Context(), bus.Stream, config)
+		if err != nil {
+			t.Logf("fetch %s: create refused: %v", name, err)
+			return 0
+		}
+		defer func() {
+			if err := js.DeleteConsumer(t.Context(), bus.Stream, config.Durable); err != nil {
+				t.Logf("delete probe consumer %s: %v", config.Durable, err)
+			}
+		}()
+		batch, err := consumer.Fetch(stored, jetstream.FetchMaxWait(3*time.Second))
+		if err != nil {
+			t.Logf("fetch %s: %v", name, err)
+			return 0
+		}
+		got := 0
+		for msg := range batch.Messages() {
+			if err := msg.Ack(); err != nil {
+				t.Logf("ack on %s: %v", name, err)
+			}
+			got++
+		}
+		t.Logf("fetch %s: %d of %d delivered (batch error %v)", name, got, stored, batch.Error())
+		return got
+	}
+	delivered("single, the workflow subject", oldSet[1])
+	delivered("plural, the workflow subject alone", oldSet[1])
+	delivered("plural, the PR subject then the workflow subject", oldSet[0], oldSet[1])
+	delivered("plural, the workflow subject then the PR subject", oldSet[1], oldSet[0])
+	delivered("plural, a concrete PR subject then the workflow subject", "notifications.github.acme.widgets.pr.1", oldSet[1])
+	delivered("plural, the workflow subject then the PR-checks workflow subject", oldSet[1], oldSet[2])
+	delivered("plural, the whole old set", oldSet...)
+
 	// The whole config the stalled release built, field for field, under a name of its own: a
 	// durable push consumer with the three filter subjects and this package's flow control. Kept
 	// alive rather than probed, because the subscription bound to it below is the subject here.
@@ -517,11 +618,20 @@ func TestWhichFilterShapeMatchesAWorkflowSubject(t *testing.T) {
 	}
 	t.Logf("whole old config matched %d of %d stored messages", old.NumPending, stored)
 
-	// Each consumer matches every stored message, so what differs is the subscription bound to
-	// it. A plural-filter consumer leaves FilterSubject empty, and an empty subject is the only
-	// one nats.go accepts against it; a single-filter consumer must be subscribed on its own
-	// filter subject. Bind each the way its release does and count what actually arrives.
+	// Bound with an empty subject, the only one nats.go accepts against a plural-filter consumer.
+	// Against the whole old set nothing arrives -- but the fetches above show the server hands that
+	// set none of these messages however it is read. A plural set the server does deliver, bound
+	// the same way, separates the empty subject from the filter set.
 	t.Logf("bound to the old config with an empty subject: %d of %d arrived", drain(t, natsClient, "probe-old-config", ""), stored)
+	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:        "probe-plural-delivering",
+		DeliverSubject: natsgo.NewInbox(),
+		FilterSubjects: []string{oldSet[1], oldSet[2]},
+		AckPolicy:      natsgo.AckExplicitPolicy,
+	}); err != nil {
+		t.Fatalf("create the delivering plural-filter durable: %v", err)
+	}
+	t.Logf("bound to [workflow, PR-checks workflow] with an empty subject: %d of %d arrived", drain(t, natsClient, "probe-plural-delivering", ""), stored)
 	single, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
 		Durable:        "probe-new-config",
 		DeliverSubject: natsgo.NewInbox(),
@@ -543,6 +653,51 @@ func TestWhichFilterShapeMatchesAWorkflowSubject(t *testing.T) {
 	}
 	t.Logf("verdict: pull single=%d plural-one=%d plural-all=%d | push single=%d plural-one=%d plural-all=%d wide=%d (of %d stored)",
 		singleWorkflow, pluralOne, pluralAll, pushSingle, pushPluralOne, pushPluralAll, pushWide, stored)
+
+	// Production's durable carried this set and did deliver -- 990 pull requests reached the
+	// timeline against 43 workflow runs. Add pull-request messages, which the set's first filter
+	// names, and count by kind what a fresh durable of the whole old set hands over.
+	const prs = 5
+	for n := range prs {
+		payload, err := json.Marshal(map[string]string{"kind": "pr", "repo": "acme/widgets", "number": strconv.Itoa(n + 1)})
+		if err != nil {
+			t.Fatalf("encode pull request payload: %v", err)
+		}
+		id := fmt.Sprintf("%s-pr-%d", t.Name(), n+1)
+		if err := natsClient.Publish(contracts.Envelope{
+			EventID: id, Source: "github", SourceEventID: id, DedupeKey: "github." + id,
+			Topic:   fmt.Sprintf("notifications.github.acme.widgets.pr.%d", n+1),
+			Payload: string(payload), TraceID: id, IssuedAt: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("publish pull request envelope: %v", err)
+		}
+	}
+	byKind, err := js.CreateConsumer(t.Context(), bus.Stream, jetstream.ConsumerConfig{
+		Durable: "probe-by-kind", FilterSubjects: oldSet, AckPolicy: jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		t.Fatalf("create the by-kind durable: %v", err)
+	}
+	batch, err := byKind.Fetch(stored+prs, jetstream.FetchMaxWait(3*time.Second))
+	if err != nil {
+		t.Fatalf("fetch by kind: %v", err)
+	}
+	gotPRs, gotRuns := 0, 0
+	for msg := range batch.Messages() {
+		if strings.Contains(msg.Subject(), ".pr.") {
+			gotPRs++
+		} else {
+			gotRuns++
+		}
+		if err := msg.Ack(); err != nil {
+			t.Logf("ack by kind: %v", err)
+		}
+	}
+	t.Logf("whole old set by kind: %d of %d pull requests, %d of %d workflow runs delivered", gotPRs, prs, gotRuns, stored)
+	if gotPRs != prs || gotRuns != 0 {
+		t.Fatalf("the old filter set delivered %d of %d pull requests and %d of %d workflow runs; the intake's filter comment says it delivers every pull request and no workflow run, so revisit githubIntakeSubject's comment",
+			gotPRs, prs, gotRuns, stored)
+	}
 }
 
 // drain binds a push subscription to consumer on subject, the way this package's bind does, and
@@ -592,9 +747,7 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 
 	natsClient := intakeTestClient(t)
 	intake := NewIntake(natsClient, pool, fake.newTestClient())
-	runCtx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	go intake.Run(runCtx)
+	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
 	// A workflow file neither setting names, and another repository's run of the deploy file.
@@ -608,28 +761,192 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 	}
 
 	// Every one acknowledged: the ack floor reaches the last message the stream holds.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
+	var info *natsgo.ConsumerInfo
+	var lastSeq uint64
+	waitFor(t, 30*time.Second, func() bool {
 		stream, err := natsClient.JS().StreamInfo(bus.Stream)
 		if err != nil {
 			t.Fatalf("read stream info: %v", err)
 		}
-		info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
 		if err != nil {
 			t.Fatalf("read consumer info: %v", err)
 		}
-		if info.AckFloor.Stream >= stream.State.LastSeq && info.NumPending == 0 {
-			t.Logf("discarded %d envelopes: ack_floor=%d last_seq=%d redelivered=%d",
-				unwanted, info.AckFloor.Stream, stream.State.LastSeq, info.NumRedelivered)
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the intake did not acknowledge every envelope it discarded\n%s", intakeStateReport(t, natsClient))
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		lastSeq = stream.State.LastSeq
+		return info.AckFloor.Stream >= lastSeq && info.NumPending == 0
+	}, func() string {
+		return fmt.Sprintf("the intake did not acknowledge every envelope it discarded\n%s", intakeStateReport(t, natsClient))
+	})
+	t.Logf("discarded %d envelopes: ack_floor=%d last_seq=%d redelivered=%d",
+		unwanted, info.AckFloor.Stream, lastSeq, info.NumRedelivered)
 	if stored := countRuns(t, ctx, pool); stored != 0 {
 		t.Fatalf("delivery_runs rows = %d, want 0 (a discarded envelope writes nothing)", stored)
+	}
+}
+
+// TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives holds that a settings change reaches
+// the running intake with no rebind: the durable's filter subject never changes, so the only way
+// a new deploy workflow path takes effect is the poll publishing the new settings to the handler.
+// After the change, an envelope for the new path is handled and one for the old path is discarded
+// with no GitHub call.
+func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+	oldPath, newPath := settings.DeployWorkflowPath, ".github/workflows/release.yml"
+
+	var mu sync.Mutex
+	fetched := map[int64]bool{}
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("run_id"), 10, 64)
+		if err != nil {
+			t.Errorf("parse run id %q: %v", r.PathValue("run_id"), err)
+		}
+		mu.Lock()
+		fetched[id] = true
+		mu.Unlock()
+		mustEncode(t, w, smallRun(id, time.Now().UTC()))
+	})
+
+	natsClient := intakeTestClient(t)
+	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	startIntake(t, intake)
+	awaitBoundDurable(t, natsClient)
+
+	settings.DeployWorkflowPath = newPath
+	if _, err := PutSettings(ctx, pool, settings, model.Actor{Kind: "system", ID: "delivery-test"}); err != nil {
+		t.Fatalf("change the deploy workflow path: %v", err)
+	}
+	// Two poll intervals: the change is read on the first tick after the write, whichever side of
+	// a tick the write lands.
+	time.Sleep(2 * settingsPollInterval)
+
+	const onNewPath, onOldPath = int64(8001), int64(8002)
+	publishWorkflowEnvelope(t, natsClient, "acme", "widgets", newPath, onNewPath)
+	awaitRuns(t, ctx, pool, natsClient, 1, 30*time.Second)
+	publishWorkflowEnvelope(t, natsClient, "acme", "widgets", oldPath, onOldPath)
+
+	// The old-path envelope is acknowledged without being fetched.
+	waitFor(t, 30*time.Second, func() bool {
+		info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		return err == nil && info.NumPending == 0 && info.NumAckPending == 0
+	}, func() string {
+		return fmt.Sprintf("the intake did not acknowledge the old path's envelope\n%s", intakeStateReport(t, natsClient))
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if !fetched[onNewPath] {
+		t.Fatalf("the run on the new deploy workflow path %s was never fetched", newPath)
+	}
+	if fetched[onOldPath] {
+		t.Fatalf("the run on the old deploy workflow path %s was fetched after the settings moved off it", oldPath)
+	}
+	if stored := countRuns(t, ctx, pool); stored != 1 {
+		t.Fatalf("delivery_runs rows = %d, want 1 (only the new path's run)", stored)
+	}
+}
+
+// TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor holds the cutover from the durable
+// production already has: one carrying the plural filter, part way through its stream, with some
+// messages acknowledged and the rest not. bind replaces it at its own ack floor, so the
+// replacement delivers exactly the messages the old durable had not acknowledged -- none of the
+// acknowledged ones come back, and none of the unacknowledged ones are skipped.
+func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+	natsClient := intakeTestClient(t)
+
+	const acknowledged, unacknowledged = 5, 7
+	for i := range acknowledged + unacknowledged {
+		publishWorkflowEnvelope(t, natsClient, "acme", "widgets", settings.DeployWorkflowPath, int64(9000+i))
+	}
+
+	// A plural-filter durable part way through its stream, which is what bind replaces. Its filter
+	// set is the two workflow subjects alone rather than the whole set an earlier release carried:
+	// that set never hands a workflow run over (TestWhichFilterShapeDeliversAWorkflowSubject), so
+	// it could not acknowledge one, and the replacement keys on the stream sequence of the ack
+	// floor whichever plural set the durable carries. The first messages are acknowledged through
+	// a pull fetch, which reaches them in stream order, so the ack floor sits at the last of them.
+	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable: deliveryConsumerName,
+		FilterSubjects: []string{
+			contracts.GithubWorkflowSubject("acme", "widgets", pathBaseForTest(settings.DeployWorkflowPath), ">"),
+			contracts.GithubWorkflowSubject("acme", "widgets", pathBaseForTest(settings.PRChecksWorkflowPath), ">"),
+		},
+		AckPolicy: natsgo.AckExplicitPolicy,
+	}); err != nil {
+		t.Fatalf("create the plural-filter durable: %v", err)
+	}
+	js, err := jetstream.New(natsClient.Conn)
+	if err != nil {
+		t.Fatalf("open the jetstream API: %v", err)
+	}
+	legacy, err := js.Consumer(ctx, bus.Stream, deliveryConsumerName)
+	if err != nil {
+		t.Fatalf("look up the plural-filter durable: %v", err)
+	}
+	batch, err := legacy.Fetch(acknowledged, jetstream.FetchMaxWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("fetch from the plural-filter durable: %v", err)
+	}
+	got := 0
+	for msg := range batch.Messages() {
+		if err := msg.DoubleAck(ctx); err != nil {
+			t.Fatalf("acknowledge a message on the plural-filter durable: %v", err)
+		}
+		got++
+	}
+	if err := batch.Error(); err != nil || got != acknowledged {
+		t.Fatalf("fetch the first %d messages: got %d, err %v", acknowledged, got, err)
+	}
+	before, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	if err != nil {
+		t.Fatalf("read the plural-filter durable: %v", err)
+	}
+	if before.AckFloor.Consumer != acknowledged {
+		t.Fatalf("plural-filter durable ack floor = %d, want %d before the cutover", before.AckFloor.Consumer, acknowledged)
+	}
+
+	var mu sync.Mutex
+	fetched := map[int64]int{}
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("run_id"), 10, 64)
+		if err != nil {
+			t.Errorf("parse run id %q: %v", r.PathValue("run_id"), err)
+		}
+		mu.Lock()
+		fetched[id]++
+		mu.Unlock()
+		mustEncode(t, w, smallRun(id, time.Now().UTC()))
+	})
+	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	startIntake(t, intake)
+
+	awaitRuns(t, ctx, pool, natsClient, unacknowledged, 30*time.Second)
+	// Time for an acknowledged message the replacement wrongly replayed to arrive too.
+	time.Sleep(2 * time.Second)
+	t.Log(intakeStateReport(t, natsClient))
+
+	after, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	if err != nil {
+		t.Fatalf("read the replacement durable: %v", err)
+	}
+	if after.Config.FilterSubject != githubIntakeSubject || len(after.Config.FilterSubjects) > 0 {
+		t.Fatalf("replacement filter = %q / %v, want %q", after.Config.FilterSubject, after.Config.FilterSubjects, githubIntakeSubject)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := range acknowledged + unacknowledged {
+		id, got := int64(9000+i), fetched[int64(9000+i)]
+		if i < acknowledged && got != 0 {
+			t.Errorf("run %d was acknowledged on the old durable and replayed %d times by the replacement", id, got)
+		}
+		if i >= acknowledged && got != 1 {
+			t.Errorf("run %d was unacknowledged on the old durable and delivered %d times by the replacement, want 1", id, got)
+		}
 	}
 }
 
@@ -691,6 +1008,24 @@ func publishWorkflowEnvelope(t *testing.T, natsClient *bus.Client, owner, repo, 
 	return duplicate
 }
 
+// startIntake runs intake until the test ends, and waits for Run to return before the test's own
+// cleanups go on. Cancelling alone does not: Run reads settingsPollInterval and the intake
+// flow-control vars, and the next test's shrinkIntakeFlowControl writes them, so a Run still
+// unwinding from the previous test is a data race on them.
+func startIntake(t *testing.T, intake *Intake) {
+	t.Helper()
+	runCtx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		intake.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
 // intakeTestClient connects one NATS client for an intake test and closes it with the test.
 func intakeTestClient(t *testing.T) *bus.Client {
 	t.Helper()
@@ -706,17 +1041,14 @@ func intakeTestClient(t *testing.T) *bus.Client {
 // test that means to publish into a bound consumer does not race the bind.
 func awaitBoundDurable(t *testing.T, natsClient *bus.Client) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
-		if err == nil && info.PushBound && info.Config.MaxAckPending == intakeMaxAckPending {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("intake never bound its durable: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	var err error
+	waitFor(t, 20*time.Second, func() bool {
+		var info *natsgo.ConsumerInfo
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		return err == nil && info.PushBound && info.Config.MaxAckPending == intakeMaxAckPending
+	}, func() string {
+		return fmt.Sprintf("intake never bound its durable: %v", err)
+	})
 }
 
 // awaitRuns waits for the intake to have stored want delivery_runs rows, and fails with the
@@ -725,16 +1057,26 @@ func awaitBoundDurable(t *testing.T, natsClient *bus.Client) {
 // reached the stream.
 func awaitRuns(t *testing.T, ctx context.Context, pool *store.Pool, natsClient *bus.Client, want int, within time.Duration) {
 	t.Helper()
+	stored := 0
+	waitFor(t, within, func() bool {
+		stored = countRuns(t, ctx, pool)
+		return stored >= want
+	}, func() string {
+		return fmt.Sprintf("delivery_runs rows = %d, want %d after %s\n%s", stored, want, within, intakeStateReport(t, natsClient))
+	})
+}
+
+// waitFor polls done until it reports true, and fails the test once within has passed with the
+// message failure builds at that moment -- so the message carries the state the wait gave up on,
+// not the state it started from.
+func waitFor(t *testing.T, within time.Duration, done func() bool, failure func() string) {
+	t.Helper()
 	deadline := time.Now().Add(within)
-	for {
-		stored := countRuns(t, ctx, pool)
-		if stored >= want {
-			return
-		}
+	for !done() {
 		if time.Now().After(deadline) {
-			t.Fatalf("delivery_runs rows = %d, want %d after %s\n%s", stored, want, within, intakeStateReport(t, natsClient))
+			t.Fatal(failure())
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -760,8 +1102,8 @@ func intakeStateReport(t *testing.T, natsClient *bus.Client) string {
 
 // singleFilterProbe reports what a consumer carrying one filter subject sees of the same stream.
 // Read beside the intake consumer's own numbers it separates the two explanations of a shortfall:
-// a stream that does not hold the messages, or a multi-subject filter the server does not apply
-// the way one filter subject is applied.
+// a stream that does not hold the messages, or a consumer that holds them pending and does not
+// hand them over.
 func singleFilterProbe(t *testing.T, natsClient *bus.Client) string {
 	t.Helper()
 	subject := contracts.GithubWorkflowSubject("acme", "widgets", "deploy.yml", "in_progress")
@@ -809,9 +1151,7 @@ func TestIntakeKeepsUpWithABurstOfDeliveryEvents(t *testing.T) {
 
 	natsClient := intakeTestClient(t)
 	intake := NewIntake(natsClient, pool, fake.newTestClient())
-	runCtx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	go intake.Run(runCtx)
+	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
 	duplicates := 0
@@ -875,9 +1215,7 @@ func TestIntakeDrainsABacklogPublishedBeforeItBinds(t *testing.T) {
 	}
 
 	intake := NewIntake(natsClient, pool, fake.newTestClient())
-	runCtx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	go intake.Run(runCtx)
+	startIntake(t, intake)
 
 	awaitRuns(t, ctx, pool, natsClient, backlog, 60*time.Second)
 	t.Log(intakeStateReport(t, natsClient))
@@ -904,7 +1242,7 @@ func TestReconcilePrunesProgressOfAnInstallationThatNoLongerExists(t *testing.T)
 	fake.installations = []fakeInstallation{{id: live, repos: []string{"acme/widgets"}}}
 	NewReconcile(pool, fake.newTestClient()).runOnce(ctx)
 
-	rows, err := pool.Query(ctx, `select step from delivery_reconcile_progress where step like 'merged_pull_requests/installation/%' order by step`)
+	rows, err := pool.Query(ctx, `select step from delivery_reconcile_progress where starts_with(step, $1) order by step`, mergedPullRequestsStepPrefix)
 	if err != nil {
 		t.Fatalf("read progress steps: %v", err)
 	}

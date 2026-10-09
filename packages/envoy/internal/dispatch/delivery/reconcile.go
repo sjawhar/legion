@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -192,8 +193,13 @@ func (r *Reconcile) stepSince(ctx context.Context, step, scope string, now time.
 // fail independently, so one that cannot be searched must not make every other one redo what it
 // already imported.
 func mergedPullRequestsStep(installationID int64) string {
-	return fmt.Sprintf("merged_pull_requests/installation/%d", installationID)
+	return mergedPullRequestsStepPrefix + strconv.FormatInt(installationID, 10)
 }
+
+// mergedPullRequestsStepPrefix is what every installation's merged-PR step name starts with, and
+// so the one place that names the family: PruneMergedPullRequestProgress selects the family with
+// starts_with rather than LIKE, since the prefix's own underscores are LIKE wildcards.
+const mergedPullRequestsStepPrefix = "merged_pull_requests/installation/"
 
 // reconcileMergedPullRequests searches every population pull request merged since each
 // installation's own recorded progress across every installation the App has (LEGION-294's
