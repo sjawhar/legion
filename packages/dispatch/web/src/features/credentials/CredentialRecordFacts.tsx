@@ -30,7 +30,8 @@ function formatLifetime(seconds: number): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
-/** The approver a request names when any signed-in person may decide it: a shared secret's. */
+/** The approver a record names when any signed-in person may decide it: a shared secret's request,
+ *  and a service's machine login. */
 const ANYONE_APPROVER = "anyone";
 
 /** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long

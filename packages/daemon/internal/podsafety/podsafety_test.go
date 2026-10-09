@@ -120,9 +120,10 @@ func TestApplyNamesTheOverlayFirstAheadOfTheOperators(t *testing.T) {
 }
 
 // Each baseline variable is set only where the pod's environment leaves it unset or empty — the
-// case in which Oh My Pi would fill it from a repository's .env — so a value the pod carries wins
-// (Apply does not know who set it; the Sandbox runtime is what refuses an operator's pod setting
-// either, sandbox.CheckPod). Nothing beyond the two and PI_CONFIG_FILES is set.
+// case in which Oh My Pi would fill it from a repository's .env — so a value the pod carries wins,
+// the Sandbox runtime's session database among them, which it names before Apply runs (Apply does
+// not know who set it; the Sandbox runtime is what refuses an operator's pod setting either,
+// sandbox.CheckPod). Nothing beyond the two and PI_CONFIG_FILES is set.
 func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T) {
 	baseline := map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "file"}
 	for name, tc := range map[string]struct {
@@ -132,6 +133,10 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 		"the pod's own value":  {map[string]string{"OMP_SESSION_STORAGE": "sql"}, map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "sql"}},
 		"empty, as .env fills": {map[string]string{"OMP_SESSION_STORAGE": ""}, baseline},
 		"another config root":  {map[string]string{"PI_CONFIG_DIR": ".config/omp"}, map[string]string{"PI_CONFIG_DIR": ".config/omp", "OMP_SESSION_STORAGE": "file"}},
+		"the runtime's session database": {
+			map[string]string{"OMP_SESSION_STORAGE": "sql", "OMP_SESSION_SQL_DSN_FILE": "/var/run/legion/providers/OMP_SESSION_SQL_DSN"},
+			map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "sql", "OMP_SESSION_SQL_DSN_FILE": "/var/run/legion/providers/OMP_SESSION_SQL_DSN"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var environ []string

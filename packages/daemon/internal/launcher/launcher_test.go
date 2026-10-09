@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -10,11 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
@@ -58,6 +61,26 @@ type rig struct {
 	result   chan error
 	hello    shimwire.LauncherHello
 	latest   shimwire.LauncherState
+	// stderr is what the launcher and its children wrote to Config.Stderr.
+	stderr *lockedBuffer
+}
+
+// lockedBuffer is a bytes.Buffer the launcher and its children can write while a test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func newRig(t *testing.T) *rig {
@@ -68,11 +91,11 @@ func newRig(t *testing.T) *rig {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &rig{t: t, listener: listener, private: t.TempDir(), cancel: cancel, result: make(chan error, 1)}
+	g := &rig{t: t, listener: listener, private: t.TempDir(), cancel: cancel, result: make(chan error, 1), stderr: &lockedBuffer{}}
 	go func() {
 		g.result <- Run(ctx, Config{
 			Connect: "tcp://" + listener.Addr().String(), Token: "launcher-token", Sandbox: "legion-legion-legion-208",
-			Role: "tester", PodUID: "pod-1", PrivateDir: g.private,
+			Role: "tester", PodUID: "pod-1", PrivateDir: g.private, Stderr: g.stderr,
 		})
 	}()
 	t.Cleanup(func() {
@@ -365,4 +388,97 @@ func TestStartRefusesAMissingResumeFile(t *testing.T) {
 	}
 	published(t, marker)
 	g.stop(8)
+}
+
+// toldRecreated starts generation with env (resuming resume, "" for none), returns the
+// WorkspaceRecreatedVariable value its child was started with, and stops it.
+func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
+	g.t.Helper()
+	told := filepath.Join(g.t.TempDir(), "told")
+	command := shimwire.LauncherStart{
+		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
+		Argv: []string{"/bin/sh", "-c", `printf '%s' "$` + WorkspaceRecreatedVariable + `" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
+		Env:  append([]string{"TOLD=" + told}, env...), ResumeFile: resume,
+	}
+	if got := g.start(command); !got.OK {
+		g.t.Fatalf("start of generation %d = %#v", generation, got)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if body, err := os.ReadFile(told); err == nil {
+			g.stop(generation)
+			return string(body)
+		}
+		if time.Now().After(deadline) {
+			g.t.Fatalf("generation %d's child never said what it was told", generation)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// newWorkspace is a directory shaped as a workspace for the creation record (workspace.Created).
+func newWorkspace(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// A resumed generation is told whether its workspace (LEGION_WORKSPACE) was recreated since its
+// session was last written, which the Legion plugin tells the agent on its first turn: "true" once
+// provisioning's creation record is later than the session file's last write, "false" when it is
+// earlier or there is none. A fresh generation resumes nothing and is told "false", and so is every
+// generation whatever the container's own environment says, so no other value reaches the child. A
+// record that is empty or not an instant, which an init container killed mid-write can leave, only
+// decides the notice: the resume starts, told "false", and the launcher logs the record.
+func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t *testing.T) {
+	t.Setenv(WorkspaceRecreatedVariable, "true")
+	g := newRig(t)
+	session := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(session, written, written); err != nil {
+		t.Fatal(err)
+	}
+	dir := newWorkspace(t)
+	env := []string{"LEGION_WORKSPACE=" + dir}
+
+	if got := g.toldRecreated(1, env, session); got != "false" {
+		t.Errorf("a resume in a workspace with no creation record was told %q, want false", got)
+	}
+	if err := workspace.RecordCreated(dir, written.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.toldRecreated(2, env, session); got != "false" {
+		t.Errorf("a resume in a workspace created before its session's last write was told %q, want false", got)
+	}
+	if err := workspace.RecordCreated(dir, written.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.toldRecreated(3, env, session); got != "true" {
+		t.Errorf("a resume in a workspace created after its session's last write was told %q, want true", got)
+	}
+	if got := g.toldRecreated(4, env, ""); got != "false" {
+		t.Errorf("a fresh generation was told %q, want false", got)
+	}
+	if got := g.toldRecreated(5, nil, session); got != "false" {
+		t.Errorf("a resume with no workspace was told %q, want false", got)
+	}
+
+	for i, record := range []string{"soon\n", ""} {
+		if err := os.WriteFile(filepath.Join(dir, ".jj", "legion-created"), []byte(record), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.toldRecreated(uint64(6+i), env, session); got != "false" {
+			t.Errorf("a resume in a workspace whose creation record is %q was told %q, want false", record, got)
+		}
+	}
+	if logged := g.stderr.String(); !strings.Contains(logged, filepath.Join(dir, ".jj", "legion-created")) ||
+		!strings.Contains(logged, "the workspace is taken as not recreated") {
+		t.Errorf("the launcher logged %q, want the unreadable creation record named", logged)
+	}
 }

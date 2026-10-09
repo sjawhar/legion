@@ -223,9 +223,10 @@ func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
 
 // --- GET /api/v1/machine-logins, POST .../{id}/revoke ---
 
-// listMachineLogins answers the machine logins the caller approved that can still reach a secret,
-// a service's among them and an expired one whose sessions still run: Dispatch names the caller as
-// the approver, so no one lists another person's.
+// listMachineLogins answers the machine logins the caller may revoke that can still reach a
+// secret: every service's login, whoever approved it, and the caller's own machines', an expired
+// one whose sessions still run among them. Dispatch names the caller, so no one lists another
+// person's machines.
 func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -239,9 +240,10 @@ func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
 	relayBrokerResponse(w, body, err)
 }
 
-// revokeMachineLogin ends a machine login the caller approved, expired or not, and with it every
-// session that login enrolled (a service's login: every pod it started): the broker allows it only
-// when the caller is the person who approved it. The browser's body carries nothing Dispatch reads.
+// revokeMachineLogin ends a machine login, expired or not, and with it every session that login
+// enrolled (a service's login: every pod it started): the broker allows it for a service's login
+// from anyone signed in, and for a person's machine login only when the caller is the person who
+// approved it. The browser's body carries nothing Dispatch reads.
 func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

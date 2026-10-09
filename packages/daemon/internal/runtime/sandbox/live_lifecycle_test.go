@@ -843,8 +843,50 @@ func (r *liveRig) checkReleasePreservesIssue() error {
 	if s.mode() != modeRunning {
 		return fmt.Errorf("Release(%s) changed issue Sandbox %s to %s", worker.name, name, s.mode())
 	}
-	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
-		return fmt.Errorf("root after Release(%s) is %s: %v", worker.name, rootObs.Kind, err)
+	// The root must not die with its sibling's release. Its launcher can still be redialling the
+	// listener the previous check restarted (orphan-sweep waits for every agent's hello, not for
+	// its launcher, whose hello the listener authenticates with a read of the role's Secret the
+	// client may throttle), and an unconnected launcher reads Uncertain; so the root is polled
+	// until Alive, any other verdict failing at once, then probed again after liveSettle, so a root
+	// that reads Alive and dies moments later fails too.
+	var last runtime.Observation
+	var verdict error
+	err = r.poll(liveGoneLimit, "root "+string(root.token)+" to read Alive after Release("+worker.name+")", func() (bool, error) {
+		obs, err := r.rt.Probe(r.ctx, *root.loc)
+		if err != nil {
+			verdict = fmt.Errorf("probe root %s after Release(%s): %w", root.token, worker.name, err)
+			return false, verdict
+		}
+		last = obs
+		switch obs.Kind {
+		case runtime.Alive:
+			return true, nil
+		case runtime.Uncertain:
+			return false, nil
+		}
+		verdict = fmt.Errorf("root %s after Release(%s) is %s: %s", root.token, worker.name, obs.Kind, obs.Detail)
+		return false, verdict
+	})
+	switch {
+	case err == nil:
+	case verdict != nil:
+		return verdict
+	case last.Kind != "":
+		return fmt.Errorf("%w; last observation %s: %s", err, last.Kind, last.Detail)
+	default:
+		return err
+	}
+	select {
+	case <-r.ctx.Done():
+		return r.ctx.Err()
+	case <-time.After(liveSettle):
+	}
+	settled, err := r.rt.Probe(r.ctx, *root.loc)
+	if err != nil {
+		return fmt.Errorf("probe root %s %s after it read Alive following Release(%s): %w", root.token, liveSettle, worker.name, err)
+	}
+	if settled.Kind != runtime.Alive {
+		return fmt.Errorf("root %s read Alive after Release(%s), and %s later is %s: %s", root.token, worker.name, liveSettle, settled.Kind, settled.Detail)
 	}
 	pvc := TreeClaimName(root.token)
 	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")

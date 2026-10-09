@@ -86,6 +86,11 @@ type Runtime interface {
 	// process runs (a pod's init containers, on the tree volume). When it does, the daemon
 	// provisions and removes none on its own host.
 	ProvisionsWorkspaces() bool
+	// SessionsOnVolume is whether a claim's session is kept on its tree's volume, so moving the
+	// claim to another tree, whose pods mount another volume, loses it: the Sandbox runtime's file
+	// store. Under its session database (runtime.kubernetes.session_store postgres) and under tmux,
+	// whose sessions are on the daemon's host, a claim keeps its session wherever it runs.
+	SessionsOnVolume() bool
 	// ProvisionBound is how much longer a launch may run before its agent's own process has even
 	// started, beyond the registration deadline's base Boot×RegistrationIntervals bound: zero for
 	// a runtime whose process starts the agent at once (tmux), and the Sandbox runtime's own

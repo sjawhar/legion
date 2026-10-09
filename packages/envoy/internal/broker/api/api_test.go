@@ -325,10 +325,12 @@ func signAgentSecretRequest(t *testing.T, key *ecdsa.PrivateKey, audience, reaso
 	return compact
 }
 
-func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, loginHint, host string) string {
+// signMachineLoginRequest signs a machine login's request object for one launcher_credential
+// detail on host, naming service ("" for a person's machine) and carrying loginHint ("" for none).
+func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, loginHint, host, service string) string {
 	t.Helper()
 	compact, err := record.Sign(key, audience, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: host},
+		{Type: "launcher_credential", Identifier: host, Service: service},
 	}, "", loginHint, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
@@ -393,7 +395,7 @@ func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
 func (ts *testServer) mintLauncherCredential(t *testing.T, loginHint, host string) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	key = newSigningKey(t)
-	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, loginHint, host), loginHint), key
+	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, loginHint, host, ""), loginHint), key
 }
 
 // approveMachineLogin posts a signed machine-login request object, looks its record up by the
@@ -466,7 +468,7 @@ func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
 
 	status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	if status != http.StatusAccepted {
@@ -603,7 +605,7 @@ func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
 func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
 		PendingID string `json:"pending_id"`
@@ -951,7 +953,7 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 	machineLogin := func(host string) (recordID, code string) {
 		t.Helper()
 		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host)})
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host, "")})
 		code = decode[struct {
 			Code string `json:"code"`
 		}](t, body).Code
@@ -1113,13 +1115,13 @@ func TestPathValidation(t *testing.T) {
 func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		d.LauncherLimits = &api.LauncherLimits{
-			PerAddress:  ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
-			PerOperator: ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+			PerAddress: ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+			PerLogin:   ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
 		}
 	})
 	login := func() (int, string) {
 		t.Helper()
-		body, err := json.Marshal(map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox")})
+		body, err := json.Marshal(map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1135,5 +1137,55 @@ func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
 	}
 	if status, retryAfter := login(); status != http.StatusTooManyRequests || retryAfter != "2" {
 		t.Fatalf("second machine login = %d Retry-After=%q, want 429 with Retry-After 2 (1.5 s rounded up)", status, retryAfter)
+	}
+}
+
+// TestAServiceLoginAndAPersonsNeverShareARateLimitBucket pins the per-login bucket's key spaces:
+// every service's login spends one shared bucket, whatever service it names (the name is the
+// machine's own unauthenticated claim, so a fresh name must not buy a fresh bucket) and whatever
+// person its login_hint names, and a person's machine login spends that person's, even one whose
+// login_hint is the bare word the service bucket is keyed on, or a service's name. With one login
+// per bucket, each person's first login is accepted and only a second service's login is refused.
+func TestAServiceLoginAndAPersonsNeverShareARateLimitBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 1},
+		}
+	})
+	login := func(loginHint, service string) int {
+		t.Helper()
+		status, _ := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, loginHint, "example-host-cluster", service)})
+		return status
+	}
+	for _, c := range []struct {
+		name, loginHint, service string
+		want                     int
+	}{
+		{"a service's login naming a person", testApprover, "legion-daemon", http.StatusAccepted},
+		{"a person's machine login naming the service bucket's bare key", "service", "", http.StatusAccepted},
+		{"a person's machine login naming a service's bare name", "other-service", "", http.StatusAccepted},
+		{"a person's machine login naming a service bucket's prefixed key", "service:other-service", "", http.StatusAccepted},
+		{"the person the service's login named", testApprover, "", http.StatusAccepted},
+		{"another service's login, under a name nobody registered", "", "other-service", http.StatusTooManyRequests},
+	} {
+		if got := login(c.loginHint, c.service); got != c.want {
+			t.Fatalf("%s = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAPersonsMachineLoginNamingNoOneIsRefused pins that a person's machine login must name the
+// person who decides it: one with no login_hint, or one naming the sentinel, is refused 400
+// REQUEST_INVALID before any record opens, while a service's login needs none.
+func TestAPersonsMachineLoginNamingNoOneIsRefused(t *testing.T) {
+	ts := newTestServer(t)
+	for _, hint := range []string{"", record.AnyoneApprover} {
+		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, hint, "example-host-devbox", "")})
+		if status != http.StatusBadRequest || decode[wireError](t, body).Code != "REQUEST_INVALID" {
+			t.Fatalf("a person's machine login with login_hint %q = %d %s, want 400 REQUEST_INVALID", hint, status, body)
+		}
 	}
 }

@@ -11,21 +11,23 @@ import (
 )
 
 // LauncherLimits bounds POST /v1/launcher-credentials, the one route an unauthenticated caller
-// can use to make the broker do work on their behalf. Every source address and every named
-// operator has its own token bucket: a flood from one address cannot keep the broker busy
-// verifying and recording machine-login requests, and a flood naming one operator cannot bury
-// that operator's pending machine logins.
+// can use to make the broker do work on their behalf. Every source address has its own token
+// bucket, and so does every person a machine login's login_hint names, while every service's login
+// spends one shared bucket, whatever service it names (launcherLoginKey): a flood from one address
+// cannot keep the broker busy verifying and recording machine-login requests, a flood naming one
+// operator cannot bury that operator's pending machine logins, and a flood of invented service
+// names cannot buy itself a bucket per name.
 type LauncherLimits struct {
-	PerAddress  ratelimit.Limit
-	PerOperator ratelimit.Limit
+	PerAddress ratelimit.Limit
+	PerLogin   ratelimit.Limit
 }
 
-// DefaultLauncherLimits allows a burst of ten requests per source address and five per operator,
+// DefaultLauncherLimits allows a burst of ten requests per source address and five per login,
 // refilled at two a minute and one a minute: generous for a person logging in a few launchers,
 // useless for a flood.
 var DefaultLauncherLimits = LauncherLimits{
-	PerAddress:  ratelimit.Limit{Every: 30 * time.Second, Burst: 10},
-	PerOperator: ratelimit.Limit{Every: time.Minute, Burst: 5},
+	PerAddress: ratelimit.Limit{Every: 30 * time.Second, Burst: 10},
+	PerLogin:   ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
 
 // DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
@@ -42,7 +44,7 @@ var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
 var DefaultRereadOverallLimit = ratelimit.Limit{Every: 250 * time.Millisecond, Burst: 10}
 
 type launcherLimiter struct {
-	perAddress, perOperator *ratelimit.Keyed
+	perAddress, perLogin *ratelimit.Keyed
 	// trustedProxyHeader is BROKER_TRUSTED_PROXY_HEADER: empty means every caller reaches the
 	// broker directly, so perAddress keys on r.RemoteAddr. Set only behind a trusted reverse
 	// proxy that itself sets this header on every forwarded request (see clientAddress).
@@ -52,7 +54,7 @@ type launcherLimiter struct {
 func newLauncherLimiter(limits LauncherLimits, trustedProxyHeader string) *launcherLimiter {
 	return &launcherLimiter{
 		perAddress:         ratelimit.NewKeyed(limits.PerAddress),
-		perOperator:        ratelimit.NewKeyed(limits.PerOperator),
+		perLogin:           ratelimit.NewKeyed(limits.PerLogin),
 		trustedProxyHeader: trustedProxyHeader,
 	}
 }
@@ -82,21 +84,24 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 	return address
 }
 
-// refuse writes 429 RATE_LIMITED and reports true when r's source address, or the operator it
-// names, has no request left in its bucket, with the Retry-After of the slower of the two buckets.
+// refuse writes 429 RATE_LIMITED and reports true when r's source address, or the login key it
+// names (launcherLoginKey), has no request left in its bucket, with the Retry-After of the slower
+// of the two buckets.
 //
-// The per-operator bucket, keyed on the request body's own "operator" field rather than the
-// caller's address, is unaffected by trustedProxyHeader and remains a smaller, accepted risk: an
-// attacker naming a specific victim operator repeatedly can still lock out that operator's
-// launcher logins at a low rate. This is inherent to a per-operator limit on an unauthenticated
-// route.
-func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, operator string) bool {
+// The per-login bucket, keyed on the request object's own claims rather than the caller's address,
+// is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's machine
+// login spends its own person:<login> bucket, so an attacker naming a specific victim operator
+// repeatedly can lock out that operator's machine logins at a low rate. Every service's login
+// shares the one "service" bucket, so a flood under any service name, invented or not, locks out
+// every service's login, the Legion daemon's included, until the bucket refills. This is inherent
+// to a per-login limit on an unauthenticated route.
+func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login string) bool {
 	now := time.Now()
 	address := clientAddress(r, l.trustedProxyHeader)
-	if l.perAddress.AllowAt(address, now) && l.perOperator.AllowAt(operator, now) {
+	if l.perAddress.AllowAt(address, now) && l.perLogin.AllowAt(login, now) {
 		return false
 	}
-	refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perOperator.Every()), "too many launcher credential requests; try again later")
+	refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perLogin.Every()), "too many launcher credential requests; try again later")
 	return true
 }
 

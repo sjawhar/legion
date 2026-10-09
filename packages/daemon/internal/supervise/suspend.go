@@ -91,7 +91,7 @@ func suspendRequest(m *Machine, ev Event) (RequestSuspend, error) {
 
 // suspendNow stops the claim's process for request and keeps its session.
 func (m *Machine) suspendNow(ctx context.Context, request RequestSuspend) error {
-	if err := m.suspendProcess(ctx); err != nil {
+	if err := m.endProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
 	return m.suspendedFor(ctx, request)
@@ -152,7 +152,7 @@ func (m *Machine) endHeld(ctx context.Context) error {
 	request := *m.held
 	m.dropHeld()
 	incarnation := m.claim.Locator.Incarnation
-	if err := m.suspendProcess(ctx); err != nil {
+	if err := m.endProcess(ctx); err != nil {
 		m.log.Error("supervise: could not stop the process with the runtime; suspending its claim anyway",
 			"incarnation", incarnation, "error", err)
 	}

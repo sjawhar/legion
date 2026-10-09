@@ -67,6 +67,7 @@ type Conn struct {
 	// seq is the order the listener registered the connection in (Sequence).
 	seq        uint64
 	claim      claim.Token
+	nc         net.Conn
 	writer     *shimwire.Writer
 	rpcTimeout time.Duration
 	log        *slog.Logger
@@ -106,6 +107,7 @@ type ackedPrompt struct {
 func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog.Logger, events *eventQueue) *Conn {
 	return &Conn{
 		claim:       token,
+		nc:          nc,
 		writer:      shimwire.NewWriter(connWriter{nc: nc, timeout: rpcTimeout}),
 		rpcTimeout:  rpcTimeout,
 		log:         log,
