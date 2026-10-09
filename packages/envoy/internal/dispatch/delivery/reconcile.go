@@ -411,8 +411,10 @@ const attributionBackfillCalls = 120
 // commits page fetchCommitMessagesWithToken reads (maxCommitPages, intake.go).
 const maxAttributionCalls = 1 + maxCommitPages
 
-// attributionBackfillRows is how many unread rows a pass lists for the backfill: as many as the
-// call budget can read at two calls a row.
+// attributionBackfillRows is how many unread rows a pass lists for the backfill: what the call
+// budget reads when every row is under 100 commits (two calls each). A row with more costs more,
+// so a pass then reads fewer of them and leaves the rest listed for the next; the budget, not
+// this count, bounds the calls.
 const attributionBackfillRows = attributionBackfillCalls / 2
 
 // callBudget is one pass's allowance of GitHub calls, shared by concurrent reads. A read reserves
