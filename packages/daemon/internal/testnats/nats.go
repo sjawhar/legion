@@ -276,7 +276,7 @@ func retryStreamStoreFailure(create func() error) error {
 // no test's end would remove a container the package shares.
 func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
 	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
-	started, err := tcnats.Run(context.Background(), "nats:2.10", options...)
+	started, err := tcnats.Run(context.Background(), "mirror.gcr.io/library/nats:2.10", options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))
 	}
