@@ -131,8 +131,11 @@ review posted without a completion leaves the issue in reviewing until you finis
   `implementing`), a merge queue drops the pull request on the red check, but auto-merge stays
   enabled across pushes, and `--match-head-commit` was checked only when it was enabled. So the
   implementer, at the start of that implementing round, runs
-  `gh pr merge <n> -R <owner>/<repo> --disable-auto` before any push; where a queue held the pull
-  request, that dequeues it.
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` before any push. A pull request still in a
+  merge queue is removed with `gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}' -F id=<pull request node id>`
+  (`--disable-auto` dequeues nothing). When nothing is armed — the merger's submission was refused,
+  or a queue already dropped it — the command exits 1 with "Can't disable auto-merge for this pull
+  request.": run it anyway and take that answer as nothing to disarm.
 
 ## After the merge
 
