@@ -5,70 +5,67 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const FIXTURE_WINDOW = "from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
-const DEPLOY_GREEN: [number, number, number] = [0x22, 0xc5, 0x5e];
-const FAILURE_RED: [number, number, number] = [0xef, 0x44, 0x44];
 
-/** The page position of the middle of the first shape of colour `rgb` the chart's canvas paints
- *  (scanning down from the top), or null. ECharts draws on a canvas, so a deploy dot or a failure
- *  triangle has no element to click; the middle of the shape is inside its hit area whatever the
- *  screen's pixel density. */
-async function chartPixel(
+/** Where the chart draws a run's shape: its series' name, its column on the x axis (the deploys
+ *  at 0.15 and the failures at 0.85 of the Deploys/fails column, `Timeline.tsx`'s
+ *  GLOBAL_DEPLOY_X/GLOBAL_FAILURE_X) and its time. Run 500's production job finished at 01:40 and
+ *  run 501's integration tests failed at 12:20 (`seedDeliveryFixture`). */
+const DEPLOY_500 = { series: "Deploys", x: 0.15, at: "2024-06-01T01:40:00Z" };
+const FAILURE_501 = { series: "Pipeline failures", x: 0.85, at: "2024-06-01T12:20:00Z" };
+
+/** The page position of a run's shape, from ECharts' own coordinate conversion: the chart draws
+ *  on a canvas, so a deploy dot or a failure triangle has no element to click. The page loads the
+ *  echarts chunk once; importing the same URL here hands back that module, whose
+ *  `getInstanceByDom` finds the chart the page made. Null until the chart has painted the run. */
+async function shapePosition(
   page: Page,
-  rgb: [number, number, number]
+  shape: { series: string; x: number; at: string }
 ): Promise<{ x: number; y: number } | null> {
-  return page.evaluate((rgb) => {
-    const canvas = document.querySelector<HTMLCanvasElement>("[data-testid=delivery-chart] canvas");
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return null;
-    const { width, height } = canvas;
-    const data = context.getImageData(0, 0, width, height).data;
-    const matches = (x: number, y: number) => {
-      const i = (y * width + x) * 4;
-      return (
-        [0, 1, 2].every((c) => Math.abs((data[i + c] ?? 0) - rgb[c]) <= 12) &&
-        (data[i + 3] ?? 0) > 200
-      );
-    };
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        if (!matches(x, y)) continue;
-        let bottom = y;
-        while (bottom + 1 < height && matches(x, bottom + 1)) bottom += 1;
-        const middle = Math.round((y + bottom) / 2);
-        let left = x;
-        let right = x;
-        while (left > 0 && matches(left - 1, middle)) left -= 1;
-        while (right + 1 < width && matches(right + 1, middle)) right += 1;
-        const rect = canvas.getBoundingClientRect();
-        return {
-          x: rect.left + (((left + right) / 2) * rect.width) / width,
-          y: rect.top + (middle * rect.height) / height,
-        };
-      }
+  return page.evaluate(async ({ series, x, at }) => {
+    interface Chart {
+      convertToPixel: (finder: { seriesName: string }, value: number[]) => number[];
+      getOption: () => { series?: { name?: string; data?: unknown[] }[] };
     }
-    return null;
-  }, rgb);
+    const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
+    if (host === null) return null;
+    const chunks = performance
+      .getEntriesByType("resource")
+      .map((resource) => resource.name)
+      .filter((name) => /\/assets\/index-[\w-]+\.js$/.test(name));
+    let chart: Chart | undefined;
+    for (const chunk of chunks) {
+      // The page's own chunks, found by URL at run time: no specifier is known in advance.
+      const loaded = (await import(chunk)) as {
+        getInstanceByDom?: (element: HTMLElement) => Chart | undefined;
+      };
+      chart = loaded.getInstanceByDom?.(host);
+      if (chart !== undefined) break;
+    }
+    if (chart === undefined) return null;
+    const painted = chart.getOption().series?.find((candidate) => candidate.name === series);
+    if ((painted?.data?.length ?? 0) === 0) return null;
+    const [px, py] = chart.convertToPixel({ seriesName: series }, [x, Date.parse(at)]);
+    if (px === undefined || py === undefined) return null;
+    const rect = host.getBoundingClientRect();
+    return { x: rect.left + px, y: rect.top + py };
+  }, shape);
 }
 
-/** Opens the seeded timeline and waits for its chart to paint a deploy. On a phone the facets sit
- *  above the chart, so the chart is scrolled into view before anything points at it. */
+/** Opens the seeded timeline and waits for its chart to paint run 500's deploy. On a phone the
+ *  facets sit above the chart, so the chart is scrolled into view before anything points at it. */
 async function openTimeline(page: Page, query = ""): Promise<void> {
   await page.goto(`/delivery?${FIXTURE_WINDOW}${query}`);
   await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
   await page.getByTestId("delivery-chart").scrollIntoViewIfNeeded();
-  await expect.poll(() => chartPixel(page, DEPLOY_GREEN)).not.toBeNull();
+  await expect.poll(() => shapePosition(page, DEPLOY_500)).not.toBeNull();
 }
 
-/** Clicks the first shape of colour `rgb`, found again at the moment of the click: a phone's
- *  browser can scroll the page between a hover and the click that follows it. The pointer first
- *  leaves the chart, since ECharts repaints a hovered shape in its emphasis colour, which the scan
- *  would not find. */
-async function clickShape(page: Page, rgb: [number, number, number]): Promise<void> {
-  await page.mouse.move(0, 0);
-  await expect.poll(() => chartPixel(page, rgb)).not.toBeNull();
-  const shape = await chartPixel(page, rgb);
-  if (shape === null) throw new Error(`no shape of rgb(${rgb.join(", ")}) painted`);
-  await page.mouse.click(shape.x, shape.y);
+/** Clicks a run's shape, placed again at the moment of the click: a phone's browser can scroll
+ *  the page between a hover and the click that follows it. */
+async function clickShape(page: Page, shape: { series: string; x: number; at: string }) {
+  const position = await shapePosition(page, shape);
+  if (position === null) throw new Error(`no ${shape.series} shape painted at ${shape.at}`);
+  await page.mouse.click(position.x, position.y);
 }
 
 test.beforeEach(async () => {
@@ -163,7 +160,7 @@ test("the header names the window and the freshness row names the prototype's si
   await openTimeline(page);
 
   await expect(page.getByText(/Generated .* · window/)).toBeVisible();
-  const freshness = page.getByRole("status", { name: "Source freshness" });
+  const freshness = page.getByRole("region", { name: "Source freshness" });
   for (const source of [
     "PRs never checked",
     "Deploy runs never checked",
@@ -186,12 +183,12 @@ test("a facet lists each value with its count and narrows the PRs, kept in the U
   await openTimeline(page);
 
   await expect(page.getByText("2 PRs in current filter/window")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Priority", exact: true })).toHaveText(
-    "Any priority"
-  );
-  await page.getByRole("button", { name: "Priority", exact: true }).click();
+  const priority = page.getByRole("button", { name: /^Priority:/ });
+  await expect(priority).toHaveText("Any priority");
+  await priority.click();
   const options = page.getByRole("listbox", { name: "Priority options" }).getByRole("option");
   await expect(options).toHaveText([/^P0\s*1$/, /^No issue\s*1$/]);
+  await expect(options.first()).toHaveAccessibleName("P0, 1 PR");
   await options.filter({ hasText: "P0" }).click();
   await page.keyboard.press("Escape");
 
@@ -229,13 +226,13 @@ test("hovering a deploy names its run, and clicking it lists what it shipped and
   const page = await context.newPage();
   await openTimeline(page);
 
-  const deploy = await chartPixel(page, DEPLOY_GREEN);
+  const deploy = await shapePosition(page, DEPLOY_500);
   if (deploy === null) throw new Error("no deploy dot painted");
   await page.mouse.move(deploy.x, deploy.y);
   await expect(page.getByText("Run #500: 1 PR(s) shipped")).toBeVisible();
-  await clickShape(page, DEPLOY_GREEN);
+  await clickShape(page, DEPLOY_500);
 
-  const details = page.getByRole("complementary", { name: "Details" });
+  const details = page.getByRole("dialog", { name: "Details" });
   await expect(details.getByRole("heading", { name: "Deploy: run #500" })).toBeVisible();
   await expect(details.getByText("acme/widgets#1 — feat: a shipped widget")).toBeVisible();
   await expect(details.getByText("widgets-release / widgets-release")).toBeVisible();
@@ -253,13 +250,13 @@ test("clicking a pipeline failure shows its failed job in red and every job's re
   const page = await context.newPage();
   await openTimeline(page);
 
-  const failure = await chartPixel(page, FAILURE_RED);
+  const failure = await shapePosition(page, FAILURE_501);
   if (failure === null) throw new Error("no failure triangle painted");
   await page.mouse.move(failure.x, failure.y);
   await expect(page.getByText("Run #501 failed: integration tests")).toBeVisible();
-  await clickShape(page, FAILURE_RED);
+  await clickShape(page, FAILURE_501);
 
-  const details = page.getByRole("complementary", { name: "Details" });
+  const details = page.getByRole("dialog", { name: "Details" });
   await expect(details.getByRole("heading", { name: "Pipeline failure: run #501" })).toBeVisible();
   await expect(details.getByText(/^integration tests at /)).toBeVisible();
   await expect(details.getByText("skipped")).toBeVisible();
@@ -313,13 +310,13 @@ test("the list sorts by its headers and a row opens the PR's details", async ({
   // The Repository facet narrows the list server-side; acme/widgets is the only repository
   // seeded, so selecting it is a no-op on the result but proves the picker and the facet
   // round-trip to the server run. Each option carries its count.
-  await page.getByRole("button", { name: "Repository", exact: true }).click();
-  await page.getByRole("option", { name: /acme\/widgets\s*2/ }).click();
+  await page.getByRole("button", { name: /^Repository:/ }).click();
+  await page.getByRole("option", { name: "acme/widgets, 2 PRs" }).click();
   await page.keyboard.press("Escape");
   await expect(titles).toHaveCount(2);
 
   await page.getByRole("cell", { name: "feat: a shipped widget" }).click();
-  const details = page.getByRole("complementary", { name: "Details" });
+  const details = page.getByRole("dialog", { name: "Details" });
   await expect(details.getByRole("link", { name: "Open on GitHub" })).toHaveAttribute(
     "href",
     "https://github.com/acme/widgets/pull/1"
@@ -328,6 +325,36 @@ test("the list sorts by its headers and a row opens the PR's details", async ({
   await expect(details.getByText("P0", { exact: true })).toBeVisible();
 
   await page.screenshot({ path: testInfo.outputPath("delivery-drilldown.png"), fullPage: true });
+  await context.close();
+});
+
+test("the list reaches a deploy's drill-down by keyboard, and Escape hands focus back", async ({
+  browser,
+}) => {
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.goto(`/delivery?${FIXTURE_WINDOW}&mode=list`);
+
+  // The rows are one tab stop: the first row takes focus, the arrow key moves to the next.
+  const rows = page.locator("tbody tr[aria-rowindex]");
+  await expect(rows).toHaveCount(2);
+  await rows.first().focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(rows.first()).toBeFocused();
+
+  // #1 shipped in run 500: its "deployed" opens that run's drill-down.
+  const deployed = page.getByRole("button", { name: "Open deploy run #500" });
+  await deployed.focus();
+  await page.keyboard.press("Enter");
+  const details = page.getByRole("dialog", { name: "Details" });
+  await expect(details.getByRole("heading", { name: "Deploy: run #500" })).toBeVisible();
+  await expect(details.getByRole("button", { name: "Close details" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(details).toHaveCount(0);
+  await expect(deployed).toBeFocused();
   await context.close();
 });
 
