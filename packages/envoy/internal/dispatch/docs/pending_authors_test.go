@@ -603,22 +603,47 @@ func TestAWriteAfterItsOwnTransactionsVersionStaysPending(t *testing.T) {
 	}
 }
 
-// An upload whose version lists its uploader alone leaves no pending author, and records the
-// uploader as the latest edit source on the settlement its append owes, as every durable update
-// owes one (markSettlementPending).
-func TestAnUploadLeavesNoPendingAuthorAndNamesItsUploader(t *testing.T) {
+// A plain upload, with no other writer pending, is the whole of what anyone sees: the settlement
+// its append owes (every durable update owes one, appendUpdateTxClass) writes no second version,
+// lists the uploader on the upload's version alone, appends no event, and leaves nothing owed.
+func TestAPlainUploadsSettlementAddsNothingVisible(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
 	uploader := model.Actor{Kind: "session", ID: "uploader-session"}
 	uploadOn(t, service, artifactID, "First.\n\nSecond, uploaded.\n", uploader)
+	uploaded := latestVersionNumber(t, service, artifactID)
 	if owed := pendingAuthorRows(t, service.store, artifactID); len(owed) != 0 {
 		t.Fatalf("pending authors after the upload = %+v, want none", owed)
 	}
 	owed, lastActor, err := readOwedSettlement(context.Background(), service.store.Pool, artifactID)
-	if err != nil || !owed || lastActor == nil || *lastActor != uploader {
-		t.Fatalf("pending settlement = %t naming %+v (%v), want one naming the uploader", owed, lastActor, err)
+	t.Logf("after the upload: settlement owed=%t naming %+v (%v)", owed, lastActor, err)
+	var eventsBefore int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from events`).Scan(&eventsBefore); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	latest := latestVersionNumber(t, service, artifactID)
+	listed := countVersionAuthor(t, service.store, artifactID, uploader)
+	owedAfter, _, err := readOwedSettlement(context.Background(), service.store.Pool, artifactID)
+	t.Logf("after the settlement: latest version %d (upload's %d), uploader listed on %d versions, settlement owed=%t (%v)", latest, uploaded, listed, owedAfter, err)
+	if latest != uploaded {
+		t.Fatalf("latest version after the settlement = %d, want the upload's %d: the settlement wrote a version", latest, uploaded)
+	}
+	var eventsAfter int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from events`).Scan(&eventsAfter); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	t.Logf("events appended by the settlement: %d", eventsAfter-eventsBefore)
+	if eventsAfter != eventsBefore {
+		t.Fatalf("the settlement appended %d events, want none", eventsAfter-eventsBefore)
+	}
+	if listed != 1 {
+		t.Fatalf("the uploader is listed on %d versions, want 1", listed)
+	}
+	if owedAfter {
+		t.Fatal("the settlement left a settlement owed")
 	}
 }
 

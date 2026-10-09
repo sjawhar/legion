@@ -350,6 +350,18 @@ func recordLatestEditSource(ctx context.Context, tx pgx.Tx, room string, lastAct
 	return markSettlementPending(ctx, tx, room, lastActor, true, false)
 }
 
+// markUpdateOwed records, in the transaction appending a document update, that the document owes
+// a settlement from now, keeping the latest edit source the row names.
+func markUpdateOwed(ctx context.Context, tx pgx.Tx, room string) error {
+	return markSettlementPending(ctx, tx, room, nil, false, true)
+}
+
+// markUpdateOwedBy is markUpdateOwed for an update credited to an edit, which names lastActor as
+// its latest edit source, nil for an edit no one peer can be credited with.
+func markUpdateOwedBy(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor) error {
+	return markSettlementPending(ctx, tx, room, lastActor, true, true)
+}
+
 // markSettlementPending records, in the transaction that appends a document update, that the
 // document owes a settlement. With setLastActor it also records lastActor as the latest edit
 // source that settlement names on its events, nil for an edit no one peer can be credited with
@@ -417,7 +429,7 @@ func (s *Service) persistLastActor(ctx context.Context, room string, lastActor m
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return err
 	}
-	if err := markSettlementPending(ctx, tx, room, &lastActor, true, false); err != nil {
+	if err := recordLatestEditSource(ctx, tx, room, &lastActor); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
