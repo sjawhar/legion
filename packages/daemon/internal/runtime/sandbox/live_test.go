@@ -154,12 +154,13 @@ type liveEnv struct {
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
 	operatorPodFile, operatorConfigMap string
-	// The agent-secrets checks' inputs: the production broker, the email of the
-	// person this run's machine login is approved by (an attended step: the operator enters the
-	// printed code on the Dispatch credential page and clicks Approve during the run), and the
-	// sha256 of the automatic rule's dummy value, and the checkout's agent-secrets binary. Every
-	// field here is read with os.Getenv, unlike the rest of liveEnv: unset is a blocked run of the
-	// secrets-* checks, never a refusal to start (secretsBlocked).
+	// The agent-secrets checks' inputs: the production broker, the email of the person who
+	// approves the run's credential request for LEGION_E2E_APPROVAL, the sha256 of the automatic
+	// rule's dummy value, and the checkout's agent-secrets binary. With all four set the harness
+	// also starts a legion-daemon machine login, which any person signed in to Dispatch approves
+	// during the run (an attended step: they enter the printed code on the Dispatch credential page
+	// and click Approve). Every field here is read with os.Getenv, unlike the rest of liveEnv: unset
+	// is a blocked run of the secrets-* checks, never a refusal to start (secretsBlocked).
 	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin string
 	// The scratch Postgres the script started for postgres-resume: the file holding its URL, which
 	// the script also wrote into the providers Secret under liveSessionsSecretKey, and the address it
@@ -630,13 +631,13 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	if r.dyn, err = dynamic.NewForConfig(own); err != nil {
 		fail("%v", err)
 	}
-	if env.agentSecretsURL != "" {
+	if agentSecretsBlockReason(env.agentSecretsURL, env.agentSecretsOperator, env.agentSecretsAutoSHA, env.agentSecretsBin) == "" {
 		client := &agentsecrets.Client{URL: env.agentSecretsURL}
 		code, err := client.Login(r.ctx)
 		if err != nil {
 			fail("%v", err)
 		}
-		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page, signed in as anyone\n", code)
+		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page, signed in as any person\n", code)
 		var state agentsecrets.LoginState
 		pollErr := r.poll(10*time.Minute, "machine login "+code+" to be approved", func() (bool, error) {
 			state = client.LoginStatus()

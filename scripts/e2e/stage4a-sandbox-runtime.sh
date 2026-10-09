@@ -36,10 +36,10 @@
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
 # unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the email of the
 # person who approves secrets-approval-ask's credential request on the Dispatch credential page
-# during the run), and LEGION_E2E_AGENT_SECRETS_AUTO_SHA256. The run's machine login is the
-# legion-daemon service's, which anyone signed in to Dispatch approves, attended the same way: the
-# harness polls, prints STAGE4A: approve …, and waits up to 10 minutes for a real approval. See
-# scripts/e2e/README.md's Stage 4a section.
+# during the run), and LEGION_E2E_AGENT_SECRETS_AUTO_SHA256. With all of them set the harness also
+# starts the run's machine login, the legion-daemon service's, which any person signed in to
+# Dispatch approves, attended the same way: the harness polls, prints STAGE4A: approve …, and waits
+# up to 10 minutes for a real approval. See scripts/e2e/README.md's Stage 4a section.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
