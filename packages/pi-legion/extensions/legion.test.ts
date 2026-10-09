@@ -10,10 +10,10 @@ import {
   spyOn,
   test,
 } from "bun:test";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import { noteInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_KEY,
@@ -158,7 +158,6 @@ const environmentKeys = [
   "LEGION_BOOT_TOKEN_FILE",
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
-  "LEGION_GRANT_FILE",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
@@ -460,15 +459,6 @@ async function setJjRepoConfig(directory: string, key: string, value: string): P
     throw new Error(`jj config set failed: ${stderr}`);
   }
 }
-/** What `legion` will read from the pane's grant file after a worker's `tool_call` handler ran:
- * the trimmed contents and the file mode. Throws (ENOENT) when the hook never wrote it, so a
- * test never asserts against an absent file. */
-async function grantFileContents(file: string): Promise<{ grant: string; mode: number }> {
-  return {
-    grant: (await readFile(file, "utf8")).trim(),
-    mode: (await stat(file)).mode & 0o777,
-  };
-}
 
 interface DaemonRequest {
   readonly path: string;
@@ -487,9 +477,6 @@ interface ClaimPane {
     readonly secret: string;
   };
   readonly bootToken: string;
-  /** The pane's `LEGION_GRANT_FILE`, `<claim>-grant` in a 0700 secrets directory. */
-  readonly grantFile: string;
-  readonly secretsDir: string;
   /** Every request the pane made, daemon and Envoy listener alike, in order. */
   readonly requests: DaemonRequest[];
   readonly exits: number[];
@@ -503,24 +490,22 @@ interface ClaimPane {
   readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
-  readonly toolCall: Handler;
   /** Runs `session_start` for the pane's session, as Oh My Pi does when the process starts. */
   readonly start: () => Promise<unknown>;
 }
 
 /** A pane the daemon launched for a claim (a root architect, or a phase worker): the identity
  * variables the tmux runtime sets (`packages/daemon/internal/runtime/tmux/spawn.go`'s
- * `panePairs`), the boot token as a 0600 file behind `LEGION_BOOT_TOKEN_FILE`, and
- * `LEGION_GRANT_FILE` naming `<claim>-grant` beside it, under a state directory of its own. The
- * stub answers `extraRoutes` first, then the daemon's claim routes (`register` and `ready`
- * override their answers) and grants (`grant-<n>`), and 404s every other daemon path exactly as
- * the daemon's catch-all does, so a route the extension reached that the daemon does not serve is
- * visible in `requests` and never mistaken for a success. Each pane is an Oh My Pi process of its
- * own, so nothing an earlier pane recorded process-wide (its bootstrapped session, its Envoy role
- * bridge) carries over. `branch` is what the session's `getBranch()` returns: a resumed session's
- * transcript entries. `title` is the title the session already carries when it starts.
- * `bindEnvoy: false` loads legion.ts alone (`createPi`'s option). Nothing runs until `start()`;
- * `bootPane` is the started pane. */
+ * `panePairs`) and the boot token as a 0600 file behind `LEGION_BOOT_TOKEN_FILE`, under a state
+ * directory of its own. The stub answers `extraRoutes` first, then the daemon's claim routes
+ * (`register` and `ready` override their answers) and grants (`grant-<n>`), and 404s every other
+ * daemon path exactly as the daemon's catch-all does, so a route the extension reached that the
+ * daemon does not serve is visible in `requests` and never mistaken for a success. Each pane is an
+ * Oh My Pi process of its own, so nothing an earlier pane recorded process-wide (its bootstrapped
+ * session, its Envoy role bridge) carries over. `branch` is what the session's `getBranch()`
+ * returns: a resumed session's transcript entries. `title` is the title the session already
+ * carries when it starts. `bindEnvoy: false` loads legion.ts alone (`createPi`'s option). Nothing
+ * runs until `start()`; `bootPane` is the started pane. */
 async function claimPane(options: {
   readonly role: LegionRole;
   readonly tree?: IssueKey;
@@ -558,7 +543,6 @@ async function claimPane(options: {
   await mkdir(secretsDir, { mode: 0o700 });
   temporaryPaths.push(stateDir);
   const bootTokenFile = path.join(secretsDir, claimToken);
-  const grantFile = path.join(secretsDir, `${claimToken}-grant`);
   await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -569,7 +553,6 @@ async function claimPane(options: {
   process.env.LEGION_ROLE = options.role;
   process.env.LEGION_WORKSPACE = workspace;
   process.env.LEGION_STATE_DIR = stateDir;
-  process.env.LEGION_GRANT_FILE = grantFile;
 
   const requests: DaemonRequest[] = [];
   let readyAttempts = 0;
@@ -623,10 +606,7 @@ async function claimPane(options: {
   }
   legionExtension(fixture.pi);
   const sessionStart = fixture.handlers.get("session_start");
-  const toolCall = fixture.handlers.get("tool_call");
-  if (sessionStart === undefined || toolCall === undefined) {
-    throw new Error("the pane's lifecycle handlers were not registered");
-  }
+  if (sessionStart === undefined) throw new Error("the pane's session_start was not registered");
   const base = sessionContext(
     sessionId,
     options.sessionFile ?? `/tmp/${sessionId}.jsonl`,
@@ -646,8 +626,6 @@ async function claimPane(options: {
     claimToken,
     registration,
     bootToken,
-    grantFile,
-    secretsDir,
     requests,
     exits,
     errors,
@@ -659,7 +637,6 @@ async function claimPane(options: {
     title: fixture.title,
     handlers: fixture.handlers,
     context,
-    toolCall,
     start: async () => {
       const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
         errors.push(args.map(String).join(" "));
@@ -681,9 +658,6 @@ async function bootPane(options: Parameters<typeof claimPane>[0]): Promise<Claim
 
 const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
   requests.filter((request) => request.path.startsWith("/legion/"));
-
-const grantRequests = (requests: readonly DaemonRequest[]) =>
-  requests.filter((request) => request.path === "/legion/v1/grants");
 
 describe("Legion OMP extension", () => {
   test("classifies controllers, root architects, sub-architects, phase workers, and ordinary sessions", () => {
@@ -1043,15 +1017,6 @@ describe("Legion OMP extension", () => {
       expect(pane.exits).toEqual([]);
       expect(pane.tools.find((tool) => tool.name === "legion")).toBeUndefined();
       expect(pane.title.set).toEqual([]);
-
-      // No tool gate was installed for this session either: a plain bash call, which an
-      // unregistered root/phase worker would otherwise have blocked, passes through untouched.
-      await expect(
-        pane.toolCall(
-          { toolName: "bash", toolCallId: `call-sub-${role}-bash`, input: { command: "ls" } },
-          pane.context
-        )
-      ).resolves.toBeUndefined();
     });
   }
   test("recognises a subagent by the session this process already bootstrapped when no transcript is on disk", async () => {
@@ -1083,10 +1048,7 @@ describe("Legion OMP extension", () => {
     const subagent = createPi();
     legionExtension(subagent.pi);
     const subagentStart = subagent.handlers.get("session_start");
-    const subagentToolCall = subagent.handlers.get("tool_call");
-    if (subagentStart === undefined || subagentToolCall === undefined) {
-      throw new Error("subagent handlers were not registered");
-    }
+    if (subagentStart === undefined) throw new Error("subagent handlers were not registered");
     const subagentContext = sessionContext("ses_root_sql_task", subagentFile);
     await subagentStart({}, subagentContext);
 
@@ -1098,54 +1060,6 @@ describe("Legion OMP extension", () => {
     );
     expect(root.exits).toEqual([]);
     expect(subagent.tools.find((tool) => tool.name === "legion")).toBeUndefined();
-    await expect(
-      subagentToolCall(
-        { toolName: "bash", toolCallId: "call-sql-subagent-bash", input: { command: "ls" } },
-        subagentContext
-      )
-    ).resolves.toBeUndefined();
-  });
-  test.each([
-    ["implementer", "REPO-43"],
-    ["architect", "REPO-42"],
-  ] as const)("refuses a subagent's operation-log rewrite in the %s pane while its other calls stay ungated", async (role, issue) => {
-    const { childFile } = await createSubagentTranscriptPaths();
-    const pane = await bootPane({
-      role,
-      issue,
-      sessionId: `ses_sub_${role}_jj`,
-      sessionFile: childFile,
-    });
-    const { toolCall, context } = pane;
-
-    // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
-    // log, as the parent that spawned it (a root architect's included), so the pane rule binds
-    // the subagent too.
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: `call-sub-${role}-jj-log`,
-          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
-        },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
-    // A subagent's other calls pass, and no grant or daemon route is touched.
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: `call-sub-${role}-legion-state`,
-          input: { command: "legion state" },
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(daemonRequests(pane.requests)).toEqual([]);
   });
   // Oh My Pi's `ensureOnDisk` publishes the transcript and throws its SessionLockError when another
   // writer holds that file's publish lock; the rewrite is discarded and a later publish may succeed.
@@ -1156,7 +1070,7 @@ describe("Legion OMP extension", () => {
     error.name = "SessionLockError";
     return error;
   };
-  /** A hook's outcome: a rejected hook is a failed tool call (or session start). */
+  /** A hook's outcome: a rejected hook is a failed session start or navigation. */
   type HookOutcome = { readonly value: unknown } | { readonly error: string };
   /** Each hook's outcome, run one after another in order. */
   const hookOutcomes = async (hooks: readonly (() => unknown)[]): Promise<HookOutcome[]> => {
@@ -1173,7 +1087,12 @@ describe("Legion OMP extension", () => {
     }
     return outcomes;
   };
-  test("a subagent whose first transcript publish loses the session lock is still recognised at the next hook, and no tool call fails", async () => {
+  const hook = (handlers: Map<string, Handler>, name: string): Handler => {
+    const found = handlers.get(name);
+    if (found === undefined) throw new Error(`the ${name} handler was not registered`);
+    return found;
+  };
+  test("a subagent whose first transcript publish loses the session lock is still recognised at the next hook", async () => {
     const { childFile } = await createSubagentTranscriptPaths();
     // The host's roster does not list this session, so the transcript decides; its first publish
     // loses the lock to another writer and every later one succeeds.
@@ -1191,25 +1110,20 @@ describe("Legion OMP extension", () => {
         if (publishes === 1) throw lockError;
       },
     });
-    const bash = (id: string) =>
-      pane.toolCall({ toolName: "bash", toolCallId: id, input: { command: "ls" } }, pane.context);
+    // A session navigation is the next hook that asks the subagent check (`afterSessionChange`).
+    const navigates = () => hook(pane.handlers, "session_tree")({}, pane.context);
     const warnings: string[] = [];
     const stopSink = logger.registerLogSink((entry) => {
       if (entry.level === "warn") warnings.push(JSON.stringify(entry));
     });
     let outcomes: HookOutcome[];
     try {
-      outcomes = await hookOutcomes([
-        () => pane.start(),
-        () => bash("call-sub-lock-first"),
-        () => bash("call-sub-lock-second"),
-      ]);
+      outcomes = await hookOutcomes([() => pane.start(), navigates, navigates]);
     } finally {
       stopSink();
     }
 
-    // Every hook answers as a subagent's: no claim, and a bash call an unregistered phase worker
-    // would have had blocked passes through ungated.
+    // Every hook answers as a subagent's: no claim, no daemon route, no exit, no tool.
     expect(outcomes).toEqual([{ value: undefined }, { value: undefined }, { value: undefined }]);
     expect(daemonRequests(pane.requests)).toEqual([]);
     expect(pane.exits).toEqual([]);
@@ -1250,16 +1164,10 @@ describe("Legion OMP extension", () => {
       },
     });
 
-    const outcomes = await hookOutcomes([
-      () => pane.start(),
-      () =>
-        pane.toolCall(
-          { toolName: "bash", toolCallId: "call-roster-sub-bash", input: { command: "ls" } },
-          pane.context
-        ),
-    ]);
+    // The start is the one hook asked; a later navigation would be answered the same way.
+    const outcomes = await hookOutcomes([() => pane.start()]);
 
-    expect(outcomes).toEqual([{ value: undefined }, { value: undefined }]);
+    expect(outcomes).toEqual([{ value: undefined }]);
     expect(daemonRequests(pane.requests)).toEqual([]);
     expect(pane.exits).toEqual([]);
     expect(pane.tools.find((tool) => tool.name === "legion")).toBeUndefined();
@@ -1338,503 +1246,17 @@ describe("Legion OMP extension", () => {
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
-  // Every pane but the root architect's is on a child issue, a sub-architect's included; the root
-  // architect's issue is its tree's.
-  test.each([
-    ["planner", "REPO-43"],
-    ["implementer", "REPO-43"],
-    ["tester", "REPO-43"],
-    ["reviewer", "REPO-43"],
-    ["merger", "REPO-43"],
-    ["architect", "REPO-43"],
-    ["architect", "REPO-42"],
-  ] as const)("lets the %s on %s use every tool, and refuses only an operation-log rewrite", async (role, issue) => {
-    const { toolCall, context } = await bootPane({
-      role,
-      issue,
-      sessionId: `ses_${role}_${issue}_tools`,
+  test("registers no tool_call hook: nothing a pane runs is refused or minted for, in any role", async () => {
+    // No pane rule and no grant mint (LEGION-631): the `legion` tool's own operations mint their
+    // grants in-process, and the role prompts alone say who runs what.
+    const worker = await bootPane({ role: "implementer", sessionId: "ses_implementer_no_hook" });
+    expect(worker.handlers.get("tool_call")).toBeUndefined();
+    const root = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_root_no_hook",
     });
-    const calls: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
-      { toolName: "edit", input: { path: "scratch.txt", oldText: "a", newText: "b" } },
-      { toolName: "write", input: { path: "scratch.txt", content: "x" } },
-      { toolName: "apply_patch", input: { patch: "*** Begin Patch\n*** End Patch" } },
-      { toolName: "bash", input: { command: "jj log" } },
-      { toolName: "bash", input: { command: "echo hi && legion state" } },
-      { toolName: "task", input: { prompt: "look around" } },
-      { toolName: "wait", input: {} },
-    ];
-    const refusedByMistake: string[] = [];
-    for (const [index, call] of calls.entries()) {
-      const result = await toolCall(
-        { ...call, toolCallId: `call-${role}-${issue}-tools-${index}` },
-        context
-      );
-      if (result !== undefined) {
-        refusedByMistake.push(`${JSON.stringify(call)} -> ${JSON.stringify(result)}`);
-      }
-    }
-    expect(refusedByMistake).toEqual([]);
-    // The hook is live in this pane: the operation-log rule still answers.
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: `call-${role}-${issue}-jj-undo`,
-          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
-        },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
-  });
-  test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
-    const { toolCall, context, requests } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_implementer_jj_log",
-    });
-    const mints = (): number => grantRequests(requests).length;
-    const mintsBefore = mints();
-    // Every form the spec names, plus the whole-argument-list, pipeline-position, quoted-shell,
-    // unquoted-message-word, and unterminated-quote (plain-text fallback) cases, and (review
-    // round 1) the quoted and backslash-escaped forms bash hands to jj as the identical argv.
-    const refused = [
-      "jj undo",
-      'jj -R "$LEGION_WORKSPACE" undo',
-      "cd ws && jj undo",
-      "jj op restore 63461aba",
-      "jj op abandon",
-      "jj op revert",
-      "jj abandon",
-      "jj --repository p undo",
-      "jj operation restore 63461aba",
-      "jj op undo",
-      "jj op log -n 1 | head -1 | xargs jj op restore",
-      "jj --at-op 805478f4 op restore 805478f4",
-      "jj describe -m undo this",
-      "sh -c 'jj -R ws undo'",
-      "(cd ws && jj abandon)",
-      "cd ws\njj -R . undo",
-      "env JJ_CONFIG=/x /usr/local/bin/jj undo",
-      'jj un"do"',
-      'jj -R "$LEGION_WORKSPACE" describe -m \'undo',
-      'jj "undo"',
-      "jj 'undo'",
-      'jj op "restore" @-',
-      '"jj" undo',
-      "jj \\u\\n\\d\\o",
-      // A one-word message equal to a blocked word is the spec's stated tradeoff: one rephrase.
-      'jj describe -m "undo"',
-      // Redirection operators split words as bash does and never end the simple command; a
-      // backslash-newline is line continuation, not part of the next word -- outside quotes and
-      // inside double quotes alike (bash removes both characters in both places).
-      "jj undo>/dev/null",
-      "jj 2>&1 undo",
-      "jj op 2>&1 restore x",
-      "jj \\\nundo",
-      'jj "un\\\ndo"',
-    ];
-    const allowedByMistake: string[] = [];
-    for (const command of refused) {
-      const result = await toolCall(
-        { toolName: "bash", toolCallId: `call-jj-log-${command}`, input: { command } },
-        context
-      );
-      const blocked =
-        typeof result === "object" && result !== null && "block" in result && result.block === true;
-      if (!blocked) allowedByMistake.push(command);
-    }
-    expect(allowedByMistake).toEqual([]);
-    // A refused command never mints a grant: nothing ran, so nothing ran under one.
-    expect(mints()).toBe(mintsBefore);
-    // The refusal names the command, says the log is shared by every issue workspace, and gives
-    // the recovery rule (new commit, or jj restore of files; otherwise the architect).
-    const result = await toolCall(
-      {
-        toolName: "bash",
-        toolCallId: "call-jj-log-named",
-        input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
-      },
-      context
-    );
-    for (const phrase of [
-      "jj -R $LEGION_WORKSPACE undo",
-      "every Legion issue workspace shares",
-      "new commit",
-      "jj restore <paths>",
-      "architect",
-    ]) {
-      expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });
-    }
-  });
-  test("leaves file-level jj restore, jj op log, jj op show, and quoted message words alone", async () => {
-    const { toolCall, context, requests } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_implementer_jj_ok",
-    });
-    const mints = (): number => grantRequests(requests).length;
-    const mintsBefore = mints();
-    // The spec's negatives plus the exact commands the legion-worker skill has every role run:
-    // the conflict merge, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
-    const allowed = [
-      "jj restore src/x.ts",
-      'jj -R "$LEGION_WORKSPACE" restore packages/pi-legion/extensions/legion.ts',
-      "jj op log",
-      'jj -R "$LEGION_WORKSPACE" op log -n 5',
-      "jj op show",
-      'jj describe -m "undo this"',
-      'jj -R "$LEGION_WORKSPACE" new legion/LEGION-1 main@origin -m "merge: resolve conflict against main@origin"',
-      'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
-      'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
-      'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',
-      "jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'",
-      "jj --at-op 805478f4 restore src/x.ts",
-      "legion state",
-      // Redirections are part of the simple command they sit in, on the allowed side too.
-      "jj op log 2>&1 | head",
-      "jj restore f 2>/dev/null",
-      // Single quotes keep a backslash-newline literally in bash, so this word is not `undo`.
-      "jj 'un\\\ndo'",
-    ];
-    const refusedByMistake: string[] = [];
-    for (const command of allowed) {
-      const result = await toolCall(
-        { toolName: "bash", toolCallId: `call-jj-ok-${command}`, input: { command } },
-        context
-      );
-      if (result !== undefined) refusedByMistake.push(`${command} -> ${JSON.stringify(result)}`);
-    }
-    expect(refusedByMistake).toEqual([]);
-    // Each allowed command went down the ordinary path; only the `legion` invocation minted a grant.
-    expect(mints()).toBe(
-      mintsBefore + allowed.filter((command) => command.split(/\s+/).includes("legion")).length
-    );
-  });
-  test("applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone", async () => {
-    // What each role actually runs per the legion-worker skill and its role prompt.
-    const sanctioned: Record<LegionRole, string> = {
-      planner: 'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
-      implementer:
-        'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" new && rm -rf .legion && jj -R "$LEGION_WORKSPACE" describe -m "chore: remove .legion handoffs" && jj -R "$LEGION_WORKSPACE" bookmark set legion/REPO-43 && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/REPO-43',
-      tester: 'jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/test.json',
-      reviewer:
-        'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r @- .legion && gh api --method POST repos/o/r/pulls/7/reviews --input body.json',
-      merger: 'jj -R "$LEGION_WORKSPACE" diff --from abc123 --to def456 --summary',
-      architect: "legion handoff read --phase plan",
-    };
-    for (const role of LEGION_ROLES) {
-      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_jj_guard` });
-      const undo = await toolCall(
-        {
-          toolName: "bash",
-          toolCallId: `call-${role}-jj-undo`,
-          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
-        },
-        context
-      );
-      // Every pane this loop boots classifies as a phase worker's, a sub-architect's "architect"
-      // case included (its issue REPO-43 differs from its tree REPO-42), so the operation-log
-      // guard, judged from the environment, answers. A root architect's pane gets the same
-      // guard; see "lets the %s on %s use every tool, and refuses only an operation-log
-      // rewrite".
-      expect(undo).toEqual({
-        block: true,
-        reason: expect.stringContaining("every Legion issue workspace shares"),
-      });
-      await expect(
-        toolCall(
-          {
-            toolName: "bash",
-            toolCallId: `call-${role}-jj-sanctioned`,
-            input: { command: sanctioned[role] },
-          },
-          context
-        )
-      ).resolves.toBeUndefined();
-    }
-  });
-  test("refuses eval code and a supervised service's stdin that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
-    const { toolCall, context } = await bootPane({
-      role: "tester",
-      sessionId: "ses_tester_jj_eval_proc",
-    });
-    const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
-      {
-        toolName: "eval",
-        input: {
-          language: "py",
-          code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])',
-        },
-      },
-      { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
-      // An argv literal separates the words with `", "`; the rule allows any non-word run.
-      { toolName: "eval", input: { language: "py", code: 'run(["jj", "op", "restore", op_id])' } },
-      // A supervised service starts as a `bash` command, tokenised like any other.
-      { toolName: "bash", input: { command: "bash -c 'jj op restore 1'", name: "x" } },
-      // Its stdin is a `write` to `proc://<id>`, the scheme in any case, and in the `[path]` or
-      // `[path#XXXX]` wrapper Oh My Pi strips before it routes.
-      { toolName: "write", input: { path: "proc://shell", content: "jj undo" } },
-      { toolName: "write", input: { path: "PROC://shell", content: "jj -R /ws op restore 1" } },
-      { toolName: "write", input: { path: "[proc://shell]", content: "jj undo" } },
-      { toolName: "write", input: { path: "[proc://shell#ABCD]", content: "jj undo" } },
-    ];
-    const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
-      {
-        toolName: "eval",
-        input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
-      },
-      { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
-      { toolName: "bash", input: { command: "bun run dev", name: "web" } },
-      { toolName: "write", input: { path: "proc://shell", content: "jj op log" } },
-      { toolName: "write", input: { path: "proc://web/kill" } },
-      // A prefixed `conflict://` write is the workspace-file write Oh My Pi routes it to, not a
-      // service's stdin.
-      { toolName: "write", input: { path: "proc://shell:conflict://2", content: "jj undo" } },
-      // A file's content is not run, so the plain-text rule leaves it alone.
-      { toolName: "write", input: { path: "notes.md", content: "never run jj undo here" } },
-    ];
-    const allowedByMistake: string[] = [];
-    for (const [index, call] of refused.entries()) {
-      const result = await toolCall({ ...call, toolCallId: `call-jj-text-${index}` }, context);
-      const blocked =
-        typeof result === "object" && result !== null && "block" in result && result.block === true;
-      if (!blocked) allowedByMistake.push(JSON.stringify(call));
-    }
-    expect(allowedByMistake).toEqual([]);
-    const refusedByMistake: string[] = [];
-    for (const [index, call] of allowed.entries()) {
-      const result = await toolCall({ ...call, toolCallId: `call-jj-text-ok-${index}` }, context);
-      if (result !== undefined) refusedByMistake.push(JSON.stringify(call));
-    }
-    expect(refusedByMistake).toEqual([]);
-    // Same message shape as the bash refusal, naming the tool and the words it found.
-    const named = await toolCall(
-      {
-        toolName: "write",
-        toolCallId: "call-jj-text-named",
-        input: { path: "proc://shell", content: "jj undo" },
-      },
-      context
-    );
-    for (const phrase of ["write: jj undo", "every Legion issue workspace shares"]) {
-      expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
-    }
-  });
-  test("mints a grant only before a bash command that invokes legion, and before no other tool call", async () => {
-    const { toolCall, context, grantFile, requests } = await bootPane({ role: "implementer" });
-
-    // The grant is a `legion` command's authentication to the daemon (`legion threads resolve`,
-    // `legion status`; harmlessly `legion push`, `legion state`), so a bash command one of whose
-    // simple commands invokes `legion` — bare or by a path ending `/legion`, in any position of a
-    // pipeline or chain — mints exactly one; a command that does not tokenise (an unterminated
-    // quote) mints too, the safe default for a credential.
-    const minting = [
-      "legion threads resolve --pr 1 --repo o/r",
-      "legion status REPO-43 todo",
-      'cd -- "$LEGION_WORKSPACE" && legion state | cat',
-      "legion push",
-      "/opt/legion/bin/legion state",
-      "FOO=1 legion state",
-      'echo "unterminated',
-    ];
-    for (const [index, command] of minting.entries()) {
-      await expect(
-        toolCall(
-          { toolName: "bash", toolCallId: `call-legion-${index}`, input: { command } },
-          context
-        )
-      ).resolves.toBeUndefined();
-      expect({ command, minted: grantRequests(requests).length }).toEqual({
-        command,
-        minted: index + 1,
-      });
-    }
-    expect(await grantFileContents(grantFile)).toEqual({
-      grant: `grant-${minting.length}`,
-      mode: 0o600,
-    });
-
-    // gh and git read the role's GitHub App token from the gh files under the pane's
-    // `GH_CONFIG_DIR`, as does the gh Oh My Pi runs for its `github` tool and for a `pr://` or
-    // `issue://` read, so none of these redeems a grant; nor does a plain shell command, or a word
-    // that only contains `legion`.
-    const unminting = [
-      { toolName: "bash", input: { command: "git status" } },
-      { toolName: "bash", input: { command: "gh pr view 1" } },
-      { toolName: "bash", input: { command: "gh api graphql -f query='{viewer{login}}'" } },
-      { toolName: "bash", input: { command: 'jj -R "$LEGION_WORKSPACE" git push' } },
-      { toolName: "bash", input: { command: "cat packages/daemon/cmd/legion/handoff.go" } },
-      { toolName: "bash", input: { command: "echo legion-worker" } },
-      { toolName: "github", input: { op: "pr_view", pr: "7" } },
-      { toolName: "read", input: { path: "pr://1" } },
-      { toolName: "read", input: { path: "issue://acme/widgets/7" } },
-      { toolName: "grep", input: { pattern: "fix", path: "src; PR://acme/widgets/7" } },
-    ];
-    for (const [index, call] of unminting.entries()) {
-      await expect(
-        toolCall({ ...call, toolCallId: `call-unminting-${index}` }, context)
-      ).resolves.toBeUndefined();
-    }
-    expect(grantRequests(requests)).toHaveLength(minting.length);
-  });
-  /**
-   * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
-   * last non-undefined result, mirroring the host's `emitToolCall`, which also never chains one
-   * handler's revised input into the next. Stacked handlers are therefore observable only by
-   * counting `/legion/v1/grants` requests, never by inspecting a returned input.
-   */
-  test("ignores whatever env or text the model supplied and never rewrites command or env", async () => {
-    const { toolCall, context, grantFile, requests } = await bootPane({ role: "implementer" });
-
-    // A model imitating an earlier session's shape: a stale grant in env and in the command text.
-    const command = `export LEGION_GRANT='stale-imitated-grant'; legion state`;
-    const result = await toolCall(
-      {
-        toolName: "bash",
-        toolCallId: "call-env",
-        input: {
-          command,
-          env: { LEGION_GRANT: "stale-imitated-grant", PATH: "/model/path" },
-        },
-      },
-      context
-    );
-
-    expect(result).toBeUndefined();
-    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
-    expect(grantRequests(requests)).toHaveLength(1);
-  });
-  test("creates the grant file's missing directory 0700, as an Agent Sandbox pod's empty state volume has none", async () => {
-    const { toolCall, context, secretsDir } = await bootPane({ role: "implementer" });
-    const grantFile = path.join(secretsDir, "state", "secrets", "x-grant");
-    process.env.LEGION_GRANT_FILE = grantFile;
-
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-new-dir", input: { command: "legion push" } },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
-    expect((await stat(path.dirname(grantFile))).mode & 0o777).toBe(0o700);
-  });
-  test("blocks the command naming the path when the grant file cannot be written", async () => {
-    const workspace = await createJjWorkspace();
-    const { toolCall, context, secretsDir, requests } = await bootPane({
-      role: "implementer",
-      workspace,
-    });
-    // A regular file where the grant file's directory should be: no directory can be made there.
-    const notADirectory = path.join(secretsDir, "not-a-directory");
-    await writeFile(notADirectory, "", { mode: 0o600 });
-    const unwritable = path.join(notADirectory, "secrets", "x-grant");
-    process.env.LEGION_GRANT_FILE = unwritable;
-
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-unwritable", input: { command: "legion push" } },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: expect.stringMatching(
-        new RegExp(
-          `^LEGION_GRANT_FILE ${unwritable.replaceAll(".", "\\.")} could not be written: .*ENOTDIR`
-        )
-      ),
-    });
-    // Mint-then-write: the grant was minted (one wasted 60 s grant), nothing ran under a stale one.
-    expect(grantRequests(requests)).toHaveLength(1);
-    // A relative pointer (an operator's own export) is refused before any temp file could land
-    // in OMP's cwd — the issue workspace.
-    process.env.LEGION_GRANT_FILE = "relative/x-grant";
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-relative", input: { command: "legion push" } },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: "LEGION_GRANT_FILE relative/x-grant could not be written: the path is not absolute",
-    });
-    expect(await readdir(workspace)).not.toContain(expect.stringMatching(/^x-grant\./));
-  });
-  test("blocks when the pane carries no LEGION_GRANT_FILE, or a blank one, without minting", async () => {
-    const { toolCall, context, requests } = await bootPane({ role: "implementer" });
-    const blocked = {
-      block: true,
-      reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it was launched)",
-    };
-
-    delete process.env.LEGION_GRANT_FILE;
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-no-file", input: { command: "legion push" } },
-        context
-      )
-    ).resolves.toEqual(blocked);
-    process.env.LEGION_GRANT_FILE = "  ";
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-blank-file", input: { command: "legion push" } },
-        context
-      )
-    ).resolves.toEqual(blocked);
-    expect(grantRequests(requests)).toHaveLength(0);
-  });
-  test("blocks a booted worker's legion bash calls when the daemon refuses to mint a grant", async () => {
-    const { toolCall, context } = await bootPane({
-      role: "reviewer",
-      extraRoutes: (url) =>
-        url.pathname === "/legion/v1/grants"
-          ? Response.json({ error: "grant minting unavailable" }, { status: 503 })
-          : undefined,
-    });
-
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "call-grant-refused",
-          input: { command: "legion threads resolve --pr 7 --repo o/r" },
-        },
-        context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: "POST /legion/v1/grants failed with 503: grant minting unavailable",
-    });
-  });
-  test("blocks a legion bash call from a worker session that has not completed its boot handshake, and leaves a plain one alone", async () => {
-    // The pane's launch environment is complete; only the boot handshake is missing.
-    const { toolCall } = await claimPane({ role: "implementer" });
-
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "call-unregistered-worker",
-          input: { command: "legion state" },
-        },
-        sessionContext("ses_unregistered_worker")
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: "Legion worker session is not registered; cannot mint its grant",
-    });
-    // A command that invokes no `legion` redeems no grant, so an unregistered session runs it.
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "call-unregistered-worker-plain",
-          input: { command: "jj git fetch" },
-        },
-        sessionContext("ses_unregistered_worker")
-      )
-    ).resolves.toBeUndefined();
+    expect(root.handlers.get("tool_call")).toBeUndefined();
   });
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];
@@ -1863,39 +1285,6 @@ describe("Legion OMP extension", () => {
     legionExtension(fixture.pi);
 
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
-  });
-  test("refuses a root architect's own eval or service stdin that spells out an operation-log rewrite", async () => {
-    // The operation-log rule bound to the root architect's pane refuses the architect's own
-    // (non-subagent) eval code and service stdin, as it does a phase worker's.
-    const { toolCall, context } = await bootPane({
-      role: "architect",
-      issue: "REPO-42",
-      sessionId: "ses_root_architect_eval_proc",
-    });
-    const evalResult = await toolCall(
-      {
-        toolName: "eval",
-        toolCallId: "architect-eval-jj",
-        input: { language: "py", code: 'run(["jj", "undo"])' },
-      },
-      context
-    );
-    expect(evalResult).toEqual({
-      block: true,
-      reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
-    const stdinResult = await toolCall(
-      {
-        toolName: "write",
-        toolCallId: "architect-proc-jj",
-        input: { path: "proc://shell", content: "jj undo" },
-      },
-      context
-    );
-    expect(stdinResult).toEqual({
-      block: true,
-      reason: expect.stringContaining("every Legion issue workspace shares"),
-    });
   });
 
   describe("a phase worker left idle with its phase open", () => {
@@ -1929,29 +1318,6 @@ describe("Legion OMP extension", () => {
       stop_hook_active: false,
       signal,
     });
-    const originalPath = process.env.PATH;
-    afterEach(() => {
-      process.env.PATH = originalPath;
-    });
-    /** A stand-in `legion` first on PATH, where the daemon's launcher is on a pane's: it records its
-     * arguments and the grant file's contents, and exits `exitCode`. Returns its call log. */
-    const fakeLegion = async (exitCode: number): Promise<string> => {
-      const bin = await mkdtemp(path.join(os.tmpdir(), "legion-fake-cli-"));
-      temporaryPaths.push(bin);
-      const log = path.join(bin, "calls.log");
-      await writeFile(
-        path.join(bin, "legion"),
-        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nprintf 'grant %s\\n' "$(cat "$LEGION_GRANT_FILE" 2>/dev/null)" >> '${log}'\ncat > '${path.join(bin, "stdin")}'\necho "legion ran"\nexit ${exitCode}\n`,
-        { mode: 0o755 }
-      );
-      process.env.PATH = `${bin}:${originalPath}`;
-      return log;
-    };
-    const hook = (handlers: Map<string, Handler>, name: string): Handler => {
-      const found = handlers.get(name);
-      if (found === undefined) throw new Error(`the ${name} handler was not registered`);
-      return found;
-    };
     /** The session's hooks, driven as OMP drives them. */
     const session = (handlers: Map<string, Handler>, context: SessionContext) => ({
       arrives: (message: unknown) => hook(handlers, "message_start")(message, context),
@@ -1962,6 +1328,8 @@ describe("Legion OMP extension", () => {
       readonly role?: LegionRole;
       readonly issue?: IssueKey;
       readonly branch?: readonly unknown[];
+      /** The daemon's answer to `POST /legion/v1/handoff/complete`: success unless given. */
+      readonly complete?: () => Response;
     }) => {
       const workspace = await mkdtemp(path.join(os.tmpdir(), "legion-stall-workspace-"));
       temporaryPaths.push(workspace);
@@ -1971,10 +1339,15 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_stall",
         workspace,
         branch: options.branch,
-        extraRoutes: (url) =>
-          url.pathname === "/legion/v1/grants"
-            ? Response.json({ grantId: "grant-stall", expiresAt: "2099-01-01T00:00:00Z" })
-            : undefined,
+        extraRoutes: (url) => {
+          if (url.pathname === "/legion/v1/grants") {
+            return Response.json({ grantId: "grant-stall", expiresAt: "2099-01-01T00:00:00Z" });
+          }
+          if (url.pathname === "/legion/v1/handoff/complete") {
+            return options.complete?.() ?? Response.json({});
+          }
+          return undefined;
+        },
       });
       const legionTool = booted.tools.find((tool) => tool.name === "legion");
       if (legionTool === undefined) throw new Error("the worker has no legion tool");
@@ -1982,9 +1355,9 @@ describe("Legion OMP extension", () => {
         ...booted,
         ...session(booted.handlers, booted.context),
         legionTool,
-        /** Calls the tool's `handoff_complete` with a stand-in `legion` exiting `exitCode`. */
-        completes: async (exitCode: number) => {
-          const log = await fakeLegion(exitCode);
+        /** Calls the tool's `handoff_complete`: its result, and the daemon requests it made. */
+        completes: async () => {
+          const before = booted.requests.length;
           const result = await legionTool.execute(
             "call-complete",
             { op: "handoff_complete", summary: "Done." },
@@ -1992,7 +1365,7 @@ describe("Legion OMP extension", () => {
             undefined,
             booted.context
           );
-          return { result, calls: (await readFile(log, "utf8")).split("\n").filter(Boolean) };
+          return { result, calls: daemonRequests(booted.requests.slice(before)) };
         },
       };
     };
@@ -2017,9 +1390,9 @@ describe("Legion OMP extension", () => {
       await worker.arrives(assignment);
 
       // The Stage 3 transcript's last message (1ee62d31, the round-2 implementer): the model's
-      // final `legion handoff complete` came back as text, not a tool call.
+      // final completion came back as text, not a tool call.
       const result = await worker.settles(
-        'court\n<invoke name="bash">\n<parameter name="command">cd -- "$LEGION_WORKSPACE" && legion handoff complete --summary \'Round 2 done.\'</parameter>\n</invoke>'
+        'court\n<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>\n<parameter name="summary">Round 2 done.</parameter>\n</invoke>'
       );
 
       expect(result).toEqual(followUp("written as text"));
@@ -2048,16 +1421,29 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("CI passed.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("a successful handoff_complete runs legion handoff complete with a fresh grant and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
+    test("a successful handoff_complete posts the completion with a fresh grant and no commit, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
 
-      const { result, calls } = await worker.completes(0);
-      expect(result).toEqual({
-        content: [{ type: "text", text: "legion ran" }],
-        details: { operation: "handoff_complete", exitCode: 0 },
-      });
-      expect(calls).toEqual(["handoff complete --summary Done.", "grant grant-stall"]);
+      const { result, calls } = await worker.completes();
+      expect(result).toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
+      // The grant is minted in-process and travels only in the request; nothing is written to the
+      // pane, and the completion names no commit: the daemon reads the branch head on GitHub.
+      expect(calls).toEqual([
+        {
+          path: "/legion/v1/grants",
+          body: {
+            sessionId: "ses_stall",
+            secret: worker.registration.secret,
+            tree: "REPO-42",
+            issue: "REPO-43",
+          },
+        },
+        {
+          path: "/legion/v1/handoff/complete",
+          body: { grantId: "grant-stall", summary: "Done.", verdict: "", ready: false },
+        },
+      ]);
       expect(await worker.settles("Reported.")).toBeUndefined();
 
       // After its phase a worker stays to answer other roles' questions over Envoy.
@@ -2111,16 +1497,36 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Answered.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("a handoff_complete whose command fails is an error result and leaves the phase open", async () => {
-      const worker = await bootStalling({});
+    test("a handoff_complete the daemon refuses is an error result naming its code and leaves the phase open", async () => {
+      const worker = await bootStalling({
+        complete: () =>
+          Response.json(
+            {
+              error:
+                "no .legion/REPO-43/implement.json at head abc123 of legion/REPO-43: write, commit and push this phase's handoff, then complete again",
+              code: "HANDOFF_FILE_MISSING",
+            },
+            { status: 409 }
+          ),
+      });
       await worker.arrives(assignment);
 
-      const { result } = await worker.completes(1);
-      expect(result).toEqual({
-        content: [{ type: "text", text: "legion ran" }],
-        details: { operation: "handoff_complete", exitCode: 1 },
+      const { result, calls } = await worker.completes();
+      expect(result).toMatchObject({
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining(
+              "POST /legion/v1/handoff/complete failed with 409 HANDOFF_FILE_MISSING: no .legion/REPO-43/implement.json"
+            ),
+          },
+        ],
         isError: true,
       });
+      expect(calls.map((call) => call.path)).toEqual([
+        "/legion/v1/grants",
+        "/legion/v1/handoff/complete",
+      ]);
       expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
     });
 
@@ -2144,125 +1550,11 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("handoff_complete takes a phase only when it is the worker's own handoff phase, and refuses any other naming the expected one", async () => {
-      const planner = await bootStalling({ role: "planner" });
-      await planner.arrives(assignment);
-      const log = await fakeLegion(0);
-
-      expect(
-        await planner.legionTool.execute(
-          "call-wrong-phase",
-          { op: "handoff_complete", phase: "implement", summary: "Planned." },
-          undefined,
-          undefined,
-          planner.context
-        )
-      ).toEqual({
-        content: [
-          {
-            type: "text",
-            text: 'handoff_complete\'s phase is "plan" for a planner: omit phase, or pass "plan"',
-          },
-        ],
-        details: {},
-        isError: true,
-      });
-      expect(await planner.settles("Tried to report.")).toEqual(followUp("handoff_complete"));
-
-      expect(
-        await planner.legionTool.execute(
-          "call-own-phase",
-          { op: "handoff_complete", phase: "plan", summary: "Planned." },
-          undefined,
-          undefined,
-          planner.context
-        )
-      ).toEqual({
-        content: [{ type: "text", text: "legion ran" }],
-        details: { operation: "handoff_complete", exitCode: 0 },
-      });
-      // The command takes no phase: the pane's LEGION_ROLE already names it.
-      expect((await readFile(log, "utf8")).split("\n").filter(Boolean)).toEqual([
-        "handoff complete --summary Planned.",
-        "grant grant-stall",
-      ]);
-
-      const merger = await bootStalling({ role: "merger" });
-      expect(
-        await merger.legionTool.execute(
-          "call-merger-phase",
-          { op: "handoff_complete", phase: "review", summary: "Ready.", ready: true },
-          undefined,
-          undefined,
-          merger.context
-        )
-      ).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "handoff_complete takes no phase for a merger, which writes no handoff",
-          },
-        ],
-        details: {},
-        isError: true,
-      });
-    });
-
-    test("the handoff actions run the daemon's own legion handoff commands, handoff_write's payload on stdin", async () => {
-      const worker = await bootStalling({});
-      const log = await fakeLegion(0);
-      const stdin = path.join(path.dirname(log), "stdin");
-      await worker.legionTool.execute(
-        "call",
-        { op: "handoff_write", phase: "implement", data: { proof: ["ran it"] } },
-        undefined,
-        undefined,
-        worker.context
-      );
-      expect(await readFile(stdin, "utf8")).toBe('{"proof":["ran it"]}');
-      await worker.legionTool.execute(
-        "call",
-        { op: "handoff_read", phase: "plan" },
-        undefined,
-        undefined,
-        worker.context
-      );
-      expect(await readFile(stdin, "utf8")).toBe("");
-      const calls = (await readFile(log, "utf8")).split("\n").filter(Boolean);
-      expect(calls.filter((line) => !line.startsWith("grant "))).toEqual([
-        "handoff write --phase implement",
-        "handoff read --phase plan",
-      ]);
-    });
-
-    test("handoff_write delivers a payload over one argv string's 128 KiB cap", async () => {
-      // Linux refuses a single argument over MAX_ARG_STRLEN (131,072 bytes) with E2BIG, and a
-      // tester's handoff that accumulates review rounds outgrows it (this repository's largest
-      // was 179,251 bytes).
-      const worker = await bootStalling({});
-      const log = await fakeLegion(0);
-      const rounds = Array.from({ length: 2000 }, (_, round) => ({ round, note: "r".repeat(80) }));
-      const data = { verdict: "pass", rounds };
-      expect(JSON.stringify(data).length).toBeGreaterThan(128 * 1024);
-      const result = await worker.legionTool.execute(
-        "call",
-        { op: "handoff_write", phase: "test", data },
-        undefined,
-        undefined,
-        worker.context
-      );
-      expect(result).not.toHaveProperty("isError");
-      expect(await readFile(path.join(path.dirname(log), "stdin"), "utf8")).toBe(
-        JSON.stringify(data)
-      );
-      expect((await readFile(log, "utf8")).split("\n")[0]).toBe("handoff write --phase test");
-    });
-
-    test("the legion tool has no handoff_message: a call runs no command, and a message for another role goes through envoy_publish", async () => {
-      // Nothing reads a handoff message: no action or prompt reads `.legion/messages/`, while a
+    test("the legion tool has no handoff_message: a call reaches no daemon route, and a message for another role goes through envoy_publish", async () => {
+      // Nothing reads a handoff message: no operation or prompt reads `.legion/messages/`, while a
       // role's live questions go through envoy_publish and a later phase reads the handoff files.
       const worker = await bootStalling({});
-      const log = await fakeLegion(0);
+      const requestsBefore = worker.requests.length;
       const result = await worker.legionTool.execute(
         "call-message",
         { op: "handoff_message", sender: "implement", recipient: "test", body: "look at the diff" },
@@ -2271,7 +1563,7 @@ describe("Legion OMP extension", () => {
         worker.context
       );
       expect(result.isError).toBe(true);
-      expect(await readFile(log, "utf8").catch(() => "")).toBe("");
+      expect(daemonRequests(worker.requests.slice(requestsBefore))).toEqual([]);
       expect(worker.legionTool.description).toContain("envoy_publish");
       expect(worker.legionTool.description).not.toContain("handoff_message");
     });
@@ -2324,7 +1616,7 @@ describe("Legion OMP extension", () => {
 
       const completed = await bootStalling({});
       await completed.arrives(assignment);
-      await completed.completes(0);
+      await completed.completes();
       const resumedClosed = await bootStalling({ branch: completed.entries });
       await resumedClosed.arrives(envoyEvent);
       expect(await resumedClosed.settles("Answered the question.")).toBeUndefined();
@@ -2357,9 +1649,7 @@ describe("Legion OMP extension", () => {
         content: [
           {
             type: "text",
-            text: expect.stringContaining(
-              "handoff_complete is not available to a root architect session; a root architect reads handoffs with `legion handoff read"
-            ),
+            text: "handoff_complete is not available to a root architect session, which runs no phase",
           },
         ],
       });
@@ -2470,50 +1760,6 @@ describe("Legion OMP extension", () => {
     expect(
       subjects.filter((subject) => subject.startsWith("notifications.legion.omp.REPO-"))
     ).toEqual([]);
-  });
-
-  test("mints and atomically replaces a claim's grant for every bash command that invokes legion", async () => {
-    const { toolCall, context, grantFile, requests, registration } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_grant",
-    });
-
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "grant-one",
-          input: { command: "legion threads resolve --pr 7 --repo o/r" },
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "grant-two", input: { command: "legion state" } },
-        context
-      )
-    ).resolves.toBeUndefined();
-
-    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-2", mode: 0o600 });
-    // Each mint names the claim's session and secret, and its tree and issue, and nothing else:
-    // the `push` field of contract 13 went with the push grant lifetime (LEGION-631).
-    const grant = {
-      path: "/legion/v1/grants",
-      body: {
-        sessionId: "ses_grant",
-        secret: registration.secret,
-        tree: "REPO-42",
-        issue: "REPO-43",
-      },
-    };
-    expect(grantRequests(requests)).toEqual([grant, grant]);
-    for (const request of grantRequests(requests)) expect(request.body).not.toHaveProperty("push");
-    // The atomic rename leaves no `<file>.<pid>.<uuid>` residue beside the grant file.
-    const secretFiles = await readdir(path.dirname(grantFile));
-    expect(secretFiles.filter((name) => name.startsWith(`${path.basename(grantFile)}.`))).toEqual(
-      []
-    );
   });
 
   for (const [status, sentence] of [
@@ -2657,9 +1903,9 @@ describe("Legion OMP extension", () => {
  * marker, and the controller capability as a 0600 file behind `LEGION_CONTROLLER_SECRET_FILE`
  * (`packages/daemon/cmd/legion/controller.go`). The stub answers the claim registration with
  * the controller's registration (or `register`'s answer, when it gives one), mints grants (or
- * answers `grant`'s refusal), and 404s every other daemon path as the daemon's catch-all does; its
- * Envoy side keeps a role holder and an interest registry, as the listener does, and names no
- * holder while `listener.lost` is set. */
+ * answers `grant`'s refusal), takes an issue-status write, and 404s every other daemon path as
+ * the daemon's catch-all does; its Envoy side keeps a role holder and an interest registry, as
+ * the listener does, and names no holder while `listener.lost` is set. */
 async function launchedController(options: {
   readonly sessionId: string;
   readonly register?: (
@@ -2685,7 +1931,8 @@ async function launchedController(options: {
 }): Promise<{
   readonly token: string;
   readonly registration: Record<string, unknown>;
-  readonly grantFile: string;
+  /** The 0700 secrets directory the controller's capability file sits in. */
+  readonly secretsDir: string;
   readonly requests: DaemonRequest[];
   readonly sentUserMessages: string[];
   readonly exits: number[];
@@ -2713,7 +1960,6 @@ async function launchedController(options: {
   await mkdir(secretsDir, { mode: 0o700 });
   temporaryPaths.push(stateDir);
   const capabilityFile = path.join(secretsDir, token);
-  const grantFile = path.join(secretsDir, `${token}-grant`);
   await writeFile(capabilityFile, "controller-capability\n", { mode: 0o600 });
   process.env.LEGION_CONTROLLER = "1";
   process.env.LEGION_ROLE = "controller";
@@ -2724,7 +1970,6 @@ async function launchedController(options: {
   process.env.LEGION_STATE_DIR = stateDir;
   process.env.LEGION_CONTROLLER_START_MESSAGE =
     options.startMessage ?? "Legion controller start: follow skill://legion-controller";
-  process.env.LEGION_GRANT_FILE = grantFile;
 
   const requests: DaemonRequest[] = [];
   const goldenState = JSON.parse(
@@ -2762,6 +2007,7 @@ async function launchedController(options: {
       });
     }
     if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
+    if (url.pathname === "/legion/v1/issues/status") return Response.json({});
     if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: "no route" }, { status: 404 });
@@ -2825,7 +2071,7 @@ async function launchedController(options: {
   return {
     token,
     registration,
-    grantFile,
+    secretsDir,
     requests,
     sentUserMessages: fixture.sentUserMessages,
     exits,
@@ -2868,8 +2114,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     );
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(controller.exits).toEqual([]);
-    // The `legion` tool is an architect's and a worker's; the controller does not get it.
-    expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
+    // The controller's `legion` tool: `read_state` and `set_status`, registered with its claim.
+    expect(controller.tools.map((tool) => tool.name)).toContain("legion");
   });
 
   // LEGION-392's race: Oh My Pi's own positional-argument first message can lose the session's one
@@ -3037,7 +2283,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       sessionId: "ses_controller_pod",
       stateFixture: "state-controller-claim.json",
     });
-    const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
+    const bootFile = path.join(controller.secretsDir, "LEGION_BOOT_TOKEN");
     await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
     delete process.env.LEGION_CONTROLLER_START_MESSAGE;
@@ -3085,7 +2331,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       sessionId: "ses_controller_pod",
       register: () => Response.json({ error: "invalid boot token" }, { status: 403 }),
     });
-    const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
+    const bootFile = path.join(controller.secretsDir, "LEGION_BOOT_TOKEN");
     await writeFile(bootFile, "stale-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
@@ -3136,27 +2382,35 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.holder()).toBe("ses_controller_takeover");
   });
 
-  test("blocks a bash call when the daemon refuses the controller grant", async () => {
+  test("set_status fails naming the daemon's refusal when it refuses the controller grant", async () => {
     const controller = await launchedController({
       sessionId: "ses_controller_refused",
       grant: () => Response.json({ error: "Invalid controller capability" }, { status: 403 }),
     });
     const context = controller.context("ses_controller_refused");
     await controller.handlers.get("session_start")?.({}, context);
+    const legion = controller.tools.find((tool) => tool.name === "legion");
 
     await expect(
-      controller.handlers.get("tool_call")?.(
-        {
-          toolName: "bash",
-          toolCallId: "controller-refused",
-          input: { command: "legion state" },
-        },
+      legion?.execute(
+        "controller-refused",
+        { op: "set_status", issue: "REPO-42", status: "icebox" },
+        undefined,
+        undefined,
         context
       )
-    ).resolves.toEqual({
-      block: true,
-      reason: "POST /legion/v1/grants failed with 403: Invalid controller capability",
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "POST /legion/v1/grants failed with 403: Invalid controller capability",
+        },
+      ],
     });
+    expect(controller.requests.map((request) => request.path)).not.toContain(
+      "/legion/v1/issues/status"
+    );
   });
 
   test("a tree navigation that changes nothing and a task subagent's switch claim nothing; a tree navigation after the transcript moved under the same id claims again with the moved file", async () => {
@@ -3271,81 +2525,57 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     });
   }
 
-  test("mints nothing before its claim, then a grant with its registration secret for every bash command that invokes legion, leaving the input as the model wrote it", async () => {
-    const controller = await launchedController({ sessionId: "ses_controller_bash" });
-    const context = controller.context("ses_controller_bash");
-    const toolCall = controller.handlers.get("tool_call");
-    if (toolCall === undefined) throw new Error("tool_call handler was not registered");
-
-    // Before the claim completes nothing can mint for the controller, so its `legion` call passes
-    // through unwrapped rather than being blocked as an unregistered worker.
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "controller-unclaimed",
-          input: { command: "legion status REPO-42 todo" },
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(daemonRequests(controller.requests)).toEqual([]);
+  test("the controller's legion tool reads the whole state without a grant and sets a status with a grant minted from its registration secret", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_tool" });
+    const context = controller.context("ses_controller_tool");
+    // Nothing is registered before the claim: the tool arrives with it.
+    expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
 
     await controller.handlers.get("session_start")?.({}, context);
-    // The grant travels exactly as a worker's does: written to the pane's grant file, with neither
-    // `command` nor `env` rewritten — the hook returns nothing.
+    const legion = controller.tools.find((tool) => tool.name === "legion");
+    if (legion === undefined) throw new Error("the controller's legion tool was not registered");
+    const requestsAfterClaim = controller.requests.length;
+
     await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "controller-env",
-          input: {
-            command: "legion state",
-            env: { KEEP: "model-value", LEGION_GRANT: "made-up-by-the-model" },
-          },
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(await grantFileContents(controller.grantFile)).toEqual({
-      grant: "controller-grant-1",
-      mode: 0o600,
+      legion.execute("controller-state", { op: "read_state" }, undefined, undefined, context)
+    ).resolves.toMatchObject({
+      details: { daemon: { project: "OMP" }, issues: expect.any(Object) },
     });
-    // LEGION-45: the controller does not commit and is not a phase worker; the operation-log guard
-    // never binds it. Its `jj undo` runs like any other bash call, and, invoking no `legion`,
-    // mints nothing.
     await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "controller-jj",
-          input: { command: "jj -R /tmp/legion-workspace undo" },
-        },
+      legion.execute(
+        "controller-status",
+        { op: "set_status", issue: "REPO-42", status: "todo" },
+        undefined,
+        undefined,
         context
       )
-    ).resolves.toBeUndefined();
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "controller-status",
-          input: { command: "legion status REPO-42 todo" },
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(
-      daemonRequests(controller.requests).filter((request) => request.path === "/legion/v1/grants")
-    ).toEqual([
+    ).resolves.toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
+    // The state read mints nothing; the status write mints one controller grant (`/grants`'
+    // `{sessionId, secret}` form, the registration's secret) and posts it with the request.
+    expect(daemonRequests(controller.requests.slice(requestsAfterClaim))).toEqual([
+      { path: "/legion/v1/state", body: undefined },
       {
         path: "/legion/v1/grants",
-        body: { sessionId: "ses_controller_bash", secret: controller.registration.secret },
+        body: { sessionId: "ses_controller_tool", secret: controller.registration.secret },
       },
       {
-        path: "/legion/v1/grants",
-        body: { sessionId: "ses_controller_bash", secret: controller.registration.secret },
+        path: "/legion/v1/issues/status",
+        body: { grantId: "controller-grant-1", issue: "REPO-42", status: "todo" },
       },
     ]);
+    // A claim's operations are not the controller's.
+    await expect(
+      legion.execute(
+        "controller-record",
+        { op: "read_record", issue: "REPO-42" },
+        undefined,
+        undefined,
+        context
+      )
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: "read_record is not available to a controller session" }],
+    });
   });
 
   test("subscribes to its project's controller topic", async () => {

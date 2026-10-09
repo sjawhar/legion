@@ -18,26 +18,34 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - `legion.daemonApiVersion` is 17 (LEGION-631). Each Legion role's GitHub App token is now a file
   the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
-  `config.yml`, rendered and refreshed by the daemon), empties `GH_TOKEN`, `GITHUB_TOKEN` and
-  `GH_HOST`, and names the two Apps' bot logins as `LEGION_IMPLEMENT_APP_LOGIN` and
-  `LEGION_REVIEW_APP_LOGIN`; the daemon's credential routes, the `gh` shim and the `legion gh`
-  and `legion credential` commands are gone, with the absolute-path pins of a pane's gh, git and
-  jj. The tool-call hook therefore mints a grant into `LEGION_GRANT_FILE` only before a `bash`
-  command that invokes `legion` (`legion threads resolve`, `legion status`, `legion push`; a
-  command whose quoting does not tokenise mints too), never before any other shell command, the
-  `github` tool or a `pr://`/`issue://` read, and its grant request carries no `push` field. The
-  client's strict parse needs this release beside a daemon at 17; the daemon's boot gate and
-  `legion probe-image` refuse any earlier contract (the 8.4.1 release declares 16 and still mints
-  a grant before every command).
+  `config.yml`, rendered and refreshed by the daemon) and empties `GH_TOKEN`, `GITHUB_TOKEN` and
+  `GH_HOST`; the daemon's credential routes, the `gh` shim, the `legion gh` and `legion credential`
+  commands and the absolute-path pins of a pane's gh, git and jj are gone. No agent runs `legion`
+  from bash any more, so the extension registers no `tool_call` hook: it mints no grant before any
+  shell command, writes no grant file (`LEGION_GRANT_FILE` is gone from the pane's environment) and
+  refuses nothing — the jj operation-log refusal (`jj undo`, `jj abandon`, `jj op restore` and the
+  rest, LEGION-45) is deleted with it. The `legion` tool's operations mint their grants in-process
+  and post them with the request: `handoff_complete` is a direct `POST /legion/v1/handoff/complete`
+  (`summary`, `verdict`, `ready`; no `commit`) whose daemon reads the issue branch's head on GitHub
+  and checks the committed handoff file and, for READY, the head's checks there, answering `note`
+  when READY was published without reading them, so a worker pushes before it completes; the
+  `handoff_write` and `handoff_read` operations are gone with the `legion handoff` and
+  `legion push` commands they shelled out beside (a handoff is written with `write`, committed and
+  pushed with plain `jj`, read with `read`); the reviewer's new `resolve_threads` names the review
+  threads to resolve by GraphQL node id and posts them to `POST /legion/v1/threads/resolve`
+  (`legion threads resolve` is gone); and the controller session gets the tool with `read_state`
+  (the whole `GET /legion/v1/state`) and `set_status` (`POST /legion/v1/issues/status` under a
+  controller grant minted with its registration secret), in place of running `legion state` and
+  `legion status` from bash. The client's strict parse needs this release beside a daemon at 17;
+  the daemon's boot gate and `legion probe-image` refuse any earlier contract (the 8.4.1 release
+  declares 16 and still mints a grant before every command).
 - No Legion handoff reaches the default branch (LEGION-605). The `legion-retro` skill ends retro
   with one final commit that removes the issue's `.legion/<issue>/`, pushed with its
-  `docs/solutions/` commit in one `legion push`; the `legion-worker` and `legion-architect` skills
-  and the merge-gate reference say the merger accepts that commit above the approved head and that
-  READY refuses a head still carrying it, in place of the rule that every head kept `.legion/` and
-  the daemon stripped main's from the next branch. The `legion` tool's `handoff_read` description
-  says it finds a handoff that commit removed. Install this release with a Go `legion` built from
-  the same commit, whose `legion handoff read` reads such a handoff and whose READY makes that
-  refusal. `legion.daemonApiVersion` is unchanged.
+  `docs/solutions/` commit in one push; the `legion-worker` and `legion-architect` skills and the
+  merge-gate reference say the merger accepts that commit above the approved head and that READY
+  refuses a head still carrying it, in place of the rule that every head kept `.legion/` and the
+  daemon stripped main's from the next branch. Install this release with a Go `legion` built from
+  the same commit, whose READY makes that refusal. `legion.daemonApiVersion` is unchanged.
 - `legion.daemonApiVersion` is 16 (LEGION-578). Contract 16 adds `capabilities` to
   `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
   `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its

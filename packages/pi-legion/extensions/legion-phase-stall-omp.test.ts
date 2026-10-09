@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
   type Block,
@@ -42,8 +42,8 @@ interface Pane {
   readonly turns: () => Request[];
   /** The Messages requests that were side turns (the self-check), in order. */
   readonly selfChecks: () => Request[];
-  /** One line per invocation of the stand-in `legion`: its arguments, then the grant it read. */
-  readonly legionLog: () => Promise<string[]>;
+  /** The body of each `POST /legion/v1/handoff/complete` the pane made, in order. */
+  readonly completions: () => unknown[];
   /** The persisted transcript's phase-stall entries, in order. */
   readonly phaseEntries: () => Promise<unknown[]>;
 }
@@ -109,11 +109,10 @@ interface PaneOptions {
 
 /**
  * Runs one implementer pane on the real Oh My Pi until its run settles: the Legion and Envoy
- * extensions from this checkout, booted against a stand-in for the daemon's claim routes and the
- * Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and the role claim is
- * two listener calls), with a stand-in model gateway that answers the pane's turns from
- * `replies`, and a stand-in `legion` on PATH that records what it was run with. The daemon's
- * assignment arrives as the RPC `prompt`.
+ * extensions from this checkout, booted against a stand-in for the daemon's claim routes, grants
+ * and completion and the Envoy listener (no NATS: the Envoy extension then skips inbound
+ * delivery, and the role claim is two listener calls), with a stand-in model gateway that answers
+ * the pane's turns from `replies`. The daemon's assignment arrives as the RPC `prompt`.
  */
 async function runPane(
   binary: string,
@@ -124,9 +123,8 @@ async function runPane(
   const { root, home, workspace, sessions } = await ompRoot(binary, "legion-phase-stall-", cleanup);
   const state = path.join(root, "state");
   const bin = path.join(root, "bin");
-  const legionLog = path.join(root, "legion.log");
   await mkdir(bin, { recursive: true });
-  await mkdir(path.join(state, "secrets"), { recursive: true, mode: 0o700 });
+  await mkdir(state, { recursive: true, mode: 0o700 });
 
   let answered = 0;
   let selfChecks = 0;
@@ -205,6 +203,7 @@ async function runPane(
         expiresAt: "2099-01-01T00:00:00Z",
       });
     }
+    if (url.pathname === "/legion/v1/handoff/complete") return Response.json({});
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
     }
@@ -217,18 +216,6 @@ async function runPane(
     });
   });
   await writeStandinProfile(home, base);
-
-  const legion = path.join(bin, "legion");
-  await writeFile(
-    legion,
-    [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> '${legionLog}'`,
-      `printf 'grant %s\\n' "$(cat "$LEGION_GRANT_FILE")" >> '${legionLog}'`,
-      "",
-    ].join("\n")
-  );
-  await chmod(legion, 0o755);
 
   // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
   // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
@@ -263,11 +250,6 @@ async function runPane(
               LEGION_BOOT_TOKEN: "stall-boot",
               LEGION_STATE_DIR: state,
               LEGION_WORKSPACE: workspace,
-              LEGION_GRANT_FILE: path.join(
-                state,
-                "secrets",
-                "legion-stall-stall-2-implementer-grant"
-              ),
             }
           : {}),
       },
@@ -315,14 +297,10 @@ async function runPane(
       requests.filter(
         (request) => request.path === "/anthropic/v1/messages" && isSelfCheck(request)
       ),
-    legionLog: async () => {
-      // No log file: the stand-in never ran.
-      const text = await readFile(legionLog, "utf8").catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return "";
-        throw error;
-      });
-      return text.split("\n").filter(Boolean);
-    },
+    completions: () =>
+      requests
+        .filter((request) => request.path === "/legion/v1/handoff/complete")
+        .map((request) => request.body),
     phaseEntries: async () => {
       const files = (await readdir(sessions, { recursive: true })).filter((file) =>
         file.endsWith(".jsonl")
@@ -346,7 +324,7 @@ async function runPane(
 }
 
 test.skipIf(omp === undefined && !onActions)(
-  "a turn that ends on a legion tool call written as text gets the follow-up, and the next turn's real legion tool call runs legion handoff complete",
+  "a turn that ends on a legion tool call written as text gets the follow-up, and the next turn's real legion tool call posts the completion",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await runPane(omp, [
@@ -366,10 +344,19 @@ test.skipIf(omp === undefined && !onActions)(
       [{ type: "text", text: "Reported." }],
     ]);
 
-    // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
+    // The worker registered through the daemon's routes, and its handoff_complete minted a grant
+    // in-process and posted the completion with it: no grant file, no `legion` command.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
-    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
+    ).toEqual([
+      "/legion/v1/claims/register",
+      "/legion/v1/claims/ready",
+      "/legion/v1/grants",
+      "/legion/v1/handoff/complete",
+    ]);
+    expect(pane.completions()).toEqual([
+      { grantId: "stall-grant-1", summary: "Stall proof done.", verdict: "", ready: false },
+    ]);
     const turns = pane.turns();
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.
@@ -379,10 +366,6 @@ test.skipIf(omp === undefined && !onActions)(
     expect(userText(turns[0] as Request)).not.toContain("handoff_complete");
     expect(userText(turns[1] as Request)).toContain("written as text");
     expect(userText(turns[1] as Request)).toContain("WAITING");
-    expect(await pane.legionLog()).toEqual([
-      "handoff complete --summary Stall proof done.",
-      "grant stall-grant-1",
-    ]);
     // The transcript holds every change, which a worker relaunched with --resume restores.
     expect(await pane.phaseEntries()).toEqual([
       { state: "open" },
@@ -406,7 +389,7 @@ test.skipIf(omp === undefined && !onActions)(
     expect(turns).toHaveLength(2);
     expect(userText(turns[1] as Request)).toContain("handoff_complete");
     expect(userText(turns[1] as Request)).not.toContain("written as text");
-    expect(await pane.legionLog()).toEqual([]);
+    expect(pane.completions()).toEqual([]);
     expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);
   },
   120_000
