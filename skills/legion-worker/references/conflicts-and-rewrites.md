@@ -19,11 +19,13 @@ Every path it cites is in sjawhar/legion.
   the fingerprint at the current tip; after pushing the merged branch, record it at the new
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
-  Every issue workspace is a `jj workspace` of the same shared repository and operation log, and
-  jj always rebases every descendant of any commit it rewrites — a revset naming the root of your
-  own chain and rewriting it in place also rewrites whatever another tree has stacked on that root,
-  whichever selector chose it (`-s`, `-b`, and `-r` all rewrite descendants; `-r` only re-parents
-  them to fill the hole, which is worse).
+  On the tmux runtime, where issue workspaces are still jj workspaces of one shared clone,
+  `jj undo`, `jj abandon` and `jj op restore` rewrite the shared operation log, so a mistake there
+  is recovered forward (`jj -R "$LEGION_WORKSPACE" new`, or `jj -R "$LEGION_WORKSPACE" restore
+  <paths>` of files). In that shared repository jj always rebases every descendant of any commit it
+  rewrites — a revset naming the root of your own chain and rewriting it in place also rewrites
+  whatever another tree has stacked on that root, whichever selector chose it (`-s`, `-b`, and
+  `-r` all rewrite descendants; `-r` only re-parents them to fill the hole, which is worse).
   Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
   bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
   built on your prior commits, in this tree or another, ever moves:
@@ -38,14 +40,14 @@ Every path it cites is in sjawhar/legion.
   ancestry and the push fails (`Won't push commit … since it has no description`); the bookmark
   is always on a described, already-pushed commit. If the merge conflicts, resolve it in that
   one commit — edit the markers directly; there is nothing to squash, since the merge is the
-  only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push with the one
-  push procedure (*Every role pushes its own commits* in `skill://legion-worker`): the merge descends from both the
-  bookmark's old position and the destination, so it is a genuine fast-forward and *Rewriting
-  pushed commits* never applies — nothing was rewritten, so there is no tip to record first.
+  only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push it (*Every role
+  pushes its own commits* in `skill://legion-worker`; a merge is a code push, so its head carries
+  no `skip-checks: true` line): the merge descends from both the bookmark's old position and the
+  destination, so it is a genuine fast-forward and *Rewriting pushed commits* never applies.
 - **After a retarget.** Retargeting a pull request to a new base does not re-run Tests. Merge the
-  bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push with the
-  ordinary push procedure — a genuine fast-forward, never the procedure for rewritten commits —
-  so the new head runs Tests against the new merge result, and cite that run in the PR body.
+  bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push it the
+  ordinary way — a genuine fast-forward, never `--allow-backwards` — so the new head runs Tests
+  against the new merge result, and cite that run in the PR body.
 
 ## The unchanged-diff check
 
@@ -90,25 +92,17 @@ and the new head; the merger never computes a fingerprint — it uses the `--sum
 
 **Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
 rewrite of a commit you already pushed — is the hazard *Reintegrating the base* describes, in a
-second shape: jj rebases
-every descendant of any commit it rewrites, and in the one shared repository a descendant can be
-another tree's branch stacked on your pushed commit, which then moves, with its bookmark, onto a
-rewritten copy. So look for a descendant outside your own chain first, and record the pushed tip
-— which the rewrite leaves outside `::@-` — after a fetch and while your chain still descends
-from it:
+second shape: jj rebases every descendant of any commit it rewrites, and in the one shared
+repository a descendant can be another tree's branch stacked on your pushed commit, which then
+moves, with its bookmark, onto a rewritten copy. So look for a descendant outside your own chain
+first, after a fetch and while your chain still descends from the pushed tip:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
   jj -R "$LEGION_WORKSPACE" git fetch && \
   foreign=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
     -r 'descendants(<the commit you are about to rewrite>) ~ ::@') && \
-  { [ -z "$foreign" ] || { echo "not mine, and descends from the commit to rewrite: $foreign" >&2; false; }; } && \
-  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
-    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
-  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
-  jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id' \
-    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin")' \
-    >"${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip"
+  { [ -z "$foreign" ] || { echo "not mine, and descends from the commit to rewrite: $foreign" >&2; false; }; }
 ```
 
 `descendants(<commit>) ~ ::@` is everything built on the commit you are about to rewrite that is
@@ -116,10 +110,18 @@ not on your own chain. Non-empty means the rewrite would move work that is not y
 rewrite it. Put the change in a new commit on top instead, and report the listed commits to the
 architect.
 
-Then rewrite, resolve, and push with the one push procedure (*Every role pushes its own commits*
-in `skill://legion-worker`). It lets the remote branch sit on the
-tip you recorded, which the rewrite replaced, and on nothing else: when another role pushed after
-you recorded it, the push is refused. The push deletes the file.
+Once the guard has cleared, rewrite, resolve, and push once, moving the bookmark backwards onto
+the rewritten head — the one sanctioned non-fast-forward move, and the only place
+`--allow-backwards` is ever used:
+
+```bash
+cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
+```
+
+A rewrite head is a code push and never carries the `skip-checks: true` line: when the rewrite
+carried one onto it (a squash of a trailered handoff commit into a code commit), describe the head
+again without that line before you push. `jj git push` still refuses a remote branch another role
+moved since your fetch: report the refusal to the architect with its output, never force.
 
 Once a base is frozen for others to stack on, never rewrite it: fixes land as new commits on top,
 and the PR body's `Chain` line records what is frozen.

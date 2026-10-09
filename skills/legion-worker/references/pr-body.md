@@ -26,15 +26,10 @@ later phase keeps it current rather than replacing it:
 
 **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
 
-**Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
-- Thread <id>: fixed in <commit-sha> — <one line>.
-- Thread <id>: not a defect — <reason>.
-`legion threads resolve --pr <n> --repo <owner>/<repo>`, run after the push that made <head-sha>:
-resolved <thread URL> — its opener's acceptance
-resolved <thread URL> — the Legion reviewer's acceptance of a bot's thread
-left open <thread URL> — newest reply by <login> is not an acceptance
-left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
-left open <thread URL> — newest reply by <login> is not its opener's or the Legion reviewer's acceptance
+**Threads:** <n> resolved, 0 unresolved. Each answered and resolved individually, never in bulk:
+- Thread <node id>: fixed in <commit-sha> — <one line>; resolved at <head-sha>.
+- Thread <node id>: not a defect — <reason>; resolved at <head-sha>.
+- Thread <node id>: still open — <what remains>; unresolved at <head-sha>.
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the reviewed head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
@@ -88,19 +83,21 @@ and the tester's proof below are both this proof.
 
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
   The proof is the one defined above. It goes into `.legion/<issue>/implement.json` as the required `proof`
-  array (`handoff_write` for phase `implement` refuses a payload without one, or with a blank or
-  whitespace-only field, and names the field), and into the PR body, because the reviewer and the
-  merger verify facts on GitHub and never from a handoff.
+  array, and into the PR body, because the reviewer and the merger verify facts on GitHub and never
+  from a handoff. The daemon checks the handoff at the head you pushed when you complete:
+  `HANDOFF_INVALID` names each field — an implement handoff without a `proof` array, or with a
+  blank or whitespace-only field in one — and records nothing, so you fix the file, commit, push,
+  and complete again.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
   `.legion/<issue>/test.json` as `implementerProof` (`{verdict, how}`).
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
-  proving it (`handoff_write` for phase `test` refuses a rejected verdict, or `failed > 0`,
-  with no recorded failure). Otherwise, add your own proof before completing — a proof as defined
-  above — as the `E2E (tester)` line and the `proof` array `handoff_write` for
-  phase `test` requires whenever you report no failure. A code path whose first execution is after merge — a
+  proving it (`HANDOFF_INVALID` refuses a test handoff with a rejected verdict, or `failed > 0`,
+  and no recorded failure). Otherwise, add your own proof before completing — a proof as defined
+  above — as the `E2E (tester)` line and the `proof` array `HANDOFF_INVALID` requires of a test
+  handoff that reports no failure. A code path whose first execution is after merge — a
   deploy workflow's inline step, a post-merge helper, a production-only resource — is untested
   until the implementer has executed it against a devN stack; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or

@@ -48,9 +48,10 @@ before you submit it, since an approval stands only on green checks and GitHub c
 once the head moves, and a verdict that settles red there makes the round's decision a request for
 changes naming the failing checks, unless only review workflows the project declares
 (`projects.<KEY>.review_workflows`) are red on their own findings: then you answer their threads,
-have them resolved with `legion threads resolve` and re-run the failed run, as your role prompt
-says, and approve once it passes. Any other red required workflow is a failing check like any
-other. A request for changes does not wait, since it stands whatever CI says and the issue leaves
+resolve the ones you answered with the `legion` tool's `resolve_threads`, and re-run the failed
+run, as your role prompt says, and approve once it passes. Any other red required workflow is a
+failing check like any other. A request for changes does not wait, since it stands whatever CI
+says and the issue leaves
 reviewing with it. The verdict is of the checks and workflows the base branch requires, the set
 READY checks: red when one of them failed, and never red for a check the base branch does not
 require. A required check that was cancelled, or that the head's checks
@@ -73,35 +74,42 @@ review posted without a completion leaves the issue in reviewing until you finis
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
-  and writes into the live body before `legion push` (`skill://legion-retro`), since the merger
+  and writes into the live body before its push (`skill://legion-retro`), since the merger
   reports a stale body rather than rewriting it. A body edit changes no commit, so the approval
   stands.
 
 ## The merger
 
-- The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
-  code-writing App as the implementer; resolving a thread changes no commit, so this run never
-  invalidates the approval), does not complete while any `left open` line remains or the command
-  exits 1 (report the thread to the architect instead), then proves that rule with two commands.
-  First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
+- The merger resolves no review thread: the reviewer's approval already judged them, and READY
+  requires no thread state beyond it. It proves the head is the approved head plus retro's commits
+  with two commands. First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY; then the same with the one fileset `'~(docs/solutions | .legion/<issue>)'` appended,
   which must print nothing (jj unions separate path arguments, so two of them leave nothing out).
-  READY itself refuses a head that still carries `.legion/<issue>/` (the merger tells the
-  architect, which has it move the issue back to `retro`), and publishes a pull request a person
-  already merged unread (`packages/daemon/internal/prompts/go/merger.md`). *The READY packet* is
+  *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
   `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
   `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
   head (or one line saying the body carries no brief — the packet still goes out), then the
-  `--summary` output and the PR body's gate facts. The merger sends it as the `summary` of its
-  `handoff_complete` with `ready: true`; the daemon posts it as a `dispatch_message` on the issue,
-  publishes it to the project's merge queue role when one is set, and says on the issue when that
-  role has no live holder. The READY packet names both the implementer's and tester's `E2E` lines;
-  a missing one is reported to the architect instead of completing. Legion never merges: no
-  `gh pr merge`, no merge call through `gh api`, for any role; the human merges after READY, and
-  nothing but this rule stops a role's `gh` from merging.
+  `--summary` output and the PR body's gate facts. The READY packet names both the implementer's
+  and tester's `E2E` lines; a missing one is reported to the architect instead of completing.
+- READY is `handoff_complete` with `ready: true` and the packet as its `summary`; the merger runs
+  no pre-flight of its own. The daemon reads the pull request's head on GitHub and refuses, before
+  recording anything: `READY_HEAD_CARRIES_HANDOFFS` while the head still carries `.legion/<issue>/`
+  (tell the architect, which has you move the issue back to `retro` with `request_backward_move`,
+  so the implementer's retro removes it; a refusal saying GitHub's read of the directory failed is
+  GitHub's failure, not the head's: complete again); and `READY_CHECKS_NOT_GREEN` unless every
+  check the base branch requires has succeeded at that head and every workflow its rulesets require
+  has a passing run there — no result for a check, or no run of a workflow, means that head's push
+  skipped CI when it should not have, or that the pull request conflicts with its base; a check
+  still running means wait; a failed one is a finding. Report the refusal to the architect; never
+  push a commit to make CI run. On success the daemon posts the packet as a `dispatch_message` on
+  the issue, publishes it to the project's merge queue role when one is set, and says on the issue
+  when that role has no live holder; the answer's `note` says when READY was published on a pull
+  request a person already merged, whose head can no longer change, or on a base that requires no
+  check, which the packet itself also says. A person merges after READY under the repository's
+  branch-protection and code-owner rules.
 
 ## After the human merge
 

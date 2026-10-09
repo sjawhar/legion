@@ -153,9 +153,14 @@ When you cannot compute that content, cannot do the work a line affirms within
 nothing and do not complete: tell the architect with `envoy_publish` to its role topic, naming
 what failed.
 
-Then push both commits with one `legion push`, so one CI run covers them. When the push is
-refused after step 4 wrote the body, write `<dir>/before.md` back the same way before you report
-the refusal to the architect, so the body matches the head GitHub has. After the push, post one
+Then push both commits with one push, so one CI run covers them (`<KEY>` is your `LEGION_ISSUE`):
+`cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>`.
+It carries `docs/solutions/` and the removal of `.legion/<KEY>/`, so it is not a handoff-only
+push: its head's message never ends with `skip-checks: true` and carries none of GitHub's
+`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*). When
+the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
+moved; never force), write `<dir>/before.md` back the same way before you report the refusal to
+the architect with its output, so the body matches the head GitHub has. After the push, post one
 Dispatch message on
 the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
@@ -186,7 +191,8 @@ The `docs/solutions/` commit, the removal of `.legion/<issue>/`, the PR body lin
 make stale, and the Dispatch message are the only retro outputs. Never write a handoff, phase
 artifact, local feedback log, or completion label, and change nothing under `.legion/` but that
 removal. Report completion with the `legion` tool's `handoff_complete` alone (its summary: two
-sentences for the architect) — no `handoff_write`.
+sentences for the architect); the commit the daemon records for retro is the branch head your
+push made, so push before you complete.
 
 ## Completion check
 
