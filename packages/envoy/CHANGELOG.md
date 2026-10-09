@@ -4,6 +4,17 @@
 
 ### Added
 
+- The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
+  `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
+  new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
+  auth token minted for that user and host from the AWS SDK's default credentials and region (it
+  needs `rds-db:connect` on the database user), so no database password exists for RDS to rotate
+  under the broker. Such a URL must name that one host with `sslmode=verify-full` and an
+  `sslrootcert`, or the broker refuses to start naming the host, since a token is a password for 15
+  minutes and `sslmode=require` verifies nothing. The Envoy image ships the RDS global CA bundle at
+  `/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so no binary in the image
+  trusts an RDS CA for any other connection. A URL with a password, the
+  `${BROKER_DATABASE_PASSWORD}` placeholder, or any other host connects as before (LEGION-662).
 - `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
   with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
   `expected_answer_at` to change the current answer; the change is another `ask.answered`
