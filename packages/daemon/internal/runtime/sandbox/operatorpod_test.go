@@ -48,6 +48,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byIdentity = "every launch sets (the git identity the role's GitHub App commits as)"
 		byEnvoy    = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
 		bySessions = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
+		byStore    = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
 		byBaseline = "the pod baseline sets (internal/podsafety)"
 		byOperator = "runtime.kubernetes.pod.env sets"
 	)
@@ -77,7 +78,8 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "the image's profile", pod: env("OMP_PROFILE", "other"), want: envSets("OMP_PROFILE", byImage)},
 		{name: "the Oh My Pi the probe proves", pod: env("LEGION_OMP_PATH", "/usr/bin/true"), want: envSets("LEGION_OMP_PATH", byImage)},
 		{name: "Oh My Pi's config root", pod: env("PI_CONFIG_DIR", ".elsewhere"), want: envSets("PI_CONFIG_DIR", bySessions)},
-		{name: "Oh My Pi's session store", pod: env("OMP_SESSION_STORAGE", "sql"), want: envSets("OMP_SESSION_STORAGE", bySessions)},
+		{name: "Oh My Pi's session store", pod: env("OMP_SESSION_STORAGE", "sql"), want: envSets("OMP_SESSION_STORAGE", byStore)},
+		{name: "Oh My Pi's session database", pod: env("OMP_SESSION_SQL_DSN_FILE", "/etc/operator/dsn"), want: envSets("OMP_SESSION_SQL_DSN_FILE", byStore)},
 		{name: "a variable of the App's git identity", pod: env("JJ_USER", "operator"), want: envSets("JJ_USER", byIdentity)},
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
@@ -107,7 +109,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key for another baseline variable", keys: map[string]string{"PI_AUTO_QA": "qa"}, want: keyNames("PI_AUTO_QA", byBaseline)},
 		{name: "a provider key for the config root", keys: map[string]string{"PI_CONFIG_DIR": "root"}, want: keyNames("PI_CONFIG_DIR", bySessions)},
 		{name: "a provider key for the session store", keys: map[string]string{"OMP_SESSION_STORAGE": "store"},
-			want: keyNames("OMP_SESSION_STORAGE", bySessions)},
+			want: keyNames("OMP_SESSION_STORAGE", byStore)},
+		{name: "a provider key for the session database's URL", keys: map[string]string{"OMP_SESSION_SQL_DSN": "dsn"},
+			want: keyPointer("OMP_SESSION_SQL_DSN", byStore)},
 		{name: "a provider key of the App's git identity", keys: map[string]string{"GIT_AUTHOR_NAME": "author"},
 			want: keyNames("GIT_AUTHOR_NAME", byIdentity)},
 		{name: "a provider key a launch secret's pointer names", keys: map[string]string{"ENVOY_TOKEN": "envoy"},
@@ -118,12 +122,14 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			keys: map[string]string{"GEMINI_API_KEY": "gemini"}, want: keyPointer("GEMINI_API_KEY", byOperator)},
 		{name: "a provider key reading a providers secret's key", keys: map[string]string{"FOO": "NATS_NKEY_SEED"},
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
+		{name: "a provider key reading the session database's URL", keys: map[string]string{"DATABASE_URL": "SESSION_DSN"},
+			want: "provider_keys names DATABASE_URL from the providers Secret's key SESSION_DSN, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as DATABASE_URL"},
 		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays and a baseline variable it overrides",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml", "OTEL_SDK_DISABLED": "false"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"})
+			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("CheckPod = %v, want no refusal", err)
@@ -152,6 +158,10 @@ func TestTheRuntimeRefusesAnOperatorPodCollidingWithLegionsOwn(t *testing.T) {
 			o.LaunchSecrets, o.ProvidersSecrets = []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}
 			o.ProviderKeys = map[string]string{"FOO": "NATS_NKEY_SEED"}
 		}, "sandbox runtime: provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
+		{"the session database's URL key a providers secret", func(o *Options) {
+			o.LaunchSecrets, o.ProvidersSecrets = []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}
+			o.SessionDSNKey = "NATS_NKEY_SEED"
+		}, "sandbox runtime: runtime.kubernetes.session_dsn_secret NATS_NKEY_SEED is the providers Secret's key the pod mounts as the launch secret NATS_NKEY_SEED: name a key of its own for the session database's URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()

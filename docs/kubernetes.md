@@ -373,57 +373,66 @@ runtime:
     session_dsn_secret: SESSION_DSN  # the providers-Secret key that holds the connection URL
 ```
 
-`pvc` is today's behaviour: each conversation is a file in the `sessions` directory of the tree's disk
-volume. `postgres` moves it into a database. The daemon never holds the connection string: you put it
-in the providers Secret (`legion-<project>-providers`, the same Secret that carries the provider API
-keys and `DISPATCH_TOKEN`) under the key `session_dsn_secret` names, as one `postgres://…` URL. Every pod
-already mounts that Secret read-only at `/var/run/legion/providers/<key>`, so no new volume is needed.
+`pvc` keeps each conversation a file in the `sessions` directory of the tree's volume. `postgres`
+keeps every pod agent's conversation, each role's and a daemon-launched controller's, in Oh My Pi's
+table. The daemon never holds the connection string: put it in the providers Secret
+(`legion-<project>-providers`) under the key `session_dsn_secret` names, as one `postgres://…` URL.
+Every issue pod, the controller's pod and the image probe mount that key read-only at
+`/var/run/legion/providers/OMP_SESSION_SQL_DSN`, whatever the key is called, so a Secret without it
+refuses boot at the image probe, naming the Secret and its keys
+(`internal/runtime/sandbox/manifest.go`, `providers`).
 
-With `postgres` on, the daemon adds exactly two variables to every pod it opens for a tree — the root
-architect, a sub-architect, each phase worker — in the one place a pod's environment is shaped
-(`podEnvironment`, `runtime-kubernetes.ts`): `OMP_SESSION_STORAGE=sql` and
-`OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/<key>`. Nothing else about the pod changes: same
-image, same volume and mounts, same `--resume` argument on a replacement. The init container never runs
-Oh My Pi and does not see the Secret; under `postgres` it also omits the recorded-session check it runs
-under `pvc` (`LEGION_RESUME_SESSION_FILE`), because the transcript is a database row it cannot look for.
-`HOME` and `OMP_PROFILE` come only from the image's own environment and the daemon never overrides them,
-which is what lets a replacement pod open the same row (its key embeds the home-relative sessions root).
+With `postgres` on, every generation a launcher starts gets two variables in its start command
+(`mainEnvironment`): `OMP_SESSION_STORAGE=sql` and
+`OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/OMP_SESSION_SQL_DSN`. The pod baseline
+(`internal/podsafety`) keeps them, where it would otherwise set `OMP_SESSION_STORAGE=file`, and the
+worker shim, seeing the pointer in its environment, never exports the URL file into Oh My Pi's
+environment. Neither variable may be the operator's (`pod.env`) or a provider key's. Oh My Pi
+creates and migrates its own two tables, `omp_session_files` and `omp_session_files_parts`, when it
+starts, so the deployment's login needs `CREATE` on its database; Legion manages no schema.
 
-When that row is missing — the database lost it, or the connection string now points at another
-database — Oh My Pi does not refuse: it starts a fresh session with a **new** session id at that path.
-The daemon refuses it instead. Every relaunch that passes `--resume` — a phase worker's or sub-architect's
-respawn, a root's resurrection — mints its boot token with the session id the previous generation
-registered, and the registration route (`/process/started` for a root, `/worker/started` for the rest)
-answers a different id with `409 Worker respawn must resume the same agent session`; the extension exits
-the process on that answer, the pod ends, the daemon counts a launch failure, and — because the resumed
-path stays on the tree's or claim's locator — the next relaunch resumes the same path and expects the
-same session, until the role ends in `worker-died` (a root: `launch-failed`) at the bound — never a fresh
-agent under the old role or tree. A first launch, and a root re-admitted after `launch-failed`, resume
-nothing, record no expectation, and are accepted as before.
+A resume under `postgres` is held to the table, not the volume. A role's launcher looks the recorded
+session up in the table through the same URL file before it starts the child
+(`internal/launcher`, `resumable`), and refuses the start when the table holds no such session
+(`resume session <path>: the session table holds no such session`) or cannot be reached: a launch
+failure, never a fresh agent. Neither `workspace-init` looks for session files: an issue pod is not
+told `LEGION_EXPECT_TREE_VOLUME` for a session, and the controller's pod is not told
+`LEGION_RESUME_SESSION_FILE`. So a claim resumed on a new volume (a tree drained or suspended, its
+volume deleted, then resumed or re-admitted) provisions its workspace from the issue's pushed
+branch (`legion/<issue>`, or `main` when none was pushed) and continues its own session; anything
+it had not pushed is gone with the old volume, and nothing tells the agent so.
 
-Name the key so that nothing reads it — `SESSION_DSN` is a good choice. The pod's worker shim exports
-every key of the providers Secret into Oh My Pi's process environment under the key's own name, as it
-does for every provider key, so the connection string is also visible there as `<key>=postgres://…`
-(the same exposure class as the provider keys: same user, same pod). A key named `OMP_SESSION_STORAGE`
-or `OMP_SESSION_SQL_DSN_FILE` would shadow the daemon's own value through that export, so the daemon
-refuses those two names at startup; `postgres` without a key, an empty key, a key with a `/` or other
-character Kubernetes does not allow in a Secret data key, and a key given under `pvc` are refused the
-same way, each naming the field.
+The variables are a generation's, but the URL file's mount is the pod's: a pod created before
+`postgres` was turned on has no such file, and Oh My Pi refuses to start on it. Turn the setting on
+or off only with no pod running, after the copy below.
 
-When the key is missing from the Secret, the pod still starts (the Secret is mounted whole, so a missing
-key is a missing file): Oh My Pi refuses with `OMP_SESSION_SQL_DSN_FILE names
-/var/run/legion/providers/<key>, which could not be read: ENOENT …`, exits 1, the pod goes `Failed`,
-the daemon quotes its log tail and counts a launch failure exactly as for any other boot failure — and
-never falls back to file storage. A blank file, a value the driver cannot parse, or an unreachable
-database ends the same way ([Refusals](#refusals) above).
+### Copying file sessions before turning it on
 
-### Why pods stay node-affine
+A deployment whose sessions are files on its tree volumes copies each one into the table once,
+while those volumes still exist and before any agent writes the same session under SQL storage:
 
-`postgres` moves only the conversation. The issue's working copy — the jj workspace every phase edits —
-is still on the tree's disk volume, which is `ReadWriteOnce`: one node at a time. So every pod of a tree
-is still required to schedule on the node that runs the tree's other pods (the affinity term in
-[Anatomy of a pod](#anatomy-of-a-pod)), under both stores. Affinity goes away only when the workspace
-moves off the volume, which is separate work.
+1. Tell every agent to push its work, then stop every claim so nothing writes its file again
+   (`legion claims suspend`, or drain each tree).
+2. Save the claims: `legion claims list --json --operator-token-file <file> > claims.json`. The
+   daemon of any release prints the list this command reads.
+3. Where a tree's volume is mounted and the session database is reachable — for example a one-off
+   pod of the worker image that mounts the tree volume's claim at `/legion` and the providers
+   Secret's URL key — run:
+
+   ```sh
+   legion sessions import --dsn-file <url file> --claims claims.json --tree <ROOT ISSUE> --tree-volume /legion
+   ```
+
+   For each claim of that tree it reads the recorded session file from the volume (its path below
+   the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads
+   the recorded path itself) and writes it as one row keyed by that recorded path: the whole file
+   as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh
+   My Pi reads a row an older release of it wrote. It creates the two tables with Oh My Pi's own
+   statements when the database has none. It prints one line per claim — `copied`, `copied before
+   (identical …)`, `recorded no session`, `failed` (a file the volume does not hold) or `refused` (the
+   table already holds that session with other content, which it leaves as it is) — then a count
+   of each, and exits 1 when any claim failed or was refused. Run again, it copies nothing twice.
+4. Turn `session_store: postgres` on and resume or re-admit the claims.
 
 ### The image guard
 
@@ -431,21 +440,10 @@ An Oh My Pi built before the `session.storage` setting ignores the two variables
 files without a word — the one silent fallback this setting must never allow. The check lives inside the
 image: `legion probe-image`, which the image build runs before it publishes, starts the image's own Oh My
 Pi with a nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints
-`session-storage=probed` on its OK line. Under `session_store: postgres` the daemon's worker-image probe
-requires that token in the probe pod's log: an image whose OK line
-lacks it is refused before the daemon serves — `pod <name> Succeeded without printing
-session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the
-session-storage setting)` — exactly as one lacking `daemon-api-version=<N>` is. Under `pvc` the token
-is not required. The daemon never probes a host Oh My Pi for this: pods run the image's build, not the
-host's.
-
-The probe cache records whether the token was seen (`sessionStorageProbed: true`). A pass cached under
-`pvc` on an image that printed the token is reused under `postgres`; one cached without the field —
-written by an older daemon, or for an image that never printed it — is ignored under `postgres`, logged
-`it records no session-storage probe, and this daemon runs session_store: postgres`, and the probe pod
-runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` plugins from one
-checkout, an image that prints the token also carries the plugins' storage-independent subagent guard
-([The extension under SQL storage](#the-extension-under-sql-storage)).
+`session-storage=probed` on its OK line. The daemon's image probe passes only an OK line that carries
+its daemon API contract, which a `legion probe-image` of this release prints only after that probe
+passed, under either store. The daemon never probes a host Oh My Pi for this: pods run the image's
+build, not the host's.
 
 ## Kubernetes runtime: the Go daemon on Agent Sandbox
 
@@ -681,8 +679,13 @@ capabilities:                   # optional: the deployment capabilities decided 
   unless `controller: daemon`, the one setting under which the daemon launches the controller's pod;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - an image that is not pinned by digest;
-- `session_store: postgres` until Stage 6, since a pod's session lives on the tree volume, and a
-  `session_dsn_secret` under `pvc`.
+- `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
+  one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
+  `pvc` (an inert key is refused, never ignored). At boot the daemon also refuses a
+  `session_dsn_secret` that is the providers Secret's `NATS_NKEY_SEED`, a `provider_keys` entry
+  that reads the same key (the shim would export the URL into Oh My Pi's environment), and an
+  operator's `pod.env` or `provider_keys` naming `OMP_SESSION_STORAGE` or
+  `OMP_SESSION_SQL_DSN_FILE` ([Selecting the store](#selecting-the-store)).
 
 Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the

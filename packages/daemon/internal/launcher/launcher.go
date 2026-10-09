@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -243,11 +244,10 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		return shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d already exited", command.Generation)}
 	}
 	m.mu.Unlock()
-	// A resume of a session the tree volume no longer holds is a launch failure, never a fresh
-	// agent: the same rule workspace-init enforces for a pod's first start.
+	env := mergeEnv(os.Environ(), command.Env)
 	if command.ResumeFile != "" {
-		if _, err := os.Stat(command.ResumeFile); err != nil {
-			result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("resume session file %s: %v", command.ResumeFile, err)}
+		if err := resumable(env, command.ResumeFile); err != nil {
+			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
 		}
@@ -259,7 +259,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		return result
 	}
 	cmd := exec.Command(command.Argv[0], command.Argv[1:]...)
-	cmd.Env = mergeEnv(os.Environ(), command.Env)
+	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = m.cfg.Stdout, m.cfg.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// The orphan reaper must see this PID as the direct child before it can observe its exit.
@@ -391,6 +391,53 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// resumeLookupTimeout bounds the session table lookup a resume's start waits on.
+const resumeLookupTimeout = 30 * time.Second
+
+// resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
+// agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
+// Oh My Pi will, by the storage the child's environment names: the session table when
+// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres), through the
+// URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the tree volume.
+func resumable(env []string, file string) error {
+	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
+		if _, err := os.Stat(file); err != nil {
+			return fmt.Errorf("resume session file %s: %v", file, err)
+		}
+		return nil
+	}
+	dsnFile := strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable))
+	if dsnFile == "" {
+		return fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
+	defer cancel()
+	conn, err := ompsessions.Connect(ctx, dsnFile)
+	if err != nil {
+		return fmt.Errorf("resume session %s: %v", file, err)
+	}
+	defer conn.Close(context.Background())
+	found, err := ompsessions.Exists(ctx, conn, file)
+	if err != nil {
+		return fmt.Errorf("resume session %s: %v", file, err)
+	}
+	if !found {
+		return fmt.Errorf("resume session %s: the session table holds no such session", file)
+	}
+	return nil
+}
+
+// envValue is name's value in env, the last entry naming it, "" when none does.
+func envValue(env []string, name string) string {
+	value := ""
+	for _, entry := range env {
+		if found, rest, ok := strings.Cut(entry, "="); ok && found == name {
+			value = rest
+		}
+	}
+	return value
 }
 
 func mergeEnv(base, updates []string) []string {

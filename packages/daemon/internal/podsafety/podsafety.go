@@ -5,9 +5,11 @@
 // repository's .env would move what the agent runs with. The overlay yields to the operator's own
 // (runtime.kubernetes.pod): it is named first, before the operator's overlays. Apply keeps a
 // variable the pod's environment sets, and the operator may set OTEL_SDK_DISABLED and PI_AUTO_QA;
-// the Sandbox runtime refuses
-// PI_CONFIG_DIR and OMP_SESSION_STORAGE in the operator's pod, since they decide where a session
-// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). Apply, the
+// the Sandbox runtime refuses PI_CONFIG_DIR, OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE in
+// the operator's pod, since they decide where a session lives (sandbox.CheckPod): a pod keeps its
+// sessions as files on the tree volume, the storage Apply sets, unless the runtime keeps them in a
+// database (runtime.kubernetes.session_store postgres), where it starts every generation with
+// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. Apply, the
 // full baseline, runs only in a pod (`legion worker-shim --pod-safety`, `legion probe-image
 // --pod-safety`); a pane gets the two turn-scoping keys alone, as TurnScopeOverlay, which
 // runtime/tmux writes and names itself (writeTurnScopeOverlay, panePairs).
@@ -48,7 +50,8 @@ const TurnScopeFile = "podsafety-turnscope-overlay.yml"
 const settingsOverlays = "PI_CONFIG_FILES"
 
 // placesSessions is why an operator's pod may not set a variable that decides where Oh My Pi keeps
-// a session: a pod keeps its sessions as files on the tree volume, where a resume reads them.
+// a session: Legion places a pod's sessions where a resume reads them, as files on the tree volume
+// or in the runtime's session database.
 const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
 
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,
@@ -64,7 +67,8 @@ var baseline = []struct{ name, value, reserved string }{
 	// outranks it.
 	{"PI_CONFIG_DIR", ".omp", placesSessions},
 	// Outranks session.storage, and with OMP_SESSION_SQL_DSN_FILE would write the conversation to
-	// a database the repository names; `file` keeps each session a file.
+	// a database the repository names; `file` keeps each session a file. A runtime that keeps
+	// sessions in its own database sets sql and the URL file's pointer before Apply runs.
 	{"OMP_SESSION_STORAGE", "file", placesSessions},
 }
 

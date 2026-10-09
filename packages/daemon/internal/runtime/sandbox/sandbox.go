@@ -73,6 +73,7 @@ type Runtime struct {
 	providerKeys                            map[string]string
 	providersSecrets                        []string
 	natsUser                                string
+	sessionDSNKey                           string
 	agentSecrets                            *AgentSecrets
 	agent                                   []string
 	bootTimeout                             time.Duration
@@ -271,7 +272,7 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and the cluster's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
-	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets); err != nil {
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets, opts.SessionDSNKey); err != nil {
 		return refuse("%v", err)
 	}
 	for _, name := range opts.ProvidersSecrets {
@@ -285,7 +286,8 @@ func configure(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
+		sessionDSNKey: opts.SessionDSNKey,
+		bootTimeout:   opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},

@@ -28,7 +28,8 @@ type setter struct {
 }
 
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
-// provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned), the worker image
+// provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
+// store's two variables named apart, since they are Legion's under either store), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
 // name is the one named.
@@ -38,6 +39,9 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 		if _, taken := set[name]; !taken {
 			set[name] = setter{who, operatorMay}
 		}
+	}
+	for _, name := range sessionStoreVariables {
+		add(name, "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)", false)
 	}
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
@@ -67,16 +71,22 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // CheckPod refuses a piece of the operator's pod (runtime.kubernetes.pod) or a provider key that
 // collides with what Legion puts in a pod, naming both. A variable the runtime, the image, or every
 // launch sets would reach the agent's container twice, and one that places Oh My Pi's sessions
-// would move them off the tree volume; a volume name would be in the pod twice; a mount at, under,
-// or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool runs from hides it or
-// is hidden by it. A provider key must name a variable nothing else in the pod sets, since the shim
-// refuses one its own environment names and would replace one Oh My Pi's environment gains after
-// (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod sets (shim.ReadProviderEnv);
-// and it must not read a providers secret's key, which the shim would export into Oh My Pi's
-// environment under the provider key's name. launchSecrets are the secrets every launch's spec
-// carries, by name, and providersSecrets those of them the providers Secret carries. configure runs
-// it, and the daemon before its boot and for `legion start --check-config`.
-func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string) error {
+// would move them off the store Legion resumes them from; a volume name would be in the pod twice;
+// a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
+// runs from hides it or is hidden by it. A provider key must name a variable nothing else in the
+// pod sets, since the shim refuses one its own environment names and would replace one Oh My Pi's
+// environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod
+// sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the session
+// database's URL key (sessionDSNKey, "" when sessions are files), which the shim would export into
+// Oh My Pi's environment under the provider key's name. launchSecrets are the secrets every
+// launch's spec carries, by name, and providersSecrets those of them the providers Secret carries,
+// none of which may be the session database's URL key. configure runs it, and the daemon before
+// its boot and for `legion start --check-config`.
+func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string, sessionDSNKey string) error {
+	if slices.Contains(providersSecrets, sessionDSNKey) {
+		return fmt.Errorf("runtime.kubernetes.session_dsn_secret %s is the providers Secret's key the pod mounts as the launch secret %s: name a key of its own for the session database's URL",
+			sessionDSNKey, sessionDSNKey)
+	}
 	variables := podVariables(pod, launchSecrets)
 	for _, name := range slices.Sorted(maps.Keys(pod.Env)) {
 		if s := variables[name]; !s.operatorMay {
@@ -119,6 +129,9 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		}
 		if key := providerKeys[name]; slices.Contains(providersSecrets, key) {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which the pod mounts as the launch secret %s: the shim would export that secret into Oh My Pi's environment as %s", name, key, key, name)
+		}
+		if key := providerKeys[name]; sessionDSNKey != "" && key == sessionDSNKey {
+			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as %s", name, key, name)
 		}
 	}
 	return nil
