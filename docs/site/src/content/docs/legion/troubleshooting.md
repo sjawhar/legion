@@ -77,11 +77,11 @@ running. A request in flight from the operator or an agent gets up to 8 seconds 
 suspension or stop whose agent is already exiting is recorded. An operator request that would
 change a claim and that the daemon accepted before the stop began, but had not started deciding,
 is answered `503` (`<request> refused: the daemon is stopping; ask again once it is back`); one
-sent once the stop has begun finds no daemon listening, since the daemon closes its API listener at
-once. Repeat either once the daemon is back. It logs `legion daemon stopped` once it has recorded
-the boot's end. It waits at most 10 seconds for its own work before it records that, so it stops
-well inside a pod's termination grace. It ends no agent: the next boot re-adopts every pod or pane
-still running and relaunches each launch the stop cut short.
+sent once the stop has begun gets the same 503, or finds no daemon listening once the daemon has
+closed its API listener. Repeat either once the daemon is back. It logs `legion daemon stopped`
+once it has recorded the boot's end. It waits at most 10 seconds for its own work before it records
+that, so it stops well inside a pod's termination grace. It ends no agent: the next boot re-adopts
+every pod or pane still running and relaunches each launch the stop cut short.
 
 A signal that comes before the boot is recorded ends the boot step under way only when that step
 is the plugin gate, which runs first, the GitHub App token mint, the image probe, or the NATS and
