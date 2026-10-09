@@ -1545,25 +1545,30 @@ expected use so the scheduler reserves disk and places no pod a full node could 
 
 Node loss reattaches the EBS volume to a replacement node and the pod resumes where it left off (on
 another node it first waits for the detach, which shows as transient `FailedAttachVolume` or
-`Multi-Attach` events). Volume loss — a PVC that lost the issue's clone and every retained session of
-the issue, as a fresh EBS volume after node loss can — is detected through the `workspace-init` init
-container, which every role's launcher waits behind: it expects the issue's clone
-(`LEGION_EXPECT_ISSUE_VOLUME`) once the launching claim resumes a session or any stored claim of the
-issue recorded one (`IssueHasSessions`), and exits 3 only once both the clone and every retained
-session are gone. Under `restartPolicy: Always` a failed init container never turns the pod
-`Failed`; the kubelet leaves it `Pending` in `Init:Error` or `Init:CrashLoopBackOff` and keeps
-retrying it forever on its own. The runtime does not wait for a phase that will not come: `evaluate`
-reads the init container's current or last-terminated state as **Gone**, with `WorkspaceLost` true
-for workspace-init's exit 3 (`the issue's volume was lost: …`, `internal/runtime/sandbox/observe.go`),
-and `relaunch` replaces the init-failed pod outright (delete, then recreate) instead of waiting on
-its launchers. The loss is one issue's: the supervisor logs `supervise: the issue's volume was lost
-with the session; relaunching a fresh session` (`internal/supervise/machine.go`) and stamps every
-other claim of that issue `workspaceLost`, dropping the session each recorded on the volume, and
-touches no other issue of the tree, whose volumes are their own; each stamped claim's replacement
-starts fresh from the committed issue bookmark until its own fresh session registers, even after the
-new pod rebuilt the clone, and a role first created later uses the ordinary fresh-worker path. A
-pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt says nothing
-of the loss: the relaunch names the ref the workspace is recovered from in the init container's
+`Multi-Attach` events). What follows is the file store's (`session_store: pvc`, the default), where
+the issue's sessions are on the volume with its clone; under `session_store: postgres` no pod is
+told `LEGION_EXPECT_ISSUE_VOLUME` (`issuePod.prepare`, `issuePod.provision`), so none of it runs: a
+lost volume is provisioned again from the issue's pushed branch and each role's session continues
+from the table ([Selecting the store](#selecting-the-store)). Volume loss — a PVC that lost the
+issue's clone and every retained session of the issue, as a fresh EBS volume after node loss can —
+is detected through the `workspace-init` init container, which every role's launcher waits behind:
+it expects the issue's clone (`LEGION_EXPECT_ISSUE_VOLUME`) once the launching claim resumes a
+session or any stored claim of the issue recorded one (`IssueHasSessions`), and exits 3 only once
+both the clone and every retained session are gone. Under `restartPolicy: Always` a failed init
+container never turns the pod `Failed`; the kubelet leaves it `Pending` in `Init:Error` or
+`Init:CrashLoopBackOff` and keeps retrying it forever on its own. The runtime does not wait for a
+phase that will not come: `evaluate` reads the init container's current or last-terminated state as
+**Gone**, with `WorkspaceLost` true for workspace-init's exit 3 (`the issue's volume was lost: …`,
+`internal/runtime/sandbox/observe.go`), and `relaunch` replaces the init-failed pod outright (delete,
+then recreate) instead of waiting on its launchers. The loss is one issue's: the supervisor logs
+`supervise: the issue's volume was lost with the session; relaunching a fresh session`
+(`internal/supervise/machine.go`) and stamps every other claim of that issue `workspaceLost`,
+dropping the session each recorded on the volume, and touches no other issue of the tree, whose
+volumes are their own; each stamped claim's replacement starts fresh from the committed issue
+bookmark until its own fresh session registers, even after the new pod rebuilt the clone, and a role
+first created later uses the ordinary fresh-worker path. A pre-loss worker is never downgraded to
+an ordinary missing-session failure. Its prompt says nothing of the loss: the relaunch names the
+ref the workspace is recovered from in the init container's
 `LEGION_WORKSPACE_RECOVERED_FROM` (`initEnvironment`, `manifest.go`), and `workspace-init provision`
 records it, with the commit it recreated the workspace at and the reason `volume-missing`, in the
 workspace's `.legion/<KEY>/workspace-recovered.json` (`writeRecoveryMarker`,

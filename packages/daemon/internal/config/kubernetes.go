@@ -61,7 +61,7 @@ type Kubernetes struct {
 	AgentSecrets *AgentSecretsConfig
 	// SessionDSNSecret is the providers Secret's key that holds the postgres:// URL of the database
 	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`);
-	// "" under `session_store: pvc`, the default, where each session is a file on the tree volume.
+	// "" under `session_store: pvc`, the default, where each session is a file on the issue's volume.
 	SessionDSNSecret string
 }
 
