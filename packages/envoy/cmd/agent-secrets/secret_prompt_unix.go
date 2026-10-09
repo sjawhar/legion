@@ -41,7 +41,8 @@ var (
 
 // readHiddenAtTerminal reads one hidden line, drains refused input, and restores the
 // terminal only after joining its signal watcher. Bracketed pastes are read through
-// their closing mark; unbracketed input is drained through a 200 ms quiet window.
+// their closing mark; what follows the line is drained through a 200 ms quiet window,
+// and a paste that begins there through its closing mark.
 // prompt runs once the reader holds the terminal with echo off, to show the label:
 // a prompt started in the background shows nothing until fg gives it the terminal.
 func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error) {
@@ -163,11 +164,9 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 		}
 	}
 	if !r.pasted || r.err != nil {
-		more, err := moreAfterTheLine(&tty, &r, buf)
-		if err != nil {
+		if err := drainAfterTheLine(&tty, &r, buf); err != nil {
 			return nil, err
 		}
-		r.more = r.more || more
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -638,35 +637,46 @@ func eraseWord(b []byte) []byte {
 	return b
 }
 
-// moreAfterTheLine reports whether anything but line endings follows the line on a terminal that
-// does not bracket pastes: what it receives until it has been quiet for pasteGapDeciseconds (for at
-// most maxPasteDrain), all of which it reads into buf and so discards. A signal key there acts as
-// it does in the line (promptReader.key), and the rest of that read is discarded.
-func moreAfterTheLine(tty *promptTerminal, r *promptReader, buf []byte) (bool, error) {
-	tty.wait = pasteGapDeciseconds * 100
-	more := false
-	for deadline := time.Now().Add(maxPasteDrain); time.Now().Before(deadline); {
+// drainAfterTheLine reads, and so discards, what follows the line, feeding each read to r, until
+// the terminal has been quiet for pasteGapDeciseconds outside a paste, for at most maxPasteDrain. A
+// paste that begins there is read through its closing mark however far apart its writes arrive,
+// within that bound, so a signal key inside it is pasted text; a signal key outside a paste acts as
+// it does in the line, and the rest of that read is discarded. Anything but line endings, and a
+// paste or paste mark still open when the drain ends, is more than one line (r.more).
+func drainAfterTheLine(tty *promptTerminal, r *promptReader, buf []byte) error {
+	deadline := time.Now().Add(maxPasteDrain)
+	for {
+		left := time.Until(deadline).Milliseconds()
+		if left <= 0 {
+			break
+		}
+		tty.wait = int(left)
+		if !r.inPaste {
+			tty.wait = min(tty.wait, pasteGapDeciseconds*100)
+		}
 		n, err := tty.read(buf)
 		if err != nil {
-			return false, err
+			return err
+		}
+		if tty.stopped {
+			// The stop discarded what the terminal held unread, a paste's closing mark perhaps,
+			// so the drain waits for none, and the entry is refused.
+			r.inPaste, r.pending, tty.stopped = false, nil, false
+			if r.err == nil {
+				r.err = errPromptStopped
+			}
 		}
 		if n == 0 {
 			break
 		}
-		for _, c := range buf[:n] {
-			if k, ok := r.key(c); ok {
-				if k.sig == 0 {
-					continue
-				}
-				if err := tty.raise(k.sig); err != nil {
-					return false, err
-				}
-				break
+		if _, sig := r.feed(buf[:n]); sig != 0 {
+			if err := tty.raise(sig); err != nil {
+				return err
 			}
-			more = more || (c != '\r' && c != '\n')
 		}
 	}
-	return more, nil
+	r.more = r.more || r.inPaste || len(r.pending) > 0
+	return nil
 }
 
 // onlyLineEndings reports whether b holds nothing but carriage returns and newlines: what a

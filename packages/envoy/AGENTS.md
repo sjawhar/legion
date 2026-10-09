@@ -2060,8 +2060,10 @@ pastes too. The reader records the error, discards through the line ending (and 
 bracketed paste's closing mark), then drains the post-line quiet window before returning it.
 The prompt enables bracketed paste and reads each such paste through its end, however far apart
 its writes arrive. Without brackets, it drains through 200 ms of quiet after the line, for at most
-10 seconds. Anything but line endings after the first line is refused with exit 2. Bytes arriving
-after that bounded drain can reach the shell; multi-line values should be piped, not pasted.
+10 seconds; that drain feeds the same reader (`drainAfterTheLine`), so a paste that begins in it
+is read through its closing mark within that bound, and a signal key inside it is pasted text.
+Anything but line endings after the first line is refused with exit 2. Bytes arriving after that
+bounded drain can reach the shell; multi-line values should be piped, not pasted.
 A terminal hang-up before the line or paste ends returns an error, never a partial value.
 Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 values are usage errors
 on either path.
@@ -2120,8 +2122,9 @@ of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not ju
 `&` (the restored settings are compared with those bash hands a foreground job, and the label with
 the terminal's owner and echo when it is printed), a stop before the label, an orphaned group, a
 shell that exits under a background prompt, SIGTERM and SIGHUP after `bg`, an external SIGSTOP,
-bytes after Ctrl-Z in one write, signal keys inside a paste, ignored SIGTSTP wrappers, quiet-window
-stops, refusal draining, shell history and terminal restoration.
+bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins after the line,
+ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
+restoration.
 
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in

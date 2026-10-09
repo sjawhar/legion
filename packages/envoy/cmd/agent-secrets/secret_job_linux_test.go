@@ -261,6 +261,11 @@ func TestPromptJobHelper(t *testing.T) {
 		if timeout >= 0 && !quiet {
 			quiet = true
 			fmt.Println("QUIET_READY")
+			if os.Getenv("AGENT_SECRETS_JOB_HOLD_QUIET") != "" {
+				// Hold the first quiet window open until input comes, so what the test sends
+				// after QUIET_READY arrives inside it however slowly this process runs.
+				timeout = -1
+			}
 		}
 		n, err := real(fd, wake, buf, timeout)
 		if n > 0 && !readSome {
@@ -601,6 +606,34 @@ func TestPromptJobSignalKeyInsideAPasteDrainsThroughItsEnd(t *testing.T) {
 				s.noShellValue("pastehead", "pastetail")
 			})
 		}
+	}
+}
+
+// A paste that begins after the typed line, while the prompt drains what follows it, is read
+// through its closing mark like one in the line: a signal key inside it is pasted text, and the
+// paste's rest, arriving after the quiet window would have ended, is discarded rather than run by
+// the shell. The entry is refused as more than one line.
+func TestPromptJobPasteAfterTheLineDrainsThroughItsEnd(t *testing.T) {
+	for _, key := range []string{"\x03", "\x1c", "\x1a", ""} {
+		name := fmt.Sprintf("%x", key)
+		if key == "" {
+			name = "no-key"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newPromptShell(t)
+			s.env = "AGENT_SECRETS_JOB_HOLD_QUIET=1 "
+			s.start(false, false)
+			s.send("headtail\r")
+			s.wait("QUIET_READY")
+			s.send("\x1b[200~pastelate" + key)
+			time.Sleep(300 * time.Millisecond)
+			s.send("echo PASTE_$((2+3))\r\x1b[201~")
+			s.wait("RETURNED a value of more than one line must be piped in")
+			// Clear the shell's line, where a leaked paste mark would leave text that breaks the
+			// history check's own command, so a leak shows as the markers below.
+			s.send("\x15")
+			s.noShellValue("pastelate", "PASTE_$((", "PASTE_5")
+		})
 	}
 }
 
