@@ -241,10 +241,11 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 }
 
 // movedInPod is what pod holds, for role, that a pod created now is not handed: the stream its
-// launcher dials (movedStream) and the secrets broker's enrollment its next generation is started
-// against (movedEnrollment). Both are fixed for the pod's life, so either moved means the pod must
-// be replaced before role can run as one launched now. It is the one rule for both: evaluate reads
-// a role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one for any
+// launcher dials (movedStream), the secrets broker's enrollment its next generation is started
+// against (movedEnrollment), and the session store its providers volume projects
+// (movedSessionStore). All are fixed for the pod's life, so any moved means the pod must be
+// replaced before role can run as one launched now. It is the one rule for all: evaluate reads a
+// role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one for any
 // of its roles.
 func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
@@ -254,7 +255,40 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	if enrollment, ok := r.movedEnrollment(pod, role); ok {
 		moved = append(moved, enrollment)
 	}
+	if store, ok := r.movedSessionStore(pod); ok {
+		moved = append(moved, store)
+	}
 	return moved
+}
+
+// movedSessionStore compares the session database URL file pod's providers volume projects
+// (sessionDSNFile, from the Secret key Options.SessionDSNKey) with the one a pod created now
+// projects; ok is whether they differ. A generation started under a session database names that
+// file in OMP_SESSION_SQL_DSN_FILE, so a pod created before the database was configured, or under
+// another key, cannot run one; and a pod still projecting it after the runtime went back to files
+// mounts a credential nothing reads.
+func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
+	held := ""
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name != providersVolume || volume.Secret == nil {
+			continue
+		}
+		for _, item := range volume.Secret.Items {
+			if item.Path == sessionDSNFile {
+				held = item.Key
+			}
+		}
+	}
+	if held == r.sessionDSNKey {
+		return movedAddress{}, false
+	}
+	name := func(key string) string {
+		if key == "" {
+			return "(unset)"
+		}
+		return key
+	}
+	return movedAddress{where: "the session database URL key", held: name(held), handed: name(r.sessionDSNKey)}, true
 }
 
 // namedURL is the log boundary for one endpoint value: an existing pod or record can hold a value a
