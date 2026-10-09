@@ -387,7 +387,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 ## Take a tree out
 
 From an operator's shell, `legion status` sets a root's Dispatch status through the daemon, as the
-controller does:
+controller does through its `legion` tool's `set_status`:
 
 ```sh
 legion status WIDGETS-12 backlog --config legion.yaml --operator-token-file operator-token

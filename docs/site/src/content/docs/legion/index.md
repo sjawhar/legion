@@ -14,9 +14,9 @@ approve the spec, the daemon runs **phase workers** one after another: a planner
 that writes the change and opens a pull request, a tester, a reviewer and a merger. Each agent is an
 [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session in a Kubernetes pod of its own.
 
-Legion never merges. When the change is tested, reviewed and approved, the merger posts `READY` on
-the Dispatch issue and a person merges the pull request under the repository's own branch
-protection. The implementer then drives the merged change in production and records what it saw,
+When the change is tested, reviewed and approved, the merger posts `READY` on the Dispatch issue
+and a person merges the pull request under the repository's own branch protection. The implementer
+then drives the merged change in production and records what it saw,
 and only then does the architect close the issue. Every step leaves a record you can read: the spec
 and the questions in Dispatch, the code and the reviews on GitHub, and each phase's handoff on the
 issue's branch.

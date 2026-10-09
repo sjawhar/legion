@@ -10,7 +10,7 @@ tags:
   - pr-review
   - envoy-review-payload
 date: 2026-09-14
-status: active
+status: superseded by LEGION-631 — `legion gh` and `legion threads resolve` with its `Accepted:` rule are gone; a role reads GitHub with plain `gh` as its App from `GH_CONFIG_DIR`, and threads are resolved by node id (the implementer with `gh api graphql`, the reviewer with the `legion` tool's `resolve_threads`), while the `reviewDecision`/`latestReviews` fact stands
 module: packages/daemon/src/daemon/reducers.ts, packages/daemon/src/daemon/catchup.ts
 problem_type: correctness
 severity: medium

@@ -9,7 +9,7 @@ tags:
   - simplify-pass
   - e2e-predicate
 date: 2026-10-08
-status: active
+status: superseded by LEGION-631 — the survivor this note kept whole, the LEGION-45 operation-log rule and `nonFileWriteScheme` in the plugin's `tool_call` hook, is deleted with the whole pane-rule mechanism, so no bash gate remains; the deletion rule itself (verify each survivor's behaviour) stands
 module: packages/pi-legion
 related_issues:
   - "LEGION-630"

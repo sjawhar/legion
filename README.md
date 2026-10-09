@@ -24,9 +24,9 @@ and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) ses
 pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
 pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
 restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
-from Todo through In Progress, Testing, Needs Review and Retro to Done. Legion never merges: the
-merger posts `READY` on the issue, a person merges the pull request, and the implementer then checks
-the change in production.
+from Todo through In Progress, Testing, Needs Review and Retro to Done. The merger posts `READY` on
+the issue, a person merges the pull request under the repository's own rules, and the implementer
+then checks the change in production.
 
 [Legion's documentation](https://sjawhar.github.io/legion/legion/) ·
 [a walkthrough video of one issue](https://sjawhar.github.io/legion/legion/walkthrough/)

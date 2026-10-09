@@ -11,7 +11,7 @@ tags:
   - legion-grant
   - worker-bin
 date: 2026-09-13
-status: superseded by LEGION-631 — the grant file is written only before a bash command that invokes `legion` and before `handoff_complete`, gh and git never read it, the gh shim and worker-bin are gone, and the daemon itself now writes and refreshes a second pane-lifetime file set, the gh files under `<state_dir>/secrets/<claim>-gh`
+status: superseded by LEGION-631 — no pane is named a grant file any more; `LEGION_GRANT_FILE` and `LEGION_GRANT` are gone, the `legion` tool mints the grants for its own daemon calls (`handoff_complete` included) in-process and writes nothing to the pane, gh and git never read a grant, the gh shim and worker-bin are gone, and the daemon itself now writes and refreshes a second pane-lifetime file set, the gh files under `<state_dir>/secrets/<claim>-gh`
 module: daemon
 related_issues:
   - "LEGION-54"

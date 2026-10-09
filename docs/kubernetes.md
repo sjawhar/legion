@@ -644,6 +644,26 @@ release cannot read what they and this release write:
   (`internal/store/store.go`, the same at `legion-v10.0.0`), so it would boot and then fail row by
   row.
 
+### Pinning a release that drops what a running pod still uses
+
+A pod is built whole from the image pinned when it was launched, and nothing relaunches it for an
+image change alone: a release whose daemon stops serving a route, or stops setting a variable,
+that the previous image's agents call or read leaves every pod still on the earlier image calling
+this daemon as the older release. LEGION-631 is one: it deletes the `/legion/v1/gh-token` and
+`/legion/v1/git-credential` routes, which a pod's `legion gh` and `legion credential` from the
+earlier image still call. Such a release is pinned only after every tree is drained (step 1 of the
+runbook above) or every issue pod is relaunched onto the new image. The daemon's boot log, and
+every orphan sweep after it, names each pod still on another image —
+`sandbox runtime: <sandbox> runs image <image>, the configured image is <image>; its agents call
+this daemon as the older release until the pod is relaunched` (`warnImageDrift` in
+`internal/runtime/sandbox/sandbox.go`) — and the daemon replaces such a pod at the next launch of
+any of its roles (`imageDrift` beside the moved-stream trigger in `relaunch.go`), which interrupts
+the roles live in it once: they are stopped and resumed in the new pod, as a moved worker stream
+already does. The daemon-launched controller's pod is in scope for both the warning and the
+replacement, which happens only when the controller's process is being started anyway. The boot
+action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and
+trigger nothing.
+
 ### Configuration
 
 ```yaml
@@ -861,9 +881,9 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
 the API port is already bound by this point (the same as during the image probe, both before this
 gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
-reports the daemon's PID alive but not yet answering. A pane's `bash` calls that invoke `legion`
-(each one mints its own grant first), `handoff complete`, the reviewer's `legion threads resolve`
-and `controller start` all wait on that same API, so none of them succeeds until the daemon
+reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`,
+`handoff_complete` and the reviewer's `resolve_threads`, the last two each minting their grant
+in-process first) and `controller start` all wait on that same API, so none of them succeeds until the daemon
 actually serves; a pane's plain `gh` and `git` do not, since they read the role's credential from
 its gh files and call the daemon for nothing.
 
@@ -966,10 +986,9 @@ its App token from the files there, and `git` reads the same file through the sh
 `workspace-init provision` is passed it as `--credential-helper '!gh auth git-credential'`, and the
 `gh` in it resolves on the PATH of whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
 `GH_HOST` are set to the empty string, which gh ignores, so no value the image or an operator's rc
-file leaves in the environment outranks the file; `LEGION_IMPLEMENT_APP_LOGIN` and
-`LEGION_REVIEW_APP_LOGIN` name the two Apps' bot logins, which `legion threads resolve` builds its
-bot-thread rule from. No container is told `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` or
-`LEGION_CREDENTIAL_HELPER`, and nothing is installed under the tree volume for a pod to run: a pod's
+file leaves in the environment outranks the file. No container is told `LEGION_GH_PATH`,
+`LEGION_GIT_PATH`, `LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a grant file (the `legion` tool
+mints the grants for its own daemon calls in-process), and nothing is installed under the tree volume for a pod to run: a pod's
 `gh`, `git` and `jj` are the image's, resolved on its PATH, which puts only the `legion` directory
 first. The daemon renders the two gh keys when it writes the role Secret at the pod's start,
 logging `sandbox runtime: github credential written` with the sandbox, role, App and `expiresAt`,
@@ -1031,7 +1050,7 @@ and with no `advertise_host` set the stream also moves when the daemon restarts 
 daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
 re-adoption alone would leave the role holding the old addresses: a launcher dialling a stale
 stream never reaches the new daemon, and a stale `LEGION_DAEMON_URL` fails every call the agent
-makes to the daemon's API (its phase completion, the reviewer's `legion threads resolve`) while its
+makes to the daemon's API (its phase completion, the reviewer's `resolve_threads`) while its
 stream still works.
 
 So the runtime compares a role's addresses with what it hands now on every evaluation of the role
@@ -1241,7 +1260,7 @@ reviewer's) the review App's; and each role's plain `gh` and `git` run in a cont
 the tree volume, with whatever the tree planted in the shared clone's configuration. A plant in the
 implementer's container, then, reaches a token the implementer already holds for its push and its
 pull request. What no plant reaches is the other App: no review-role container ever holds the
-implement App's token (the reviewer's `legion threads resolve` asks the daemon to resolve as the
+implement App's token (the reviewer's `legion` tool's `resolve_threads` asks the daemon to resolve as the
 implement App, and the token stays there), and no implement-role container the review App's, so an
 approval posted as the review App is a review-role container's, and a push or a pull request as the
 implement App an implement-role container's.
@@ -1809,13 +1828,6 @@ eviction, a node drain, a hand deletion) cannot act on one gone stale. A list th
 `notAfter`, no candidates) likewise removes nothing, and the pass logs why; the payload is part of
 `DaemonAPIVersion`'s contract, so a change to its shape bumps that number and the daemon's image
 probe refuses an image whose `legion` would read it the old way.
-
-The worker's own jj working-copy snapshot before `legion push`'s network push can take 63-100 s
-on a near-full volume (`removalBudget`'s own doc comment, `cmd/legion/workspace_init.go`, names
-the measured range), so that push gets `credential.pushTTL` (5 minutes) in place of the usual 60
-seconds, minted whenever a bash call invokes it — alone, as one segment of a compound command, or
-a pipeline's last stage (`docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics
-and the LEGION-17 case this closes).
 
 ### RBAC the daemon needs
 

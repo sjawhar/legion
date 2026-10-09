@@ -198,9 +198,8 @@ READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pul
 followed by the pull request's outcome and its known risks. A project can also name a merge-queue
 role (`merge_queue_role`) that gets the same packet. When the head's own CI turns red while the
 issue awaits its merge, the daemon posts on the issue, and tells that role, that the `READY` is
-withdrawn, naming the red checks. Legion never merges, and every merge-shaped `gh` command an agent
-tries is refused. A person merges under the repository's own branch protection and code-owner
-rules, which Legion neither reads nor changes.
+withdrawn, naming the red checks. A person merges under the repository's own branch protection and
+code-owner rules, which Legion neither reads nor changes.
 
 ## The production check
 
