@@ -133,10 +133,7 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 		return nil, err
 	}
 	tty.stopped, tty.notice = false, false
-	r := promptReader{keys: signalKeys(saved, controlling, ignored), special: func(c byte, index int) bool {
-		v := saved.Cc[index]
-		return v != 0 && v != 0xff && c == v
-	}}
+	r := newPromptReader(saved, controlling, ignored)
 	buf := make([]byte, 512)
 	var pasteSince time.Time // when the open paste began; zero outside one
 	for {
@@ -531,6 +528,15 @@ type promptReader struct {
 type promptKey struct {
 	c   byte
 	sig syscall.Signal
+}
+
+// newPromptReader is a read at the prompt under saved, the settings the shell handed it: its
+// editing characters, and its signal keys (signalKeys).
+func newPromptReader(saved *unix.Termios, controlling bool, ignored []int) promptReader {
+	return promptReader{keys: signalKeys(saved, controlling, ignored), special: func(c byte, index int) bool {
+		v := saved.Cc[index]
+		return v != 0 && v != 0xff && c == v
+	}}
 }
 
 // signalKeys answers the terminal's signal keys from saved, the settings the shell handed the
