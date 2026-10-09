@@ -844,6 +844,77 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 	}
 }
 
+// Since DaemonAPIVersion 16 no runtime tells a pane or a pod LEGION_JJ_PATH (internal/api/version.go;
+// docs/kubernetes.md, "No container is told …"): a pane's jj is its PATH's, the one `legion push` and
+// `legion handoff complete` run (jjOnPath, cmd/legion/handoff.go), and the shim's adoption runs that
+// same jj. A PATH without one refuses naming jj and the PATH it searched — never a variable no
+// runtime sets, whose absence stopped every role of every pod at its first jj operation (stage 4a's
+// adopt-working-copy at 18dc1df2, dispatch://LEGION-631/comment/b376473d-a4cb-492f-ac7d-e66b26f2bff1).
+func TestAdoptWorkingCopyRunsTheJJOnPATHWithNoLEGIONJJPATH(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		jjOnPath bool
+		ok       bool
+	}{
+		{name: "the PATH's jj adopts the working copy", jjOnPath: true, ok: true},
+		{name: "a PATH without jj refuses, naming jj and the PATH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// PATH is one directory of the test's own: no other jj (the image's, a devbox's) can
+			// answer the lookup, and nothing an adoption runs needs another directory (the fake OMP
+			// is os.Args[0], absolute; the fake jj's interpreter is /bin/sh).
+			bin := t.TempDir()
+			record := filepath.Join(t.TempDir(), "jj-invocation")
+			if tc.jjOnPath {
+				script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_JJ_RECORD\"\nprintf 'JJ_USER=%s\\nJJ_EMAIL=%s\\n' \"$JJ_USER\" \"$JJ_EMAIL\" >> \"$FAKE_JJ_RECORD\"\n"
+				if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(script), 0o700); err != nil {
+					t.Fatalf("write the fake jj: %v", err)
+				}
+			}
+			t.Setenv("PATH", bin)
+			path := socketPath(t)
+			daemon := listen(t, path)
+			child := newOMP(t)
+			cfg := config(t, path, child)
+			workspace := t.TempDir()
+			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+				"FAKE_OMP_LOG="+child.log, "FAKE_JJ_RECORD="+record, "LEGION_WORKSPACE="+workspace)
+			run(t, cfg, newClock())
+			p := daemon.accept(t)
+			p.open(t)
+
+			request := shimwire.AdoptWorkingCopy{ID: "path", JJUser: "legion-implementer[bot]", JJEmail: "implementer@example.test", TimeoutMs: 5000}
+			p.send(t, request)
+			got, ok := p.next(t).(shimwire.AdoptWorkingCopyResult)
+			if !ok || got.ID != request.ID || got.OK != tc.ok {
+				t.Fatalf("the shim answered %#v, want a result for %s with ok=%v", got, request.ID, tc.ok)
+			}
+			invocation, err := os.ReadFile(record)
+			if !tc.ok {
+				if strings.Contains(got.Error, "LEGION_JJ_PATH") {
+					t.Fatalf("the refusal %q names LEGION_JJ_PATH, which no runtime sets", got.Error)
+				}
+				if !strings.Contains(got.Error, "jj") || !strings.Contains(got.Error, bin) {
+					t.Fatalf("the refusal %q does not name jj and the PATH searched (%s)", got.Error, bin)
+				}
+				if err == nil {
+					t.Fatalf("jj ran on a PATH without one: %s", invocation)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the PATH's jj never ran: %v", err)
+			}
+			identity := []string{"JJ_USER=" + request.JJUser, "JJ_EMAIL=" + request.JJEmail}
+			read := append([]string{"log", "-r", `@ ~ description(exact:"")`, "--no-graph", "-T", "commit_id", "-R", workspace}, identity...)
+			metaedit := append([]string{"metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", workspace}, identity...)
+			if want := strings.Join(append(read, metaedit...), "\n") + "\n"; string(invocation) != want {
+				t.Fatalf("the PATH's jj ran as\n%s\nwant the read, then the shared metaedit, under the requested identity\n%s", invocation, want)
+			}
+		})
+	}
+}
+
 // Every role of an issue shares one workspace, so a role that left its working copy described (the
 // implementer pushed @ as its commit) would have the next role's work land in that commit, authored
 // by the previous role's App. Before a task reaches the agent, the adoption starts the incoming role
