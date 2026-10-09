@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
 
-// tool_ran and tool_result_said, taken from stage4b-sandbox-tree.sh by name and run over a session
-// a real implementer pod wrote (testdata/stage4b-tools-session.jsonl): the proof a tool ran and
-// answered, where assistant_said only proves the model said so. Each test pins one rule of
-// lib/stage4b-tools.jq: a result is the tool's by the call it answers (a write to xd://lsp records
-// toolName write), an error result never counts, a tool that never ran has no result, and a result
-// whose call the session no longer holds is no tool's.
+// tool_ran, tool_result_said and tool_result_answered, taken from stage4b-sandbox-tree.sh by name
+// and run over a session a real implementer pod wrote (testdata/stage4b-tools-session.jsonl): the
+// proof a tool ran and answered, where assistant_said only proves the model said so. Each test pins
+// one rule of lib/stage4b-tools.jq: a result is the tool's by the call it answers (a write to
+// xd://lsp records toolName write), an error result never counts, a tool that never ran has no
+// result, a result whose call the session no longer holds is no tool's, and a result carries its
+// call's arguments.
 const root = join(import.meta.dir, "..", "..", "..");
 const lib = import.meta.dir;
 const fn = scriptFunctions(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"));
@@ -172,11 +173,29 @@ describe("the library", () => {
     expect(calls.filter((c) => c.arguments?.path === "xd://lsp")).toHaveLength(3);
     expect(jqOver(session, '[tool_results("lsp")[] | .isError]')).toEqual([false, false]);
     expect(jqOver(session, '[tool_results("lsp")[] | .toolCallId]')).toEqual(lspCalls);
+    // Each result carries its call's arguments, the device's content as JSON text, so a
+    // checkpoint can tell the hover's answer from the status listing.
+    expect(jqOver(session, '[tool_results("lsp")[] | .arguments | fromjson | .action]')).toEqual([
+      "status",
+      "hover",
+    ]);
+    expect(jqOver(session, '[tool_results("lsp")[] | .arguments | fromjson | .symbol]')).toEqual([
+      null,
+      "liveDetail",
+    ]);
     expect(jqOver(session, '[tool_results("write")[] | .isError]')).toEqual([false, false, false]);
   });
 
   test("tool_result_texts keeps the non-error texts alone", () => {
     expect(jqOver(session, 'tool_result_texts("eval")')).toEqual(["42", "42"]);
+  });
+
+  test("tool_result_answered holds a result to the call it answers", () => {
+    expect(helper("tool_result_answered", "lsp", "liveDetail", "func liveDetail")).toBe(0);
+    expect(helper("tool_result_answered", "lsp", '"status"', "Language servers: gopls")).toBe(0);
+    // The hover's text is not the status call's, and a text of the wrong call is no answer.
+    expect(helper("tool_result_answered", "lsp", '"status"', "func liveDetail")).toBe(1);
+    expect(helper("tool_result_answered", "lsp", "liveDetail", "Language servers")).toBe(1);
   });
 
   test("a result whose call the session no longer holds is no tool's", () => {
@@ -216,7 +235,12 @@ describe("the library", () => {
       .map((line) => `${JSON.stringify(line)}\n`)
       .join("");
     expect(jqOver(text, 'tool_results("read")')).toEqual([
-      { toolCallId: "toolu_1", isError: false, text: "a screenshot" },
+      {
+        toolCallId: "toolu_1",
+        isError: false,
+        text: "a screenshot",
+        arguments: '{"path":"a.png"}',
+      },
     ]);
     expect(jqOver(text, 'tool_ran("read")')).toBe(true);
   });

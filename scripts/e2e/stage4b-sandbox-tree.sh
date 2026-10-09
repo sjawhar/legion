@@ -185,6 +185,9 @@ smoke_file=
 prod_baseline=
 audited=
 fixture_branch=
+# The run's own text in the fixture's two skills: a skill read in a pod is this run's, not a stale
+# checkout's.
+fixture_skill_nonce=
 pair_recorded=
 pair_session=
 # The daemon's configured default bounds launch failures and deaths with work outstanding alike.
@@ -1372,9 +1375,13 @@ stream_missing() {
 # push_fixture ISSUE: legion/ISSUE on the smoke repository, one commit on main carrying a
 # repository's own configuration: AGENTS.md, an Oh My Pi extension and tool, two MCP servers under
 # distinct names, an LSP config, a Codex tool, and a Claude plugin list. Each one, if the agent's
-# process loads it, writes its own marker under /tmp/legion-fixture/ in the pod. The workspace of
-# ISSUE is provisioned from that bookmark (internal/workspace createWorkspace), so tree 2's pods
-# carry the fixture; tree 2 never opens a pull request, so nothing of it reaches the smoke main.
+# process loads it, writes its own marker under /tmp/legion-fixture/ in the pod. The commit also
+# carries what repository-tools reads: two skills (one in Oh My Pi's directory, one in Claude's)
+# each holding this run's nonce, a Go, a TypeScript and a Python root small enough for a language
+# server to hover and a code graph to trace, and a .omp/config.yml setting one key nothing above
+# it sets and one the operator's overlay also sets. The workspace of ISSUE is provisioned from that
+# bookmark (internal/workspace createWorkspace), so tree 2's pods carry the fixture; tree 2 never
+# opens a pull request, so nothing of it reaches the smoke main.
 push_fixture() {
   local issue=$1 dir
   dir=$work/fixture
@@ -1424,11 +1431,96 @@ description: fixture
 ---
 Run `touch /tmp/legion-fixture/claude-plugin`.
 EOF
+  # Two skills under distinct names: the Claude provider namespaces a name both directories hold,
+  # so a shared name would read as one skill. Each body carries the run's nonce, which is what the
+  # read of skill://<name> must return.
+  fixture_skill_nonce="fixture-skill-$RANDOM$RANDOM"
+  mkdir -p "$dir/.omp/skills/fixture-omp-skill" "$dir/.claude/skills/fixture-claude-skill"
+  printf -- '---\nname: fixture-omp-skill\ndescription: Stage 4b fixture skill (Oh My Pi skills directory)\n---\nFIXTURE-SKILL-OMP-%s\n' "$fixture_skill_nonce" >"$dir/.omp/skills/fixture-omp-skill/SKILL.md"
+  printf -- '---\nname: fixture-claude-skill\ndescription: Stage 4b fixture skill (Claude skills directory)\n---\nFIXTURE-SKILL-CLAUDE-%s\n' "$fixture_skill_nonce" >"$dir/.claude/skills/fixture-claude-skill/SKILL.md"
+  # Three language roots at the repository's root, where each language server looks for its root
+  # marker (go.mod, tsconfig.json, pyproject.toml). Each holds one function, a caller, and a test, so
+  # a hover has a signature, an impact query a caller, and an affected query a test to name. The Go
+  # test lives under fixture/test/: CodeGraph's affected knows a test file by its path (.spec., .test.,
+  # __tests__/, test/, tests/, e2e/, spec/), never by Go's _test.go suffix, so a test beside its
+  # source would be traversed and not named.
+  mkdir -p "$dir/fixture/test" "$dir/src" "$dir/fixture_py"
+  printf 'module example.com/stage4b-fixture\n\ngo 1.22\n' >"$dir/go.mod"
+  cat >"$dir/fixture/greet.go" <<'EOF'
+// Package fixture is the Stage 4b fixture's Go root: a function, its caller, and its test.
+package fixture
+
+// Greet is the symbol the proof hovers and traces.
+func Greet(name string) string { return "hello, " + name }
+EOF
+  cat >"$dir/fixture/caller.go" <<'EOF'
+package fixture
+
+// GreetWorld is Greet's caller, the name an impact query on Greet answers with.
+func GreetWorld() string { return Greet("world") }
+EOF
+  cat >"$dir/fixture/test/greet_test.go" <<'EOF'
+package test
+
+import (
+	"testing"
+
+	"example.com/stage4b-fixture/fixture"
+)
+
+func TestGreet(t *testing.T) {
+	if got := fixture.Greet("stage4b"); got != "hello, stage4b" {
+		t.Fatalf("Greet = %q", got)
+	}
+}
+EOF
+  cat >"$dir/tsconfig.json" <<'EOF'
+{ "compilerOptions": { "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "strict": true, "noEmit": true, "types": [] }, "include": ["src"] }
+EOF
+  cat >"$dir/src/greet.ts" <<'EOF'
+export function greet(name: string): string {
+  return `hello, ${name}`;
+}
+EOF
+  cat >"$dir/src/index.ts" <<'EOF'
+import { greet } from "./greet";
+
+console.log(greet("world"));
+EOF
+  printf '[project]\nname = "stage4b-fixture"\nversion = "0.0.1"\n' >"$dir/pyproject.toml"
+  : >"$dir/fixture_py/__init__.py"
+  cat >"$dir/fixture_py/greet.py" <<'EOF'
+def greet(name: str) -> str:
+    return f"hello, {name}"
+EOF
+  cat >"$dir/fixture_py/test_greet.py" <<'EOF'
+from fixture_py.greet import greet
+
+
+def test_greet() -> None:
+    assert greet("stage4b") == "hello, stage4b"
+
+
+if __name__ == "__main__":
+    test_greet()
+    print(greet("stage4b"))
+EOF
+  # The repository's settings, which Oh My Pi reads below every overlay in PI_CONFIG_FILES.
+  cat >"$dir/.omp/config.yml" <<'EOF'
+# Stage 4b fixture: images.urls.enabled nothing above the repository sets, so it holds;
+# retry.modelFallback the operator's overlay (deploy/kubernetes/operator-route/overlay.yml) also
+# sets, to true, so the operator's wins.
+images:
+  urls:
+    enabled: true
+retry:
+  modelFallback: false
+EOF
   git -C "$dir" checkout -q -b "$fixture_branch"
   git -C "$dir" add -A
-  git -C "$dir" -c user.name="stage4b proof" -c user.email="stage4b@legion.invalid" commit -qm "Stage 4b fixture: a repository's own configuration, each with a marker ($issue)"
+  git -C "$dir" -c user.name="stage4b proof" -c user.email="stage4b@legion.invalid" commit -qm "Stage 4b fixture: a repository's own configuration, each with a marker; two skills, Go, TypeScript and Python roots, and settings ($issue)"
   git -C "$dir" push -q origin "$fixture_branch" || fail "push the fixture branch $fixture_branch to $repo"
-  note "pushed the repository-configuration fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD))"
+  note "pushed the fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD)): the loading paths' markers, two skills ($fixture_skill_nonce), three language roots, .omp/config.yml"
 }
 # assistant_said ISSUE ROLE TEXT: one of the claim's assistant turns carries TEXT, in its reply text
 # or in a tool call's arguments: an agent answers a Dispatch message with dispatch_message, so the
@@ -1457,6 +1549,68 @@ tool_ran() {
   local text
   text=$(claim_session_text "$1" "$2") || return 1
   jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" 'include "stage4b-tools"; tool_ran($tool)' <<<"$text" >/dev/null
+}
+# tool_result_answered ISSUE ROLE TOOL ARGS TEXT: tool_result_said for the calls of TOOL whose
+# arguments carry ARGS (lib/stage4b-tools.jq): the read of skill://<name> among the session's reads,
+# the hover of one file among its hovers.
+tool_result_answered() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" --arg args "$4" --arg want "$5" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' <<<"$text" >/dev/null
+}
+# tool_result_quotes ISSUE ROLE TOOL [ARGS]: every result of TOOL in ROLE's session (of the calls
+# whose arguments carry ARGS, when given) on one line, each with its call's arguments, an error
+# marked and its text trimmed: what the tool did return, for the fail line of an expectation it
+# did not meet.
+tool_result_quotes() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -r -L "$root/scripts/e2e/lib" --arg tool "$3" --arg args "${4:-}" 'include "stage4b-tools";
+    [tool_results($tool)[] | select(.arguments | contains($args))
+      | (if .isError then "error " else "" end) + .arguments[0:160] + " => " + (.text | gsub("\\s+"; " ") | .[0:400])]
+    | join(" ; ")' <<<"$text"
+}
+# codegraph_control ISSUE ROLE: ROLE's session holds a codegraph call for NoSuchSymbol, a symbol the
+# fixture does not define, and every such call returned an error or a text naming none of the
+# fixture's test (greet_test.go), caller (GreetWorld) or caller's file (caller.go). An index that
+# names the fixture's test and caller proves nothing unless it also names nothing where there is
+# nothing.
+codegraph_control() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -e -L "$root/scripts/e2e/lib" 'include "stage4b-tools";
+    [tool_results("codegraph")[] | select(.arguments | contains("NoSuchSymbol"))]
+    | length > 0 and all(.[]; .isError or (.text | test("greet_test\\.go|GreetWorld|caller\\.go") | not))' <<<"$text" >/dev/null
+}
+# agent_pid POD ROLE prints the pid of ROLE's Oh My Pi in POD: the process whose command line
+# starts with /opt/omp/bin/omp and carries --mode rpc. The shim's own command line carries that
+# text too, after its --, so the match is on how the line starts; Oh My Pi's eval worker starts the
+# same way and carries no --mode rpc.
+agent_pid() {
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  pod_exec "$1" "$2" sh -c 'for p in /proc/[0-9]*; do c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue; case "$c" in /opt/omp/bin/omp*--mode\ rpc*) echo "${p#/proc/}"; break;; esac; done' | grep .
+}
+# agent_setting POD ROLE PID DIR KEY prints KEY's value, as JSON, as ROLE's Oh My Pi (PID) reads it
+# in DIR: `omp config get` run under that process's own environment (/proc/PID/environ), the one
+# that carries PI_CONFIG_FILES, so the pod baseline and the operator's overlay rank over DIR's own
+# .omp/config.yml as they do for the agent (live_operator_test.go reads one key the same way).
+agent_setting() {
+  local pod=$1 role=$2 pid=$3 dir=$4 key=$5 script
+  # The pod's shell runs this with $1 DIR, $2 KEY and $3 PID; the inner sh reads KEY from the
+  # environment xargs hands it, before env -i empties that environment for omp.
+  script=$(cat <<'EOF'
+cd "$1" && KEY=$2 xargs -0 sh -c 'exec env -i "$@" omp config get "$KEY" --json' agent-env <"/proc/$3/environ"
+EOF
+  )
+  pod_exec "$pod" "$role" sh -c "$script" agent-setting "$dir" "$key" "$pid" | jq -c .value
+}
+# bare_setting POD ROLE DIR KEY prints KEY's value, as JSON, as `omp config get` reads it in DIR
+# with no environment but PATH and HOME: no PI_CONFIG_FILES, so no overlay, only DIR's own
+# .omp/config.yml over Oh My Pi's defaults.
+bare_setting() {
+  local pod=$1 role=$2 dir=$3 key=$4
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  pod_exec "$pod" "$role" sh -c 'cd "$1" && exec env -i PATH="$PATH" HOME="$HOME" omp config get "$2" --json' bare-setting "$dir" "$key" | jq -c .value
 }
 fixture_markers() {
   local pod=$1 role=$2
@@ -2288,10 +2442,10 @@ pass
 
 begin repository-configuration
 # Tree 2's pods carry the repository's own configuration (push_fixture). Each marker names a loading
-# path the pod's agent loaded, as an agent in any checkout does. The markers live in the
-# pod's own /tmp, which goes with the pod when its tree closes, and are read while the planner waits
-# after its first turn, before it plans. The argv the pod ran
-# its agent with is recorded beside them.
+# path the pod's agent loaded, as an agent in any checkout does. The markers live in the pod's own
+# /tmp, which goes with the pod when its tree closes, and are read while the planner waits after its
+# first turn, before it plans. The argv the pod ran its agent with is recorded beside them; both are
+# judged by repository-tools, which keeps the planner waiting until it has.
 nonce="fixture-read-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then answer this message with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
 on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
@@ -2306,7 +2460,99 @@ markers=$(fixture_markers "$pod" planner) || fail "the fixture markers could not
 printf '%s\n' "$markers" >"$evidence/fixture-markers.txt"
 argv=$(pod_commands "$pod" planner)
 note "tree 2 planner container $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
-if grep -q -- '--no-extensions' <<<"$argv"; then note "the planner runs with --no-extensions"; else note "the planner runs without --no-extensions"; fi
+pass
+
+begin repository-tools
+# Tree 2's planner, still waiting in its checkout, uses what a worker in any repository checkout
+# has (dispatch://LEGION-578's integration check, criteria 1 and 2): the repository's skills, the
+# language servers of its Go, TypeScript and Python roots, the CodeGraph index the shim warmed, and
+# its settings as Oh My Pi ranks them, the pod baseline and the operator's overlay over the
+# repository's own. Each is read from a tool's result in the session (lib/stage4b-tools.jq), never
+# from the model's words: a model can quote a skill's line it never read, and a result is held to
+# the call it answered, so the fail line quotes what the tool did return. The settings are read by
+# running `omp config get` in the workspace under the agent process's own environment
+# (/proc/<pid>/environ, which carries PI_CONFIG_FILES), what the agent reads and not what a shell in
+# the container would; the control reads two of them with no environment but PATH and HOME, where
+# the repository's own values show: the overlay reaches the agent through its environment alone.
+# The fixture's markers are asserted here, and the argv: a planner run with --no-extensions could
+# load no repository extension and no profile plugin, so there would be no CodeGraph device to
+# prove. Only once all of it holds is the planner told to plan.
+pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
+fixture_dir=/legion/workspaces/$repo/${tree2,,}
+# The shim warms the index after the agent starts, so the planner's first turn can end before the
+# index is built.
+on_tree "$tree2" until_true 600 "tree 2's CodeGraph index to initialize in $fixture_dir" sh -c \
+  "timeout 60 kubectl --context '$operator' -n '$namespace' exec '$pod' -c planner -- sh -c 'cd $fixture_dir && codegraph status --json' | jq -e '.initialized == true' >/dev/null"
+codegraph_status=$(pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -c '{initialized, fileCount, nodeCount, edgeCount, languages, state: .index.state}')
+note "tree 2's CodeGraph index in $fixture_dir: $codegraph_status"
+nonce="repository-tools-$RANDOM$RANDOM"
+send_agent "$tree2" planner "Stage 4b proof repository-tools operation, in this repository's checkout: (1) read skill://fixture-omp-skill and skill://fixture-claude-skill with the read tool and quote each one's FIXTURE-SKILL line; (2) with the lsp tool, get its status (the language servers it has for this checkout), then hover Greet in fixture/greet.go, greet in src/greet.ts and greet in fixture_py/greet.py, each on the line that defines it; (3) with the codegraph tool, get its status, then the tests affected by fixture/greet.go, the impact of Greet, and the impact of NoSuchSymbol; (4) reply to this message with one line per step, each starting with $nonce, then wait for the next instruction. Change no file and call no legion operation."
+on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
+claim_session_text "$tree2" planner | jq -R -s -c -L "$root/scripts/e2e/lib" 'include "stage4b-tools";
+  {skills: [tool_results("read")[] | select(.arguments | contains("skill://"))], lsp: tool_results("lsp"), codegraph: tool_results("codegraph")}' \
+  >"$evidence/repository-tools-results.json" || fail "tree 2's planner session could not be read for its tool results"
+# The skills, as the read tool returned them at skill://<name>: the run's own nonce, which no stale
+# checkout and no skill of the image carries.
+for skill in omp claude; do
+  tool_result_answered "$tree2" planner read "skill://fixture-$skill-skill" "FIXTURE-SKILL-${skill^^}-$fixture_skill_nonce" ||
+    fail "no read of skill://fixture-$skill-skill in tree 2's planner session returned FIXTURE-SKILL-${skill^^}-$fixture_skill_nonce; its reads of skill://: $(tool_result_quotes "$tree2" planner read skill://)"
+done
+# The status listing names the server of each root, which the lsp tool configures from the root
+# marker it finds in the checkout; a hover is the server's own signature, which only a server that
+# started in the checkout gives.
+for server in gopls typescript-language-server pyright; do
+  tool_result_said "$tree2" planner lsp "$server" ||
+    fail "no lsp result in tree 2's planner session names $server, so the checkout's language servers are not the planner's; its lsp results: $(tool_result_quotes "$tree2" planner lsp)"
+done
+for hover in "greet.go=func Greet" "greet.ts=function greet" "greet.py=def greet"; do
+  tool_result_answered "$tree2" planner lsp "${hover%%=*}" "${hover#*=}" ||
+    fail "no lsp result of a call on ${hover%%=*} in tree 2's planner session carries the hover text '${hover#*=}'; its lsp results: $(tool_result_quotes "$tree2" planner lsp)"
+done
+# The index answers from the graph: the test a change to greet.go reaches, and Greet's caller.
+tool_result_said "$tree2" planner codegraph greet_test.go ||
+  fail "no codegraph result in tree 2's planner session names greet_test.go as a test affected by fixture/greet.go; its codegraph results: $(tool_result_quotes "$tree2" planner codegraph)"
+tool_result_said "$tree2" planner codegraph GreetWorld || tool_result_said "$tree2" planner codegraph caller.go ||
+  fail "no codegraph result in tree 2's planner session names Greet's caller (GreetWorld, or caller.go); its codegraph results: $(tool_result_quotes "$tree2" planner codegraph)"
+codegraph_control "$tree2" planner ||
+  fail "the codegraph control did not hold: tree 2's planner session has no codegraph call for NoSuchSymbol, or one answered naming the fixture's test or caller; its codegraph results: $(tool_result_quotes "$tree2" planner codegraph)"
+note "tree 2's planner read both skills, listed the three language servers and hovered the three roots, and its codegraph named the affected test and Greet's caller; NoSuchSymbol answered: $(tool_result_quotes "$tree2" planner codegraph NoSuchSymbol)"
+note "tool results kept as $evidence/repository-tools-results.json"
+# The markers repository-configuration recorded are what a worker's loading paths wrote; each of
+# the Oh My Pi ones must be there (the Codex tool and Claude plugin are another agent's paths, and
+# the fixture's LSP config waits for a Markdown file to be opened).
+markers=$(fixture_markers "$pod" planner) || fail "the fixture markers could not be read in $pod: $markers"
+for marker in omp-extension omp-tool mcp-root mcp-omp; do
+  grep -qw -- "$marker" <<<"$markers" || fail "tree 2's planner never loaded the fixture's $marker: markers [${markers:-none}]"
+done
+argv=$(pod_commands "$pod" planner)
+! grep -q -- '--no-extensions' <<<"$argv" || fail "tree 2's planner runs with --no-extensions, so no repository extension or profile plugin can load: $(tr '\n' ';' <<<"$argv")"
+note "tree 2's planner loaded the fixture's extension, tool and both MCP servers [${markers}] and runs without --no-extensions"
+# Five settings as the agent reads them: three defaults nothing above the repository sets and the
+# repository leaves alone, the repository's own images.urls.enabled, and retry.modelFallback, which
+# the repository sets false and the operator's overlay sets true: the operator's wins.
+pid=$(agent_pid "$pod" planner) || fail "no Oh My Pi (/opt/omp/bin/omp … --mode rpc) runs in tree 2's planner container $pod: $(tr '\n' ';' <<<"$argv")"
+settings=
+for pair in 'compaction.remoteEndpoint=""' 'memory.backend="off"' images.urls.enabled=true dev.autoqa=false retry.modelFallback=true; do
+  key=${pair%%=*} want=${pair#*=}
+  case $key in
+    images.urls.enabled) why="the repository's .omp/config.yml sets it and nothing above the repository does" ;;
+    retry.modelFallback) why="the operator's overlay sets it true over the repository's false" ;;
+    *) why="Oh My Pi's default, which neither the repository nor an overlay sets" ;;
+  esac
+  got=$(agent_setting "$pod" planner "$pid" "$fixture_dir" "$key" 2>"$work/setting-stderr") || fail "omp config get $key under tree 2's planner's environment (pid $pid) in $fixture_dir failed: $got $(tr '\n' ' ' <"$work/setting-stderr")"
+  [ "$got" = "$want" ] || fail "$key reads $got under tree 2's planner's own environment (pid $pid) in $fixture_dir, want $want: $why"
+  settings="$settings $key=$got"
+done
+note "settings as tree 2's planner (pid $pid) reads them in $fixture_dir:${settings}"
+# The control: the same reads with no environment but PATH and HOME give the repository's own
+# values, false and true. The operator's true reached the agent through PI_CONFIG_FILES in its
+# environment, which is what the reads above ran under, and nothing else.
+for pair in retry.modelFallback=false images.urls.enabled=true; do
+  key=${pair%%=*} want=${pair#*=}
+  got=$(bare_setting "$pod" planner "$fixture_dir" "$key" 2>"$work/setting-stderr") || fail "omp config get $key with no environment but PATH and HOME in $fixture_dir failed: $got $(tr '\n' ' ' <"$work/setting-stderr")"
+  [ "$got" = "$want" ] || fail "control: $key reads $got in $fixture_dir with no environment but PATH and HOME, want the repository's $want, so the agent's environment is not what carries the operator's overlay"
+done
+note "control: with no environment but PATH and HOME, retry.modelFallback reads the repository's false and images.urls.enabled its true in $fixture_dir"
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
 on_tree "$tree2" wait_for_phase "$tree2" implementing "$plan_seconds"
 pass

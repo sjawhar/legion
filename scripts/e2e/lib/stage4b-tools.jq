@@ -14,18 +14,21 @@ def session_entries: split("\n")[] | fromjson?;
 
 # tool_results(name) are the toolResults of the session whose paired toolCall, the one with the
 # result's toolCallId in an assistant message's content, calls(name), in session order, each
-# {toolCallId, isError, text}: isError false when the result records none, text the result's text
-# blocks joined by newlines (an image or any other block contributes nothing). A result whose call
-# is not in the session (a session truncated before its call) is no tool's.
+# {toolCallId, isError, text, arguments}: isError false when the result records none, text the
+# result's text blocks joined by newlines (an image or any other block contributes nothing), and
+# arguments the paired call's call_arguments as JSON text, so a checkpoint can tell which call a
+# result answered (the hover among lsp's results, the control among codegraph's). A result whose
+# call is not in the session (a session truncated before its call) is no tool's.
 def tool_results(name):
   [session_entries] as $entries
-  | [$entries[] | select(.type == "message" and .message.role == "assistant")
-      | .message.content[]? | select(calls(name)) | .id] as $ids
+  | ([$entries[] | select(.type == "message" and .message.role == "assistant")
+      | .message.content[]? | select(calls(name)) | {key: .id, value: (call_arguments | tostring)}] | from_entries) as $calls
   | [$entries[] | select(.type == "message" and .message.role == "toolResult")
-      | select(.message.toolCallId | IN($ids[]))
+      | select((.message.toolCallId | strings) | in($calls))
       | {toolCallId: .message.toolCallId,
          isError: (.message.isError // false),
-         text: ([.message.content[]? | select(.type == "text") | .text] | join("\n"))}];
+         text: ([.message.content[]? | select(.type == "text") | .text] | join("\n")),
+         arguments: $calls[.message.toolCallId]}];
 
 # tool_result_texts(name) are the texts of the tool's results that are no error, for a checkpoint's
 # note to quote.
@@ -37,3 +40,8 @@ def tool_ran(name): any(tool_results(name)[]; .isError == false);
 # tool_result_said(name; $text) is whether one call of the tool returned without error with $text
 # in its text, literally and case-sensitively.
 def tool_result_said(name; $text): any(tool_result_texts(name)[]; contains($text));
+
+# tool_result_answered(name; $args; $text) is tool_result_said for the calls whose arguments carry
+# $args: the hover of one file among a tool's hovers, the read of one skill:// among its reads.
+def tool_result_answered(name; $args; $text):
+  any(tool_results(name)[]; .isError == false and (.arguments | contains($args)) and (.text | contains($text)));

@@ -732,7 +732,8 @@ Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, through one changes-requested review
   round in a thread the reviewer opens, lingers, and closes.
 - Tree 2 runs through its planner beside tree 1's implementer, on its own node, carrying the
-  repository-configuration fixture, and is then moved to backlog.
+  repository-configuration fixture (the loading paths' markers, two skills, a Go, a TypeScript and
+  a Python root, and a `.omp/config.yml`), and is then moved to backlog.
 - Tree 3 is admitted when tree 2 leaves the line. It supplies the held phase the controller
   checkpoint needs, and is taken out from an operator shell.
 - Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
@@ -841,7 +842,8 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `advertise-host` | the daemon's API and worker-stream listeners hold every interface (`ss -Hltn`); every pod the watch has seen ready has all six role launchers dialing the worker stream at `advertise_host` (a pod-shape rule, so the shape watcher and `pod-shape` hold every later pod to it too); each admitted root's architect registered from such a pod. The daemon's loader refuses the proof's file with `advertise_host` dropped (`bind 0.0.0.0 is not an address a pod can reach`) and with `bind: 127.0.0.1` beside it (`bind 127.0.0.1 is loopback, …`). Negative control: a recorded pod whose role launchers' `--connect` names the bind address departs from the pod shape |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node. Tree 2's planner has held for the driver: a tree 2 that left planning before the driver sent it anything fails here by name. The proof's instructions tell every phase worker that the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`) is not the driver's instruction |
-| `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
+| `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes and the agent's argv are recorded, for `repository-tools` to judge |
+| `repository-tools` | what a worker in a repository checkout has, proved in tree 2's planner while it still waits (LEGION-578's integration check, criteria 1 and 2), each read from a tool's result in its session and held to the call it answered (`lib/stage4b-tools.jq`; the results are kept as `repository-tools-results.json`), never from the model's words. The read tool returned both skills at `skill://fixture-omp-skill` and `skill://fixture-claude-skill`, each carrying the run's nonce. The lsp tool's status lists `gopls`, `typescript-language-server` and `pyright` for the checkout, and its hovers return each root's own signature (`func Greet`, `function greet`, `def greet`). The CodeGraph index the shim warmed reads `initialized: true`; the codegraph tool's affected names `greet_test.go` for `fixture/greet.go`, its impact of `Greet` names the caller (`GreetWorld` or `caller.go`), and its control, the impact of `NoSuchSymbol`, errs or names none of them. The fixture's `omp-extension`, `omp-tool`, `mcp-root` and `mcp-omp` markers are all present, and the planner's argv has no `--no-extensions`. Five settings read by `omp config get` in the workspace under the agent process's own environment (`/proc/<pid>/environ`, which carries `PI_CONFIG_FILES`): `compaction.remoteEndpoint` `""`, `memory.backend` `"off"` and `dev.autoqa` `false` (defaults hold), `images.urls.enabled` `true` (the repository's `.omp/config.yml`), `retry.modelFallback` `true` (the operator's overlay over the repository's `false`); the control reads the last two with no environment but `PATH` and `HOME` and gets the repository's `false` and `true`, so the overlay reaches the agent through its environment alone. Then the planner is told to plan |
 | `finished-idle-planner-death` | tree 2's completed planner is idle with no pending task while its implementer owns `implementing`; the driver records its session, process incarnation and pod UID and kills only the planner launcher PID 1, once. Kubernetes restarts that container in the same issue pod, and the daemon relaunches the planner on the same session at a new process generation, in the same pod by uid, registered and ready or idle with no task pending and no new planning-task delivery, while tree 2 remains `implementing`, unheld and with its implementer live. A relaunch registers and reaches Ready in seconds, and Ready resets the launch-failure budget, so the driver cannot exhaust it; the exhausted budget's failure, its one `worker-died` and the unheld phase are `packages/daemon/internal/daemon/outbox_lifecycle_test.go`'s (`TestAFinishedWorkerThatDiesIsRelaunchedAndItsFailureHoldsNothing`). `issue-cap-moves` then removes tree 2 normally |
 | `issue-cap-moves` | the proof human's `backlog` on tree 2's live root is set back: the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot; `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone |
 | `tree-moved` | tree 1's planner and implementer take it to `testing` with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author |
@@ -1709,23 +1711,28 @@ What a tool returned in a role's Oh My Pi session, for a Stage 4b checkpoint to 
 rather than that the model said it did. `assistant_said ISSUE ROLE TEXT` reads the claim's assistant
 turns, the reply text and each tool call's arguments, so it proves what the model wrote; the
 session's `toolResult` entries are what the tools answered. `tool_ran ISSUE ROLE TOOL` holds when one
-call of TOOL in ROLE's session returned without error, and `tool_result_said ISSUE ROLE TOOL TEXT` when
-such a result's text carries TEXT, literally and case-sensitively. A result is TOOL's by the call it
-answers, never by the `toolName` it records: the model calls a tool by its name, by a `write` to its
-device `xd://<name>`, or by `eval` code calling `tool.<name>(…)`, and a write to the device records
-`toolName: "write"`, the device's name only in the paired call's `arguments.path`. The library pairs
-each result with its call by `toolCallId` and judges the call with `lib/omp-tool-calls.jq`'s `calls`,
-the one rule every live proof uses for "the agent called this tool". An error result (`isError`
-true; a `bash` whose command exited 1 after printing what was wanted) never counts, and a result
-whose call the session no longer holds is no tool's. `tool_results(name)`, `tool_result_texts(name)`
-(the non-error texts, for a checkpoint's note to quote), `tool_ran(name)` and
-`tool_result_said(name; $text)` take the session's text read with `jq -R -s` and are loaded with
-`jq -L scripts/e2e/lib 'include "stage4b-tools"; …'`.
+call of TOOL in ROLE's session returned without error, `tool_result_said ISSUE ROLE TOOL TEXT` when
+such a result's text carries TEXT, literally and case-sensitively, and `tool_result_answered ISSUE
+ROLE TOOL ARGS TEXT` when such a result's call had ARGS in its arguments too: the hover of one file
+among the lsp tool's hovers, the read of one `skill://` among the session's reads. A result is
+TOOL's by the call it answers, never by the `toolName` it records: the model calls a tool by its
+name, by a `write` to its device `xd://<name>`, or by `eval` code calling `tool.<name>(…)`, and a
+write to the device records `toolName: "write"`, the device's name only in the paired call's
+`arguments.path`. The library pairs each result with its call by `toolCallId`, judges the call with
+`lib/omp-tool-calls.jq`'s `calls`, the one rule every live proof uses for "the agent called this
+tool", and keeps the call's arguments (`call_arguments`, as JSON text) on the result. An error
+result (`isError` true; a `bash` whose command exited 1 after printing what was wanted) never
+counts, and a result whose call the session no longer holds is no tool's. `tool_results(name)`
+(each `{toolCallId, isError, text, arguments}`), `tool_result_texts(name)` (the non-error texts,
+for a checkpoint's note to quote), `tool_ran(name)`, `tool_result_said(name; $text)` and
+`tool_result_answered(name; $args; $text)` take the session's text read with `jq -R -s` and are
+loaded with `jq -L scripts/e2e/lib 'include "stage4b-tools"; …'`.
 
-`lib/stage4b-tools.test.ts` (`bun test scripts/e2e/lib`, which CI runs) lifts the two helpers from the
-script by name and runs them over `lib/testdata/stage4b-tools-session.jsonl`, a session an
+`lib/stage4b-tools.test.ts` (`bun test scripts/e2e/lib`, which CI runs) lifts the three helpers from
+the script by name and runs them over `lib/testdata/stage4b-tools-session.jsonl`, a session an
 implementer pod wrote: `eval` returned `42`; the `lsp` device's two writes are `lsp`'s results and a
-`write`'s alike; the Go version is in the session only in a `bash` that exited 1 and the browser's
-refusal only in an `eval` that errored, and each is refused; `notebook`, which never ran, is the
-never-ran control; and a word the model wrote in a call's arguments, which `assistant_said` accepts,
-is refused as a tool's answer.
+`write`'s alike, each carrying its call's `action`; the Go version is in the session only in a `bash`
+that exited 1 and the browser's refusal only in an `eval` that errored, and each is refused;
+`notebook`, which never ran, is the never-ran control; a word the model wrote in a call's arguments,
+which `assistant_said` accepts, is refused as a tool's answer; and the hover's text is no answer of
+the status call.
