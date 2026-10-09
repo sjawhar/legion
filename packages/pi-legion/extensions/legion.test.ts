@@ -254,6 +254,8 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
+  /** Every `sendMessage` call's options, in the order of sentMessages. */
+  readonly sentMessageOptions: unknown[];
   readonly sentUserMessages: string[];
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
@@ -265,6 +267,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
+  const sentMessageOptions: unknown[] = [];
   const sentUserMessages: string[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
@@ -293,7 +296,10 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       unknown: () => optional(),
       discriminatedUnion: () => ({}),
     },
-    sendMessage: (message) => sentMessages.push(message),
+    sendMessage: (message, sendOptions) => {
+      sentMessages.push(message);
+      sentMessageOptions.push(sendOptions);
+    },
     sendUserMessage: (content) => {
       if (typeof content !== "string") {
         throw new Error(
@@ -340,6 +346,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     handlers,
     tools,
     sentMessages,
+    sentMessageOptions,
     sentUserMessages,
     entries,
     activeTools,
@@ -507,6 +514,8 @@ interface ClaimPane {
   readonly commands: RegisteredCommand[];
   readonly activeTools: string[];
   readonly entries: AppendedEntry[];
+  readonly sentMessages: SentMessage[];
+  readonly sentMessageOptions: unknown[];
   readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
@@ -663,6 +672,8 @@ async function claimPane(options: {
     commands: fixture.commands,
     activeTools: fixture.activeTools,
     entries: fixture.entries,
+    sentMessages: fixture.sentMessages,
+    sentMessageOptions: fixture.sentMessageOptions,
     title: fixture.title,
     handlers: fixture.handlers,
     context,
@@ -4046,48 +4057,50 @@ describe("a Legion session's title", () => {
 });
 
 describe("the recreated-workspace notice", () => {
-  const firstTurnRequest = [
-    { role: "compactionSummary", summary: "earlier" },
-    { role: "user", content: [{ type: "text", text: "the task" }], timestamp: 1 },
-  ];
-  /** What the pane's `context` handler makes of a request, the request's messages when nothing. */
-  const requestOf = async (pane: ClaimPane): Promise<readonly unknown[]> => {
-    const handler = pane.handlers.get("context");
-    if (handler === undefined) throw new Error("context was not registered");
-    const result = (await handler({ messages: firstTurnRequest }, pane.context)) as
-      | { readonly messages: readonly unknown[] }
-      | undefined;
-    return result?.messages ?? firstTurnRequest;
-  };
-  const endTurn = async (pane: ClaimPane): Promise<void> => {
-    await pane.handlers.get("agent_end")?.({ messages: [] }, pane.context);
-  };
-
-  // A pane whose role launcher said its workspace was recreated tells the agent so in every
-  // request of its first turn, whatever started that turn, right after the compaction summaries,
-  // naming the issue's branch; the turn's end ends it, so no later turn carries it.
-  test("the first turn alone carries it when LEGION_WORKSPACE_RECREATED is true", async () => {
+  const notices = (pane: ClaimPane) =>
+    pane.sentMessages.flatMap((message, i) =>
+      "customType" in message && message.customType === "legion-workspace-recreated"
+        ? [{ message, options: pane.sentMessageOptions[i] }]
+        : []
+    );
+  // A resumed session, its history uncompacted turns, whose role launcher said its workspace was
+  // recreated: at session start the plugin saves one notice naming the issue's branch, as a steer
+  // that starts no turn, so Oh My Pi stores it ahead of the next turn whatever starts that turn.
+  test("a resume told LEGION_WORKSPACE_RECREATED=true saves one notice ahead of its next turn", async () => {
     process.env.LEGION_WORKSPACE_RECREATED = "true";
-    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
-    for (const request of [await requestOf(pane), await requestOf(pane)]) {
-      expect(request).toHaveLength(3);
-      expect(request[0]).toEqual(firstTurnRequest[0]);
-      expect(request[1]).toMatchObject({ role: "user" });
-      expect(JSON.stringify(request[1])).toContain(
-        "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
-      );
-      expect(request[2]).toEqual(firstTurnRequest[1]);
-    }
-    await endTurn(pane);
-    expect(await requestOf(pane)).toEqual(firstTurnRequest);
+    const history = [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-1" }] } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "reply 1" }] },
+      },
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "TURN-2" }] } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "reply 2" }] },
+      },
+    ];
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43", branch: history });
+    expect(notices(pane)).toEqual([
+      {
+        message: {
+          customType: "legion-workspace-recreated",
+          content: expect.stringContaining(
+            "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
+          ),
+          display: true,
+        },
+        options: { deliverAs: "steer", triggerTurn: false },
+      },
+    ]);
   });
 
-  test("no turn carries it when LEGION_WORKSPACE_RECREATED is false or unset", async () => {
+  test("a resume told false, or nothing, saves no notice", async () => {
     for (const value of ["false", undefined]) {
       if (value === undefined) delete process.env.LEGION_WORKSPACE_RECREATED;
       else process.env.LEGION_WORKSPACE_RECREATED = value;
       const pane = await bootPane({ role: "implementer", sessionId: `ses_recreated_${value}` });
-      expect(await requestOf(pane)).toEqual(firstTurnRequest);
+      expect(notices(pane)).toEqual([]);
     }
   });
 });

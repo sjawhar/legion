@@ -70,6 +70,12 @@ func Connect(ctx context.Context, dsnFile string) (*pgx.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ConnectURL(ctx, dsn)
+}
+
+// ConnectURL opens the session database at dsn, a URL ReadDSN read. A refusal names the
+// database's address, never the URL's password (store.ConnectError).
+func ConnectURL(ctx context.Context, dsn string) (*pgx.Conn, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return nil, store.ConnectError(dsn, err)

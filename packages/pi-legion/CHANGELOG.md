@@ -7,6 +7,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- A resumed session whose role launcher sets `LEGION_WORKSPACE_RECREATED=true` (its workspace was
+  provisioned after the session was last written, LEGION-654) is told so at session start: one
+  `legion-workspace-recreated` message, sent as a steer that starts no turn, is saved ahead of the
+  next turn, whatever starts it, naming `legion/<LEGION_ISSUE>` and saying anything not pushed is
+  gone. A `task` subagent is never told.
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
   runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
   registers on `/legion/v1/claims/register` with that boot token in place of a controller

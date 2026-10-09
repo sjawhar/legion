@@ -31,7 +31,7 @@ const liveSessionsSecretKey = "stage4a_sessions"
 // though the volume holds no such file, since the launcher looked the session up in the table
 // through the pod's URL file; and the agent's environment says the workspace was recreated since the
 // session was last written (launcher.WorkspaceRecreatedVariable), which the Legion plugin tells the
-// agent on its first turn, where the fresh generation's said it was not.
+// agent before its next turn, where the fresh generation's said it was not.
 func (r *liveRig) checkPostgresResume() error {
 	c := r.claim("sessions")
 	if r.sessionStore == "" {

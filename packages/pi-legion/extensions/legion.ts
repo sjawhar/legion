@@ -42,7 +42,7 @@ import {
 } from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { createLegionTool } from "../src/tools";
-import { withWorkspaceRecreatedNotice, workspaceRecreatedNotice } from "../src/workspace-recreated";
+import { WORKSPACE_RECREATED_MESSAGE, workspaceRecreatedNotice } from "../src/workspace-recreated";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -437,10 +437,6 @@ export default function legionExtension(pi: PiApi): void {
     }
     return step.followUp;
   };
-  // The recreated-workspace notice (src/workspace-recreated.ts): set at session_start when the role
-  // launcher said the workspace was recreated, it goes into every provider request of the process's
-  // first turn and no other, since the first run's end, a task's or an event's, clears it.
-  let recreatedNotice: string | undefined;
 
   let daemonClient: LegionDaemonClient | undefined;
   const roleDaemon = (): LegionDaemonClient => {
@@ -488,10 +484,18 @@ export default function legionExtension(pi: PiApi): void {
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
-    // The agent's first turn in this process, whatever starts it (a task, an Envoy delivery), is
-    // told its workspace was recreated when the role launcher said so; a subagent, which returned
-    // above, never is.
-    recreatedNotice = workspaceRecreatedNotice(process.env);
+    // A resume whose role launcher found the workspace recreated since the session was last
+    // written (src/workspace-recreated.ts) is told so in a message saved to the session ahead of
+    // the next turn, whatever starts that turn (a task, an Envoy delivery), so a process lost in
+    // that turn resumes with the notice already in its history; a subagent, which returned above,
+    // never is.
+    const recreated = workspaceRecreatedNotice(process.env);
+    if (recreated !== undefined) {
+      pi.sendMessage(
+        { customType: WORKSPACE_RECREATED_MESSAGE, content: recreated, display: true },
+        { deliverAs: "steer", triggerTurn: false }
+      );
+    }
     await titleSession(context);
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open.
@@ -622,15 +626,6 @@ export default function legionExtension(pi: PiApi): void {
       lastAssistantText: assistantText(event.last_assistant_message),
     });
     return followUp === undefined ? undefined : { continue: true, additionalContext: followUp };
-  });
-
-  // The first turn's requests carry the recreated-workspace notice (recreatedNotice, above).
-  pi.on("context", async (event) => {
-    if (recreatedNotice === undefined) return undefined;
-    return { messages: withWorkspaceRecreatedNotice(event.messages, recreatedNotice) };
-  });
-  pi.on("agent_end", async () => {
-    recreatedNotice = undefined;
   });
 
   const onPhaseCompleted = (context: SessionContext): void => {

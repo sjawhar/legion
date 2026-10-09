@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -29,9 +30,51 @@ func runSessions(ctx context.Context, args []string, stdout, stderr io.Writer) i
 }
 
 const (
-	sessionsImportUsage   = "usage: legion sessions import --dsn-file <file> --claims <file|-> [--tree <KEY> | --claim <token>] [--tree-volume <dir>]"
+	sessionsImportUsage   = "usage: legion sessions import --dsn-file <file> --claims <file|-> [--tree <KEY>] [--tree-volume <dir>]"
 	sessionsMarkLostUsage = "usage: legion sessions mark-lost --dsn-file <file> --claims <file|-> --daemon-dsn-file <file>"
 )
+
+// sessionsInput is what both `legion sessions` commands read first: --dsn-file and --claims,
+// registered on their flag set by addSessionsInput.
+type sessionsInput struct {
+	command, usage      string
+	dsnFile, claimsFile *string
+}
+
+func addSessionsInput(command, usage string, flags *flag.FlagSet) sessionsInput {
+	return sessionsInput{
+		command: command, usage: usage,
+		dsnFile:    flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)"),
+		claimsFile: flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)"),
+	}
+}
+
+// open refuses a positional argument or a missing required flag, its own two and required's
+// (name, value) pairs, as a usage error, then reads the claims list and connects to the session
+// database. code is the command's exit when conn is nil.
+func (in sessionsInput) open(ctx context.Context, flags *flag.FlagSet, required [][2]string, stderr io.Writer) (claims []importedClaim, conn *pgx.Conn, code int) {
+	if flags.NArg() != 0 {
+		fmt.Fprintf(stderr, "legion sessions %s: unexpected argument %q\n%s\n", in.command, flags.Arg(0), in.usage)
+		return nil, nil, 2
+	}
+	for _, pair := range append([][2]string{{"dsn-file", *in.dsnFile}, {"claims", *in.claimsFile}}, required...) {
+		if pair[1] == "" {
+			fmt.Fprintf(stderr, "legion sessions %s: --%s is required\n%s\n", in.command, pair[0], in.usage)
+			return nil, nil, 2
+		}
+	}
+	claims, err := readImportedClaims(*in.claimsFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions %s: %v\n", in.command, err)
+		return nil, nil, 1
+	}
+	conn, err = ompsessions.Connect(ctx, *in.dsnFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion sessions %s: %v\n", in.command, err)
+		return nil, nil, 1
+	}
+	return claims, conn, 0
+}
 
 // importedClaim is what `legion sessions import` reads of one claim `legion claims list --json`
 // prints: its token, tree and recorded session file. Every other member is the daemon's and
@@ -58,44 +101,19 @@ type importedClaim struct {
 // twice: a session the table already holds byte for byte is reported as copied before.
 func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sessions import", sessionsImportUsage, stderr)
-	dsnFile := flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)")
-	claimsFile := flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)")
+	input := addSessionsInput("import", sessionsImportUsage, flags)
 	tree := flags.String("tree", "", "copy the sessions of this tree's claims alone")
-	claimToken := flags.String("claim", "", "copy this claim's session alone (one that belongs to no tree)")
-	treeVolume := flags.String("tree-volume", "", "read each session from the volume mounted here (a tree's, or the claim's) rather than at its recorded path")
+	treeVolume := flags.String("tree-volume", "", "read each session from the tree volume mounted here rather than at its recorded path")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
-	usage := func(format string, args ...any) int {
-		fmt.Fprintf(stderr, "legion sessions import: "+format+"\n%s\n", append(args, sessionsImportUsage)...)
-		return 2
-	}
-	if flags.NArg() != 0 {
-		return usage("unexpected argument %q", flags.Arg(0))
-	}
-	for _, required := range []struct{ name, value string }{{"dsn-file", *dsnFile}, {"claims", *claimsFile}} {
-		if required.value == "" {
-			return usage("--%s is required", required.name)
-		}
-	}
-	if *tree != "" && *claimToken != "" {
-		return usage("--tree and --claim each select the claims to copy; give one")
-	}
-	claims, err := readImportedClaims(*claimsFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
-		return 1
-	}
-	conn, err := ompsessions.Connect(ctx, *dsnFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
-		return 1
+	claims, conn, code := input.open(ctx, flags, nil, stderr)
+	if conn == nil {
+		return code
 	}
 	defer conn.Close(context.Background())
 
-	selected := func(c importedClaim) bool {
-		return (*tree == "" || c.Tree == *tree) && (*claimToken == "" || c.Token == *claimToken)
-	}
+	selected := func(c importedClaim) bool { return *tree == "" || c.Tree == *tree }
 	counts := map[string]int{}
 	matched := 0
 	for _, c := range claims {
@@ -125,8 +143,8 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 			counts["copied before"]++
 		}
 	}
-	if matched == 0 && (*tree != "" || *claimToken != "") {
-		fmt.Fprintf(stderr, "legion sessions import: the claims list %s has no claim of %s\n", *claimsFile, strings.TrimSpace(*tree+" "+*claimToken))
+	if matched == 0 && *tree != "" {
+		fmt.Fprintf(stderr, "legion sessions import: the claims list %s has no claim of %s\n", *input.claimsFile, *tree)
 		return 1
 	}
 	missing, err := missingSessions(ctx, conn, claims)
@@ -184,31 +202,14 @@ func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim
 // is marked (unlistedClaims). Only a claim still recording the session the list says is marked.
 func runSessionsMarkLost(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sessions mark-lost", sessionsMarkLostUsage, stderr)
-	dsnFile := flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)")
-	claimsFile := flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)")
+	input := addSessionsInput("mark-lost", sessionsMarkLostUsage, flags)
 	daemonDSNFile := flags.String("daemon-dsn-file", "", "file holding the stopped daemon's own postgres_dsn (required)")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
-	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "legion sessions mark-lost: unexpected argument %q\n%s\n", flags.Arg(0), sessionsMarkLostUsage)
-		return 2
-	}
-	for _, required := range []struct{ name, value string }{{"dsn-file", *dsnFile}, {"claims", *claimsFile}, {"daemon-dsn-file", *daemonDSNFile}} {
-		if required.value == "" {
-			fmt.Fprintf(stderr, "legion sessions mark-lost: --%s is required\n%s\n", required.name, sessionsMarkLostUsage)
-			return 2
-		}
-	}
-	claims, err := readImportedClaims(*claimsFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion sessions mark-lost: %v\n", err)
-		return 1
-	}
-	conn, err := ompsessions.Connect(ctx, *dsnFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion sessions mark-lost: %v\n", err)
-		return 1
+	claims, conn, code := input.open(ctx, flags, [][2]string{{"daemon-dsn-file", *daemonDSNFile}}, stderr)
+	if conn == nil {
+		return code
 	}
 	defer conn.Close(context.Background())
 	missing, err := missingSessions(ctx, conn, claims)

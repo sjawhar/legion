@@ -4,8 +4,9 @@
 # 4 of docs/kubernetes.md "Copying file sessions before turning it on". It copies only from
 # legion-v10.0.0, whose every role runs in a Sandbox of its own: a project whose Sandboxes are issue
 # pods (legion-v10.1.0 and later) is refused by name, as that runbook has no copy path for them.
-# Run it with the daemon scaled to 0: it refuses while any pod of the project runs, since a pod
-# still running is a writer the copy would miss, and a volume attaches to one node at a time.
+# Run it with the daemon scaled to 0: it refuses while any Sandbox of the project is not Suspended,
+# whose pod may still be starting, and while any pod of the project has not ended, since such a pod
+# is a writer the copy would miss, and a volume attaches to one node at a time.
 #
 # Each tree's volume and root Sandbox are found by legion-v10.0.0's own labels (legion.dev/project,
 # legion.dev/role=architect, legion.dev/tree and legion.dev/issue: `labels` in
@@ -42,9 +43,17 @@ if [[ -n $issue_pods ]]; then
   echo "sessions-import-pods: project $token runs issue pods ($(wc -l <<<"$issue_pods") Sandboxes with an issue label and no role, e.g. ${issue_pods%%$'\n'*}), so it is on legion-v10.1.0 or later; this script copies only from legion-v10.0.0's per-claim Sandboxes (docs/kubernetes.md \"Copying file sessions before turning it on\")" >&2
   exit 2
 fi
-running=$("${kubectl[@]}" get pods -l "$selector,!legion.dev/sessions-import" --field-selector=status.phase=Running -o name)
-if [[ -n $running ]]; then
-  echo "sessions-import-pods: $(wc -l <<<"$running") pod(s) of project $token are running, e.g. ${running%%$'\n'*}: a running agent writes its session after the copy; suspend every claim and scale the daemon to 0 first (step 1 and 2)" >&2
+# A Sandbox not Suspended (legion-v10.0.0 reads an unset operating mode as Running) can start a
+# pod after the pod check below, so every one must be Suspended first.
+awake=$("${kubectl[@]}" get sandboxes -l "$selector,!legion.dev/probe" -o json |
+  jq -r '.items[] | select((.spec.operatingMode // "Running") != "Suspended") | "sandbox/\(.metadata.name)"')
+if [[ -n $awake ]]; then
+  echo "sessions-import-pods: $(wc -l <<<"$awake") Sandbox(es) of project $token are not Suspended, e.g. ${awake%%$'\n'*}: its pod can still start and write its session after the copy; suspend every claim and scale the daemon to 0 first (steps 1 and 2)" >&2
+  exit 2
+fi
+unended=$("${kubectl[@]}" get pods -l "$selector,!legion.dev/sessions-import" --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name)
+if [[ -n $unended ]]; then
+  echo "sessions-import-pods: $(wc -l <<<"$unended") pod(s) of project $token have not ended, e.g. ${unended%%$'\n'*}: such an agent writes its session after the copy; suspend every claim and scale the daemon to 0 first (steps 1 and 2)" >&2
   exit 2
 fi
 

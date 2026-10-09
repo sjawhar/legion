@@ -125,31 +125,41 @@ func TestAResumeUnderSQLStorageWaitsOutAnUnreachableSessionDatabase(t *testing.T
 	if _, err := ompsessions.Import(context.Background(), conn, sessionFile, []byte("{}\n"), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	saved := resumeLookupBackoff
-	resumeLookupBackoff = []time.Duration{100 * time.Millisecond}
-	t.Cleanup(func() { resumeLookupBackoff = saved })
-	unreachable := "postgres://legion:unused@127.0.0.1:1/none?sslmode=disable&connect_timeout=1\n"
-	if err := os.WriteFile(dsnFile, []byte(unreachable), 0o600); err != nil {
-		t.Fatal(err)
+	savedBackoff, savedTimeout := resumeLookupBackoff, resumeLookupTimeout
+	resumeLookupBackoff, resumeLookupTimeout = []time.Duration{100 * time.Millisecond}, 3*time.Second
+	t.Cleanup(func() { resumeLookupBackoff, resumeLookupTimeout = savedBackoff, savedTimeout })
+	// writeURL replaces the URL file whole, as a rename does, so a read never sees half of it.
+	writeURL := func(url string) {
+		staged := dsnFile + ".staged"
+		if err := os.WriteFile(staged, []byte(url+"\n"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(staged, dsnFile); err != nil {
+			t.Error(err)
+		}
 	}
+	unreachable := "postgres://legion:unused@127.0.0.1:1/none?sslmode=disable&connect_timeout=1"
+	writeURL(unreachable)
 	env := []string{ompsessions.StorageVariable + "=" + ompsessions.SQLStorage, ompsessions.DSNFileVariable + "=" + dsnFile}
+	back := make(chan struct{})
 	go func() {
+		defer close(back)
 		time.Sleep(300 * time.Millisecond)
-		_ = os.WriteFile(dsnFile, []byte(dsn+"\n"), 0o600)
+		writeURL(dsn)
 	}()
 	if _, err := sessionWritten(env, sessionFile); err != nil {
 		t.Fatalf("a lookup whose database came back during the backoff = %v, want the session found", err)
 	}
+	<-back
 
-	if err := os.WriteFile(dsnFile, []byte(unreachable), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctxTimeout := time.Now()
+	writeURL(unreachable)
+	started := time.Now()
 	_, err = sessionWritten(env, sessionFile)
 	if err == nil || !strings.Contains(err.Error(), "resume session "+sessionFile) || !strings.Contains(err.Error(), "attempts in "+resumeLookupTimeout.String()) {
 		t.Fatalf("a lookup whose database never came back = %v, want the refusal naming the session and the attempts", err)
 	}
-	if waited := time.Since(ctxTimeout); waited < resumeLookupTimeout-time.Second {
+	if waited := time.Since(started); waited < resumeLookupTimeout-time.Second {
 		t.Fatalf("the lookup gave up after %s, want it to keep asking for %s", waited, resumeLookupTimeout)
 	}
 }

@@ -31,14 +31,16 @@ while (($#)); do
   esac
 done
 set -- "${args[@]}"
-# matching lists the items of $1's list that every term of the selector admits.
+# matching lists the items of $1's list that every term of the label selector and of the field
+# selector (status.phase=X and status.phase!=X terms) admits.
 matching() {
-  jq --arg s "$selector" --arg f "$field" '[.items[] | (.metadata.labels // {}) as $l | select(
+  jq --arg s "$selector" --arg f "$field" '[.items[] | (.metadata.labels // {}) as $l | (.status.phase // "") as $phase | select(
     ($s | split(",") | all(. as $t |
       if ($t | startswith("!")) then ($l | has($t[1:]) | not)
       elif ($t | contains("=")) then ($l[$t | split("=")[0]] == ($t | split("=")[1]))
       else ($l | has($t)) end)) and
-    ($f == "" or .status.phase == ($f | split("=")[1])))]' "$state/$1.json"
+    ($f | split(",") | map(select(. != "")) | all(. as $t |
+      if ($t | contains("!=")) then $phase != ($t | split("!=")[1]) else $phase == ($t | split("=")[1]) end)))]' "$state/$1.json"
 }
 case "$1 $2" in
 "delete configmap" | "create configmap" | "delete pod") ;;
@@ -90,7 +92,7 @@ v10_state() {
     {metadata: {name: "legion-acmewidgets-acme-7-architect", labels: $b}, spec: {podTemplate: {spec: {
       nodeSelector: {"legion.dev/pool": "legion"}, tolerations: [$pool]}}}},
     {metadata: {name: "legion-acmewidgets-controller", labels: $c}, spec: {podTemplate: {spec: {}}}}
-  ]}' >"$state/sandboxes.json"
+  ] | map(.spec.operatingMode = "Suspended")}' >"$state/sandboxes.json"
   jq -n --argjson a "$(labels architect INFRA-1234 INFRA-1234)" --argjson b "$(labels architect ACME-7 ACME-7)" '{items: [
     {metadata: {name: "tree-legion-acmewidgets-infra-1234-archite-59acf6b9", labels: $a}},
     {metadata: {name: "tree-legion-acmewidgets-acme-7-architect", labels: $b}}
@@ -158,13 +160,21 @@ run
 grep -qF "tree ACME-7 has no volume labelled" "$temporary_dir/err" || fail "the lost volume was not named: $(<"$temporary_dir/err")"
 [[ -f $state/created/legion-sessions-import-infra-1234.yaml ]] || fail "the other trees did not run beside the failed one"
 
-# A pod of the project still running stops the script before anything is created.
+# A pod of the project that has not ended, or a Sandbox not Suspended, whose pod may yet start,
+# stops the script before anything is created.
 v10_state
-jq '.items[0].status.phase = "Running"' "$state/pods.json" >"$state/pods.new" && mv "$state/pods.new" "$state/pods.json"
+jq '.items[0].status.phase = "Pending"' "$state/pods.json" >"$state/pods.new" && mv "$state/pods.new" "$state/pods.json"
 run
-((code == 2)) || fail "a running pod: exit $code, want 2"
-grep -qF "pod(s) of project acmewidgets are running" "$temporary_dir/err" || fail "the running pod was not named: $(<"$temporary_dir/err")"
-compgen -G "$state/created/*.yaml" >/dev/null && fail "a pod was created while a pod of the project ran"
+((code == 2)) || fail "a pending pod: exit $code, want 2"
+grep -qF "pod(s) of project acmewidgets have not ended" "$temporary_dir/err" || fail "the pending pod was not named: $(<"$temporary_dir/err")"
+compgen -G "$state/created/*.yaml" >/dev/null && fail "a pod was created while a pod of the project had not ended"
+v10_state
+jq '.items[2].spec.operatingMode = "Running" | .items[3].spec |= del(.operatingMode)' "$state/sandboxes.json" >"$state/sandboxes.new" && mv "$state/sandboxes.new" "$state/sandboxes.json"
+run
+((code == 2)) || fail "an awake Sandbox: exit $code, want 2"
+grep -qF "2 Sandbox(es) of project acmewidgets are not Suspended, e.g. sandbox/legion-acmewidgets-acme-7-architect" "$temporary_dir/err" ||
+  fail "the awake Sandboxes, one Running and one with no mode, were not named: $(<"$temporary_dir/err")"
+compgen -G "$state/created/*.yaml" >/dev/null && fail "a pod was created while a Sandbox of the project was not Suspended"
 
 # A project on a release with issue pods is refused by name before anything is created.
 v10_state

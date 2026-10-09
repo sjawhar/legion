@@ -134,17 +134,12 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 		t.Fatalf("import of a changed file = %d:\n%s\nwant the architect refused and counted as refused", code, out)
 	}
 
-	// The daemon-launched controller belongs to no tree: --claim selects it, read from its own volume.
-	r.write(other, "{\"type\":\"session\",\"id\":\"0004\"}\n")
-	if code, out, _ := r.run("--claim", "legion-legion-legion-2-architect"); code != 0 ||
-		!strings.Contains(out, "legion-legion-legion-2-architect copied "+other) || strings.Contains(out, "legion-legion-legion-1-tester copied") {
-		t.Fatalf("import of one claim = %d:\n%s\nwant that claim alone copied, exit 0", code, out)
+	// A --tree no claim matches is a mistyped key, never a clean copy.
+	if code, _, errb := r.run("--tree", "ACME-404"); code != 1 || !strings.Contains(errb, "has no claim of ACME-404") {
+		t.Errorf("import of --tree ACME-404 = %d, %q; want exit 1 naming it", code, errb)
 	}
-	// A selection no claim matches is a mistyped key, never a clean copy.
-	for _, selection := range [][]string{{"--tree", "ACME-404"}, {"--claim", "legion-acme-acme-404-architect"}} {
-		if code, _, errb := r.run(selection...); code != 1 || !strings.Contains(errb, "has no claim of "+selection[1]) {
-			t.Errorf("import of %v = %d, %q; want exit 1 naming it", selection, code, errb)
-		}
+	if code, _, errb := r.run("--claim", "legion-legion-legion-2-architect"); code != 2 || !strings.Contains(errb, "-claim") {
+		t.Errorf("import --claim = %d, %q; want the flag refused, as it selects nothing now", code, errb)
 	}
 	if held, _ := r.held(architect); held != "{\"type\":\"session\",\"id\":\"0001\"}\n" {
 		t.Errorf("after the refusal the table holds %q for the architect, want what it held", held)

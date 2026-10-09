@@ -418,7 +418,7 @@ it had not pushed is gone with the old volume. For the same reason a child issue
 root of its own keeps its roles' sessions under `postgres` (`Machine.Retree`, which drops them only
 under a runtime that keeps sessions on the tree's volume, `SessionsOnVolume`).
 
-Such an agent is told so on its first turn. Provisioning records when it created a workspace, in
+Such an agent is told so before its next turn. Provisioning records when it created a workspace, in
 the workspace's own `.jj/legion-created`, which jj never snapshots (`workspace.RecordCreated`). At
 every resume the role's launcher compares that record with when the session was last written: the
 row's `mtime_ms` under `postgres`, which Oh My Pi moves on every write and `legion sessions import`
@@ -427,12 +427,15 @@ starts the generation with `LEGION_WORKSPACE_RECREATED=true`; every other genera
 whatever the container's environment says, and so does a resume into a workspace with no record
 (one provisioned before the record was kept). A record that is empty or not one RFC 3339 instant,
 which an init container killed mid-write can leave, decides only that notice: the launcher logs it,
-takes the workspace as not recreated, and resumes. The Legion plugin reads the variable and puts
-one paragraph into every model request of the process's first turn, whatever starts that turn (a
-task, an Envoy event): `Your workspace was recreated since your last turn: it holds what was pushed
-to legion/<KEY> (main if nothing was), and anything you had not pushed is gone. …`
-(`packages/pi-legion/src/workspace-recreated.ts`). That turn's end ends it, and a `task` subagent
-is never told.
+takes the workspace as not recreated, and resumes. At session start the Legion plugin reads the
+variable and saves one message to the session, ahead of the next turn whatever starts it (a task,
+an Envoy event): `Your workspace was recreated since your last turn: it holds what was pushed to
+legion/<KEY> (main if nothing was), and anything you had not pushed is gone. …`
+(`packages/pi-legion/src/workspace-recreated.ts`, a steer that starts no turn). Measured on Oh My Pi
+`18.8.3-sami.20261009-045702` under SQL storage, it is in the stored session before that turn
+starts, and the turn's first model request carries it just after the history and before the turn's
+own message. Being saved, it stays in the history, so a process lost in that turn resumes with the
+notice already there. A `task` subagent is never told.
 
 The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
 volume projects another session store than a pod created now would — one created before
@@ -498,8 +501,9 @@ launches starts a fresh session.
    Sandbox by `legion-v10.0.0`'s labels (`legion.dev/project`, `legion.dev/role=architect`,
    `legion.dev/tree` and `legion.dev/issue`), not by name, and schedules the pod as the root
    Sandbox's pods were: its pod template's node selector, tolerations, priority class and service
-   account. Before anything it refuses a project whose Sandboxes are issue pods (a later release)
-   and a project any of whose pods still runs, which would be a writer the copy misses. It deletes
+   account. Before anything it refuses a project whose Sandboxes are issue pods (a later release),
+   one with a Sandbox not `Suspended`, whose pod could still start, and one with a pod that has not
+   ended (any phase but `Succeeded` or `Failed`): each would be a writer the copy misses. It deletes
    a pod an interrupted run left before creating one, reports a pod that fails at once, exits 1
    when any tree's import did, names a tree whose volume or root Sandbox is gone, and names every
    claim that records a session and belongs to no tree, the cleared controller's among them, which
@@ -516,17 +520,18 @@ launches starts a fresh session.
    is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded
    session the table does not hold, then a count of each. It exits 1 on any `failed` or `refused`,
    on a `missing` of the claims it was asked to copy (another tree's is reported only), and when
-   `--tree` or `--claim` selects no claim of the list, which is a mistyped key.
+   `--tree` selects no claim of the list, which is a mistyped key.
 4. **Copy every tree again.** Each run must print only `copied before` or `recorded no session`
    for its tree's claims, and its `missing` lines may name only claims step 5 is to mark: one
    whose volume was gone before step 3 (the cleared controller's, or a claim of a tree closed
    earlier), or a `failed` you cannot fix. A `refused` here means a writer was still running: the
    session grew on its volume after step 3 copied it, and the import never overwrites a row it
-   already holds, so it refuses the file it now finds. Go back to step 1, then delete that row and
-   its parts (`DELETE FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM
-   omp_session_files WHERE path = '<path>'`) and copy again; going on would resume the agent from
-   the older row and lose every turn after it. Nothing writes a row under SQL storage before the
-   switch, so in this runbook a `refused` has no other cause.
+   already holds, so it refuses the file it now finds. Going on would resume the agent from the
+   older row and lose every turn after it. Go back to step 1 instead: scale the earlier daemon back
+   up, suspend whatever runs, save the list again, and scale it to 0 at once (step 2); then delete
+   that row and its parts (`DELETE FROM omp_session_files_parts WHERE path = '<path>'; DELETE FROM
+   omp_session_files WHERE path = '<path>'`) and copy again. Nothing writes a row under SQL storage
+   before the switch, so in this runbook a `refused` has no other cause.
 5. **Mark the claims whose sessions are gone.** A claim recording a session no volume holds — its
    tree's volume already deleted, or a `failed` line you cannot fix — would fail every launch
    under SQL storage, where a file store starts it fresh. Run this step even when step 4 printed
@@ -543,7 +548,8 @@ launches starts a fresh session.
    the dump the rollback restores. It first reads every claim of the list's project from the daemon's
    database, the record once the daemon is stopped, and refuses, marking nothing, when one records
    a session file the list does not give it: a claim the earlier daemon launched, or relaunched
-   onto a new session, after step 2 saved the list. It names each such claim; go back to step 1.
+   onto a new session, after step 2 saved the list. It names each such claim; go back to step 1 as
+   step 4 says (scale the earlier daemon up, suspend, save the list again, scale it to 0).
    Then, for every claim of the list whose recorded session the table lacks, it clears the
    claim's session and session file and marks its workspace lost, as the daemon marks a claim
    whose volume was lost, but only while the claim still records that session file. It prints

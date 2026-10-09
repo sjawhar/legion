@@ -30,8 +30,8 @@ import (
 // WorkspaceRecreatedVariable is how a role launcher tells the generation it starts whether that
 // generation resumes a session in a workspace recreated since the session was last written: "true"
 // or "false", set on every generation, so no value from the container's environment reaches the
-// child. The Legion plugin tells the agent so on its process's first turn (pi-legion,
-// src/workspace-recreated.ts).
+// child. The Legion plugin tells the agent so in a message it saves to the session at its start,
+// ahead of the next turn (pi-legion, src/workspace-recreated.ts).
 const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
 
 // Config is the role-private launcher configuration. Token is read from the role-private
@@ -405,8 +405,11 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 	return dir, nil
 }
 
-// resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included.
-const resumeLookupTimeout = 30 * time.Second
+// resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
+// a test shortens it. It sits well inside the daemon's wait on a launcher's start, its boot timeout
+// plus its stop grace (130 s by default: runtime/sandbox's relaunch), so a lookup that gives up
+// answers before the daemon stops waiting.
+var resumeLookupTimeout = 30 * time.Second
 
 // resumeLookupBackoff is the wait before each retry of a session table lookup that could not reach
 // the database, doubling up to its last value until resumeLookupTimeout; a test shortens it.
@@ -463,10 +466,11 @@ func sessionWritten(env []string, file string) (time.Time, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
-		if _, err := ompsessions.ReadDSN(dsnFile); err != nil {
+		dsn, err := ompsessions.ReadDSN(dsnFile)
+		if err != nil {
 			return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
 		}
-		written, found, err := lookupWritten(ctx, dsnFile, file)
+		written, found, err := lookupWritten(ctx, dsn, file)
 		switch {
 		case err == nil && found:
 			return written, nil
@@ -482,9 +486,9 @@ func sessionWritten(env []string, file string) (time.Time, error) {
 	}
 }
 
-// lookupWritten is one session table lookup of file through the URL dsnFile holds.
-func lookupWritten(ctx context.Context, dsnFile, file string) (time.Time, bool, error) {
-	conn, err := ompsessions.Connect(ctx, dsnFile)
+// lookupWritten is one session table lookup of file in the database at dsn.
+func lookupWritten(ctx context.Context, dsn, file string) (time.Time, bool, error) {
+	conn, err := ompsessions.ConnectURL(ctx, dsn)
 	if err != nil {
 		return time.Time{}, false, err
 	}
