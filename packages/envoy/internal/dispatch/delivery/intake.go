@@ -84,8 +84,9 @@ func (in *Intake) Run(ctx context.Context) {
 	var sub *natsgo.Subscription
 	// The settings the handler routes by. Read on every poll and published here rather than
 	// captured by the handler closure: the durable's filter subject never changes, so a settings
-	// change must reach the running handler without rebinding anything.
-	var current atomic.Pointer[routeSettings]
+	// change must reach the running handler without rebinding anything. Only settings whose deploy
+	// repository splitRepo accepts are published, so route can compare against it as it stands.
+	var current atomic.Pointer[DeliverySettings]
 	defer func() {
 		if sub != nil {
 			_ = sub.Unsubscribe()
@@ -105,16 +106,16 @@ func (in *Intake) Run(ctx context.Context) {
 			slog.Error("dispatch delivery: deploy_repo setting", "error", err)
 			return
 		}
-		current.Store(&routeSettings{settings: settings, deployRepo: settings.DeployRepo})
+		current.Store(&settings)
 		if sub != nil {
 			return
 		}
 		newSub, ok := in.bind(func(ctx context.Context, payload map[string]string) error {
-			routing := current.Load()
-			if routing == nil {
+			settings := current.Load()
+			if settings == nil {
 				return nil
 			}
-			return in.route(ctx, *routing, payload)
+			return in.route(ctx, *settings, payload)
 		})
 		if !ok {
 			return
@@ -140,21 +141,12 @@ func (in *Intake) Run(ctx context.Context) {
 // operator restarting the server. A var so a test can shrink it.
 var settingsPollInterval = 30 * time.Second
 
-// routeSettings is what the handler needs to route one envelope: the settings row, and the deploy
-// repository as "owner/repo", which refresh has checked with splitRepo and route compares every
-// workflow envelope against.
-type routeSettings struct {
-	settings   DeliverySettings
-	deployRepo string
-}
-
 // route dispatches one decoded payload to the PR or workflow handler by its kind field, and to
 // the right workflow kind (deploy or PR-checks) by comparing the payload's own repository and
 // workflow path against the configured ones. It is the whole filter: the durable is handed every
 // GitHub notification on the bus (githubIntakeSubject), so everything this slice does not want
 // is discarded here, before any GitHub call or database write.
-func (in *Intake) route(ctx context.Context, routing routeSettings, payload map[string]string) error {
-	settings := routing.settings
+func (in *Intake) route(ctx context.Context, settings DeliverySettings, payload map[string]string) error {
 	switch payload["kind"] {
 	case "pr":
 		// Every repository's pull requests: the population spans any repository the configured
@@ -165,7 +157,7 @@ func (in *Intake) route(ctx context.Context, routing routeSettings, payload map[
 		// The workflow runs this slice records are the deploy repository's own. Another
 		// repository's run of a file with the same path is not one of them, and routing it would
 		// fetch a run this slice never stores.
-		if payload["repo"] != routing.deployRepo {
+		if payload["repo"] != settings.DeployRepo {
 			return nil
 		}
 		switch payload["path"] {

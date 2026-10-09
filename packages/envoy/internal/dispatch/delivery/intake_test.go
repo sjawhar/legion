@@ -279,11 +279,7 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 			t.Logf("%s: AddConsumer refused: %v", name, err)
 			return 0
 		}
-		defer func() {
-			if err := natsClient.JS().DeleteConsumer(bus.Stream, info.Name); err != nil {
-				t.Logf("delete probe consumer %s: %v", info.Name, err)
-			}
-		}()
+		defer deleteProbeConsumer(t, natsClient, info.Name)
 		t.Logf("%s: pending=%d", name, info.NumPending)
 		return info.NumPending
 	}
@@ -315,23 +311,22 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	// deleteOnCleanup removes a probe durable when the test ends, so each probe this test makes is
 	// gone with it whether or not a later step fails.
 	deleteOnCleanup := func(durable string) {
-		t.Cleanup(func() {
-			if err := js.DeleteConsumer(context.Background(), bus.Stream, durable); err != nil {
-				t.Logf("delete probe consumer %s: %v", durable, err)
-			}
-		})
+		t.Cleanup(func() { deleteProbeConsumer(t, natsClient, durable) })
 	}
-	// fetch creates a fresh pull durable carrying filters, fetches up to want messages from it by
-	// name, and counts by kind what arrives.
+	// fetch creates a fresh pull durable carrying filters -- as the one FilterSubject when plural
+	// is false, as FilterSubjects when it is true -- fetches up to want messages from it by name,
+	// and counts by kind what arrives.
 	fetches := 0
-	fetch := func(name string, want int, filters ...string) (runs, prs int) {
+	fetch := func(t *testing.T, name string, plural bool, want int, filters ...string) (runs, prs int) {
 		t.Helper()
 		fetches++
 		config := jetstream.ConsumerConfig{Durable: fmt.Sprintf("probe-fetch-%d", fetches), AckPolicy: jetstream.AckExplicitPolicy}
-		if len(filters) == 1 && !strings.HasPrefix(name, "plural") {
+		if plural {
+			config.FilterSubjects = filters
+		} else if len(filters) == 1 {
 			config.FilterSubject = filters[0]
 		} else {
-			config.FilterSubjects = filters
+			t.Fatalf("fetch %s: a single FilterSubject cannot hold %d filters", name, len(filters))
 		}
 		consumer, err := js.CreateConsumer(t.Context(), bus.Stream, config)
 		if err != nil {
@@ -361,21 +356,24 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	// stored workflow runs each shape hands over.
 	for _, row := range []struct {
 		name    string
+		plural  bool
 		filters []string
 		runs    int
 	}{
-		{"single, the workflow subject", []string{oldSet[1]}, stored},
-		{"plural, the workflow subject alone", []string{oldSet[1]}, stored},
-		{"plural, the workflow subject then the PR-checks workflow subject", []string{oldSet[1], oldSet[2]}, stored},
-		{"plural, a concrete PR subject then the workflow subject", []string{"notifications.github.acme.widgets.pr.1", oldSet[1]}, stored},
-		{"plural, the PR subject then the workflow subject", []string{oldSet[0], oldSet[1]}, 0},
-		{"plural, the workflow subject then the PR subject", []string{oldSet[1], oldSet[0]}, 0},
-		{"plural, the whole old set", oldSet, 0},
+		{"single, the workflow subject", false, []string{oldSet[1]}, stored},
+		{"plural, the workflow subject alone", true, []string{oldSet[1]}, stored},
+		{"plural, the workflow subject then the PR-checks workflow subject", true, []string{oldSet[1], oldSet[2]}, stored},
+		{"plural, a concrete PR subject then the workflow subject", true, []string{"notifications.github.acme.widgets.pr.1", oldSet[1]}, stored},
+		{"plural, the PR subject then the workflow subject", true, []string{oldSet[0], oldSet[1]}, 0},
+		{"plural, the workflow subject then the PR subject", true, []string{oldSet[1], oldSet[0]}, 0},
+		{"plural, the whole old set", true, oldSet, 0},
 	} {
-		if runs, _ := fetch(row.name, stored, row.filters...); runs != row.runs {
-			t.Errorf("%s delivered %d of %d workflow runs, want %d; githubIntakeSubject's comment and the PR body give this table, so revisit both",
-				row.name, runs, stored, row.runs)
-		}
+		t.Run(row.name, func(t *testing.T) {
+			if runs, _ := fetch(t, row.name, row.plural, stored, row.filters...); runs != row.runs {
+				t.Errorf("delivered %d of %d workflow runs, want %d; githubIntakeSubject's comment and the PR body give this table, so revisit both",
+					runs, stored, row.runs)
+			}
+		})
 	}
 
 	// The whole config the stalled release built, field for field, under a name of its own: a
@@ -458,7 +456,7 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 			t.Fatalf("publish pull request envelope: %v", err)
 		}
 	}
-	gotRuns, gotPRs := fetch("plural, the whole old set, with pull requests stored too", stored+prs, oldSet...)
+	gotRuns, gotPRs := fetch(t, "plural, the whole old set, with pull requests stored too", true, stored+prs, oldSet...)
 	if gotPRs != prs || gotRuns != 0 {
 		t.Fatalf("the old filter set delivered %d of %d pull requests and %d of %d workflow runs; the intake's filter comment says it delivers every pull request and no workflow run, so revisit githubIntakeSubject's comment",
 			gotPRs, prs, gotRuns, stored)
@@ -879,12 +877,17 @@ func singleFilterProbe(t *testing.T, natsClient *bus.Client) string {
 	if err != nil {
 		return fmt.Sprintf("single-filter probe on %q: %v", subject, err)
 	}
-	defer func() {
-		if err := natsClient.JS().DeleteConsumer(bus.Stream, probe.Name); err != nil {
-			t.Logf("delete the single-filter probe consumer: %v", err)
-		}
-	}()
+	defer deleteProbeConsumer(t, natsClient, probe.Name)
 	return fmt.Sprintf("single-filter probe on %q: pending=%d", subject, probe.NumPending)
+}
+
+// deleteProbeConsumer removes a consumer a test created only to probe the stream, and logs a
+// delete that fails rather than failing the test over its own cleanup.
+func deleteProbeConsumer(t *testing.T, natsClient *bus.Client, name string) {
+	t.Helper()
+	if err := natsClient.JS().DeleteConsumer(bus.Stream, name); err != nil {
+		t.Logf("delete probe consumer %s: %v", name, err)
+	}
 }
 
 // TestIntakeKeepsUpWithABurstOfDeliveryEvents publishes more events at once than the consumer may
