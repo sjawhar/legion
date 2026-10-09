@@ -170,7 +170,7 @@ type enrollmentRow struct {
 // for a pod), its service, and the names that person withheld from it (RevokeByApprover's
 // withhold). Its service is its launcher credential's only when it is a pod, that service is one
 // of services, and the pod's verified service account is the one services binds it to: a machine
-// login's service name is the machine's own claim, approved by whoever its login names, so the
+// login's service name is the machine's own claim, which anyone signed in to Dispatch may approve, so the
 // account is what proves the service. Any other session has none. A caller that decides for the
 // session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.

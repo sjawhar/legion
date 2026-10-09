@@ -184,7 +184,8 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 // every service's login, whoever approved it, never another person's machine: an expired login is
 // listed, marked expired, while a session it enrolled still runs (a session renews with its own
 // key, past its login's expiry), and an expired one with no session is not. Revoking the expired
-// login ends that session and takes it off the list.
+// login ends that session and takes it off the list. A service's login whose record an older broker
+// opened naming a person is listed for every person too.
 func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
@@ -262,6 +263,12 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	}
 	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{service.ID, ada.ID}) {
 		t.Fatalf("LiveCredentials(ada) after revoking the expired login = %v, want the service login then her devbox", got)
+	}
+	// A service's login a broker from before this rule opened, its record naming ada: the list keys
+	// on the credential's service, not on the stored approver, so bob lists it too.
+	old := mintDecidedCredential(t, svc, nil, str("legion-daemon"), "old-cluster", "ada@example.com", "ada@example.com")
+	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{old.ID, service.ID, bob.ID}) {
+		t.Fatalf("LiveCredentials(bob) = %v, want the service login whose record names ada, the other service login, then his own", got)
 	}
 }
 

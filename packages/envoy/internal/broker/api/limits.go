@@ -88,10 +88,13 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 // names (launcherLoginKey), has no request left in its bucket, with the Retry-After of the slower
 // of the two buckets.
 //
-// The per-login bucket, keyed on the request object's own service or login_hint rather than the
-// caller's address, is unaffected by trustedProxyHeader and remains a smaller, accepted risk: an
-// attacker naming a specific victim operator or service repeatedly can still lock out its machine
-// logins at a low rate. This is inherent to a per-login limit on an unauthenticated route.
+// The per-login bucket, keyed on the request object's own claims rather than the caller's address,
+// is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's machine
+// login spends its own person:<login> bucket, so an attacker naming a specific victim operator
+// repeatedly can lock out that operator's machine logins at a low rate. Every service's login
+// shares the one "service" bucket, so a flood under any service name, invented or not, locks out
+// every service's login, the Legion daemon's included, until the bucket refills. This is inherent
+// to a per-login limit on an unauthenticated route.
 func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login string) bool {
 	now := time.Now()
 	address := clientAddress(r, l.trustedProxyHeader)
