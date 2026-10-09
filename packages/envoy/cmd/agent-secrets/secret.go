@@ -221,8 +221,8 @@ var errPasteCutShort = errors.New("the terminal hung up before the paste ended")
 // person ended the value: what was typed is not necessarily all they meant to enter.
 var errValueCutShort = errors.New("the terminal hung up before the value ended")
 
-// A tty stop flushes unread bytes without reporting how many. The entire entry
-// must be refused, even when the reader had already received a prefix.
+// A stop discards what the terminal holds unread (the watcher's flush) without a count of
+// how much. The entire entry must be refused, even when the reader had already received a prefix.
 var errPromptStopped = errors.New("the terminal stopped while reading the value")
 
 // errNoForeground is readHidden's answer when its process group is orphaned while it waits in the

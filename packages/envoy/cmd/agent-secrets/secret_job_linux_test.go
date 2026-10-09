@@ -242,13 +242,18 @@ func TestPromptJobHelper(t *testing.T) {
 		fmt.Println("PROMPT_STARTING")
 	}
 	real := readTerminal
-	quiet := false
+	quiet, readSome := false, false
 	readTerminal = func(fd, wake int, buf []byte, timeout int) (int, error) {
 		if timeout >= 0 && !quiet {
 			quiet = true
 			fmt.Println("QUIET_READY")
 		}
-		return real(fd, wake, buf, timeout)
+		n, err := real(fd, wake, buf, timeout)
+		if n > 0 && !readSome {
+			readSome = true
+			fmt.Println("READ_SOME")
+		}
+		return n, err
 	}
 	label := &labelCheck{}
 	value, err := readSecretValue("DEMO_KEY", "agent-secrets secret set DEMO_KEY", label)
@@ -391,6 +396,9 @@ func TestPromptJobSignalInTheBackgroundEndsItWithoutFg(t *testing.T) {
 			if strings.Contains(s.out.String(), "Exit") || strings.Contains(s.out.String(), "RETURNED") {
 				t.Fatalf("the job ended by exiting, not by SIG%s: %q", tc.signal, s.out.String())
 			}
+			if strings.Contains(s.out.String(), "\x1b[?2004l") {
+				t.Fatalf("the prompt wrote to the shell's terminal from the background: %q", s.out.String())
+			}
 		})
 	}
 }
@@ -523,7 +531,7 @@ func TestPromptJobStopDuringQuietWindowDoesNotHang(t *testing.T) {
 func TestPromptJobStopDiscardsQueuedInputWithoutLeaking(t *testing.T) {
 	s := newPromptShell(t)
 	s.start(false, false)
-	// A single write exercises the kernel's input flush without a scheduling gap.
+	// A single write exercises the prompt's input flush without a scheduling gap.
 	s.send("head\x1a")
 	s.wait("Stopped")
 	s.out.Reset()
@@ -537,6 +545,96 @@ func TestPromptJobStopDiscardsQueuedInputWithoutLeaking(t *testing.T) {
 
 	s.start(false, false)
 	s.send("headtail\r")
+	s.wait("RETURNED <nil> MATCH=true")
+	s.noShellValue("head", "tail")
+}
+
+// Ctrl-Z discards whatever follows it in the same write, as a fast typist's or a paste's keys
+// arrive: the prompt stops with the entry refused, and none of it reaches the shell.
+func TestPromptJobStopKeyDiscardsWhatFollowsIt(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, false)
+	s.send("partone\x1aparttwo\r")
+	s.wait("Stopped")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("fg\r")
+	s.wait("Nothing was stored. Press Enter")
+	s.send("\r")
+	s.wait("RETURNED nothing was stored:")
+	s.wait("MATCH=false EMPTY=true")
+	s.noShellValue("partone", "parttwo")
+}
+
+// A signal key inside a bracketed paste is pasted text, not a keypress: the prompt refuses it as a
+// control byte and discards the paste through its end, in one write or with the rest arriving
+// later, so none of the paste reaches the shell.
+func TestPromptJobSignalKeyInsideAPasteDrainsThroughItsEnd(t *testing.T) {
+	for _, key := range []string{"\x03", "\x1a", "\x1c"} {
+		for _, gap := range []time.Duration{0, 300 * time.Millisecond} {
+			t.Run(fmt.Sprintf("%x/%s", key, gap), func(t *testing.T) {
+				s := newPromptShell(t)
+				s.start(false, false)
+				head, tail := "\x1b[200~pastehead"+key, "pastetail\r\x1b[201~"
+				if gap == 0 {
+					s.send(head + tail)
+				} else {
+					s.send(head)
+					time.Sleep(gap)
+					s.send(tail)
+				}
+				s.wait(fmt.Sprintf("RETURNED the control byte 0x%02x cannot be typed at the prompt", key[0]))
+				s.noShellValue("pastehead", "pastetail")
+			})
+		}
+	}
+}
+
+// A prompt started with & whose shell then exits has no shell to bring it forward, though the
+// terminal stays open: it refuses, naming the pipe, rather than showing its label to nobody and
+// reading a value there.
+func TestPromptJobShellGoneRefuses(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, true)
+	s.send("exit\r")
+	s.wait("RETURNED no shell can bring the value prompt to the foreground of this terminal; pipe the value in: agent-secrets secret set DEMO_KEY < FILE")
+	s.wait("LABEL_HELD=false")
+	if strings.Contains(s.out.String(), "Value for") {
+		t.Fatalf("a prompt whose shell had gone showed its label: %q", s.out.String())
+	}
+}
+
+// A stop no handler sees (SIGSTOP from another process) lets the shell put its own mode back,
+// echo on, while the job is stopped. After fg the prompt puts its own mode back before it reads
+// again, so the rest of the value stays hidden.
+func TestPromptJobExternalStopKeepsTheValueHidden(t *testing.T) {
+	s := newPromptShell(t)
+	s.start(false, false)
+	s.send("head")
+	// The prompt must have read the bytes first: the shell would read any still queued.
+	s.wait("READ_SOME")
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		queued, err := unix.IoctlGetInt(s.terminal, unix.TIOCINQ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if queued == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the prompt left %d bytes unread", queued)
+		}
+	}
+	if err := syscall.Kill(s.pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	s.wait("Stopped")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("fg\r")
+	// The prompt's mode is back once it turns bracketed paste on again.
+	s.wait("\x1b[?2004h")
+	s.send("tail\r")
 	s.wait("RETURNED <nil> MATCH=true")
 	s.noShellValue("head", "tail")
 }

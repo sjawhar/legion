@@ -54,8 +54,9 @@ broker: serving DEMO_DEPLOY_TOKEN
   sends every use to a person for approval. Both flags are required.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
   Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
-  one inside a bracketed paste, refuses the value. The prompt keeps discarding through Enter or
-  Ctrl-D and the paste's end before reporting the error and naming the pipe command. Anywhere
+  Ctrl-S, Ctrl-Q, and Ctrl-C, Ctrl-\\ or Ctrl-Z inside a bracketed paste, refuses the value. The
+  prompt keeps discarding through Enter or Ctrl-D and the paste's end before reporting the error
+  and naming the pipe command. Anywhere
   else the CLI reads standard input to its end, less one trailing newline. Empty values and
   invalid UTF-8 are refused (exit 2) and write nothing.
 
@@ -87,10 +88,11 @@ nothing, then ends the CLI by that signal. A shell reports 130, 131, 143 or 129 
 Ctrl-C also stops a shell's `;` list. On Unix, core dumps are disabled before the value is read and
 stay disabled for the rest of the process. On other platforms, crash-dump policy is OS-managed.
 
-**Ctrl-Z discards the entry.** The kernel flushes unread input on a terminal stop and reports no
-count of lost bytes, so a resumed value could be silently incomplete. The CLI refuses it rather
-than storing a partial secret. After `fg`, input stays hidden only while the remainder is
-discarded: press Enter, then run the command shown in the message and type the whole value again.
+**Ctrl-Z discards the entry.** The CLI discards what it holds of the value and whatever the
+terminal holds unread, including anything typed after Ctrl-Z, so none of it reaches your shell,
+and it refuses the entry rather than storing a partial secret. After `fg`, input stays hidden only
+while the remainder is discarded: press Enter, then run the command shown in the message and type
+the whole value again.
 The command exits 2 and stores nothing. After `bg`, the reader waits without touching the
 terminal until `fg` gives it back, then discards the entry in the same way. SIGTERM or SIGHUP
 while it waits there ends it at once by that signal, leaving the terminal to your shell.

@@ -1,8 +1,8 @@
 // packages/envoy/cmd/agent-secrets/secret_prompt_unix.go
 //go:build (linux || darwin) && (amd64 || arm64)
 
-// The value prompt's reader on Linux and macOS. The reader alone changes the terminal;
-// the signal watcher reports a resume or a terminating signal without touching it.
+// The value prompt's reader on Linux and macOS. The reader alone changes the terminal's settings;
+// the signal watcher reports each signal, and before a stop discards what the terminal holds unread.
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -47,11 +48,16 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	if err := disableCoreDumps(); err != nil {
 		return nil, err
 	}
-	watch, ignoredControls, err := watchPromptSignals()
+	controlling, err := controllingTerminal(fd)
 	if err != nil {
 		return nil, err
 	}
-	tty := promptTerminal{fd: fd, watch: watch, wait: -1, onStop: onStop}
+	tty := promptTerminal{fd: fd, controlling: controlling, wait: -1, onStop: onStop}
+	watch, ignored, err := watchPromptSignals(tty.flushInput)
+	if err != nil {
+		return nil, err
+	}
+	tty.watch = watch
 	var saved *unix.Termios // nil until the reader holds the terminal: nothing to restore before
 	defer func() {
 		pending := watch.stop()
@@ -96,19 +102,14 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 		return nil, err
 	}
 	mode := *saved
-	// Keep the kernel's signal flush: NOFLSH would leave unread secret bytes for
-	// bash when a stop gives it the foreground. Every caught stop invalidates the entry.
-	mode.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.NOFLSH
-	mode.Lflag |= unix.ISIG
-	var ignoredKeys [3]byte
-	for i, cc := range ignoredControls {
-		if key := saved.Cc[cc]; key != 0 && key != 0xff {
-			ignoredKeys[i] = key
-			// Even an ignored tty signal flushes input. Disable its tty character
-			// and let the reader consume it without flushing the value.
-			mode.Cc[cc] = disabledControlByte
-		}
-	}
+	// The reader acts on the terminal's signal keys itself (promptReader.keys), so ISIG is off: the
+	// kernel's own handling discards only what is queued before a key, leaves what follows it in
+	// the same write for the shell, and acts on a key inside a paste, where it is pasted text.
+	mode.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG
+	// Ctrl-S and Ctrl-Q reach the reader as control bytes, refused like any other: with IXON on,
+	// the terminal would take them, so a pasted one would vanish from the value, and a lone
+	// Ctrl-S would leave the prompt waiting with its output suspended.
+	mode.Iflag &^= unix.IXON
 	// Poll owns both waits. Reads themselves never block, including after resume.
 	mode.Cc[unix.VMIN], mode.Cc[unix.VTIME] = 0, 0
 	tty.current = &mode
@@ -123,7 +124,7 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 		return nil, err
 	}
 	tty.stopped, tty.notice = false, false
-	r := promptReader{ignored: ignoredKeys, special: func(c byte, index int) bool {
+	r := promptReader{keys: signalKeys(saved, controlling, ignored), special: func(c byte, index int) bool {
 		v := saved.Cc[index]
 		return v != 0 && v != 0xff && c == v
 	}}
@@ -134,9 +135,9 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			return nil, err
 		}
 		if tty.stopped {
-			// The kernel may have flushed bytes or paste marks, with no count of
-			// what was lost. Drain a fresh line instead of keeping a partial value.
-			r = promptReader{special: r.special, ignored: r.ignored, err: errPromptStopped}
+			// The stop discarded unread bytes or paste marks, with no count of what
+			// was lost. Drain a fresh line instead of keeping a partial value.
+			r = promptReader{special: r.special, keys: r.keys, err: errPromptStopped}
 			tty.stopped = false
 		}
 		if n == 0 {
@@ -150,12 +151,19 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			}
 			return nil, errValueCutShort
 		}
-		if r.feed(buf[:n]) {
+		done, sig := r.feed(buf[:n])
+		if sig != 0 {
+			if err := tty.raise(sig); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if done {
 			break
 		}
 	}
 	if !r.pasted || r.err != nil {
-		more, err := moreAfterTheLine(&tty, buf)
+		more, err := moreAfterTheLine(&tty, &r, buf)
 		if err != nil {
 			return nil, err
 		}
@@ -171,13 +179,14 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 }
 
 type promptTerminal struct {
-	fd      int
-	current *unix.Termios // the reader's own mode; nil until it has read the settings it restores
-	watch   *promptWatch
-	death   syscall.Signal
-	wait    int // poll timeout in milliseconds; -1 until the line ends
-	stopped bool
-	onStop  func()
+	fd          int
+	controlling bool          // whether fd was this process's controlling terminal when the prompt began
+	current     *unix.Termios // the reader's own mode; nil until it has read the settings it restores
+	watch       *promptWatch
+	death       syscall.Signal
+	wait        int // poll timeout in milliseconds; -1 until the line ends
+	stopped     bool
+	onStop      func()
 	// mayBeBackground is set at the first stop or resume and never cleared: the reader may
 	// since have been put in the background, so it holds the terminal again before each poll.
 	mayBeBackground bool
@@ -185,15 +194,22 @@ type promptTerminal struct {
 	applied         bool // whether t.current and bracketed paste are already in effect
 }
 
-// apply is a no-op once the terminal already carries t.current and bracketed paste: one resume
-// can reach here more than once (the watcher's event, and an EINTR on whichever other blocked
-// syscall the same resume woke), and neither termios nor paste mode is touched by a stop or a
-// resume by themselves, so repeating the ioctl and the paste-on write would only be redundant,
-// and visibly so over a real terminal. signal clears applied the moment it records a new stop,
-// so the next genuine resume still reapplies.
+// apply puts the reader's mode and bracketed paste in effect. One resume can reach here more than
+// once (the watcher's event, and an EINTR on whichever other blocked syscall the same resume
+// woke), so once applied it rereads the mode, a read that never stops the process, and reapplies
+// only when the mode differs, rather than repeat a paste-on write that shows over a real terminal.
+// A caught stop clears applied (signal); a stop no handler sees (SIGSTOP from another process)
+// lets the shell put its own mode back, echo on, while the job is stopped, and only the reread
+// shows that.
 func (t *promptTerminal) apply() error {
 	if t.applied {
-		return nil
+		now, err := unix.IoctlGetTermios(t.fd, ioctlGetTermios)
+		if err != nil {
+			return err
+		}
+		if sameMode(now, t.current) {
+			return nil
+		}
 	}
 	for {
 		err := unix.IoctlSetTermios(t.fd, ioctlSetTermios, t.current)
@@ -212,6 +228,13 @@ func (t *promptTerminal) apply() error {
 	_, _ = unix.Write(t.fd, bracketedPasteOn)
 	t.applied = true
 	return nil
+}
+
+// sameMode reports whether a and b set the same input, output and local modes and control
+// characters. The control modes and speeds are left out: they are the line's hardware settings,
+// which neither the prompt nor a shell changes, and which a driver may adjust as it applies them.
+func sameMode(a, b *unix.Termios) bool {
+	return a.Iflag == b.Iflag && a.Oflag == b.Oflag && a.Lflag == b.Lflag && a.Cc == b.Cc
 }
 
 // restoreTerminal puts the terminal back to saved, once the signal watcher has joined. A
@@ -313,15 +336,35 @@ func (t *promptTerminal) holdsTerminal() (bool, error) {
 			continue
 		}
 		if errors.Is(err, unix.ENOTTY) {
-			// fd is not this process's controlling terminal at all (a bare
-			// pseudo-terminal opened directly, as the unit tests do): job
-			// control cannot apply to it.
-			return true, nil
+			if !t.controlling {
+				// fd was never this process's controlling terminal (a bare pseudo-terminal
+				// opened directly, as the unit tests do): job control cannot apply to it.
+				return true, nil
+			}
+			// The terminal was this process's controlling terminal and is no longer: its
+			// session lost it when the leader, the shell, exited. Only a session leader can
+			// take a controlling terminal, so no shell can hand this one back.
+			return false, errNoForeground
 		}
 		if err != nil {
 			return false, err
 		}
 		return foreground == unix.Getpgrp(), nil
+	}
+}
+
+// controllingTerminal reports whether fd is this process's controlling terminal, by a read-only
+// ioctl that answers ENOTTY for any other terminal (Linux's tiocgpgrp, XNU's isctty check).
+func controllingTerminal(fd int) (bool, error) {
+	for {
+		_, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.ENOTTY) {
+			return false, nil
+		}
+		return err == nil, err
 	}
 }
 
@@ -384,6 +427,37 @@ func (t *promptTerminal) noticeStop() error {
 	return nil
 }
 
+// raise sends sig to this process's group, as the kernel does for a signal key under ISIG, and
+// takes the watcher's event for it before the reader touches the terminal again: a stop is over,
+// or a terminating signal answers its error, when raise returns.
+func (t *promptTerminal) raise(sig syscall.Signal) error {
+	if err := unix.Kill(0, sig); err != nil {
+		return fmt.Errorf("send %s: %w", sig, err)
+	}
+	for {
+		event, took, err := t.watch.next(-1)
+		if err != nil {
+			return err
+		}
+		if !took {
+			continue
+		}
+		if err := t.signal(event); err != nil || event.sig == sig {
+			return err
+		}
+	}
+}
+
+// flushInput discards what the terminal holds unread while this process's group holds it, as the
+// kernel's own handling of a signal key would: what was typed after Ctrl-Z would otherwise reach
+// the shell once the stop gives it the terminal. From the background a flush would stop the job
+// (tty_check_change), so it is skipped there.
+func (t *promptTerminal) flushInput() {
+	if held, err := t.holdsTerminal(); err == nil && held {
+		_ = discardInput(t.fd)
+	}
+}
+
 func (t *promptTerminal) read(buf []byte) (int, error) {
 	event := false
 	for {
@@ -408,7 +482,7 @@ func (t *promptTerminal) read(buf []byte) (int, error) {
 // promptReader is the state of one read at the prompt, fed each read's bytes in turn.
 type promptReader struct {
 	special func(c byte, index int) bool // whether c is the terminal's control character index
-	ignored [3]byte                      // disabled tty characters of inherited ignored signals
+	keys    [3]promptKey                 // the terminal's signal keys (signalKeys)
 	line    []byte                       // the value read so far
 	pending []byte                       // bytes that may begin a paste mark split across reads
 	inPaste bool                         // inside a bracketed paste
@@ -418,9 +492,54 @@ type promptReader struct {
 	err     error                        // a refusal whose remaining input must be drained
 }
 
+// promptKey is one of the terminal's signal keys (VINTR, VQUIT, VSUSP) as the reader handles it
+// outside a paste: c sends sig to the process group, as the kernel would under ISIG, or does
+// nothing when sig is 0, as the inherited SIG_IGN would have it. c is 0 for a key not set.
+type promptKey struct {
+	c   byte
+	sig syscall.Signal
+}
+
+// signalKeys answers the terminal's signal keys from saved, the settings the shell handed the
+// prompt. On a terminal that is not this process's controlling terminal the kernel would send
+// their signals to that terminal's foreground group rather than this one, so there they are
+// control bytes like any other.
+func signalKeys(saved *unix.Termios, controlling bool, ignored []int) [3]promptKey {
+	var keys [3]promptKey
+	if !controlling {
+		return keys
+	}
+	for i, k := range [3]struct {
+		cc  int
+		sig syscall.Signal
+	}{{unix.VINTR, syscall.SIGINT}, {unix.VQUIT, syscall.SIGQUIT}, {unix.VSUSP, syscall.SIGTSTP}} {
+		c := saved.Cc[k.cc]
+		if c == 0 || c == 0xff {
+			continue // not set: _POSIX_VDISABLE is 0 on Linux and 0xff on Darwin
+		}
+		keys[i] = promptKey{c: c, sig: k.sig}
+		if slices.Contains(ignored, k.cc) {
+			keys[i].sig = 0
+		}
+	}
+	return keys
+}
+
+// key answers the signal key c is, if it is one.
+func (r *promptReader) key(c byte) (promptKey, bool) {
+	for _, k := range r.keys {
+		if k.c != 0 && k.c == c {
+			return k, true
+		}
+	}
+	return promptKey{}, false
+}
+
 // feed takes one read's bytes and reports whether the read is over: the line ended outside a paste,
-// or a paste in which it ended has closed.
-func (r *promptReader) feed(b []byte) bool {
+// or a paste in which it ended has closed. A signal key outside a paste ends the read there and
+// answers its signal; the bytes after it are discarded. Inside a paste it is pasted text, a
+// control byte refused like any other.
+func (r *promptReader) feed(b []byte) (bool, syscall.Signal) {
 	b = append(r.pending, b...)
 	r.pending = nil
 	for i := 0; i < len(b); i++ {
@@ -435,16 +554,22 @@ func (r *promptReader) feed(b []byte) bool {
 				r.inPaste = false
 				i += len(pasteEnd) - 1
 				if r.ended {
-					return true
+					return true, 0
 				}
 				continue
 			}
 			if bytes.HasPrefix(pasteStart, rest) || bytes.HasPrefix(pasteEnd, rest) {
 				r.pending = append(r.pending, rest...)
-				return false
+				return false, 0
 			}
 		}
 		c := b[i]
+		if k, ok := r.key(c); ok && !r.inPaste {
+			if k.sig != 0 {
+				return false, k.sig
+			}
+			continue // an inherited ignored signal: its key does nothing
+		}
 		if r.ended {
 			// The line ended inside a paste: outside one, feed returned as it ended.
 			if c != '\r' && c != '\n' {
@@ -453,8 +578,6 @@ func (r *promptReader) feed(b []byte) bool {
 			continue
 		}
 		switch {
-		case !r.inPaste && c != 0 && bytes.IndexByte(r.ignored[:], c) >= 0:
-			// Preserve inherited SIG_IGN without the tty driver's input flush.
 		case c == '\r' || c == '\n' || (!r.inPaste && r.special(c, unix.VEOF)):
 			r.ended = true
 			if r.inPaste {
@@ -462,7 +585,7 @@ func (r *promptReader) feed(b []byte) bool {
 				continue
 			}
 			r.more = r.more || !onlyLineEndings(b[i+1:])
-			return true
+			return true, 0
 		case !r.inPaste && (r.special(c, unix.VERASE) || c == 0x7f || c == '\b'):
 			if len(r.line) > 0 {
 				_, size := utf8.DecodeLastRune(r.line)
@@ -483,7 +606,7 @@ func (r *promptReader) feed(b []byte) bool {
 			}
 		}
 	}
-	return false
+	return false, 0
 }
 
 // eraseWord removes trailing blanks, then the preceding word, by rune as canonical terminal
@@ -508,8 +631,9 @@ func eraseWord(b []byte) []byte {
 
 // moreAfterTheLine reports whether anything but line endings follows the line on a terminal that
 // does not bracket pastes: what it receives until it has been quiet for pasteGapDeciseconds (for at
-// most maxPasteDrain), all of which it reads into buf and so discards.
-func moreAfterTheLine(tty *promptTerminal, buf []byte) (bool, error) {
+// most maxPasteDrain), all of which it reads into buf and so discards. A signal key there acts as
+// it does in the line (promptReader.key), and the rest of that read is discarded.
+func moreAfterTheLine(tty *promptTerminal, r *promptReader, buf []byte) (bool, error) {
 	tty.wait = pasteGapDeciseconds * 100
 	more := false
 	for deadline := time.Now().Add(maxPasteDrain); time.Now().Before(deadline); {
@@ -520,7 +644,18 @@ func moreAfterTheLine(tty *promptTerminal, buf []byte) (bool, error) {
 		if n == 0 {
 			break
 		}
-		more = more || !onlyLineEndings(buf[:n])
+		for _, c := range buf[:n] {
+			if k, ok := r.key(c); ok {
+				if k.sig == 0 {
+					continue
+				}
+				if err := tty.raise(k.sig); err != nil {
+					return false, err
+				}
+				break
+			}
+			more = more || (c != '\r' && c != '\n')
+		}
 	}
 	return more, nil
 }
@@ -561,8 +696,8 @@ type promptSignal struct {
 	err error
 }
 
-// promptWatch is the prompt's signal watcher. It never changes the terminal: for each signal it
-// writes one byte, the signal's number, to the wake pipe, so an event and the wake-up that
+// promptWatch is the prompt's signal watcher. It never changes the terminal's settings: for each
+// signal it writes one byte, the signal's number, to the wake pipe, so an event and the wake-up that
 // announces it are one thing, taken only by next. A stop's byte is written before the stop, under
 // stopping, which the watcher holds until the process resumes: the reader can keep a stop off its
 // baseline read and label (whileHeld), and a reader that takes the byte waits the stop out.
@@ -571,31 +706,32 @@ type promptWatch struct {
 	wake, notify *os.File
 	signals      chan os.Signal
 	done, joined chan struct{}
+	flush        func() // discards the terminal's unread input before a stop (flushInput)
 	stopping     sync.Mutex
 	stopErr      error // why a stop failed, written under stopping
 }
 
 // watchPromptSignals starts the watcher. SIGCONT is a wake only; SIGTTIN and SIGTTOU retain their
-// default actions, and a signal whose kernel disposition is SIG_IGN stays ignored, its terminal
-// control character answered in ignoredControls.
-func watchPromptSignals() (*promptWatch, []int, error) {
+// default actions, and a signal whose kernel disposition is SIG_IGN stays ignored, the terminal
+// control character of its key answered in ignored.
+func watchPromptSignals(flush func()) (*promptWatch, []int, error) {
 	watched := []os.Signal{syscall.SIGCONT}
-	var ignoredControls []int
+	var ignored []int
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGTSTP} {
-		ignored, err := promptSignalIgnored(sig)
+		isIgnored, err := promptSignalIgnored(sig)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !ignored {
+		if !isIgnored {
 			watched = append(watched, sig)
 		} else {
 			switch sig {
 			case syscall.SIGINT:
-				ignoredControls = append(ignoredControls, unix.VINTR)
+				ignored = append(ignored, unix.VINTR)
 			case syscall.SIGQUIT:
-				ignoredControls = append(ignoredControls, unix.VQUIT)
+				ignored = append(ignored, unix.VQUIT)
 			case syscall.SIGTSTP:
-				ignoredControls = append(ignoredControls, unix.VSUSP)
+				ignored = append(ignored, unix.VSUSP)
 			}
 		}
 	}
@@ -604,10 +740,10 @@ func watchPromptSignals() (*promptWatch, []int, error) {
 		return nil, nil, err
 	}
 	w := &promptWatch{fd: int(wake.Fd()), wake: wake, notify: notify, signals: make(chan os.Signal, 8),
-		done: make(chan struct{}), joined: make(chan struct{})}
+		done: make(chan struct{}), joined: make(chan struct{}), flush: flush}
 	signal.Notify(w.signals, watched...)
 	go w.run()
-	return w, ignoredControls, nil
+	return w, ignored, nil
 }
 
 func (w *promptWatch) run() {
@@ -622,10 +758,13 @@ func (w *promptWatch) run() {
 			}
 			w.stopping.Lock()
 			// The byte goes first, so the reader never touches the terminal while the stop
-			// takes effect: a poll in flight can report the terminal ready for the stop's own
-			// input flush, and a read on that readiness can be caught mid-syscall by the
+			// takes effect: a poll in flight can report the terminal ready for input the flush
+			// below discards, and a read on that readiness can be caught mid-syscall by the
 			// stop, then raise SIGTTIN once bg leaves the job in the background.
 			_, _ = w.notify.Write([]byte{byte(sig)})
+			// What the terminal holds unread is the entry the stop discards; left there it
+			// would reach the shell once the stop gives it the terminal.
+			w.flush()
 			if err := stopBy(sig); err != nil && w.stopErr == nil {
 				w.stopErr = err
 			}

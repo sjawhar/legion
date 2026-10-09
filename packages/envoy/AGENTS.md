@@ -2009,19 +2009,31 @@ settings are not the ones `fg` hands back, so restoring what it read there would
 editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
 orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
 Darwin the group's job-control count), which no shell can foreground and whose stops the kernel
-discards, ends the wait with exit 2 naming the pipe command. The watcher handles SIGINT, SIGQUIT,
-SIGTERM, SIGHUP and SIGTSTP; signals whose
-kernel disposition is SIG_IGN remain ignored. Their tty control characters are disabled and
-consumed by the reader instead, since even an ignored tty signal would flush unread input.
+discards, ends the wait with exit 2 naming the pipe command. So does a terminal that was the
+prompt's controlling terminal and no longer is (TIOCGPGRP answers ENOTTY once the session-leader
+shell that started it exits); a terminal that never was, as the unit tests' bare pseudo-terminal,
+counts as held. The watcher handles SIGINT, SIGQUIT,
+SIGTERM, SIGHUP and SIGTSTP; signals whose kernel disposition is SIG_IGN remain ignored. ISIG is
+off: the reader acts on the terminal's signal keys itself (`promptReader.keys`, from the settings
+the shell handed it), sending the signal to its process group and discarding the rest of that
+read, so bytes typed after Ctrl-Z in the same write never reach the shell. A key inside a
+bracketed paste is pasted text, refused as a control byte with the paste drained through its end,
+and the key of an ignored signal does nothing.
 SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. The watcher
 (`promptWatch`) writes each signal's number as one byte to a pipe the reader polls with the
-terminal, so an event and its wake-up are one byte, taken only by `next`; it never touches the
-terminal. On SIGTSTP it writes the byte first, then `stopBy` re-raises the stop, holding a lock
-until the process resumes, so the reader's baseline read and label never run in a prompt a stop
+terminal, so an event and its wake-up are one byte, taken only by `next`; it never changes the
+terminal's settings. On SIGTSTP it writes the byte first, discards unread input, then `stopBy`
+re-raises the stop, holding a lock until the process resumes, so the reader's baseline read and
+label never run in a prompt a stop
 has sent to the background (`whileHeld`). The reader reapplies its current mode on resume or
-EINTR; one poll waits for input or a
-watcher event and also times the quiet window. Reads never block. NOFLSH is cleared: leaving
-unread secret bytes in the tty queue at a stop would let bash read them. The kernel reports no
+EINTR, and before each poll after any stop or resume it rereads the mode and reapplies it when it
+differs, since a stop no handler sees (SIGSTOP from another process) lets the shell put echo back
+while the job is stopped; one poll waits for input or a
+watcher event and also times the quiet window. Reads never block. IXON is cleared, so Ctrl-S and
+Ctrl-Q reach the reader and are refused as control bytes rather than suspending the prompt's
+output or vanishing from a paste. Before each caught stop the watcher discards what the terminal
+holds unread (`discardInput`: TCFLSH on Linux, TIOCFLUSH on Darwin) while the prompt's group
+holds it, so unread secret bytes never reach the shell at a stop. The kernel reports no
 count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
 stays hidden only to discard the remaining line, then exits 2 and names the command to run again
 with the whole value. No partial value is returned or stored. An interactive shell restores its
@@ -2036,9 +2048,10 @@ goroutine dump. Core dumps are disabled once, before the first value byte is rea
 of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
 `secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with
 `&` (the restored settings are compared with those bash hands a foreground job, and the label with
-the terminal's owner and echo when it is printed), a stop before the label, an orphaned group,
-SIGTERM and SIGHUP after `bg`, ignored SIGTSTP wrappers, quiet-window stops, refusal draining,
-shell history and terminal restoration.
+the terminal's owner and echo when it is printed), a stop before the label, an orphaned group, a
+shell that exits under a background prompt, SIGTERM and SIGHUP after `bg`, an external SIGSTOP,
+bytes after Ctrl-Z in one write, signal keys inside a paste, ignored SIGTSTP wrappers, quiet-window
+stops, refusal draining, shell history and terminal restoration.
 
 `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in

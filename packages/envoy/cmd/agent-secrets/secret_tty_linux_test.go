@@ -272,6 +272,19 @@ func TestPromptWordEraseAndControlBytes(t *testing.T) {
 	}
 }
 
+// TestPromptRefusesFlowControlBytes: Ctrl-S and Ctrl-Q reach the reader as control bytes rather
+// than stopping and starting the terminal's output, so a paste holding one is refused, never stored
+// without it, and never leaves the prompt waiting with its output suspended.
+func TestPromptRefusesFlowControlBytes(t *testing.T) {
+	for _, c := range []byte{0x13, 0x11} {
+		_, _, got := typeAtPrompt(t, "val"+string(c)+"ue\r")
+		want := fmt.Sprintf("the control byte 0x%02x cannot be typed at the prompt", c)
+		if got.line != nil || got.err == nil || !strings.Contains(got.err.Error(), want) {
+			t.Fatalf("control 0x%02x: readHidden = %q, %v; want the refusal naming it", c, got.line, got.err)
+		}
+	}
+}
+
 // TestPromptRefusesAPasteCutShortByAHangUp: when the terminal hangs up inside a bracketed paste, as
 // when its window or ssh session closes mid-paste, the reader answers an error rather than what it
 // has read, so nothing is stored. The hang-up lands while the reader is between reads, where its
