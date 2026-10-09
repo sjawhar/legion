@@ -111,8 +111,8 @@ bookmark. Then commit the removal of the issue's handoffs as the one final commi
 nothing else, when the head still holds them:
 `cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before READY" ".legion/${LEGION_ISSUE:?}"; fi`.
 A retro that commits no learning makes that commit alone; a retro after an earlier removal with no
-handoff written since has nothing to remove and makes none (a split of an absent path would leave
-an empty commit).
+handoff written since has nothing to remove and makes none (without the guard, `rm -r` would fail
+on the missing directory and that retro would stop there).
 
 Before you push those commits, bring up to date the body content the repository derives from the
 pull request's changed paths. A repository can require such content, a line naming a checklist
