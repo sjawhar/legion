@@ -1702,3 +1702,30 @@ resourceVersion; a watch that delivered nothing is resumed after a pause, and a 
 parse ends that watch. On 410 Gone it lists the Secrets again, so a value a Secret held only between
 the last version seen and that list is not seen; every value a list or a watch event shows is. It
 exits 2 when it cannot start.
+
+## lib/stage4b-tools.jq
+
+What a tool returned in a role's Oh My Pi session, for a Stage 4b checkpoint to prove a tool ran
+rather than that the model said it did. `assistant_said ISSUE ROLE TEXT` reads the claim's assistant
+turns, the reply text and each tool call's arguments, so it proves what the model wrote; the
+session's `toolResult` entries are what the tools answered. `tool_ran ISSUE ROLE TOOL` holds when one
+call of TOOL in ROLE's session returned without error, and `tool_result_said ISSUE ROLE TOOL TEXT` when
+such a result's text carries TEXT, literally and case-sensitively. A result is TOOL's by the call it
+answers, never by the `toolName` it records: the model calls a tool by its name, by a `write` to its
+device `xd://<name>`, or by `eval` code calling `tool.<name>(…)`, and a write to the device records
+`toolName: "write"`, the device's name only in the paired call's `arguments.path`. The library pairs
+each result with its call by `toolCallId` and judges the call with `lib/omp-tool-calls.jq`'s `calls`,
+the one rule every live proof uses for "the agent called this tool". An error result (`isError`
+true; a `bash` whose command exited 1 after printing what was wanted) never counts, and a result
+whose call the session no longer holds is no tool's. `tool_results(name)`, `tool_result_texts(name)`
+(the non-error texts, for a checkpoint's note to quote), `tool_ran(name)` and
+`tool_result_said(name; $text)` take the session's text read with `jq -R -s` and are loaded with
+`jq -L scripts/e2e/lib 'include "stage4b-tools"; …'`.
+
+`lib/stage4b-tools.test.ts` (`bun test scripts/e2e/lib`, which CI runs) lifts the two helpers from the
+script by name and runs them over `lib/testdata/stage4b-tools-session.jsonl`, a session an
+implementer pod wrote: `eval` returned `42`; the `lsp` device's two writes are `lsp`'s results and a
+`write`'s alike; the Go version is in the session only in a `bash` that exited 1 and the browser's
+refusal only in an `eval` that errored, and each is refused; `notebook`, which never ran, is the
+never-ran control; and a word the model wrote in a call's arguments, which `assistant_said` accepts,
+is refused as a tool's answer.

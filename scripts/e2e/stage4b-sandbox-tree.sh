@@ -1441,6 +1441,23 @@ assistant_said() {
     | .message.content[]? | (if .type == "text" then .text elif .type == "toolCall" then (.arguments | tostring) else "" end)
     | select(contains($want))] | length > 0' <<<"$text" >/dev/null
 }
+# tool_result_said ISSUE ROLE TOOL TEXT: a tool call of ROLE's session for TOOL (by name, by its
+# xd:// device, or by eval's tool.<name>) returned without error and its text carries TEXT: the proof
+# a tool ran and answered, where assistant_said only proves the model said so. An error result never
+# counts, and a result is the tool's by the call it answers, not by the toolName it records: a write
+# to xd://<name> records write (lib/stage4b-tools.jq).
+tool_result_said() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_said($tool; $want)' <<<"$text" >/dev/null
+}
+# tool_ran ISSUE ROLE TOOL: one call of TOOL in ROLE's session returned without error
+# (lib/stage4b-tools.jq).
+tool_ran() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -e -L "$root/scripts/e2e/lib" --arg tool "$3" 'include "stage4b-tools"; tool_ran($tool)' <<<"$text" >/dev/null
+}
 fixture_markers() {
   local pod=$1 role=$2
   pod_exec "$pod" "$role" sh -c 'ls /tmp/legion-fixture 2>/dev/null | sort | tr "\n" " "' 2>&1
