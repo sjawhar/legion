@@ -1808,11 +1808,29 @@ async function refuseOpenDecisionBlocks(
   if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0) return;
-  const [documentAsks, version] = await Promise.all([
-    blockAsks(client, resolved),
+  const [ownerAsks, version] = await Promise.all([
+    resolved.issue === undefined
+      ? client.getArtifactAsks(artifact.id)
+      : client.listIssueAsks(resolved.issue.key),
     client.docRead(artifact.id, latest),
   ]);
-  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
+  const withBlocks = ownerAsks.filter(
+    (ask): ask is Ask & { readonly block_id: string } => typeof ask.block_id === "string"
+  );
+  const asks = new Map(
+    withBlocks
+      .filter((ask) => ask.block_artifact?.id === artifact.id)
+      .map((ask) => [ask.block_id, ask])
+  );
+  // A block copied from another document of the issue opens no ask of its own: Dispatch shows it
+  // the state of the ask it was copied from, the earliest asked under its id.
+  const sources = new Map<string, Ask>();
+  for (const ask of withBlocks) {
+    if (ask.block_artifact?.id === artifact.id) continue;
+    const earlier = sources.get(ask.block_id);
+    if (earlier === undefined || ask.created_at < earlier.created_at)
+      sources.set(ask.block_id, ask);
+  }
   const lines = version.markdown.split("\n");
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
@@ -1828,7 +1846,15 @@ async function refuseOpenDecisionBlocks(
       .map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
     if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
-    if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
+    if (ask === undefined) {
+      const source = sources.get(block.id);
+      if (source?.state === "open" && resolved.issue !== undefined) {
+        return [
+          `${named}, a copy of ask dispatch://${resolved.issue.key}/ask/${source.id}, which is open on the document it was copied from (${source.block_artifact?.slug ?? "another document"})`,
+        ];
+      }
+      return [`${named}, whose ask Dispatch has not opened yet`];
+    }
     if (ask.state === "open") return [named];
     // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
     const next =

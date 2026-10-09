@@ -396,6 +396,87 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "uploaded-ask", "Ship the uploaded decision?")
 }
 
+// A record copy of a spec uploaded as a second document of the issue carries the spec's ask
+// blocks under their ids. It opens no ask in anyone's Inbox: each copied block shows the state and
+// answer of the ask it was copied from (LEGION-651).
+func TestAnUploadedCopyOfASpecOpensNoAskForItsCopiedBlocks(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	spec := "Context\n\n" +
+		":::ask{#rec-answered urgency=\"med\" multiple=\"false\"}\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::\n\n" +
+		":::ask{#rec-resolved urgency=\"med\" multiple=\"false\"}\nWrite the changelog?\n:::\n\n" +
+		":::ask{#rec-open urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	issue := createInteractionIssue(t, handler, "TEST", "Record copy", spec)
+	for _, block := range []struct{ id, question string }{
+		{"rec-answered", "Ship on Monday?"}, {"rec-resolved", "Write the changelog?"}, {"rec-open", "Which region?"},
+	} {
+		awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, block.id, block.question)
+	}
+	asks := map[string]string{}
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	for _, ask := range decodeBody[[]model.Ask](t, listed) {
+		if ask.BlockID != nil {
+			asks[*ask.BlockID] = ask.ID
+		}
+	}
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks["rec-answered"]+"/answer", map[string]any{
+		"selected": []string{"Yes"},
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	if resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks["rec-resolved"]+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Waived.",
+	}, "alice"); resolved.Code != http.StatusOK {
+		t.Fatalf("resolve: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	current := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	record := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, current).Markdown
+	if !strings.Contains(record, `state="answered"`) || !strings.Contains(record, `state="resolved"`) {
+		t.Fatalf("spec before the copy = %s", record)
+	}
+
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "spec-record.md", "content": record,
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the record copy: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	copied := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+copied+"/text", nil, "alice").Body.String()
+		if strings.Contains(text, `#rec-answered urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\"`) &&
+			strings.Contains(text, `#rec-resolved urgency=\"med\" multiple=\"false\" state=\"resolved\"`) &&
+			strings.Contains(text, `#rec-open urgency=\"med\" multiple=\"false\" state=\"open\"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the copy never showed its sources' states: %s", text)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Settlement of the copy has run; a few more passes would have opened its asks by now.
+	time.Sleep(200 * time.Millisecond)
+	var onCopy []string
+	all := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	for _, ask := range decodeBody[[]model.Ask](t, all) {
+		if ask.BlockArtifact != nil && ask.BlockArtifact.ID == copied {
+			onCopy = append(onCopy, *ask.BlockID+" "+ask.State)
+		}
+	}
+	if len(onCopy) != 0 {
+		t.Fatalf("the record copy opened asks %v, want none", onCopy)
+	}
+}
+
 // A free-text ask block (no bullet list) must put `"options": []` on the wire - in the ask.opened
 // event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
 // and a null there takes the page down.

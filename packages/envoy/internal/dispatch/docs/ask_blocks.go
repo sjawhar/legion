@@ -183,9 +183,10 @@ func settlementRetracted(ask model.Ask) bool {
 
 // reconcileAskBlocks makes the asks rows and the ask blocks of tree, the document settlement read,
 // agree. A new block is authored by the update that introduced it (askBlockSources.author); one
-// whose update observer has not run is left for the settlement that observer arms. before is the
-// document's rendering as settlement read it ("" where it did not render), which the answers
-// settlement writes back into returning blocks are weighed against (withholdAnswers).
+// whose update observer has not run is left for the settlement that observer arms. A block copied
+// from another document's ask opens none and shows that ask's state instead (copiedAskSources).
+// before is the document's rendering as settlement read it ("" where it did not render), which the
+// answers settlement writes back into returning blocks are weighed against (withholdAnswers).
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -222,12 +223,22 @@ func (s *Service) reconcileAskBlocks(
 			))
 		}
 	}
+	sources, err := copiedAskSources(ctx, tx, artifactID, owner, blocks, rows)
+	if err != nil {
+		return settlementReconciliation{}, err
+	}
 	for _, block := range blocks {
 		if _, recorded := credit.askSources.authors[block.id]; recorded {
 			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
 		}
 		ask, exists := rows[block.id]
 		if !exists {
+			// A copy is read-only here: its source's state is written into the block, and
+			// nothing this settlement does writes the source's row.
+			if source, copied := sources[block.id]; copied {
+				reconciled.repairAsk(block.node, block.id, source, nil)
+				continue
+			}
 			blockActor, known := credit.askSources.author(block.id, actor)
 			if !known {
 				continue
@@ -596,6 +607,148 @@ func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[strin
 		return nil, fmt.Errorf("iterate ask blocks: %w", err)
 	}
 	return asks, nil
+}
+
+// copiedAskSources finds the ask each block of blocks was copied from, keyed by block id, among the
+// blocks no ask of this document indexes (rows). Block ids are unique per document only
+// (asks_block_id_unique is on block_artifact_id and block_id), so a document copied from another
+// carries its ask blocks' ids, and an id an author chose, such as `decision`, can name unrelated
+// questions on two documents. A block is therefore a copy only of an ask on another document of
+// the same owner - the same issue, or for a project document the same project's other documents -
+// that indexes the same block id and asks the block's question, or once asked it: the copy can be
+// of an earlier version, from before the ask was reworded (an ask.opened or ask.edited event names
+// each question it has asked). A block reworded on the copy is a new question and opens an ask. An
+// ask settlement retracted because its block left its document is no source: a block cut from one
+// document and pasted into another is the only one left, and opens an ask as any new block does.
+// Of several sources, the earliest asked is the original, since a copy that opened asks of its own
+// before copies were recognised came after it. The copy shows its source's state as of this
+// settlement; answering the source later changes the copy at the copy's next settlement. The rows
+// are read, never locked or written: settlement holds this document's owner row and room lock, and
+// a source's answer route takes the source's ask row before its own document's room.
+func copiedAskSources(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	owner artifactOwner,
+	blocks []askBlock,
+	rows map[string]model.Ask,
+) (map[string]model.Ask, error) {
+	var unindexed []string
+	for _, block := range blocks {
+		if _, indexed := rows[block.id]; !indexed {
+			unindexed = append(unindexed, block.id)
+		}
+	}
+	if len(unindexed) == 0 {
+		return nil, nil
+	}
+	// The owner's documents come first (artifacts_issue_key for an issue), then each one's asks
+	// under the copied ids through asks_block_id_unique.
+	documents := `d.issue_key = $3`
+	ownerKey := owner.Project
+	if owner.IssueKey != nil {
+		ownerKey = *owner.IssueKey
+	} else {
+		documents = `d.issue_key is null and d.session_id is null and d.project_key = $3`
+	}
+	query, err := tx.Query(ctx, `
+		select `+AskColumns+`
+		from artifacts d
+		join asks a on a.block_artifact_id = d.id and a.block_id = any($1)
+		where `+documents+` and d.id <> $2
+		order by a.created_at, a.id
+	`, unindexed, artifactID, ownerKey)
+	if err != nil {
+		return nil, fmt.Errorf("load copied ask sources: %w", err)
+	}
+	defer query.Close()
+	candidates := map[string][]model.Ask{}
+	for query.Next() {
+		ask, err := ScanAsk(query)
+		if err != nil {
+			return nil, fmt.Errorf("scan copied ask source: %w", err)
+		}
+		if settlementRetracted(ask) {
+			continue
+		}
+		candidates[*ask.BlockID] = append(candidates[*ask.BlockID], ask)
+	}
+	if err := query.Err(); err != nil {
+		return nil, fmt.Errorf("iterate copied ask sources: %w", err)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	sources := map[string]model.Ask{}
+	var reworded []askBlock
+	for _, block := range blocks {
+		matched := false
+		for _, ask := range candidates[block.id] {
+			if ask.Question == block.question {
+				sources[block.id] = ask
+				matched = true
+				break
+			}
+		}
+		if !matched && len(candidates[block.id]) > 0 {
+			reworded = append(reworded, block)
+		}
+	}
+	if len(reworded) == 0 {
+		return sources, nil
+	}
+	asked, err := questionsAsked(ctx, tx, reworded, candidates)
+	if err != nil {
+		return nil, err
+	}
+	for _, block := range reworded {
+		for _, ask := range candidates[block.id] {
+			if _, once := asked[ask.ID][block.question]; once {
+				sources[block.id] = ask
+				break
+			}
+		}
+	}
+	return sources, nil
+}
+
+// questionsAsked is every question each candidate of the blocks has asked, keyed by ask id, read
+// from the ask.opened and ask.edited events that record its questions (events_ask_payload_id).
+func questionsAsked(ctx context.Context, tx pgx.Tx, blocks []askBlock, candidates map[string][]model.Ask) (map[string]map[string]struct{}, error) {
+	var ids []string
+	for _, block := range blocks {
+		for _, ask := range candidates[block.id] {
+			ids = append(ids, ask.ID)
+		}
+	}
+	rows, err := tx.Query(ctx, `
+		select payload->>'id', coalesce(payload->>'question', ''), coalesce(payload#>>'{previous,question}', '')
+		from events
+		where type in ('ask.opened', 'ask.edited') and payload->>'id' = any($1)
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load questions copied asks asked: %w", err)
+	}
+	defer rows.Close()
+	asked := map[string]map[string]struct{}{}
+	for rows.Next() {
+		var id, question, previous string
+		if err := rows.Scan(&id, &question, &previous); err != nil {
+			return nil, fmt.Errorf("scan question a copied ask asked: %w", err)
+		}
+		if asked[id] == nil {
+			asked[id] = map[string]struct{}{}
+		}
+		for _, text := range []string{question, previous} {
+			if text != "" {
+				asked[id][text] = struct{}{}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate questions copied asks asked: %w", err)
+	}
+	return asked, nil
 }
 
 func createAskBlock(

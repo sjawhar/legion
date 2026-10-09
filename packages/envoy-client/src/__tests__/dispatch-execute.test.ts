@@ -4059,6 +4059,31 @@ describe("executeDispatchTool", () => {
       expect(posts).toEqual([]);
     });
 
+    test("a copied block whose source ask is open names that ask and the document it is open on", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [opening("b-1", "open")],
+        [
+          {
+            ...blockAsk("b-1", "open"),
+            id: "ask-source",
+            created_at: "2026-10-08T10:00:00Z",
+            block_artifact: { id: "artifact-1", slug: "plan" },
+          },
+        ]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on the document it was copied from (plan)"
+      );
+      expect(refusal).not.toContain("has not opened yet");
+      expect(posts).toEqual([]);
+    });
+
     test("a resolved block the named version still holds open is named with the decision to write in", async () => {
       const { outcome, posts } = await requestOver(
         ["b-1"],

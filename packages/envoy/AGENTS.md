@@ -1491,6 +1491,20 @@ against its schema content rule. Schema changes are additive: add a type, add a 
 attribute, add an enum choice, or widen a content rule. Tightening content, removing or renaming a
 type or attribute, or requiring a new attribute requires a document migration and version bump.
 
+An ask block whose id no ask of its document indexes is a copy when another document of the same
+owner (the same issue, or for a project document the same project's other documents) holds an ask
+under that id that asks, or once asked, the block's question (`copiedAskSources`): a record copy
+of a spec uploaded beside it carries its blocks under their ids. Block ids are unique per document
+only (`asks_block_id_unique` is on `block_artifact_id` and `block_id`), so the question has to
+match as well, since an author-chosen id such as `decision` can name unrelated questions on two
+documents. A copy opens no ask: settlement writes its source's state and answer into the block,
+the earliest-asked source where several match, and the block stays read-only there, since the copy
+has no ask row an answer or resolve route could reach and settlement only reads the source's. It
+shows the source as of the copy's last settlement; answering the source later reaches the copy at
+its next settlement. A copy whose question is reworded, a source settlement retracted because its
+block left its document (a cut and paste), and an id no ask of the owner indexes open an ask as
+any new block does (LEGION-651).
+
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
 The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
