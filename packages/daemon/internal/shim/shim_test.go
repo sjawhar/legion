@@ -1004,12 +1004,12 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 	}
 }
 
-// Since DaemonAPIVersion 16 no runtime tells a pane or a pod LEGION_JJ_PATH (internal/api/version.go;
-// docs/kubernetes.md, "No container is told …"): a pane's jj is its PATH's, the one `legion push` and
-// `legion handoff complete` run (jjOnPath, cmd/legion/handoff.go), and the shim's adoption runs that
-// same jj. A PATH without one refuses naming jj and the PATH it searched — never a variable no
-// runtime sets, whose absence stopped every role of every pod at its first jj operation (stage 4a's
-// adopt-working-copy at 18dc1df2, dispatch://LEGION-631/comment/b376473d-a4cb-492f-ac7d-e66b26f2bff1).
+// No runtime tells a pane or a pod LEGION_JJ_PATH (internal/api/version.go, the LEGION-631 entry;
+// docs/kubernetes.md, "No container is told …"): a pane's jj is its PATH's, the one every role's
+// plain `jj git push` runs, and the shim's adoption runs that same jj. A PATH without one refuses
+// naming jj and the PATH it searched — never a variable no runtime sets, whose absence stopped every
+// role of every pod at its first jj operation (stage 4a's adopt-working-copy at 18dc1df2,
+// dispatch://LEGION-631/comment/b376473d-a4cb-492f-ac7d-e66b26f2bff1).
 func TestAdoptWorkingCopyRunsTheJJOnPATHWithNoLEGIONJJPATH(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
