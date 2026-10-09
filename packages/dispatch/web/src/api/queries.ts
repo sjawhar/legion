@@ -127,6 +127,14 @@ export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
     queryFn: () => api.getDeliveryTimeline(filters),
   });
 
+/** One deploy-repository run with every job it ran: a finished run's jobs no longer change, so
+ *  the drill-down reads it once per run. */
+export const deliveryRunQuery = (id: number) =>
+  queryOptions({
+    queryKey: ["delivery", "run", id],
+    queryFn: () => api.getDeliveryRun(id),
+  });
+
 /** The delivery timeline's configuration record, or `null` until someone sets it: the Settings
  *  section's form reads it, while the Delivery page's setup form starts from the `null` the
  *  timeline's `DELIVERY_NOT_CONFIGURED` already implies and reads nothing. */

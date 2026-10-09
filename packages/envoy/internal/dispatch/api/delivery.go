@@ -5,10 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 )
@@ -23,6 +26,27 @@ const defaultDeliveryWindow = 7 * 24 * time.Hour
 // an authenticated-but-careless caller (any agent session; GET /api/v1/delivery/timeline is
 // authAny) could otherwise send against the shared pool.
 const maxDeliveryWindow = 3 * 28 * 24 * time.Hour
+
+// The timeline's facets, by the query parameter that selects each and the facet_counts key that
+// counts it. A pull request carries one or more values for each (deliveryRow.values).
+var deliveryFacets = []string{"repo", "parent_agent", "session", "issue", "priority", "component", "author", "rework", "deployed"}
+
+// The facets the page colours merges by, by the color_counts key that counts each.
+var deliveryColorFacets = []string{"repo", "author", "priority", "component", "parent_agent"}
+
+// Placeholder facet values, split by cause as the page labels them (features/delivery/lib/facets.ts
+// holds the same four): a pull request naming no issue, an issue with no priority or no component,
+// and a pull request whose commits name no session.
+const (
+	deliveryNoIssue     = "__no_issue__"
+	deliveryNoPriority  = "__no_priority__"
+	deliveryNoComponent = "__no_component__"
+	deliveryNoSession   = "__no_session__"
+)
+
+// deliveryPrioritySelection reads a priority selection as the page writes it (P0-P3) or as a
+// person types it (p0, or the bare digit the issue routes store).
+var deliveryPrioritySelection = regexp.MustCompile(`^[pP]?([0-3])$`)
 
 // parseDeliveryWindow reads from/to (RFC3339) from query, defaulting to the last 7 days when
 // either is absent, and refuses a malformed value, an inverted window, or one wider than
@@ -51,10 +75,26 @@ func parseDeliveryWindow(query url.Values) (from, to time.Time, err error) {
 	return from, to, nil
 }
 
+// deliverySettings reads the timeline's configuration record, answering 404
+// DELIVERY_NOT_CONFIGURED (or the store's error) and false when it cannot.
+func (s *server) deliverySettings(w http.ResponseWriter, r *http.Request) (delivery.DeliverySettings, bool) {
+	settings, err := delivery.GetSettings(r.Context(), s.deps.Store.Pool)
+	if err != nil {
+		if errors.Is(err, delivery.ErrNoSettings) {
+			writeError(w, "DELIVERY_NOT_CONFIGURED", http.StatusNotFound, "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery")
+			return delivery.DeliverySettings{}, false
+		}
+		s.writeHandlerError(w, err)
+		return delivery.DeliverySettings{}, false
+	}
+	return settings, true
+}
+
 // getDeliveryTimeline answers GET /api/v1/delivery/timeline: merges, deploys, pipeline failures
-// and waiting-to-deploy PRs within [from, to) and the given facets, computed from stored facts at
-// request time (deployed_status, root_failing_job and the parent_agent/session display labels are
-// never stored -- "the server computes every measure from stored facts on request").
+// and waiting-to-deploy PRs within [from, to) and the given facets and search, computed from
+// stored facts at request time (deployed_status, root_failing_job, the parent_agent/session
+// display labels, the issue facts and every count are never stored -- "the server computes every
+// measure from stored facts on request").
 func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -65,26 +105,19 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, err.Error())
 		return
 	}
+	settings, ok := s.deliverySettings(w, r)
+	if !ok {
+		return
+	}
 
 	ctx := r.Context()
 	pool := s.deps.Store.Pool
-
-	settings, err := delivery.GetSettings(ctx, pool)
-	if err != nil {
-		if errors.Is(err, delivery.ErrNoSettings) {
-			writeError(w, "DELIVERY_NOT_CONFIGURED", http.StatusNotFound, "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery")
-			return
-		}
-		s.writeHandlerError(w, err)
-		return
-	}
 
 	prs, err := delivery.ListPullRequestsInWindow(ctx, pool, from, to)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	prs = filterDeliveryPullRequests(prs, query)
 
 	// Every deploy run with a head commit at or after `from`: the containment algorithm needs
 	// every apply from there forward, unbounded past `to`, since a PR merged just before `to` may
@@ -119,50 +152,67 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	priorities, components, err := s.resolveIssueFacetData(ctx, issueKeys)
+	issues, err := s.deliveryIssueFacts(ctx, issueKeys)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	projects := []string{}
+	issueTitles := make(map[string]string, len(issues))
+	for key, issue := range issues {
+		issueTitles[key] = issue.title
+		if !slices.Contains(projects, issue.project) {
+			projects = append(projects, issue.project)
+		}
+	}
+	components, err := s.deliveryComponents(ctx, projects)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 
-	// shippedBy only ever gains an entry for a PR that actually survives every facet below (the
-	// append happens in the same branch that keeps the view in prViews): a PR a facet excludes
-	// from prs[] never appears in runs[].prs either, so the two lists agree about what a deploy
-	// shipped under the active filters.
-	shippedBy := map[int64][]string{}
-	prViews := make([]delivery.DeliveryPRView, 0, len(prs))
+	// A run's prs[] is every window pull request it shipped first, whatever the facets: the page
+	// sizes a deploy and lists its drill-down by everything it shipped.
+	shippedBy := map[int64][]delivery.DeliveryShippedPRView{}
+	rows := make([]deliveryRow, 0, len(prs))
 	for _, pr := range prs {
 		apply := delivery.ContainingRun(pr, settings.DeployRepo, applies)
-		status := delivery.ComputeDeployedStatus(pr, settings.DeployRepo, apply)
-		id := pr.Repo + "#" + strconv.Itoa(pr.Number)
 		view := delivery.DeliveryPRView{
-			ID: id, Repo: pr.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL, Author: pr.Author,
-			CreatedAt: pr.CreatedAt, MergedAt: pr.MergedAt, FirstCommitAt: pr.FirstCommitAt,
+			ID: pr.Repo + "#" + strconv.Itoa(pr.Number), Repo: pr.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
+			Author: pr.Author, CreatedAt: pr.CreatedAt, MergedAt: pr.MergedAt, FirstCommitAt: pr.FirstCommitAt,
 			Additions: pr.Additions, Deletions: pr.Deletions, Partial: pr.Partial, Rework: pr.Rework,
-			Issue: pr.IssueKey, Sessions: pr.Sessions, DeployedStatus: status,
+			Issue: pr.IssueKey, Components: []string{}, Sessions: pr.Sessions,
+			DeployedStatus:    delivery.ComputeDeployedStatus(pr, settings.DeployRepo, apply),
 			UnfetchableReason: pr.UnfetchableReason,
+		}
+		if pr.IssueKey != nil {
+			if issue, found := issues[*pr.IssueKey]; found {
+				view.IssueTitle = &issue.title
+				view.Components = issue.components
+				if issue.priority != nil {
+					label := "P" + strconv.Itoa(*issue.priority)
+					view.Priority = &label
+				}
+			}
 		}
 		if len(pr.Sessions) > 0 {
 			agent := delivery.DisplayAgent(pr.Sessions[0], titles)
 			view.ParentAgent = &agent
 		}
-		var applyRunID *int64
 		if apply != nil {
-			runID := apply.RunID
-			applyRunID = &runID
-			completedAt := apply.CompletedAt
+			runID, completedAt := apply.RunID, apply.CompletedAt
 			view.DeployRun = &runID
 			view.DeployedAt = &completedAt
+			shippedBy[runID] = append(shippedBy[runID], delivery.DeliveryShippedPRView{ID: view.ID, Title: view.Title})
 		}
-		if !matchesParentAgentOrSessionFacet(view, query) || !matchesDeployedFacet(view, query) {
-			continue
-		}
-		if !matchesPriorityFacet(pr.IssueKey, priorities, query) || !matchesComponentFacet(pr.IssueKey, components, query) {
-			continue
-		}
-		prViews = append(prViews, view)
-		if applyRunID != nil {
-			shippedBy[*applyRunID] = append(shippedBy[*applyRunID], id)
+		rows = append(rows, newDeliveryRow(view))
+	}
+
+	selection := parseDeliverySelection(query, components)
+	prViews := make([]delivery.DeliveryPRView, 0, len(rows))
+	for _, row := range rows {
+		if row.matches(selection, "") {
+			prViews = append(prViews, row.view)
 		}
 	}
 
@@ -172,18 +222,19 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		jobs := jobsByRun[run.RunID]
-		prs := shippedBy[run.RunID]
-		if prs == nil {
+		shipped := shippedBy[run.RunID]
+		if shipped == nil {
 			// Always a slice, never nil, so it always serializes as `[]`, not `null` -- the
 			// common case for any successful deploy that shipped no in-window population PR.
-			prs = []string{}
+			shipped = []delivery.DeliveryShippedPRView{}
 		}
 		runViews = append(runViews, delivery.DeliveryRunView{
 			ID: run.RunID, URL: run.URL, HeadSHA: run.HeadSHA, HeadAt: run.HeadCommitAt,
 			StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
+			Production:     deliveryProductionView(jobs, settings.ProductionJobName),
 			FailedJobs:     deliveryJobViews(delivery.FailedJobs(jobs)),
 			RootFailingJob: deliveryJobView(delivery.RootFailingJob(jobs)),
-			PRs:            prs,
+			PRs:            shipped,
 		})
 	}
 
@@ -194,14 +245,68 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, delivery.DeliveryTimelineResponse{
-		Window: delivery.DeliveryWindowView{From: from, To: to},
-		PRs:    prViews,
-		Runs:   runViews,
+		Window:      delivery.DeliveryWindowView{From: from, To: to},
+		PRs:         prViews,
+		Runs:        runViews,
+		FacetCounts: deliveryFacetCounts(rows, selection),
+		ColorCounts: deliveryColorCounts(rows),
+		Components:  components,
+		IssueTitles: issueTitles,
 		Freshness: delivery.DeliveryFreshnessView{
 			LastEventAt: settings.LastEventAt, LastReconcileAt: settings.LastReconcileAt, LastError: settings.LastError,
 			UnfetchableCount: unfetchableCount,
 		},
 	})
+}
+
+// getDeliveryRun answers GET /api/v1/delivery/runs/{id}: one run of the deploy repository with
+// every job it ran, by when each started (a job that never started last, then by name), for the
+// drill-down's job lists.
+func (s *server) getDeliveryRun(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	runID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || runID < 1 {
+		writeError(w, "RUN_ID_INPUT", http.StatusBadRequest, "run id must be a positive integer")
+		return
+	}
+	settings, ok := s.deliverySettings(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	pool := s.deps.Store.Pool
+	run, err := delivery.ScanRun(pool.QueryRow(ctx, `select `+delivery.RunColumns+` from delivery_runs where repo = $1 and run_id = $2`, settings.DeployRepo, runID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, "NOT_FOUND", http.StatusNotFound, "no run "+strconv.FormatInt(runID, 10)+" of "+settings.DeployRepo)
+			return
+		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	jobs, err := delivery.ListRunJobs(ctx, pool, settings.DeployRepo, runID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	slices.SortFunc(jobs, func(a, b delivery.DeliveryRunJob) int {
+		switch {
+		case a.StartedAt == nil && b.StartedAt != nil:
+			return 1
+		case a.StartedAt != nil && b.StartedAt == nil:
+			return -1
+		case a.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt):
+			return a.StartedAt.Compare(*b.StartedAt)
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	views := make([]delivery.DeliveryRunJobDetailView, len(jobs))
+	for i, job := range jobs {
+		views[i] = delivery.DeliveryRunJobDetailView{Name: job.Name, StartedAt: job.StartedAt, CompletedAt: job.CompletedAt, Conclusion: job.Conclusion}
+	}
+	WriteJSON(w, http.StatusOK, delivery.DeliveryRunDetailView{ID: run.RunID, URL: run.URL, Jobs: views})
 }
 
 func deliveryJobViews(jobs []delivery.DeliveryRunJob) []delivery.DeliveryRunJobView {
@@ -219,156 +324,237 @@ func deliveryJobView(job *delivery.DeliveryRunJob) *delivery.DeliveryRunJobView 
 	return &delivery.DeliveryRunJobView{Name: job.Name, CompletedAt: job.CompletedAt}
 }
 
-// filterDeliveryPullRequests applies the facets that filter on a PR's own stored fields directly
-// (repo, issue, author, rework): the ones that need no derived value. parent_agent/session and
-// deployed are applied after deployed_status and the agent titles are resolved, by
-// matchesParentAgentOrSessionFacet/matchesDeployedFacet below.
-func filterDeliveryPullRequests(prs []delivery.DeliveryPullRequest, query url.Values) []delivery.DeliveryPullRequest {
-	repos := query["repo"]
-	issues := query["issue"]
-	authors := query["author"]
-	rework := query["rework"]
-	return slices.DeleteFunc(slices.Clone(prs), func(pr delivery.DeliveryPullRequest) bool {
-		if len(repos) > 0 && !slices.Contains(repos, pr.Repo) {
-			return true
+// deliveryProductionView is the run's production job (the configured production_job_name), or nil
+// when the run has none.
+func deliveryProductionView(jobs []delivery.DeliveryRunJob, productionJobName string) *delivery.DeliveryRunProductionView {
+	for _, job := range jobs {
+		if job.Name == productionJobName {
+			return &delivery.DeliveryRunProductionView{Conclusion: job.Conclusion, CompletedAt: job.CompletedAt}
 		}
-		if len(authors) > 0 && !slices.Contains(authors, pr.Author) {
-			return true
-		}
-		if len(issues) > 0 {
-			if pr.IssueKey == nil || !slices.Contains(issues, *pr.IssueKey) {
-				return true
-			}
-		}
-		return !matchesReworkFacet(rework, pr.Rework)
-	})
+	}
+	return nil
 }
 
-// matchesReworkFacet is the rework/value tri-state facet, spelled as two direct checks instead of
-// one double-negated boolean expression: with neither value selected every PR matches; a rework
-// PR matches only when "rework" is selected; a value (non-rework) PR matches only when "value" is
-// selected.
-func matchesReworkFacet(selected []string, isRework bool) bool {
-	if len(selected) == 0 {
-		return true
-	}
-	if isRework {
-		return slices.Contains(selected, "rework")
-	}
-	return slices.Contains(selected, "value")
+// deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,
+// priority, and effective components (qualified `<project>/<id>`, resolved as every issue read
+// resolves them: the nearest issue on its parent chain that chose, through issueComponentsLateral).
+type deliveryIssue struct {
+	project    string
+	title      string
+	priority   *int
+	components []string
 }
 
-func matchesParentAgentOrSessionFacet(pr delivery.DeliveryPRView, query url.Values) bool {
-	if parentAgents := query["parent_agent"]; len(parentAgents) > 0 {
-		if pr.ParentAgent == nil || !slices.Contains(parentAgents, *pr.ParentAgent) {
-			return false
+func (s *server) deliveryIssueFacts(ctx context.Context, keys []string) (map[string]deliveryIssue, error) {
+	issues := make(map[string]deliveryIssue, len(keys))
+	if len(keys) == 0 {
+		return issues, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
+		from issues i
+		`+issueComponentsLateral+`
+		where i.key = any($1)
+	`, keys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var issue deliveryIssue
+		var ids []string
+		if err := rows.Scan(&key, &issue.project, &issue.title, &issue.priority, &ids); err != nil {
+			return nil, err
+		}
+		issue.components = make([]string, len(ids))
+		for i, id := range ids {
+			issue.components[i] = deliveryComponentKey(issue.project, id)
+		}
+		issues[key] = issue
+	}
+	return issues, rows.Err()
+}
+
+// deliveryComponentKey names a component as the graph addresses it, `<project>/<id>`: component
+// ids are unique only within their project.
+func deliveryComponentKey(project, id string) string {
+	return project + "/" + id
+}
+
+// deliveryComponents names every component of projects, keyed by deliveryComponentKey.
+func (s *server) deliveryComponents(ctx context.Context, projects []string) (map[string]delivery.DeliveryComponentView, error) {
+	components := map[string]delivery.DeliveryComponentView{}
+	if len(projects) == 0 {
+		return components, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `select project_key, id, title, parent from components where project_key = any($1)`, projects)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var project, id, title string
+		var parent *string
+		if err := rows.Scan(&project, &id, &title, &parent); err != nil {
+			return nil, err
+		}
+		view := delivery.DeliveryComponentView{Title: title}
+		if parent != nil {
+			qualified := deliveryComponentKey(project, *parent)
+			view.Parent = &qualified
+		}
+		components[deliveryComponentKey(project, id)] = view
+	}
+	return components, rows.Err()
+}
+
+// deliveryRow is one window pull request's view with its value for each facet: one value for most,
+// every session for session, every effective component for component, and none for issue when it
+// names no issue (the issue facet offers no placeholder).
+type deliveryRow struct {
+	view   delivery.DeliveryPRView
+	values map[string][]string
+	search string
+}
+
+func newDeliveryRow(view delivery.DeliveryPRView) deliveryRow {
+	values := map[string][]string{
+		"repo":     {view.Repo},
+		"session":  view.Sessions,
+		"issue":    {},
+		"author":   {view.Author},
+		"rework":   {"value"},
+		"deployed": {string(view.DeployedStatus)},
+	}
+	if view.ParentAgent != nil {
+		values["parent_agent"] = []string{*view.ParentAgent}
+	} else {
+		values["parent_agent"] = []string{deliveryNoSession}
+	}
+	if view.Rework {
+		values["rework"] = []string{"rework"}
+	}
+	switch {
+	case view.Issue == nil:
+		values["priority"] = []string{deliveryNoIssue}
+		values["component"] = []string{deliveryNoIssue}
+	default:
+		values["issue"] = []string{*view.Issue}
+		values["priority"] = []string{deliveryNoPriority}
+		if view.Priority != nil {
+			values["priority"] = []string{*view.Priority}
+		}
+		values["component"] = []string{deliveryNoComponent}
+		if len(view.Components) > 0 {
+			values["component"] = view.Components
 		}
 	}
-	if sessions := query["session"]; len(sessions) > 0 {
-		found := false
-		for _, s := range pr.Sessions {
-			if slices.Contains(sessions, s) {
-				found = true
-				break
-			}
+	return deliveryRow{view: view, values: values, search: strings.ToLower(view.Title) + "\x00" + strings.ToLower(view.ID)}
+}
+
+// deliverySelection is the request's facet selections, each a set of values a row must hold one of
+// (a selected component standing for itself and every component below it), and its search, the
+// lowercased text a row's title or id must contain.
+type deliverySelection struct {
+	facets map[string][]string
+	search string
+}
+
+func parseDeliverySelection(query url.Values, components map[string]delivery.DeliveryComponentView) deliverySelection {
+	selection := deliverySelection{facets: map[string][]string{}, search: strings.ToLower(strings.TrimSpace(query.Get("q")))}
+	for _, facet := range deliveryFacets {
+		values := query[facet]
+		if len(values) == 0 {
+			continue
 		}
-		if !found {
+		switch facet {
+		case "priority":
+			normalized := make([]string, len(values))
+			for i, value := range values {
+				normalized[i] = value
+				if match := deliveryPrioritySelection.FindStringSubmatch(value); match != nil {
+					normalized[i] = "P" + match[1]
+				}
+			}
+			values = normalized
+		case "component":
+			values = deliveryComponentDescendants(components, values)
+		}
+		selection.facets[facet] = values
+	}
+	return selection
+}
+
+// deliveryComponentDescendants is selected plus every component below a selected one.
+func deliveryComponentDescendants(components map[string]delivery.DeliveryComponentView, selected []string) []string {
+	children := map[string][]string{}
+	for id, component := range components {
+		if component.Parent != nil {
+			children[*component.Parent] = append(children[*component.Parent], id)
+		}
+	}
+	expanded := []string{}
+	stack := slices.Clone(selected)
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if slices.Contains(expanded, id) {
+			continue
+		}
+		expanded = append(expanded, id)
+		stack = append(stack, children[id]...)
+	}
+	return expanded
+}
+
+// matches is whether the row passes the search and every selected facet but skip.
+func (row deliveryRow) matches(selection deliverySelection, skip string) bool {
+	if selection.search != "" && !strings.Contains(row.search, selection.search) {
+		return false
+	}
+	for facet, selected := range selection.facets {
+		if facet == skip {
+			continue
+		}
+		if !slices.ContainsFunc(row.values[facet], func(value string) bool { return slices.Contains(selected, value) }) {
 			return false
 		}
 	}
 	return true
 }
 
-func matchesDeployedFacet(pr delivery.DeliveryPRView, query url.Values) bool {
-	deployed := query["deployed"]
-	if len(deployed) == 0 {
-		return true
+// deliveryFacetCounts counts, per facet, the rows passing the search and every other facet's
+// selection by that facet's values, so selecting a value never zeroes its own count.
+func deliveryFacetCounts(rows []deliveryRow, selection deliverySelection) map[string]map[string]int {
+	counts := make(map[string]map[string]int, len(deliveryFacets))
+	for _, facet := range deliveryFacets {
+		counts[facet] = map[string]int{}
 	}
-	return slices.Contains(deployed, string(pr.DeployedStatus))
+	for _, row := range rows {
+		for _, facet := range deliveryFacets {
+			if !row.matches(selection, facet) {
+				continue
+			}
+			for _, value := range row.values[facet] {
+				counts[facet][value]++
+			}
+		}
+	}
+	return counts
 }
 
-// resolveIssueFacetData reads each issue key's priority and direct component membership, for the
-// priority/component facets. Component resolution here is direct membership only
-// (issue_component_members), not the full nearest-ancestor inheritance / descendant-expansion
-// walk getArchitectureTree does -- a PR whose issue inherits its component from a parent, or a
-// "parent component includes its children" facet selection, is not matched by this simplified
-// version. Flagged here rather than silently approximated as exact.
-func (s *server) resolveIssueFacetData(ctx context.Context, issueKeys []string) (priorities map[string]*int, components map[string][]string, err error) {
-	priorities = make(map[string]*int, len(issueKeys))
-	components = make(map[string][]string)
-	if len(issueKeys) == 0 {
-		return priorities, components, nil
+// deliveryColorCounts counts every row, with no facet or search applied, by the value it is
+// coloured by under each colour-by facet: its first value there.
+func deliveryColorCounts(rows []deliveryRow) map[string]map[string]int {
+	counts := make(map[string]map[string]int, len(deliveryColorFacets))
+	for _, facet := range deliveryColorFacets {
+		counts[facet] = map[string]int{}
 	}
-	rows, err := s.deps.Store.Pool.Query(ctx, `select key, priority from issues where key = any($1)`, issueKeys)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var key string
-		var priority *int
-		if err := rows.Scan(&key, &priority); err != nil {
-			return nil, nil, err
-		}
-		priorities[key] = priority
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-
-	memberRows, err := s.deps.Store.Pool.Query(ctx, `select issue_key, component_id from issue_component_members where issue_key = any($1)`, issueKeys)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer memberRows.Close()
-	for memberRows.Next() {
-		var key, component string
-		if err := memberRows.Scan(&key, &component); err != nil {
-			return nil, nil, err
-		}
-		components[key] = append(components[key], component)
-	}
-	return priorities, components, memberRows.Err()
-}
-
-// matchesPriorityFacet compares against the issue's stored integer priority, accepting either the
-// bare digit ("0") or this feature's own "P0" display convention (DrillDown.tsx renders priority
-// as `P${priority}`, and the picker's own placeholder tells the user to type "P0") -- stripping an
-// optional leading P/p before comparing so the UI's own example actually matches.
-func matchesPriorityFacet(issueKey *string, priorities map[string]*int, query url.Values) bool {
-	wanted := query["priority"]
-	if len(wanted) == 0 {
-		return true
-	}
-	if issueKey == nil {
-		return false
-	}
-	priority, ok := priorities[*issueKey]
-	if !ok || priority == nil {
-		return false
-	}
-	digits := strconv.Itoa(*priority)
-	for _, want := range wanted {
-		trimmed := strings.TrimPrefix(strings.TrimPrefix(want, "P"), "p")
-		if trimmed == digits {
-			return true
+	for _, row := range rows {
+		for _, facet := range deliveryColorFacets {
+			counts[facet][row.values[facet][0]]++
 		}
 	}
-	return false
-}
-
-func matchesComponentFacet(issueKey *string, components map[string][]string, query url.Values) bool {
-	wanted := query["component"]
-	if len(wanted) == 0 {
-		return true
-	}
-	if issueKey == nil {
-		return false
-	}
-	for _, id := range components[*issueKey] {
-		if slices.Contains(wanted, id) {
-			return true
-		}
-	}
-	return false
+	return counts
 }

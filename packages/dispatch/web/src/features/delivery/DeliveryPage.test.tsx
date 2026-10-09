@@ -11,13 +11,29 @@ import { DeliveryPage } from "./DeliveryPage";
 const DELIVERY_URL =
   "/delivery?mode=list&from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
 
+const emptyCounts = {
+  repo: {},
+  parent_agent: {},
+  session: {},
+  issue: {},
+  priority: {},
+  component: {},
+  author: {},
+  rework: {},
+  deployed: {},
+};
+
 const emptyTimeline: DeliveryTimelineResponse = {
+  color_counts: { repo: {}, author: {}, priority: {}, component: {}, parent_agent: {} },
+  components: {},
+  facet_counts: emptyCounts,
   freshness: {
     last_error: null,
     last_event_at: null,
     last_reconcile_at: null,
     unfetchable_count: 0,
   },
+  issue_titles: {},
   prs: [],
   runs: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },

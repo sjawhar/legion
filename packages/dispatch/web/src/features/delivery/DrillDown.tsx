@@ -87,10 +87,7 @@ function PRDetail({ pr }: { pr: DeliveryPR }): ReactNode {
   );
 }
 
-function DeployDetail({ run, prs }: { run: DeliveryRun; prs: readonly DeliveryPR[] }): ReactNode {
-  const shipped = run.prs
-    .map((id) => prs.find((pr) => pr.id === id))
-    .filter((pr) => pr !== undefined);
+function DeployDetail({ run }: { run: DeliveryRun }): ReactNode {
   return (
     <div className="flex flex-col gap-2 text-sm">
       <h3 className={`font-semibold ${textSecondaryOnCanvas}`}>Deploy run {run.id}</h3>
@@ -103,24 +100,11 @@ function DeployDetail({ run, prs }: { run: DeliveryRun; prs: readonly DeliveryPR
       <p className={textSecondaryOnCanvas}>Completed: {fmt(run.completed_at)}</p>
       <p className={textSecondaryOnCanvas}>Shipped {run.prs.length} PR(s):</p>
       <ul className="list-disc pl-5">
-        {shipped.map((pr) => (
+        {run.prs.map((pr) => (
           <li key={pr.id}>
-            <a
-              className={linkText}
-              href={githubPrUrl(pr.repo, pr.number)}
-              rel="noreferrer"
-              target="_blank"
-            >
-              {pr.id}
-            </a>{" "}
-            {pr.title}
+            {pr.id} {pr.title}
           </li>
         ))}
-        {run.prs.length > shipped.length ? (
-          <li className={textMutedOnCanvas}>
-            {run.prs.length - shipped.length} more outside the current window.
-          </li>
-        ) : null}
       </ul>
     </div>
   );
@@ -188,7 +172,7 @@ export function DrillDown({
     if (run === undefined) {
       body = <p>Run {selection.id} not found in the current window.</p>;
     } else if (selection.kind === "deploy") {
-      body = <DeployDetail prs={prs} run={run} />;
+      body = <DeployDetail run={run} />;
     } else {
       body = <FailureDetail run={run} />;
     }
