@@ -195,15 +195,26 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   }
 });
 
-test("ProofDocument reports connection status through the toolbar bag and enforces read-only state", async () => {
-  const { editors, rerender, status, sync, toolbar, view } = renderProofDocument();
+test("ProofDocument reports connection status and pending edits through the toolbar bag", async () => {
+  const { editors, pending, rerender, status, sync, toolbar, view } = renderProofDocument();
 
   try {
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
-    act(() => status("offline"));
+    act(() => {
+      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      status("offline");
+    });
+    await waitFor(() =>
+      expect(toolbar.current?.pending).toEqual({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
     rerender({ isClosed: true });
     expect(editors[0]?.readOnly).toBe(true);

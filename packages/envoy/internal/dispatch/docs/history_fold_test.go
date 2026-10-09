@@ -14,6 +14,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -521,7 +522,7 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 	if err := crdt.ApplyUpdateV1(browser, initial, nil); err != nil {
 		t.Fatalf("open the second client: %v", err)
 	}
-	browserText := firstXMLText(browser.GetXmlFragment(fragmentName))
+	browserText := docstest.FirstText(browser.GetXmlFragment(fragmentName))
 
 	history := [][]byte{initial}
 	step := func(what string, change func(*crdt.Transaction) error) {
@@ -555,21 +556,6 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 		return pmdoc.Update(txn, fragment, initialTree)
 	})
 	return history
-}
-
-// firstXMLText is the first text node in document order, or nil for a document without one.
-func firstXMLText(fragment *crdt.YXmlFragment) *crdt.YXmlText {
-	for _, child := range fragment.Children() {
-		switch node := child.(type) {
-		case *crdt.YXmlText:
-			return node
-		case *crdt.YXmlElement:
-			if text := firstXMLText(&node.YXmlFragment); text != nil {
-				return text
-			}
-		}
-	}
-	return nil
 }
 
 // documentReading is everything a reader of a document state sees: its markdown (or why it has

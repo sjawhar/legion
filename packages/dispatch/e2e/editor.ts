@@ -1,3 +1,4 @@
+import { MessageType } from "@hocuspocus/provider";
 import {
   type Browser,
   expect,
@@ -6,7 +7,9 @@ import {
   type Route,
   type WebSocketRoute,
 } from "@playwright/test";
+import { createDecoder, readVarUint } from "lib0/decoding";
 
+import { readField } from "../web/src/features/doc/sync-frame";
 import { createIssue, createProject, getArtifactText } from "./api";
 import { asUser } from "./users";
 
@@ -252,6 +255,20 @@ export function openDocumentSockets(page: Page): () => number {
   return () => open;
 }
 
+/** Identifies a Hocuspocus server acknowledgement without duplicating its wire constants. */
+function isSyncStatusFrame(message: string | Buffer): boolean {
+  if (typeof message === "string") {
+    return false;
+  }
+  try {
+    const decoder = createDecoder(message);
+    readField(decoder); // the document name
+    return readVarUint(decoder) === MessageType.SyncStatus;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Proxies the document transport so a test owns its connections. `sever()` closes the ones it
  * made, the way a network blip or a server restart does, and the client reconnects. With
@@ -259,20 +276,40 @@ export function openDocumentSockets(page: Page): () => number {
  * does not sync: the open document reports no layout and every anchored card is still stacked at
  * the top of the margin, which is the state the link's hold exists for, and a reconnect after
  * `sever()` waits. `release()` connects what is held and anything that arrives afterwards.
- * Install it before the page's first navigation: only sockets opened afterwards are routed, and
- * Playwright has no fallthrough for WebSocket routes, so a test installs one.
+ * `holdServerFrames()` holds only tag-8 server acknowledgements on connected routes, while still
+ * applying each client update to the server. Install it before the page's first navigation: only
+ * sockets opened afterwards are routed, and Playwright has no fallthrough for WebSocket routes.
  */
 export async function documentTransport(
   page: Page,
   { holding = false }: { holding?: boolean } = {}
-): Promise<{ hold: () => void; release: () => Promise<void>; sever: () => Promise<void> }> {
+): Promise<{
+  hold: () => void;
+  holdServerFrames: () => void;
+  release: () => Promise<void>;
+  releaseServerFrames: () => Promise<void>;
+  sever: () => Promise<void>;
+}> {
   const connects: (() => void)[] = [];
+  const heldServerFrames: { message: string | Buffer; route: WebSocketRoute }[] = [];
   const live: WebSocketRoute[] = [];
+  let holdingServerFrames = false;
   let releasing = !holding;
+  const connect = (route: WebSocketRoute): WebSocketRoute => {
+    const server = route.connectToServer();
+    live.push(route);
+    server.onMessage((message) => {
+      if (holdingServerFrames && isSyncStatusFrame(message)) {
+        heldServerFrames.push({ message, route });
+        return;
+      }
+      route.send(message);
+    });
+    return server;
+  };
   await page.routeWebSocket(/\/ws\/doc\//u, (route) => {
     if (releasing) {
-      route.connectToServer();
-      live.push(route);
+      connect(route);
       return;
     }
     // The page's sync messages are buffered rather than dropped: the provider sends its first
@@ -287,8 +324,7 @@ export async function documentTransport(
       server.send(message);
     });
     connects.push(() => {
-      server = route.connectToServer();
-      live.push(route);
+      server = connect(route);
       for (const message of pending.splice(0)) {
         server.send(message);
       }
@@ -298,10 +334,19 @@ export async function documentTransport(
     hold: () => {
       releasing = false;
     },
+    holdServerFrames: () => {
+      holdingServerFrames = true;
+    },
     release: async () => {
       releasing = true;
-      for (const connect of connects.splice(0)) {
-        connect();
+      for (const connectHeld of connects.splice(0)) {
+        connectHeld();
+      }
+    },
+    releaseServerFrames: async () => {
+      holdingServerFrames = false;
+      for (const { message, route } of heldServerFrames.splice(0)) {
+        route.send(message);
       }
     },
     sever: async () => {
