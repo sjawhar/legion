@@ -226,11 +226,7 @@ const controllerNotRegistered = "controller not registered; run legion controlle
 // both modes write the same lines on the same cadence.
 func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
 	launched := cfg.ControllerLaunch == config.ControllerLaunchDaemon
-	mode := config.ControllerLaunchOperator
-	if launched {
-		mode = config.ControllerLaunchDaemon
-	}
-	log = log.With("mode", string(mode))
+	log = log.With("mode", string(cfg.ControllerLaunch))
 	prober := controller.NewProber(controller.ProberOptions{
 		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
 	})

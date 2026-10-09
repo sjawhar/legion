@@ -109,6 +109,7 @@ func testConfig(t *testing.T) config.Config {
 		PromptRetireLimit:                       2,
 		OperatorTokenFile:                       tokenFile,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		ControllerLaunch:                        config.ControllerLaunchOperator,
 	}
 }
 

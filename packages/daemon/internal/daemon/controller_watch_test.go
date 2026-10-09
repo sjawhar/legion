@@ -145,10 +145,7 @@ func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 			logs := &syncBuffer{}
 			o := fakeRuntime(fake.NewRuntime(), &built{})
 			o.orphanSweep = 20 * time.Millisecond
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan error, 1)
-			go func() { done <- run(ctx, cfg, slog.New(slog.NewJSONHandler(logs, nil)), o) }()
-			awaitHealthz(t, cfg, done)
+			d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
 			// The first sweep runs as the daemon starts serving, and a due line comes from it. The
 			// count then waits out further sweeps, where a second line would show: a registered
 			// controller is looked up in the role registry on every sweep, so three more lookups are
@@ -162,10 +159,7 @@ func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 			} else {
 				time.Sleep(10 * o.orphanSweep)
 			}
-			cancel()
-			if err := <-done; err != nil {
-				t.Fatalf("run: %v", err)
-			}
+			d.stop()
 			lines := loggedLines(t, logs.String(), notRegisteredLine)
 			if len(lines) != tc.want {
 				t.Fatalf("%q was logged %d times over many sweeps, want %d\n%s", notRegisteredLine, len(lines), tc.want, logs.String())
