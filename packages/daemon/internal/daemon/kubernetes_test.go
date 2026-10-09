@@ -48,6 +48,22 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	return cfg
 }
 
+// defaultReservations are every role's container requirements at the daemon's defaults, translated
+// as sandboxOptions translates them: the map sandbox.New requires of a test that builds Options by
+// hand, since it refuses one lacking a role.
+func defaultReservations(t *testing.T) map[claim.Role]corev1.ResourceRequirements {
+	t.Helper()
+	reservations := map[claim.Role]corev1.ResourceRequirements{}
+	for role, reservation := range config.DefaultResources() {
+		requirements, err := roleRequirements(role, reservation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reservations[role] = requirements
+	}
+	return reservations
+}
+
 // writeKubeconfig is a kubeconfig of one cluster at server and one context, its current context
 // when current names it.
 func writeKubeconfig(t *testing.T, server, current string) string {

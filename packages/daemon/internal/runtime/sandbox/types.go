@@ -80,8 +80,10 @@ type Options struct {
 	// Resources are each role's container requirements, the controller's included: the daemon
 	// hands one for every role (config.DefaultResources fills what its file leaves out), its cpu and
 	// memory the request and the limit alike, so every container of every pod the runtime builds —
-	// the init containers take the launching role's — is Guaranteed. A role absent here gets none,
-	// which no daemon-built Options has.
+	// the init containers take the launching role's, the image probe's the controller's — is
+	// Guaranteed. New refuses a map that lacks a role of claim.Roles or the controller, or whose
+	// entry is not such a reservation: cpu and memory each requested as a positive quantity equal
+	// to its limit, and no other resource named.
 	Resources map[claim.Role]corev1.ResourceRequirements
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string

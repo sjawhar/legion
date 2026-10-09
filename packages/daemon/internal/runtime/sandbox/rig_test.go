@@ -53,8 +53,9 @@ var (
 	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
-// testOptions are the options every test starts from: production's shape, with budgets short
-// enough that a wait the test expects to end never slows the suite.
+// testOptions are the options every test starts from: production's shape, every role's reservation
+// at the daemon's defaults (reservations), with budgets short enough that a wait the test expects
+// to end never slows the suite.
 func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
@@ -63,6 +64,7 @@ func testOptions() Options {
 		Image:        testImage,
 		StorageClass: "gp2",
 		IssueVolume:  resource.MustParse("20Gi"),
+		Resources:    reservations(),
 		StreamURL:    "tcp://192.0.2.250:13371",
 		DaemonURL:    "http://192.0.2.250:13370",
 		EnvoyURL:     "http://192.0.2.250:9020",

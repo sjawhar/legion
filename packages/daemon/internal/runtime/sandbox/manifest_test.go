@@ -25,14 +25,13 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite the manifest goldens this package pins")
 
-// goldenOptions are production's settings: the budgets a golden's grace is read from, every
-// role's reservation at the daemon's defaults, and the Legion priority class.
+// goldenOptions are production's settings: the budgets a golden's grace is read from and the
+// Legion priority class, over testOptions' reservations at the daemon's defaults.
 func goldenOptions() Options {
 	opts := testOptions()
 	opts.BootTimeout = 120 * time.Second
 	opts.TerminationGrace = 30 * time.Second
 	opts.Scheduling = Scheduling{PriorityClass: "legion"}
-	opts.Resources = reservations()
 	return opts
 }
 
@@ -656,22 +655,45 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 
 // New refuses options no cluster could run: an image not pinned by digest, an issue volume with no
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
-// does not choose.
+// does not choose, and a Resources map that would leave a container unreserved — a role or the
+// controller without an entry, or an entry that is no reservation: a cpu limit its request falls
+// short of, no memory, or a resource the daemon never sizes — each refusal naming the role.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
 		want string
 	}{
-		"tag image":         {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
-		"no class":          {func(o *Options) { o.StorageClass = "" }, "no storage class"},
-		"no volume size":    {func(o *Options) { o.IssueVolume = resource.Quantity{} }, "no issue volume size"},
-		"unix stream":       {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
-		"relative tool":     {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
-		"bad project":       {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
-		"url no bearer":     {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
-		"bearer no url":     {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
-		"another pool":      {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
-		"the pool restated": {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
+		"tag image":                 {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
+		"no class":                  {func(o *Options) { o.StorageClass = "" }, "no storage class"},
+		"no volume size":            {func(o *Options) { o.IssueVolume = resource.Quantity{} }, "no issue volume size"},
+		"unix stream":               {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
+		"relative tool":             {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
+		"bad project":               {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
+		"url no bearer":             {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
+		"bearer no url":             {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
+		"another pool":              {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
+		"the pool restated":         {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
+		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
+		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
+		"cpu limit past request": {
+			func(o *Options) {
+				o.Resources[claim.RoleReviewer].Limits[corev1.ResourceCPU] = resource.MustParse("1500m")
+			},
+			"role reviewer requests cpu 750m but is limited to 1500m",
+		},
+		"no memory": {
+			func(o *Options) {
+				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceMemory)
+				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceMemory)
+			},
+			"role merger reserves no memory",
+		},
+		"ephemeral storage": {
+			func(o *Options) {
+				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("1Gi")
+			},
+			"role implementer names ephemeral-storage in its requests",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()

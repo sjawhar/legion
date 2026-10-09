@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"path/filepath"
@@ -286,6 +287,16 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
 		}
 	}
+	// Every container of every pod the runtime builds takes its role's entry of Resources — the
+	// init containers the launching role's, the image probe's the controller's — so a role without
+	// a reservation would run with no requests or limits at all, a silently BestEffort pod.
+	for _, kind := range []podKind{issuePod{}, controllerPod{}} {
+		for _, role := range kind.roles() {
+			if err := checkReservation(role, opts.Resources); err != nil {
+				return refuse("%v", err)
+			}
+		}
+	}
 	if a := opts.AgentSecrets; a != nil {
 		switch {
 		case a.URL == "":
@@ -326,6 +337,39 @@ func configure(opts Options) (*Runtime, error) {
 		r.log = slog.Default()
 	}
 	return r, nil
+}
+
+// checkReservation is why resources' entry for role is not a reservation, or nil when it is one:
+// cpu and memory each requested as a positive quantity equal to its limit, the kubelet's Guaranteed
+// rule for the one container, and no other resource named, since the daemon sizes nothing else
+// (daemon/kubernetes.go, roleRequirements) and an ephemeral-storage or extended resource here would
+// be one no operator configured. A missing role is the first fault: its containers would carry the
+// zero requirements.
+func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceRequirements) error {
+	requirements, ok := resources[role]
+	if !ok {
+		return fmt.Errorf("resources: no reservation for role %s", role)
+	}
+	for _, list := range []struct {
+		name string
+		list corev1.ResourceList
+	}{{"requests", requirements.Requests}, {"limits", requirements.Limits}} {
+		for _, name := range slices.Sorted(maps.Keys(list.list)) {
+			if name != corev1.ResourceCPU && name != corev1.ResourceMemory {
+				return fmt.Errorf("resources: role %s names %s in its %s; a reservation is cpu and memory alone", role, name, list.name)
+			}
+		}
+	}
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		request, limit := requirements.Requests[name], requirements.Limits[name]
+		switch {
+		case request.Sign() <= 0 || limit.Sign() <= 0:
+			return fmt.Errorf("resources: role %s reserves no %s (request %s, limit %s); a reservation is a positive quantity as both", role, name, request.String(), limit.String())
+		case request.Cmp(limit) != 0:
+			return fmt.Errorf("resources: role %s requests %s %s but is limited to %s; a reservation is one value as both", role, name, request.String(), limit.String())
+		}
+	}
+	return nil
 }
 
 // start runs both informers, selected on the project label, until ctx ends, and waits for both
