@@ -205,24 +205,39 @@ const reviewWorkflowsToAdjudicate = "; only declared review workflows are red, s
 // changes (stuckAs).
 const answerSkew = 10 * time.Second
 
-// decidesRound says whether review may decide a review round: the review App submitted it, or its
-// author has write access or higher to the repository, which intake read from GitHub before the
-// fact reached this transaction (intake.PullRequestReview.AuthorCanWrite). On a public repository
-// any account can review a pull request, so anyone else's review decides nothing. GitHub's 404, or
-// a 403 that is not its rate limit, reads as no write access; any other failed read is retried
-// before the review reaches here. The review App is recognised by its login, since GitHub gives an
-// App's bot account no collaborator permission of its own, so the daemon never asks about it.
-func (e *Engine) decidesRound(review intake.PullRequestReview) bool {
-	return e.byReviewApp(review.Author) || review.AuthorCanWrite
+// byReviewer says whether review is the reviewer's own review-App session, not merely a review the
+// review App submitted: the controller now holds the review App's token too, so every role's
+// review arrives under the same bot login (`legion-reviewer[bot]`). What tells the reviewer's
+// review from any other review-App session's - the controller's, an architect's, a sibling tree's
+// role - is the Legion footer every Legion role appends to a pull-request review
+// (intake.PullRequestReview.LegionSession), matched against reviewerSession, the session recorded
+// on the reviewer's own claim (record.Store.ClaimSession). With no session recorded - a daemon
+// whose claims predate this, or a reviewer claim with no row - the login decides by itself, as it
+// always has, since there is nothing recorded to tell the sessions apart.
+func (e *Engine) byReviewer(review intake.PullRequestReview, reviewerSession string) bool {
+	return e.byReviewApp(review.Author) && (reviewerSession == "" || review.LegionSession() == reviewerSession)
+}
+
+// decidesRound says whether review may decide a review round: it is the reviewer's own review-App
+// session (byReviewer), or its author has write access or higher to the repository, which intake
+// read from GitHub before the fact reached this transaction
+// (intake.PullRequestReview.AuthorCanWrite). On a public repository any account can review a pull
+// request, so anyone else's review decides nothing. GitHub's 404, or a 403 that is not its rate
+// limit, reads as no write access; any other failed read is retried before the review reaches
+// here. A review-App review that is not the reviewer's own session decides nothing either: it is
+// set aside, not counted as a writer's or dropped as a stranger's.
+func (e *Engine) decidesRound(review intake.PullRequestReview, reviewerSession string) bool {
+	return e.byReviewer(review, reviewerSession) || review.AuthorCanWrite
 }
 
 // reviewersAnswer says whether fact is the reviewer's answer to a round it completed undecided: a
-// review the review App submitted, with a body - GitHub records a reply on a review thread as a
-// review with no body - more than answerSkew after the completion was applied. A review submitted
-// before the completion but delivered after it is not, since the completion comes through the API
-// and the review by webhook; nor is one with no submission time, or anyone else's.
-func (e *Engine) reviewersAnswer(fact intake.PullRequestReview, reviewer record.PhaseRow) bool {
-	return e.byReviewApp(fact.Author) && fact.Body != "" && fact.SubmittedAt.After(reviewer.CompletedAt.Add(answerSkew))
+// review from the reviewer's own review-App session (byReviewer), with a body - GitHub records a
+// reply on a review thread as a review with no body - more than answerSkew after the completion
+// was applied. A review submitted before the completion but delivered after it is not, since the
+// completion comes through the API and the review by webhook; nor is one with no submission time,
+// or anyone else's, the review App's other sessions included.
+func (e *Engine) reviewersAnswer(fact intake.PullRequestReview, reviewer record.PhaseRow, reviewerSession string) bool {
+	return e.byReviewer(fact, reviewerSession) && fact.Body != "" && fact.SubmittedAt.After(reviewer.CompletedAt.Add(answerSkew))
 }
 
 func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestReview) (intake.Result, error) {
@@ -238,22 +253,41 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil {
 		return intake.Result{}, err
 	}
+	// reviewerSession is the session recorded on the reviewer's claim, "" when the row has no claim,
+	// the claim has no row, or its session is empty: byReviewer then decides by the login only.
+	var reviewerSession string
+	if reviewer.Claim != "" {
+		reviewerSession, err = e.store.ClaimSession(ctx, tx, reviewer.Claim)
+		if err != nil {
+			return intake.Result{}, err
+		}
+	}
 	// The reviewer's answer tells whenever it leaves the round stuck; any other review, only when it
 	// changes how the round is stuck.
 	before, by := e.reviewRound(*issue, reviewer, pr), byOtherReview
-	if e.reviewersAnswer(fact, reviewer) {
+	if e.reviewersAnswer(fact, reviewer, reviewerSession) {
 		before, by = round{}, byAnswer
 	}
-	// Only changes_requested and approved decide anything, and only from the review App or an
-	// account with write access to the repository (decidesRound). Any other review orders nothing
-	// either, so a comment written after a decision but delivered before it, or an outsider's
-	// review, cannot make the decision look old.
+	// Only changes_requested and approved decide anything, and only from the reviewer's own
+	// review-App session or an account with write access to the repository (decidesRound). Any
+	// other review orders nothing either, so a comment written after a decision but delivered
+	// before it, or an outsider's review, cannot make the decision look old.
 	state := strings.ToLower(fact.State)
 	decides := fact.Decides()
-	if decides && !e.decidesRound(fact) {
-		e.logOnCommit(ctx, "workflow: a review decides nothing: its author is neither the review App nor an account with write access to the repository",
-			"issue", issue.Key, "pull_request", pr.Number, "author", fact.Author, "state", state)
+	if decides && !e.decidesRound(fact, reviewerSession) {
+		if e.byReviewApp(fact.Author) {
+			e.logOnCommit(ctx, "workflow: a review decides nothing: the review App submitted it from a session that is not the reviewer's",
+				"issue", issue.Key, "pull_request", pr.Number, "state", state, "footer_session", fact.LegionSession(),
+				"reviewer_session", reviewerSession, "reviewer_claim", string(reviewer.Claim), "body_truncated", fact.BodyTruncated)
+		} else {
+			e.logOnCommit(ctx, "workflow: a review decides nothing: its author is neither the review App nor an account with write access to the repository",
+				"issue", issue.Key, "pull_request", pr.Number, "author", fact.Author, "state", state)
+		}
 		decides = false
+	}
+	if decides && reviewerSession == "" && e.byReviewApp(fact.Author) {
+		e.logOnCommit(ctx, "workflow: the reviewer's session is not recorded; the review App's login decides",
+			"issue", issue.Key, "pull_request", pr.Number, "reviewer_claim", string(reviewer.Claim))
 	}
 	if !decides {
 		_, err := e.settleRound(ctx, tx, *issue, reviewer, pr, before, by)

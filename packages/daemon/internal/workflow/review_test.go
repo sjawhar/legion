@@ -1,8 +1,10 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -922,4 +924,175 @@ func reviewStuckNotices(t *testing.T, pool *pgxpool.Pool) []record.Notice {
 		t.Fatalf("iterate review-stuck notices: %v", err)
 	}
 	return notices
+}
+
+// seedClaimSession records a claims row for token holding session, so the workflow's read of the
+// reviewer's claim (record.Store.ClaimSession) finds it (byReviewer).
+func seedClaimSession(t *testing.T, pool *pgxpool.Pool, token claim.Token, session string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+		state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+		values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', 'reviewer', 1, $2, '', 'working', 0, 0, 0, 0)`,
+		string(token), session); err != nil {
+		t.Fatalf("seed the claim's session: %v", err)
+	}
+}
+
+// reviewerDecision is LEGION-208's reviewer row's recorded decision, nil until a review decides.
+func reviewerDecision(t *testing.T, pool *pgxpool.Pool) *record.ReviewDecision {
+	t.Helper()
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	phases, err := record.NewStore().Phases(context.Background(), tx, "LEGION-208")
+	if err != nil {
+		t.Fatalf("read phases: %v", err)
+	}
+	for _, p := range phases {
+		if p.Role == claim.RoleReviewer {
+			return p.Decision
+		}
+	}
+	return nil
+}
+
+// The controller now holds the review App's token too, so its own reviews, and a sibling tree's or
+// an architect's, arrive under the review App's own login. The workflow tells the reviewer's own
+// review from any other review-App session's by the Legion footer every Legion role appends
+// (intake.PullRequestReview.LegionSession), matched against the session recorded on the reviewer's
+// claim (record.Store.ClaimSession). A review-App review naming another session decides nothing:
+// it is set aside, the round stays undecided, and the stuck-round path logs why. One naming the
+// reviewer's own session decides exactly as before.
+func TestAReviewAppReviewFromAnotherSessionIsSetAside(t *testing.T) {
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "c0ffee", "green")
+	seedClaimSession(t, pool, "review-claim", "ses-reviewer")
+	var logs bytes.Buffer
+	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logs, nil)))
+	apply := applyFacts(t, pool, engine)
+	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+
+	apply("another session's approval", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 1, State: "approved", CommitID: "c0ffee",
+		Author: testReviewApp, Body: "ship it\n\n<!-- legion: {\"session\":\"ses-controller\",\"phase\":\"review\"} -->",
+		SubmittedAt: time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)})
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after another session's review the issue is in %s, want reviewing", got)
+	}
+	if got := reviewerDecision(t, pool); got != nil {
+		t.Fatalf("the reviewer's decision = %+v, want nil", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "a review decides nothing: the review App submitted it from a session that is not the reviewer's") ||
+		!strings.Contains(got, "footer_session=ses-controller") || !strings.Contains(got, "reviewer_session=ses-reviewer") {
+		t.Fatalf("logs = %s, want the set-aside line naming both sessions", got)
+	}
+
+	apply("the reviewer's own approval", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 2, State: "approved", CommitID: "c0ffee",
+		Author: testReviewApp, Body: "ship it\n\n<!-- legion: {\"session\":\"ses-reviewer\",\"phase\":\"review\"} -->",
+		SubmittedAt: time.Date(2026, 9, 23, 0, 2, 0, 0, time.UTC)})
+	if got := issuePhase(t, pool); got != phase.Retro {
+		t.Fatalf("after the reviewer's own review the issue is in %s, want retro", got)
+	}
+}
+
+// A comment delivered after the reviewer completes an undecided round is the reviewer's answer
+// only from the reviewer's own review-App session (byReviewer); one from another session - the
+// controller's - is nobody's answer and tells the architect nothing more.
+func TestACommentFromAnotherSessionIsNotTheReviewersAnswer(t *testing.T) {
+	late := time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		session string
+		want    int
+	}{
+		{name: "a comment from another review-App session", session: "ses-controller", want: 1},
+		{name: "a comment from the reviewer's own session", session: "ses-reviewer", want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "c0ffee", "green")
+			seedClaimSession(t, pool, "review-claim", "ses-reviewer")
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+			if got := reviewStuckNotices(t, pool); len(got) != 1 {
+				t.Fatalf("the completion told the architect %d times (%+v), want once", len(got), got)
+			}
+			apply("comment", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "c0ffee", Author: testReviewApp,
+				Body: "one more thought\n\n<!-- legion: {\"session\":\"" + tc.session + "\",\"phase\":\"review\"} -->", SubmittedAt: late})
+			if got := reviewStuckNotices(t, pool); len(got) != tc.want {
+				t.Fatalf("after the comment the architect was told %d times (%+v), want %d", len(got), got, tc.want)
+			}
+		})
+	}
+}
+
+// A review-App review with no Legion footer, while the reviewer's session is recorded, decides
+// nothing: it has nothing to match the reviewer's claim against, so it is set aside exactly as one
+// naming another session is, and its set-aside log line's footer_session is empty.
+func TestAReviewWithNoFooterWhileTheReviewersSessionIsRecordedIsSetAside(t *testing.T) {
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "c0ffee", "green")
+	seedClaimSession(t, pool, "review-claim", "ses-reviewer")
+	var logs bytes.Buffer
+	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logs, nil)))
+	apply := applyFacts(t, pool, engine)
+	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+	apply("no footer", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 1, State: "approved", CommitID: "c0ffee", Author: testReviewApp,
+		Body: "ship it", SubmittedAt: time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)})
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after the footer-less review the issue is in %s, want reviewing", got)
+	}
+	if got := reviewerDecision(t, pool); got != nil {
+		t.Fatalf("the reviewer's decision = %+v, want nil", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "a review decides nothing: the review App submitted it from a session that is not the reviewer's") ||
+		!strings.Contains(got, `footer_session=""`) {
+		t.Fatalf("logs = %s, want the set-aside line with an empty footer_session", got)
+	}
+}
+
+// With no session recorded on the reviewer's claim - a reviewer claim with no row, as every
+// existing fixture seeds - the login decides a round by itself, as it always has, since there is
+// nothing recorded to tell its sessions apart; this is logged once at info.
+func TestWithNoRecordedReviewerSessionTheLoginDecides(t *testing.T) {
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "c0ffee", "green")
+	var logs bytes.Buffer
+	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logs, nil)))
+	apply := applyFacts(t, pool, engine)
+	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+	apply("review", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 1, State: "approved", CommitID: "c0ffee", Author: testReviewApp,
+		Body: "ship it", SubmittedAt: time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)})
+	if got := issuePhase(t, pool); got != phase.Retro {
+		t.Fatalf("after the review the issue is in %s, want retro", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "the reviewer's session is not recorded; the review App's login decides") {
+		t.Fatalf("logs = %s, want the unrecorded-session line", got)
+	}
+}
+
+// Envoy's normalizer caps a review's body before the daemon sees it, which can cut a long review's
+// trailing Legion footer off (intake.PullRequestReview.BodyTruncated). A truncated review-App
+// review with no footer, while the reviewer's session is recorded, is set aside exactly as any
+// other footer-less one is, and its log line names the truncation.
+func TestATruncatedReviewWithNoFooterIsSetAsideAndLogsTruncation(t *testing.T) {
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "c0ffee", "green")
+	seedClaimSession(t, pool, "review-claim", "ses-reviewer")
+	var logs bytes.Buffer
+	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logs, nil)))
+	apply := applyFacts(t, pool, engine)
+	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+	apply("truncated", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 1, State: "approved", CommitID: "c0ffee", Author: testReviewApp,
+		Body: "a capped body", BodyTruncated: true, SubmittedAt: time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)})
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after the truncated review the issue is in %s, want reviewing", got)
+	}
+	if got := reviewerDecision(t, pool); got != nil {
+		t.Fatalf("the reviewer's decision = %+v, want nil", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "body_truncated=true") {
+		t.Fatalf("logs = %s, want the set-aside line to carry body_truncated=true", got)
+	}
 }

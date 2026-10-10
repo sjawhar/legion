@@ -207,6 +207,34 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
+// ClaimSession is the session claims records for the token (the workflow reads it for the
+// reviewer's claim to tell the reviewer's own review-App session from another's by the Legion
+// footer each carries). An unknown token answers "" and no error.
+func TestClaimSessionAnswersTheSeededSessionOrEmpty(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		_, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $4, $5, 0, $6, '', $7, 0, 0, 0, 0)`,
+			"review-claim", "LEGION", "LEGION-208", "LEGION-208", string(claim.RoleReviewer), "ses-reviewer", string(supervise.StateWorking))
+		must(t, err)
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.ClaimSession(ctx, tx, "review-claim")
+		must(t, err)
+		if got != "ses-reviewer" {
+			t.Fatalf("ClaimSession(review-claim) = %q, want ses-reviewer", got)
+		}
+		got, err = records.ClaimSession(ctx, tx, "no-such-claim")
+		must(t, err)
+		if got != "" {
+			t.Fatalf("ClaimSession(no-such-claim) = %q, want \"\"", got)
+		}
+	})
+}
+
 // PullRequestsByIssue is removableWorkspaces' own batched read (internal/daemon/removable.go):
 // one query for every candidate's pull request instead of one PullRequest call per candidate. An
 // issue with no pull request is simply absent from the map, the same as PullRequest's own nil;

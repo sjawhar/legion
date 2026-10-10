@@ -42,10 +42,11 @@ type permissionKey struct{ repository, login string }
 // reads as `write` there - and `read`, `none` or anything else is not. An answer for another
 // account than the author (GitHub resolves some logins to another user) is not either, and logged.
 //
-// GitHub is not asked about the review App's own reviews, which decide by its login alone
-// (workflow's decidesRound), nor about a review on a pull request the daemon does not record, which
-// the workflow drops; both are answered false. An account answered no write access stands so for
-// reviewPermissionTTL; write access is never kept (reviewPermissionTTL's comment).
+// GitHub is not asked about the review App's own reviews, which decide by its login and the
+// reviewer's recorded session (workflow's decidesRound), nor about a review on a pull request the
+// daemon does not record, which the workflow drops; both are answered false. An account answered
+// no write access stands so for reviewPermissionTTL; write access is never kept
+// (reviewPermissionTTL's comment).
 //
 // An account GitHub does not know on the repository is answered `404`: no write access, logged,
 // and the review decides nothing. A `403` that is not GitHub's rate limit is no write access too,

@@ -84,8 +84,8 @@ type workflowRuntime struct {
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
-	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
-	// nothing about it.
+	// review it submits decides a round by that login and the reviewer's recorded session
+	// (workflow's decidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
 	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
@@ -236,7 +236,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
 		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
-		ReviewPermission: w.reviewerCanWrite,
+		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
 	})
 	if err != nil {
 		conn.Close()

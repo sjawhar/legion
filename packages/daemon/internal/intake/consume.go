@@ -42,6 +42,15 @@ type ConsumerSpec struct {
 	// nobody read. No resolver (a test, or a daemon without one) leaves every review's
 	// AuthorCanWrite false, so only the review App's own reviews decide.
 	ReviewPermission func(ctx context.Context, review PullRequestReview) (bool, error)
+	// ReviewBody restores a review-App review's full body from GitHub when Envoy's normalizer
+	// capped it (PullRequestReview.BodyTruncated), since the capped body can cut the trailing
+	// Legion footer the workflow reads to tell the reviewer's review from any other review-App
+	// session's (PullRequestReview.LegionSession). It is read here, before the fact is applied,
+	// within AckWait, and only for a review the review App submitted, with an id and a truncated
+	// body (resolveReviewBody); a failed read is returned, and the message is retried the same way
+	// a failed ReviewPermission read is. No resolver (a test, or a daemon without one) leaves every
+	// truncated review's body capped.
+	ReviewBody func(ctx context.Context, review PullRequestReview) (string, error)
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -200,7 +209,20 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		ackMessage(spec.Logger, message)
 		return
 	}
-	fact, err := resolveReviewPermission(ctx, spec, decoded.Fact)
+	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
+	if err != nil {
+		delay := spec.NakDelay
+		var later *RetryLater
+		if errors.As(err, &later) && later.After > delay {
+			delay = later.After
+		}
+		logMessage(spec.Logger, slog.LevelWarn, "restore the review's truncated body", message, "event_id", decoded.EventID, "retry_in", delay, "error", err)
+		if nakErr := message.NakWithDelay(delay); nakErr != nil {
+			logMessage(spec.Logger, slog.LevelError, "nak the review body restore", message, "event_id", decoded.EventID, "error", nakErr)
+		}
+		return
+	}
+	fact, err := resolveReviewPermission(ctx, spec, withBody)
 	if err != nil {
 		delay := spec.NakDelay
 		var later *RetryLater
@@ -250,6 +272,30 @@ func resolveReviewPermission(ctx context.Context, spec ConsumerSpec, fact Fact) 
 		return nil, err
 	}
 	review.AuthorCanWrite = canWrite
+	return review, nil
+}
+
+// resolveReviewBody restores a truncated review-App review's body from GitHub
+// (ConsumerSpec.ReviewBody), before the fact enters its transaction and before
+// resolveReviewPermission reads its author's permission, since a restored body carries the Legion
+// footer the workflow needs. Only a review the normalizer capped (BodyTruncated), with an id to
+// look it up by and an author, is read: one with no id (a listener that predates it) keeps its
+// capped body and BodyTruncated true, so the workflow sets it aside as footer-less rather than
+// guessing at a footer it cannot restore. Every other fact, and a review the normalizer did not
+// cap, passes through untouched.
+func resolveReviewBody(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
+	review, ok := fact.(PullRequestReview)
+	if !ok || spec.ReviewBody == nil || !review.BodyTruncated || review.ID == 0 || review.Author == "" {
+		return fact, nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	body, err := spec.ReviewBody(read, review)
+	if err != nil {
+		return nil, err
+	}
+	review.Body = body
+	review.BodyTruncated = false
 	return review, nil
 }
 
