@@ -23,7 +23,7 @@ type LauncherLimits struct {
 }
 
 // DefaultLauncherLimits allows a burst of ten requests per source address and five per login,
-// refilled at two a minute and one a minute: generous for a person logging in a few launchers,
+// refilled at two a minute and one a minute: generous for a person logging in a few machines,
 // useless for a flood.
 var DefaultLauncherLimits = LauncherLimits{
 	PerAddress: ratelimit.Limit{Every: 30 * time.Second, Burst: 10},

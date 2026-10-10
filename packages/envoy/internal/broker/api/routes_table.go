@@ -122,6 +122,19 @@ func routes() []apiRoute {
 		// the grant had already ended: its other grants that got them automatically end too, and it
 		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
+		// List the logins of the calling credential's operator's own machines, as Dispatch's
+		// machine-logins page lists them, without the service logins that page also lists.
+		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},
+		// End one of the operator's own machines' logins: no proof signed with it authenticates again
+		// and every session it enrolled ends. A service's login is not found here, like an unknown
+		// id. Revoking the calling machine's own login ends this machine's access.
+		{http.MethodPost, "/v1/operator/machines/{id}/revoke", launcherAuth((*server).revokeOperatorMachine)},
+		// List the live grants of the operator's sessions and those the operator approved, exactly as
+		// Dispatch's Live grants page lists them.
+		{http.MethodGet, "/v1/operator/grants", launcherAuth((*server).listOperatorGrants)},
+		// End a grant as the operator: the revocation Dispatch's page offers, which also withholds an
+		// automatic grant's secrets from its session.
+		{http.MethodPost, "/v1/operator/grants/{id}/revoke", launcherAuth((*server).revokeOperatorGrant)},
 		// The namespace prefix, AWS account and region, and the agent-secrets key the broker serves:
 		// what the CLI needs so it and the broker never disagree about which secret a name means.
 		{http.MethodGet, "/v1/settings", public((*server).readSettings)},

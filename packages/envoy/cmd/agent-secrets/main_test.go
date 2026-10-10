@@ -994,8 +994,8 @@ func TestRequestSignsARequestObject(t *testing.T) {
 	}
 }
 
-// fakeLoginHelper serves just the launcher-login socket ops (login, login-status) a bare unix
-// listener needs to drive cmdLauncher's own poll loop, letting each test's states slice fully
+// fakeLoginHelper serves just the machine-login socket ops (login, login-status) a bare unix
+// listener needs to drive cmdMachineLogin's own poll loop, letting each test's states slice fully
 // drive the poll loop through however many pending answers it wants before a terminal state.
 func fakeLoginHelper(t *testing.T, code string, states []string) string {
 	t.Helper()
@@ -1035,15 +1035,15 @@ func fakeLoginHelper(t *testing.T, code string, states []string) string {
 	return sock
 }
 
-// TestLauncherLoginPrintsTheCodeAndWaits pins the socket-based launcher login: it prints the
+// TestMachineLoginPrintsTheCodeAndWaits pins the socket-based machine login: it prints the
 // confirmation code and, since AGENT_SECRETS_APPROVE_URL is unset, the generic Dispatch-page
 // line, then polls login-status through two pending answers before exiting 0 on "issued".
-func TestLauncherLoginPrintsTheCodeAndWaits(t *testing.T) {
+func TestMachineLoginPrintsTheCodeAndWaits(t *testing.T) {
 	t.Setenv("AGENT_SECRETS_APPROVE_URL", "")
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"pending", "pending", "issued"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login")
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1053,15 +1053,15 @@ func TestLauncherLoginPrintsTheCodeAndWaits(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet pins the other half of the two-line
+// TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet pins the other half of the two-line
 // contract: with AGENT_SECRETS_APPROVE_URL set, the second line names it instead of the generic
 // "Dispatch credential page" fallback.
-func TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
+func TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"issued"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=https://dispatch.example/"},
-		"launcher", "login")
+		"machine", "login")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1071,13 +1071,13 @@ func TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginExitsOneOnDenied pins the terminal-failure half of the poll loop: a
+// TestMachineLoginExitsOneOnDenied pins the terminal-failure half of the poll loop: a
 // login-status answer of "denied" exits 1 and names the state, never retrying past it.
-func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
+func TestMachineLoginExitsOneOnDenied(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"denied"})
 	_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login")
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login")
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1: stderr=%q", exit, stderr)
 	}
@@ -1086,7 +1086,7 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
+// TestMachineLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
 // single-shot contract: it prints a bare state on stdout and its exit code is a
 // liveness probe — 0, printing "issued", while the helper holds a launcher credential, and 1 for
 // every login state with none, "none" when login was never run (empty LoginState) — with a single
@@ -1097,10 +1097,10 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 // no credential and no login in flight (never logged in, denied, or expired, which is also what a
 // credential the broker rejected becomes) says on stderr to run the login again, and a login in
 // flight outranks a refused credential.
-func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
+func TestMachineLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	const held = "the helper still holds the launcher credential an earlier login issued"
-	const prefix = "agent-secrets launcher login-status: "
+	const prefix = "agent-secrets machine login-status: "
 	const unknown = prefix + "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)\n"
 	expiresAt := time.Now().Add(50 * time.Hour).UTC().Format(time.RFC3339)
 	for _, tc := range []struct {
@@ -1128,11 +1128,11 @@ func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 			tc.resp.OK, tc.resp.Code = true, "KQ7M-X4PZ"
 			sock, reqs := fakeHelper(t, tc.resp)
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login-status")
 			if exit != tc.exit || stdout != tc.want {
 				t.Fatalf("exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", exit, stdout, tc.exit, tc.want, stderr)
 			}
-			if got := strings.Contains(stderr, "run: agent-secrets launcher login"); got != tc.remedy {
+			if got := strings.Contains(stderr, "run: agent-secrets machine login"); got != tc.remedy {
 				t.Fatalf("stderr = %q, want the login remedy: %v", stderr, tc.remedy)
 			}
 			if tc.stderr != "" && stderr != tc.stderr {
@@ -1154,7 +1154,7 @@ func TestCredentialExpiryLine(t *testing.T) {
 		{"2026-10-10T11:59:30Z", "the launcher credential expires at 2026-10-10T11:59:30Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
 		{"2026-10-03T15:05:00Z", "the launcher credential expires at 2026-10-03T15:05:00Z (in 3h5m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
 		{"2026-10-03T12:00:40Z", "the launcher credential expires at 2026-10-03T12:00:40Z (in 0m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
-		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets launcher login"},
+		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets machine login"},
 		{"", "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"},
 		{"next tuesday", `the helper reported an unreadable launcher credential expiry "next tuesday"`},
 	} {

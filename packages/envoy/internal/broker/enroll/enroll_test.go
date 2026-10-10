@@ -546,7 +546,7 @@ func TestSessionID(t *testing.T) {
 		t.Fatalf("SessionID(noSession) = %q, %v, want empty, nil", got, err)
 	}
 
-	if err := svc.Revoke(ctx, cred, withSession.ID.String(), "launcher:"+cred.ID.String()); err != nil {
+	if err := svc.Revoke(ctx, cred, withSession.ID.String(), record.LauncherActor(cred.ID.String())); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if got, err := svc.SessionID(ctx, withSession.ID.String()); err != nil || got != "" {
@@ -793,7 +793,7 @@ func TestEachSlotOfAPodIsAnEnrollmentOfItsOwn(t *testing.T) {
 		t.Fatalf("Create(implementer-g1, a different key) = %v, want ErrAlreadyEnrolled", err)
 	}
 
-	if err := svc.Revoke(ctx, cred, implementerG1.String(), "launcher:"+cred.ID.String()); err != nil {
+	if err := svc.Revoke(ctx, cred, implementerG1.String(), record.LauncherActor(cred.ID.String())); err != nil {
 		t.Fatalf("Revoke(implementer-g1): %v", err)
 	}
 	for id, slot := range ids {

@@ -459,7 +459,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("no credential yet: expected the remedy in the error, got %v", err)
 	}
 
@@ -474,13 +474,13 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	f.mu.Lock()
 	f.enrollUnauthorizedNext = 1
 	f.mu.Unlock()
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("expired credential: expected the remedy in the error, got %v", err)
 	}
 	if b.cred.Load() != nil {
 		t.Fatal("a 401 LAUNCHER_INVALID must clear the credential")
 	}
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("cleared credential: expected the remedy again, got %v", err)
 	}
 
@@ -571,7 +571,7 @@ func TestLoginStatusReadsARefusalWithTheClearThatCausedIt(t *testing.T) {
 // TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome: a re-login is waiting for
 // approval when the broker refuses the credential an earlier login installed. While it waits,
 // login-status reads it pending and the credential refused. Once the operator denies it, it reads
-// denied and no longer refused: its outcome is newer than the refusal, and `launcher login`, which
+// denied and no longer refused: its outcome is newer than the refusal, and `machine login`, which
 // reads the same answer, must tell the operator it was denied.
 func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
 	f := newFakeBroker(t)
@@ -697,7 +697,7 @@ func TestMissingCredentialNamesTheLoginCommand(t *testing.T) {
 	b := &Broker{URL: "http://127.0.0.1:1", OperatorFile: filepath.Join(t.TempDir(), "none"), HTTP: http.DefaultClient}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 	_, _, err := b.Enroll(context.Background(), sess)
-	if err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("expected the remedy in the error, got %v", err)
 	}
 }

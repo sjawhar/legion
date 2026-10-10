@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -40,11 +41,20 @@ type approverGrantsResponse struct {
 	Grants []approverGrantResp `json:"grants"`
 }
 
+// listGrantsForApprover lists the live grants of the person ?approver= names (writeApproverGrants).
 func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 	approver := r.URL.Query().Get("approver")
 	if !requireApprover(w, approver) {
 		return
 	}
+	s.writeApproverGrants(w, r, approver)
+}
+
+// writeApproverGrants answers every live grant of a session approver operates, automatic or
+// approved by anyone, and every grant approver approved on anyone's session
+// (requests.Machine.GrantsForApprover). Dispatch's Live grants page and the operator's own grant
+// list both answer through it, so the two agree.
+func (s *server) writeApproverGrants(w http.ResponseWriter, r *http.Request, approver string) {
 	rows, err := s.deps.Machine.GrantsForApprover(r.Context(), approver)
 	if err != nil {
 		writeInternal(w, "list grants for approver", err)
@@ -74,11 +84,8 @@ type revokeByApproverBody struct {
 	Approver string `json:"approver"`
 }
 
-// revokeByApprover ends a grant on a human's Dispatch login: the login must be the grant's
-// approver or its enrollment's operator (requests.Machine.RevokeByApprover's own mayRevoke
-// check). When the operator revokes a grant the session got without asking, its secrets are
-// withheld from that session, even when the grant had already ended: its other grants that got
-// them without asking end too, and its later requests for them ask their owner.
+// revokeByApprover ends a grant on a human's Dispatch login, as the person Dispatch names
+// (revokeGrantAs).
 func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {
@@ -91,7 +98,16 @@ func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	if !requireApprover(w, body.Approver) {
 		return
 	}
-	err := s.deps.Machine.RevokeByApprover(r.Context(), id, body.Approver)
+	s.revokeGrantAs(w, r, id, body.Approver, record.HumanActor(body.Approver))
+}
+
+// revokeGrantAs ends grant id as login, recording actor on every row it writes: login must be the
+// grant's approver or its enrollment's operator (requests.Machine.RevokeByApprover's own mayRevoke
+// check). When the operator revokes a grant the session got without asking, its secrets are
+// withheld from that session, even when the grant had already ended: its other grants that got
+// them without asking end too, and its later requests for them ask their owner.
+func (s *server) revokeGrantAs(w http.ResponseWriter, r *http.Request, id, login, actor string) {
+	err := s.deps.Machine.RevokeByApprover(r.Context(), id, login, actor)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such grant")

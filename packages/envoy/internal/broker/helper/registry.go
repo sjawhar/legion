@@ -180,10 +180,12 @@ type Registry struct {
 	saveMu sync.Mutex // serializes Save so the last rename is always the newest snapshot
 	path   string
 	byPID  map[int]*Session
+	// parent reads a process's parent for the ancestry walks: procParent, or a test's fake.
+	parent func(int) (int, error)
 }
 
 func NewRegistry(path string) *Registry {
-	return &Registry{path: path, byPID: map[int]*Session{}}
+	return &Registry{path: path, byPID: map[int]*Session{}, parent: procParent}
 }
 
 func (r *Registry) Add(s *Session) {
@@ -225,14 +227,28 @@ func (r *Registry) List() []*Session {
 }
 
 // Root is the session pid belongs to: the one registered for pid itself or for one of its
-// ancestors. nil when pid is in no session.
+// ancestors. nil when pid is in no session, or when a walk could not tell, which sign,
+// sign-request and unregister refuse (resolveDescendant) and register treats as a new root.
 func (r *Registry) Root(pid int) *Session {
+	sess, _ := r.RootOrUnknown(pid)
+	return sess
+}
+
+// RootOrUnknown is Root for a caller that must show pid is in no session: beside a nil session
+// it answers an error when some walk from pid ended short of init (descendsFrom: an unreadable
+// parent, a loop, the hop limit), since pid may then be inside that session.
+func (r *Registry) RootOrUnknown(pid int) (*Session, error) {
+	var unknown error
 	for _, s := range r.List() {
-		if DescendsFrom(pid, s.PID) {
-			return s
+		in, err := descendsFrom(pid, s.PID, r.parent)
+		if in {
+			return s, nil
+		}
+		if err != nil && unknown == nil {
+			unknown = err
 		}
 	}
-	return nil
+	return nil, unknown
 }
 
 // addRootIfAbsent inserts sess as pid's session only if pid still has none, atomically with the
@@ -242,7 +258,7 @@ func (r *Registry) addRootIfAbsent(pid int, sess *Session) (*Session, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range r.byPID {
-		if DescendsFrom(pid, s.PID) {
+		if in, _ := descendsFrom(pid, s.PID, r.parent); in {
 			return s, false
 		}
 	}

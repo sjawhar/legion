@@ -51,7 +51,7 @@ function MachineLoginDecision({
 }
 
 /**
- * The machine-login page: `agent-secrets launcher login` prints an 8-character code on the
+ * The machine-login page: `agent-secrets machine login` prints an 8-character code on the
  * machine, and the operator types it here; a service's login, such as the Legion daemon's, prints
  * its code in its log, and any signed-in person types it. Ruling 13 of the shared broker contract:
  * only this code-lookup route selects a
