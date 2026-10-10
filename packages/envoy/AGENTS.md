@@ -1993,7 +1993,9 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
+Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
 carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
@@ -2085,6 +2087,128 @@ name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a
 request ended first; the public `GET /v1/settings`
 answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
 
+`agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
+its AWS side in `secret_aws.go`) is the person's side of that reread. Each form reads the broker's
+settings from `AGENT_SECRETS_URL`, loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`,
+else the SDK's default chain) pinned to the key's region, and calls Secrets Manager itself, so IAM
+in that account, not the broker, decides what the person may read or write; it needs no session
+identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
+account than the key's, naming both (`requireAccount`, so a read never lists another account's
+secrets as if they were the agent secrets), and a write also refuses any ARN but
+`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
+in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
+before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
+`create` and `set` check the sign-in before they read the value: at a terminal they read one line
+with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
+reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
+shell's line until `fg`. Canonical mode is
+off, so no terminal line limit cuts the value. Enter or the terminal's end-of-file character ends
+it; erase, word erase and kill edit it. An unhandled control byte is refused, inside bracketed
+pastes too. The reader records the error, discards through the line ending (and through a
+bracketed paste's closing mark), then drains the post-line quiet window before returning it.
+The prompt enables bracketed paste and reads each such paste through its end, however far apart
+its writes arrive, as long as no more than `maxPasteDrain` (10 s) of quiet passes between them: the
+bound counts the quiet since the last input, restarted at each read, not the time since the paste
+began. Without brackets, it drains through 200 ms of quiet after the line with no total bound, and
+Ctrl-C ends it; that drain feeds the same reader (`drainAfterTheLine`), so a paste that begins in it
+restarts the same bound and is read through its closing mark, and a signal key inside it is pasted
+text. A paste-start mark split so only its first bytes arrive before the line ends holds the drain
+for `splitMarkGapMillis` (1 s) for the rest of the mark, so a late paste still opens.
+Anything but line endings after the first line is refused with exit 2. Bytes arriving after that
+quiet window can reach the shell; multi-line values should be piped, not pasted.
+A terminal hang-up before the line or paste ends returns an error, never a partial value, and so
+does a bracketed paste that falls quiet for `maxPasteDrain` (10 s) before its closing mark comes,
+where the signal keys pressed meanwhile were pasted text; input arriving after it is given up
+reaches the shell.
+Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 values are usage errors
+on either path.
+
+The reader alone changes the terminal, including its final flushing restore and bracketed-paste
+disable. It joins the signal watcher before restoring, and restores only while its process group
+holds the terminal (or the check fails, as on a hung-up terminal). A prompt that ends while
+another group holds it, by a terminating signal after Ctrl-Z and `bg` or orphaned by its shell's
+exit after `bg`, leaves the terminal as that group has it: a restore would stop the job until
+`fg`, or write the paste-off mark onto the other shell's line. A terminating signal then ends the
+CLI by that signal; bash resets its own terminal when a job dies by a signal. It reads the
+settings it restores only once its process group holds the
+terminal (`whenHeld`): a prompt started with `&` waits behind the shell's line editor, whose
+settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
+editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
+orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
+Darwin the group's job-control count), which no shell can foreground and whose stops the kernel
+discards, ends the wait with exit 2 naming the pipe command. So does a terminal that was the
+prompt's controlling terminal and no longer is (TIOCGPGRP answers ENOTTY once the session-leader
+shell that started it exits). A prompt that first reaches the terminal after that exit sees
+ENOTTY at once, so `controllingTerminal` also refuses when the session's leader is a zombie,
+reaped, or exiting (`sessionLeaderGone`: PF_EXITING in `/proc` on Linux, P_WEXIT or SZOMB from
+sysctl on Darwin). A terminal that never was, as the unit tests' bare pseudo-terminal in a live
+session, counts as held. The watcher handles SIGINT, SIGQUIT,
+SIGTERM, SIGHUP and SIGTSTP; signals whose kernel disposition is SIG_IGN remain ignored. ISIG is
+off: the reader acts on the terminal's signal keys itself (`promptReader.keys`, from the settings
+the shell handed it), sending the signal to its process group and discarding the rest of that
+read, so bytes typed after Ctrl-Z in the same write never reach the shell. A key inside a
+bracketed paste is pasted text, refused as a control byte with the paste drained through its end,
+and the key of an ignored signal does nothing. `feed` scans the whole read, past the line's end, so
+a signal key in the rest of the read after the line, outside a paste, still sends its signal and the
+value is not stored.
+SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. The watcher
+(`promptWatch`) writes each signal's number as one byte to a pipe the reader polls with the
+terminal, so an event and its wake-up are one byte, taken only by `next`; it never changes the
+terminal's settings. On SIGTSTP it writes the byte first, discards unread input, then `stopBy`
+re-raises the stop, holding a lock until the process resumes, so the reader's baseline read and
+label never run in a prompt a stop
+has sent to the background (`whileHeld`). The reader reapplies its current mode on resume or
+EINTR, and before each poll after any stop or resume it rereads the mode and reapplies it when it
+differs, since a stop no handler sees (SIGSTOP from another process) lets the shell put echo back
+while the job is stopped; one poll waits for input or a
+watcher event and also times the quiet window. Reads never block. IXON is cleared, so Ctrl-S and
+Ctrl-Q reach the reader and are refused as control bytes rather than suspending the prompt's
+output or vanishing from a paste. IEXTEN is cleared too, since macOS acts on Ctrl-V and Ctrl-O
+under it whatever ICANON and ISIG say, and on Linux n_tty lowercases input under IUCLC only while
+IEXTEN is set (`I_IUCLC(tty) && L_IEXTEN(tty)`), even outside canonical mode. Before each caught
+stop the watcher discards what the terminal
+holds unread (`discardInput`: TCFLSH on Linux, TIOCFLUSH on Darwin) while the prompt's group
+holds it, so unread secret bytes never reach the shell at a stop; keys typed after the stop has
+taken effect go to the shell, which holds the terminal then. The kernel reports no
+count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
+stays hidden only to discard the remaining line, then exits 2 and names the command to run again
+with the whole value. No partial value is returned or stored. An interactive shell restores its
+own terminal while the job is stopped. On Linux the stop is sent to the watcher's own thread with
+`tgkill` under `runtime.LockOSThread`, with SIG_DFL installed and the saved action restored.
+Darwin sends the stop to the process and reinstalls Go's handler through `signal.Ignore` and
+`signal.Notify`; its stop/resume behavior remains unverified on Darwin.
+After a terminating signal the reader restores, when its group holds the terminal, then re-raises
+it: SIGHUP, SIGINT, SIGQUIT and SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the
+kernel default, not Go's
+goroutine dump. Core dumps are disabled once, before the first value byte is read, for the rest
+of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
+`secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with
+`&` (the restored settings are compared with those bash hands a foreground job, and the label with
+the terminal's owner and echo when it is printed), a stop before the label, an orphaned group, a
+shell that exits under a background prompt, SIGTERM and SIGHUP after `bg`, an external SIGSTOP,
+bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins after the line,
+ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
+restoration.
+
+`create` writes on the settings' key with both tags
+and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
+one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
+secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
+an administrator's to change (a person's own secret may be made shared where their access allows
+the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
+recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. Every write is
+followed by the broker's reread of that name (`rereadAfter`): exit 0 when it serves the secret, or
+no longer serves it after a delete; 1 when its answer contradicts the write (a refusal names its
+reason); and 1 when the broker cannot be asked (an unreachable broker, `429 RATE_LIMITED`), saying
+the write stands and is served only from the next reload. `list` (`ListSecrets` with
+`IncludePlannedDeletion`) and `show` never print a
+value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
+plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
+and neither call answers the window it chose: a reader told that date never waits past the purge.
+`earliestPurge` is the one place `DeletedDate` is read. The forms' unit tests run in-process
+against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secret_e2e_test.go`
+runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
+
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
 Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
@@ -2170,10 +2294,8 @@ exists. With `--wait N --exec`, a session the helper cannot enroll for want of a
 with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
-`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
-`${BROKER_DATABASE_PASSWORD}` placeholder is substituted, URL-escaped, from
-`BROKER_DATABASE_PASSWORD` — naming the placeholder without the variable, or the variable without
-the placeholder, is refused naming both; a URL naming a user and no password whose host ends in
+`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only
+database variable: nothing is substituted into it; a URL naming a user and no password whose host ends in
 `.rds.amazonaws.com`, for which `pgconn.ParseConfig` finds no password (none in the URL, `PGPASSWORD`
 or a passfile), sets `Config.DatabaseIAM` and must read as that one host with `sslmode=verify-full`
 and an `sslrootcert` file's pool (not `sslrootcert=system`), or `Load` refuses naming the host and
@@ -2214,7 +2336,10 @@ an unset value. `config.Load` refuses to start naming a stale removal still set 
 environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
-checks no WebAuthn origin), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
+checks no WebAuthn origin), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token,
+and any other database's password goes in the URL itself; a `BROKER_DATABASE_URL` still naming its
+`${BROKER_DATABASE_PASSWORD}` placeholder is refused for the same reason, rather than tried as a
+literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
@@ -2223,9 +2348,20 @@ holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alia
 elsewhere, and a bare key id names no account); exactly one of
 `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
-same check as out of range). `cmd/broker/main.go` reads one thing `config.Load` does not:
+same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
+opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
+else `method=password`), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
+
+`docker/rds-global-bundle.pem`, the RDS CA bundle an IAM-form URL's `sslrootcert` names (the image
+ships it at `/etc/ssl/rds/global-bundle.pem`), is a dated snapshot of AWS's global bundle. Refresh it
+when a cluster moves to an RDS CA it does not hold, as its header says: download the source URL the
+header names, replace everything below the header, update the date and the SHA-256 line, and check
+that the body below the header hashes to that line. A broker on a cluster whose CA the bundle lacks
+fails the TLS handshake of every sign-in, its first (`store.Open`'s ping) included, so it refuses to
+start; `internal/smoke`'s `TestRDSBundle` checks that the image ships the vendored bytes outside the
+system trust store, not whether they are current.
 
 The docs site's broker reference pages are generated at site build from this source by
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
@@ -2327,9 +2463,16 @@ control, as it already was for grant rows.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no
-`login_hint` — a session never names its own approver, only the policy does), first checks for a
-still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
-as long as the current policy still allows it and the grant's whole chain still verifies), then
+`login_hint` — a session never names its own approver, only the policy does), rereads each name
+the live policy does not serve before deciding (`rereadMissing`, the miss path: `RefreshOne` for
+that one name, bounded per enrollment by `DefaultMissRereads`, a burst of 10 refilled one every
+10 s; a name `Current.CheckName` refuses costs no token; a failed reread logs
+`policy.LoadFailedMessage` with the name and leaves it unknown, while one whose own request ended
+first logs nothing and fails the call with that request's error; it runs before the transaction,
+so no Secrets Manager call holds a row lock), so a secret created a moment ago, or one the console
+made, is served on its first request, then checks for a still-live grant covering the exact same
+name set (`reuseLiveGrant`: no new request, no new record, as long as the current policy still
+allows it and the grant's whole chain still verifies), then
 decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
 sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
 the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
@@ -2532,9 +2675,11 @@ lane's own test mounts the real broker handlers (`api.Register` with real, Postg
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
 `enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
-`cmd/agent-secrets/main_test.go`'s own hand-rolled `fakeBroker` is the one sanctioned exception,
-since it exists to test the CLI binary's own request-building and response-parsing logic, not
-broker behavior. `packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
+`cmd/agent-secrets/main_test.go`'s hand-rolled `fakeBroker` and `secret_test.go`'s `secretBroker`
+(settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI
+binary's own request-building and response-parsing logic, not broker behavior;
+`secret_e2e_test.go` runs the same forms against the real rig.
+`packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
 for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
 when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
 testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
@@ -2558,15 +2703,20 @@ smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
 dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
-`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper`: each of
-`agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
-`bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
-backend auto-strips exactly one leading directory, so the installed tree still ends up
-`bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
-`bin/...` top level would itself be the directory mise strips. The release job builds them, once
-it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
+`cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux
+alone, since its build constraints admit only Linux (a laptop runs the CLI, never the helper).
+For each architecture `.github/go-release-targets.json`'s `envoy` key names,
+`agent-secrets-<arch>.tar.gz` holds both binaries; for each target its `agent-secrets-client` key
+names, `agent-secrets-darwin-<arch>.tar.gz` holds `bin/agent-secrets` alone. Each wraps its
+`bin/` in one top-level `agent-secrets/` directory — mise's `github:` backend auto-strips exactly
+one leading directory, so the installed tree still ends up `bin/agent-secrets` (and
+`bin/agent-secrets-helper` on Linux), the layout its installer expects; a bare `bin/...` top level
+would itself be the directory mise strips. The release job builds them, once it has decided the
+tag, so it can stamp that tag into each binary, and attests every `agent-secrets-*.tar.gz`; the
 build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
-the licenses of the Go modules both binaries compile in. This is the release a host installs both
-binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
+the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those
+notices for every archive and compiles the darwin client on each pull request. A host installs
+both binaries from this release (through the operator's dotfiles, under the broker design's
+devbox-enrollment plan), and a laptop the CLI.
 
