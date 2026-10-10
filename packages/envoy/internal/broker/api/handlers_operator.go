@@ -49,7 +49,7 @@ func (s *server) revokeOperatorMachine(w http.ResponseWriter, r *http.Request, c
 	if !ok {
 		return
 	}
-	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeOwnCredential, id, operator, launcherActor(cred))
+	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeOwnCredential, id, operator, record.LauncherActor(cred.ID.String()))
 }
 
 // listOperatorGrants lists the live grants of the calling credential's operator's sessions and
@@ -75,5 +75,5 @@ func (s *server) revokeOperatorGrant(w http.ResponseWriter, r *http.Request, cre
 	if !ok {
 		return
 	}
-	s.revokeGrantAs(w, r, id, operator, launcherActor(cred))
+	s.revokeGrantAs(w, r, id, operator, record.LauncherActor(cred.ID.String()))
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -97,7 +98,7 @@ func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	if !requireApprover(w, body.Approver) {
 		return
 	}
-	s.revokeGrantAs(w, r, id, body.Approver, humanActor(body.Approver))
+	s.revokeGrantAs(w, r, id, body.Approver, record.HumanActor(body.Approver))
 }
 
 // revokeGrantAs ends grant id as login, recording actor on every row it writes: login must be the

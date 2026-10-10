@@ -222,7 +222,7 @@ func insertApprovedCopy(t testing.TB, st *store.Store, recordID string, body rec
 		t.Fatalf("insert record copy: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor) values ($1, 'approved', $2, $3)`,
-		copyID, body.Approver, "human:"+body.Approver); err != nil {
+		copyID, body.Approver, record.HumanActor(body.Approver)); err != nil {
 		t.Fatalf("insert record copy's approval: %v", err)
 	}
 	return copyID

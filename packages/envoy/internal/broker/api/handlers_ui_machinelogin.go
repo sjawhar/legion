@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 type lookupMachineLoginBody struct {
@@ -125,7 +126,7 @@ func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request
 	if !requireApprover(w, body.Approver) {
 		return
 	}
-	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeCredential, id, body.Approver, humanActor(body.Approver))
+	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeCredential, id, body.Approver, record.HumanActor(body.Approver))
 }
 
 // revokeCredentialAs ends machine login id, expired or not, with revoke on the word of person

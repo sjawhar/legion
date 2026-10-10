@@ -587,7 +587,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 
-	event, by := "denied", "human:"+login
+	event, by := "denied", record.HumanActor(login)
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"

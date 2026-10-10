@@ -215,7 +215,7 @@ func TestApplyDecisionTakesTheCodeThenOnlyTheApproversLogin(t *testing.T) {
 		Scan(&login, &actor); err != nil {
 		t.Fatalf("read approved event: %v", err)
 	}
-	if login != testApprover || actor != "human:"+testApprover {
+	if login != testApprover || actor != record.HumanActor(testApprover) {
 		t.Fatalf("approved event login=%q actor=%q, want the canonical login %q", login, actor, testApprover)
 	}
 }

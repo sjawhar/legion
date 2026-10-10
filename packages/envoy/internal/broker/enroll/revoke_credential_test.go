@@ -44,7 +44,7 @@ func mintDecidedCredential(t *testing.T, svc *Service, operator, service *string
 	recordID := insertRecord(t, svc, "launcher_credential", approver)
 	cred := mintCredentialFrom(t, svc, operator, service, host, recordID)
 	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into credential_request_events (record_id, event, login, credential_id, actor)
-		values ($1,'approved',$2,$3,$4)`, recordID, approvedBy, cred.ID, "human:"+approvedBy); err != nil {
+		values ($1,'approved',$2,$3,$4)`, recordID, approvedBy, cred.ID, record.HumanActor(approvedBy)); err != nil {
 		t.Fatalf("insert the approved event: %v", err)
 	}
 	return cred
@@ -72,7 +72,7 @@ func TestRevokeAndDecideAdmitTheSameLogins(t *testing.T) {
 					name = *service
 				}
 				decides := record.MayDecide(record.KindLauncherCredential, approver, name, person)
-				err := svc.RevokeCredential(ctx, cred.ID.String(), person, "human:"+record.CanonicalLogin(person))
+				err := svc.RevokeCredential(ctx, cred.ID.String(), person, record.HumanActor(person))
 				if decides && err != nil || !decides && !errors.Is(err, ErrNotApprover) {
 					t.Errorf("approver %q, service %q, login %q: RevokeCredential = %v, but MayDecide = %v", approver, name, person, err, decides)
 				}
@@ -241,7 +241,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 		{"another person, an expired login", stale.ID.String(), "bob@example.com", ErrNotApprover},
 		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
 	} {
-		if err := svc.RevokeCredential(ctx, tc.id, tc.approver, "human:"+tc.approver); !errors.Is(err, tc.want) {
+		if err := svc.RevokeCredential(ctx, tc.id, tc.approver, record.HumanActor(tc.approver)); !errors.Is(err, tc.want) {
 			t.Fatalf("RevokeCredential(%s) = %v, want %v", tc.name, err, tc.want)
 		}
 	}
@@ -321,14 +321,14 @@ func TestAPersonsOwnMachineLoginsLeaveOutEveryServicesLogin(t *testing.T) {
 		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
 		{"another person's machine", bob.ID.String(), "ada@example.com", ErrNotApprover},
 	} {
-		if err := svc.RevokeOwnCredential(ctx, tc.id, tc.person, "launcher:"+devbox.ID.String()); !errors.Is(err, tc.want) {
+		if err := svc.RevokeOwnCredential(ctx, tc.id, tc.person, record.LauncherActor(devbox.ID.String())); !errors.Is(err, tc.want) {
 			t.Fatalf("RevokeOwnCredential(%s) = %v, want %v", tc.name, err, tc.want)
 		}
 	}
 	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{old.ID, laptop.ID, service.ID, devbox.ID}) {
 		t.Fatalf("LiveCredentials(ada) after the refused revokes = %v, want all four still live", got)
 	}
-	if err := svc.RevokeOwnCredential(ctx, laptop.ID.String(), "Ada@Example.com", "launcher:"+devbox.ID.String()); err != nil {
+	if err := svc.RevokeOwnCredential(ctx, laptop.ID.String(), "Ada@Example.com", record.LauncherActor(devbox.ID.String())); err != nil {
 		t.Fatalf("RevokeOwnCredential(her laptop) = %v", err)
 	}
 	if got := own("ada@example.com"); !slices.Equal(got, []uuid.UUID{devbox.ID}) {
@@ -353,7 +353,7 @@ func TestAnExpiredLoginLeavesTheListOnceItsLastSessionEnds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(the laptop's session): %v", err)
 	}
-	if err := svc.Revoke(ctx, devbox, ended.ID.String(), "launcher:"+devbox.ID.String()); err != nil {
+	if err := svc.Revoke(ctx, devbox, ended.ID.String(), record.LauncherActor(devbox.ID.String())); err != nil {
 		t.Fatalf("Revoke(the devbox's session) by its launcher: %v", err)
 	}
 	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 minute' where id = any($1)`, []uuid.UUID{devbox.ID, laptop.ID}); err != nil {
@@ -655,7 +655,7 @@ func TestARevokeRacingTheLaunchersOwnRevokeEndsTheSessionOnce(t *testing.T) {
 	if _, err := tx.Exec(ctx, `select 1 from enrollments where id=$1 for update`, enr.ID); err != nil {
 		t.Fatalf("lock the enrollment: %v", err)
 	}
-	if _, _, err := endEnrollment(ctx, tx, enr.ID.String(), "launcher:"+cred.ID.String(), "enrollment.revoked", "revoked by its launcher"); err != nil {
+	if _, _, err := endEnrollment(ctx, tx, enr.ID.String(), record.LauncherActor(cred.ID.String()), "enrollment.revoked", "revoked by its launcher"); err != nil {
 		t.Fatalf("end the enrollment as its launcher: %v", err)
 	}
 	done := make(chan error, 1)

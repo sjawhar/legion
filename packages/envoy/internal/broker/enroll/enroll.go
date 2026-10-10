@@ -289,7 +289,7 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2,
 		jsonb_strip_nulls(jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text,'slot',nullif($6::text,''))))`,
-		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
+		in.ID, record.LauncherActor(cred.ID.String()), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
 		return Enrollment{}, false, err
 	}
 	return in, false, tx.Commit(ctx)

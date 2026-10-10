@@ -226,18 +226,6 @@ func requireApprover(w http.ResponseWriter, login string) bool {
 	return true
 }
 
-// humanActor is the audit actor of a change a UI route makes: the person Dispatch names, whose
-// signed-in session Dispatch's server vouches for.
-func humanActor(login string) string {
-	return "human:" + record.CanonicalLogin(login)
-}
-
-// launcherActor is the audit actor of a change a launcher route makes: the machine login whose
-// proof authenticated the call, which names its operator through its own row.
-func launcherActor(cred enroll.Credential) string {
-	return "launcher:" + cred.ID.String()
-}
-
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

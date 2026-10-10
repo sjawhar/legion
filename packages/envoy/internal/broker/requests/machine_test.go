@@ -949,7 +949,7 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if _, _, err := m.Values(ctx, *automatic.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator, "human:"+operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator, record.HumanActor(operator)); err != nil {
 		t.Fatalf("RevokeByApprover(the operator) = %v", err)
 	}
 
@@ -969,11 +969,11 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com", "human:"+otherPerson); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com", record.HumanActor(otherPerson)); err != nil {
 		t.Fatalf("RevokeByApprover(the approver) = %v", err)
 	}
 	var actor string
-	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != "human:"+otherPerson {
+	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != record.HumanActor(otherPerson) {
 		t.Fatalf("grant.revoked actor = %q, %v, want human:%s", actor, err, otherPerson)
 	}
 }

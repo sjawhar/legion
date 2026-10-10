@@ -17,6 +17,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 // operatorGet reads an operator route's list under launcher credential credentialID, failing t on
@@ -314,7 +316,7 @@ func TestOperatorRevokesAGrant(t *testing.T) {
 		t.Fatalf("the session's next WORKER_TOKEN request = %+v, want it pending: the operator's revoke withheld it", again)
 	}
 
-	actor := "launcher:" + credID
+	actor := record.LauncherActor(credID)
 	for _, g := range []string{grantID, mixed} {
 		if got := ts.column(t, `select revoked_by from grants where id=$1`, g); !slices.Equal(got, []string{actor}) {
 			t.Fatalf("grant %s revoked_by = %v, want [%s]", g, got, actor)
@@ -374,7 +376,7 @@ func TestAnApproverWhoIsNotTheOperatorRevokesWithoutWithholding(t *testing.T) {
 	if got := ts.column(t, `select name from withheld_secrets where enrollment_id=$1`, box); len(got) != 0 {
 		t.Fatalf("withheld from mallory's session = %v, want nothing", got)
 	}
-	if got := ts.column(t, `select actor || ' ' || coalesce(detail->>'withheld', '-') from audit where kind in ('grant.revoked', 'grant.withheld') and grant_id=$1`, mixed); !slices.Equal(got, []string{"launcher:" + credID + " -"}) {
+	if got := ts.column(t, `select actor || ' ' || coalesce(detail->>'withheld', '-') from audit where kind in ('grant.revoked', 'grant.withheld') and grant_id=$1`, mixed); !slices.Equal(got, []string{record.LauncherActor(credID) + " -"}) {
 		t.Fatalf("the revoked grant's audit rows = %v, want one grant.revoked by launcher:%s withholding nothing", got, credID)
 	}
 }
@@ -413,7 +415,7 @@ func TestOperatorRevokesAnotherOfTheirMachinesAsTheCallingLogin(t *testing.T) {
 		t.Fatalf("the devbox's list after the revoke = %v, want the devbox alone", ids)
 	}
 
-	actor := "launcher:" + devbox
+	actor := record.LauncherActor(devbox)
 	for _, check := range []struct {
 		what, query, arg string
 	}{
@@ -437,7 +439,7 @@ func TestOperatorRevokesAnotherOfTheirMachinesAsTheCallingLogin(t *testing.T) {
 func TestUIRevokesRecordTheSignedInPerson(t *testing.T) {
 	ts := newTestServer(t)
 	spelled := " \t" + "SAMI@Example.COM "
-	actor := "human:" + testApprover
+	actor := record.HumanActor(testApprover)
 	credID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
 	box, boxKey := ts.enrolledBox(t, machineKey, credID, "box-"+t.Name())
 	first := ts.requestAs(t, boxKey, box, "WORKER_TOKEN")
