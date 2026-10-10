@@ -93,8 +93,8 @@ func TestLoadRefusesASetARunnerWouldApplyOtherThanAsWritten(t *testing.T) {
 			want: []string{"migration +3_signed.up.sql: its name does not begin with a version"},
 		},
 		{
-			// A bare //go:embed directory pattern leaves such a name out; embedded with all:, the
-			// runner is given it, and it is refused here rather than skipped.
+			// pgmigratetest.CheckEmbedsEveryFile says why the stores' runners are given such a name;
+			// it is refused here rather than skipped.
 			name: "a name beginning with an underscore",
 			set:  fstest.MapFS{"migrations/_0053_hidden.up.sql": file("select 53")},
 			want: []string{"migration _0053_hidden.up.sql: its name does not begin with a version"},

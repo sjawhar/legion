@@ -329,20 +329,23 @@ when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.dow
 `.census.sql` is the migration's census, "Pre-deploy census" below; each needs its `.up.sql`),
 when a census is not one `select` or calls a function it may not (below), when a version
 is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
-embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
-swap file left in the directory fails a local build's tests until it is gone. Versions are applied
-by number, not by file name, and the store's tests require every file on disk to be embedded
-(`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
-(`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
-on `main`.
+embedded whole (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` says why), so a name beginning with
+`_` or `.` is refused like any other. An editor's swap file therefore stops a locally built
+`envoy-dispatch` from booting, and fails the store's tests, until it is removed, and a binary built
+while it was there keeps refusing to boot until it is rebuilt; Vim writes its swap file beside the
+file it edits by default. Versions are applied by number, not by file name, and
+the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`)
+and the versions to run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`), both reading
+file names alone, so take the next free number on `main`.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
 `pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
 migration queued behind a long transaction fails the boot instead of holding every read and write
 of its table behind its request. The failure names the migration, the lock it wanted, the sessions
-it was queued behind, and the `pg_stat_activity` query that lists the holders; end the holder or
-let it finish and start the server again. A migration that needs another bound sets its own
-`SET LOCAL lock_timeout`.
+it was queued behind, and a `pg_stat_activity` query for the sessions holding the lock; end the
+holder or let it finish and start the server again. That query can come back empty: a prepared
+transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432). A
+migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
 Migrations `0056`–`0062` make search indexing linear. Each table has its own migration, so its
 transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and trigger setup;
