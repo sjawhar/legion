@@ -56,11 +56,12 @@ func loggedInElsewhere(t *testing.T, rig *brokertest.Rig, host string) (*helper.
 }
 
 // TestMachineListAndRevokeUnderTheMachinesLogin: once this machine is logged in, `machine list`
-// shows its login and another of the operator's machines, and `--json` prints exactly what
-// Dispatch's machine-login page reads for the operator. `machine revoke` ends the other machine's
-// login, which the broker then refuses, and prints `revoked <id>`. Revoking this machine's own
-// login warns that it ends this machine's access, and the broker refuses the next command, which
-// says to log the machine in again.
+// shows its login and another of the operator's machines, and `--json` prints the broker's body
+// verbatim, which with no service login on the rig is exactly what Dispatch's machine-login page
+// reads for the operator. `machine revoke` ends the other machine's login, which the broker then
+// refuses, and prints `revoked <id>`. Revoking this machine's own login warns that it ends this
+// machine's access, and the broker refuses the next command, which says to log the machine in
+// again.
 func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
@@ -79,14 +80,14 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 		t.Fatalf("machine list: %d %q %q", exit, stdout, stderr)
 	}
 	header, rows := tableRows(t, stdout)
-	if want := []string{"CREDENTIAL_ID", "HOST", "SERVICE", "APPROVED_BY", "ISSUED", "EXPIRES", "STATE"}; !slices.Equal(header, want) || len(rows) != 2 {
+	if want := []string{"CREDENTIAL_ID", "HOST", "APPROVED_BY", "ISSUED", "EXPIRES", "STATE"}; !slices.Equal(header, want) || len(rows) != 2 {
 		t.Fatalf("machine list = %q, want the header %v and two rows", stdout, want)
 	}
-	if laptopRow := rows[0]; laptopRow[0] != laptopID || laptopRow[1] != "example-host-laptop" || laptopRow[2] != "-" || laptopRow[3] != rig.Operator || laptopRow[6] != "ok" {
+	if laptopRow := rows[0]; laptopRow[0] != laptopID || laptopRow[1] != "example-host-laptop" || laptopRow[2] != rig.Operator || laptopRow[5] != "ok" {
 		t.Fatalf("machine list's first row = %v, want the laptop's login %s, newest first", laptopRow, laptopID)
 	}
 	own := rows[1][0]
-	if rows[1][1] != "testhost" || rows[1][6] != "ok" {
+	if rows[1][1] != "testhost" || rows[1][5] != "ok" {
 		t.Fatalf("machine list's second row = %v, want this machine's login", rows[1])
 	}
 

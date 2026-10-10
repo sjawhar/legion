@@ -1,9 +1,11 @@
 // handlers_operator.go: GET /v1/operator/machines, POST /v1/operator/machines/{id}/revoke, GET
 // /v1/operator/grants and POST /v1/operator/grants/{id}/revoke — a person's own machine logins and
-// live grants, listed and ended from their machine under its machine login (launcherAuth), as
-// Dispatch's machine-logins and Live grants pages list and end them through the UI routes. Each
-// acts for the calling credential's operator, and each revoke records that machine login as its
-// actor, since its launcher proof, not a Dispatch sign-in, is what authenticated it.
+// live grants, listed and ended from their machine under its machine login (launcherAuth). The
+// grant routes answer as Dispatch's Live grants page does through the UI routes; the machine
+// routes cover the person's own machines' logins alone, a subset of Dispatch's machine-logins page,
+// which also lists every service's login, so ending the Legion daemon's login stays a Dispatch
+// sign-in's. Each acts for the calling credential's operator, and each revoke records that machine
+// login as its actor, since its launcher proof, not a Dispatch sign-in, is what authenticated it.
 package api
 
 import (
@@ -23,21 +25,21 @@ func operatorOf(w http.ResponseWriter, cred enroll.Credential) (string, bool) {
 	return record.CanonicalLogin(*cred.Operator), true
 }
 
-// listOperatorMachines lists the machine logins the calling credential's operator may revoke, as
-// GET /v1/launcher-credentials lists them for that person: their own machines' and every
-// service's, not revoked, and unexpired or expired with a session still running.
+// listOperatorMachines lists the calling credential's operator's own machines' logins, as
+// GET /v1/launcher-credentials lists them for that person but without any service's login: not
+// revoked, and unexpired or expired with a session still running.
 func (s *server) listOperatorMachines(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	operator, ok := operatorOf(w, cred)
 	if !ok {
 		return
 	}
-	s.writeLauncherCredentials(w, r, operator)
+	s.writeLauncherCredentials(w, r, s.deps.Enroll.OwnLiveCredentials, operator)
 }
 
-// revokeOperatorMachine ends a machine login the calling credential's operator may revoke (one of
-// their own machines', or any service's), as POST /v1/launcher-credentials/{id}/revoke-by-approver
-// ends it for that person, recording the calling machine login as the actor. Revoking the calling
-// credential itself ends this machine's own access.
+// revokeOperatorMachine ends one of the calling credential's operator's own machines' logins, as
+// POST /v1/launcher-credentials/{id}/revoke-by-approver ends it for that person, recording the
+// calling machine login as the actor. A service's login is not found here (404 NOT_FOUND), as an
+// unknown id is. Revoking the calling credential itself ends this machine's own access.
 func (s *server) revokeOperatorMachine(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	operator, ok := operatorOf(w, cred)
 	if !ok {
@@ -47,7 +49,7 @@ func (s *server) revokeOperatorMachine(w http.ResponseWriter, r *http.Request, c
 	if !ok {
 		return
 	}
-	s.revokeCredentialAs(w, r, id, operator, launcherActor(cred))
+	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeOwnCredential, id, operator, launcherActor(cred))
 }
 
 // listOperatorGrants lists the live grants of the calling credential's operator's sessions and

@@ -122,11 +122,12 @@ func routes() []apiRoute {
 		// the grant had already ended: its other grants that got them automatically end too, and it
 		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
-		// List the machine logins the calling credential's operator may revoke — the machines they
-		// logged in and every service's login — exactly as Dispatch's machine-logins page lists them.
+		// List the logins of the calling credential's operator's own machines, as Dispatch's
+		// machine-logins page lists them, without the service logins that page also lists.
 		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},
-		// End one of the operator's machine logins: no proof signed with it authenticates again and every
-		// session it enrolled ends. Revoking the calling machine's own login ends this machine's access.
+		// End one of the operator's own machines' logins: no proof signed with it authenticates again
+		// and every session it enrolled ends. A service's login is not found here, like an unknown
+		// id. Revoking the calling machine's own login ends this machine's access.
 		{http.MethodPost, "/v1/operator/machines/{id}/revoke", launcherAuth((*server).revokeOperatorMachine)},
 		// List the live grants of the operator's sessions and those the operator approved, exactly as
 		// Dispatch's Live grants page lists them.

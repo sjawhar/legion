@@ -512,8 +512,20 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 // login, such as the Legion daemon's, has no operator and acts as no person, so anyone signed in
 // to Dispatch approves it (record.MayDecide), lists it and revokes it, its Service set. Each login
 // names who approved it, the login its approved event records. The sentinel record.AnyoneApprover
-// and an empty login list nothing.
+// and an empty login list nothing. OwnLiveCredentials lists the person's own machines' alone.
 func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
+	return s.liveCredentials(ctx, person, true)
+}
+
+// OwnLiveCredentials is LiveCredentials without any service's login: the logins of the person's
+// own machines alone, those minted from a launcher_credential record that names them, as the
+// person's own machine lists them (GET /v1/operator/machines).
+func (s *Service) OwnLiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
+	return s.liveCredentials(ctx, person, false)
+}
+
+// liveCredentials is LiveCredentials, every service's login among them only when services is set.
+func (s *Service) liveCredentials(ctx context.Context, person string, services bool) ([]LiveCredential, error) {
 	person = record.CanonicalLogin(person)
 	if person == "" || person == record.AnyoneApprover {
 		return nil, nil
@@ -522,9 +534,9 @@ func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCre
 			(select ev.login from credential_request_events ev where ev.record_id = r.id and ev.event = 'approved'),
 			c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
 		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where (c.service is not null or r.approver = $1) and c.revoked_at is null
+		where ((c.service is null and r.approver = $1) or ($2 and c.service is not null)) and c.revoked_at is null
 			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and e.lease_expires_at > now()))
-		order by c.created_at desc, c.id`, person)
+		order by c.created_at desc, c.id`, person, services)
 	if err != nil {
 		return nil, err
 	}
@@ -550,6 +562,17 @@ func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCre
 // the credential revoked; and it takes those enrollments' rows, so a launcher's own Revoke of one
 // either commits first, leaving it out of the list here, or waits and finds it ended.
 func (s *Service) RevokeCredential(ctx context.Context, id, person, actor string) error {
+	return s.revokeCredential(ctx, id, person, actor, true)
+}
+
+// RevokeOwnCredential is RevokeCredential for the logins OwnLiveCredentials lists: a service's
+// login is ErrNoCredential, as an unknown id is, and ends nothing.
+func (s *Service) RevokeOwnCredential(ctx context.Context, id, person, actor string) error {
+	return s.revokeCredential(ctx, id, person, actor, false)
+}
+
+// revokeCredential is RevokeCredential, a service's login revocable only when services is set.
+func (s *Service) revokeCredential(ctx context.Context, id, person, actor string, services bool) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -569,6 +592,9 @@ func (s *Service) RevokeCredential(ctx context.Context, id, person, actor string
 	}
 	var svc string
 	if service != nil {
+		if !services {
+			return ErrNoCredential
+		}
 		svc = *service
 	}
 	person = record.CanonicalLogin(person)

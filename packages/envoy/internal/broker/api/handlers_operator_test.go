@@ -1,14 +1,16 @@
 // handlers_operator_test.go drives the operator self-service routes (/v1/operator/*), which a
 // person's machine login calls with its launcher proof, on the same real broker api_test.go
-// mounts: each list answers what Dispatch's own page answers for the credential's operator, each
-// revoke acts as that operator and records the calling machine login as its actor, and a
-// service's login, which has no operator, is refused every one of them.
+// mounts: the machine list answers the person's own machines' rows of Dispatch's machine-login
+// page and the grant list what Dispatch's Live grants page answers, each revoke acts as the
+// credential's operator and records the calling machine login as its actor, and a service's
+// login, which has no operator, is refused every one of them.
 package api_test
 
 import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
@@ -92,6 +94,21 @@ func (ts *testServer) column(t *testing.T, query string, args ...any) []string {
 	return out
 }
 
+// machineRows splits a machine-login list body into its rows as the broker wrote them, keeping
+// only a person's own machines' (service null) when own is set.
+func machineRows(t *testing.T, body []byte, own bool) []string {
+	t.Helper()
+	var rows []string
+	for _, raw := range decode[struct {
+		Credentials []json.RawMessage `json:"credentials"`
+	}](t, body).Credentials {
+		if !own || decode[wireLauncherCredential](t, raw).Service == nil {
+			rows = append(rows, string(raw))
+		}
+	}
+	return rows
+}
+
 func TestOperatorListsAndRevokesTheirOwnMachines(t *testing.T) {
 	ts := newTestServer(t)
 	credID, key := ts.mintLauncherCredential(t, testApprover, "example-host-devbox-a")
@@ -125,20 +142,25 @@ func TestOperatorListsAndRevokesTheirOwnMachines(t *testing.T) {
 	}
 }
 
-// TestOperatorMachinesMatchTheApproversDispatchList: a person's machine login lists, byte for byte,
-// what Dispatch's machine-logins page lists for them — both their machines and the service login
-// they approved — and another person's lists only theirs; an unknown or malformed id is refused
-// and ends nothing.
-func TestOperatorMachinesMatchTheApproversDispatchList(t *testing.T) {
+// TestOperatorMachinesAreThePersonsOwnRowsOfDispatchsList: a person's machine login lists
+// exactly their own machines' rows of what Dispatch's machine-login page lists for them, byte for
+// byte and in its order, and never a service's login, which that page lists beside them; another
+// person's lists only theirs. A service's login is no more revocable there than an unknown id
+// (404 NOT_FOUND), and a malformed id is refused; none of those revokes ends anything.
+func TestOperatorMachinesAreThePersonsOwnRowsOfDispatchsList(t *testing.T) {
 	ts := newTestServer(t)
 	devbox, devboxKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
 	laptop, _ := ts.mintLauncherCredential(t, testApprover, "example-host-laptop")
 	service, _ := ts.mintServiceLauncherCredential(t)
 	mallory, malloryKey := ts.mintLauncherCredential(t, "mallory@example.com", "example-host-devbox-m")
 
+	page := ts.uiGet(t, "/v1/launcher-credentials", testApprover)
+	if got := len(machineRows(t, page, false)); got != 3 {
+		t.Fatalf("Dispatch's page = %s, want three rows, the service login among them", page)
+	}
 	got := ts.operatorGet(t, devboxKey, devbox, "/v1/operator/machines")
-	if want := ts.uiGet(t, "/v1/launcher-credentials", testApprover); !bytes.Equal(got, want) {
-		t.Fatalf("GET /v1/operator/machines = %s\nwant Dispatch's page's list %s", got, want)
+	if rows, want := machineRows(t, got, false), machineRows(t, page, true); !slices.Equal(rows, want) {
+		t.Fatalf("GET /v1/operator/machines rows = %v\nwant the own machines' rows of Dispatch's page, %v", rows, want)
 	}
 	var ids []string
 	for _, c := range decode[struct {
@@ -146,11 +168,11 @@ func TestOperatorMachinesMatchTheApproversDispatchList(t *testing.T) {
 	}](t, got).Credentials {
 		ids = append(ids, c.CredentialID)
 	}
-	if want := []string{service, laptop, devbox}; !slices.Equal(ids, want) {
-		t.Fatalf("operator machines = %v, want the service login, the laptop and the devbox, newest first (%v)", ids, want)
+	if want := []string{laptop, devbox}; !slices.Equal(ids, want) {
+		t.Fatalf("operator machines = %v, want the laptop and the devbox, newest first, and not the service login (%v)", ids, want)
 	}
-	if got, want := ts.operatorGet(t, malloryKey, mallory, "/v1/operator/machines"), ts.uiGet(t, "/v1/launcher-credentials", "mallory@example.com"); !bytes.Equal(got, want) {
-		t.Fatalf("mallory's GET /v1/operator/machines = %s\nwant her page's list %s", got, want)
+	if got, want := ts.operatorGet(t, malloryKey, mallory, "/v1/operator/machines"), ts.uiGet(t, "/v1/launcher-credentials", "mallory@example.com"); !slices.Equal(machineRows(t, got, false), machineRows(t, want, true)) {
+		t.Fatalf("mallory's GET /v1/operator/machines = %s\nwant her own machines' rows of her page %s", got, want)
 	}
 
 	for _, tc := range []struct {
@@ -158,6 +180,7 @@ func TestOperatorMachinesMatchTheApproversDispatchList(t *testing.T) {
 		status     int
 		code       string
 	}{
+		{"of a service's login", "/v1/operator/machines/" + service + "/revoke", http.StatusNotFound, "NOT_FOUND"},
 		{"of an unknown id", "/v1/operator/machines/" + uuid.NewString() + "/revoke", http.StatusNotFound, "NOT_FOUND"},
 		{"of a malformed id", "/v1/operator/machines/not-a-uuid/revoke", http.StatusBadRequest, "CREDENTIAL_ID_INPUT"},
 	} {
@@ -165,8 +188,8 @@ func TestOperatorMachinesMatchTheApproversDispatchList(t *testing.T) {
 			t.Fatalf("revoke %s = %d %s, want %d %s", tc.name, status, body, tc.status, tc.code)
 		}
 	}
-	if logins := ts.machineLogins(t, testApprover); len(logins) != 3 {
-		t.Fatalf("machine logins after the refused revokes = %+v, want all three", logins)
+	if got := ts.uiGet(t, "/v1/launcher-credentials", testApprover); !bytes.Equal(got, page) {
+		t.Fatalf("Dispatch's page after the refused revokes = %s, want it unchanged: %s", got, page)
 	}
 }
 

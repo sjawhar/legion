@@ -272,6 +272,70 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	}
 }
 
+// TestAPersonsOwnMachineLoginsLeaveOutEveryServicesLogin: OwnLiveCredentials is LiveCredentials
+// without any service's login, a person's own machines' alone, in its order; a service's login,
+// including one whose record an older broker opened naming the person, is ErrNoCredential to
+// RevokeOwnCredential, as an unknown id is, and stays live. RevokeOwnCredential keeps
+// RevokeCredential's rule for a person's machine: another person is ErrNotApprover, and the
+// person who approved it ends it.
+func TestAPersonsOwnMachineLoginsLeaveOutEveryServicesLogin(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	devbox := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
+	service := mintApprovedCredential(t, svc, "ada@example.com", str("legion-daemon"), "cluster")
+	laptop := mintApprovedCredential(t, svc, "ada@example.com", nil, "laptop")
+	old := mintDecidedCredential(t, svc, nil, str("legion-daemon"), "old-cluster", "ada@example.com", "ada@example.com")
+	bob := mintApprovedCredential(t, svc, "bob@example.com", nil, "bobs-box")
+
+	own := func(person string) []uuid.UUID {
+		t.Helper()
+		creds, err := svc.OwnLiveCredentials(ctx, person)
+		if err != nil {
+			t.Fatalf("OwnLiveCredentials(%s): %v", person, err)
+		}
+		ids := make([]uuid.UUID, len(creds))
+		for i, c := range creds {
+			ids[i] = c.ID
+		}
+		return ids
+	}
+	if got, all := own("ada@example.com"), liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{laptop.ID, devbox.ID}) ||
+		!slices.Equal(all, []uuid.UUID{old.ID, laptop.ID, service.ID, devbox.ID}) {
+		t.Fatalf("OwnLiveCredentials(ada) = %v and LiveCredentials(ada) = %v; want her laptop and devbox, then those beside both service logins", got, all)
+	}
+	if got := own(" BOB@example.com "); !slices.Equal(got, []uuid.UUID{bob.ID}) {
+		t.Fatalf("OwnLiveCredentials(bob) = %v, want his own alone", got)
+	}
+	for _, who := range []string{"  ", record.AnyoneApprover} {
+		if got := own(who); len(got) != 0 {
+			t.Fatalf("OwnLiveCredentials(%q) = %v, want none", who, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		name, id, person string
+		want             error
+	}{
+		{"a service's login", service.ID.String(), "ada@example.com", ErrNoCredential},
+		{"a service's login whose record names ada", old.ID.String(), "ada@example.com", ErrNoCredential},
+		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
+		{"another person's machine", bob.ID.String(), "ada@example.com", ErrNotApprover},
+	} {
+		if err := svc.RevokeOwnCredential(ctx, tc.id, tc.person, "launcher:"+devbox.ID.String()); !errors.Is(err, tc.want) {
+			t.Fatalf("RevokeOwnCredential(%s) = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{old.ID, laptop.ID, service.ID, devbox.ID}) {
+		t.Fatalf("LiveCredentials(ada) after the refused revokes = %v, want all four still live", got)
+	}
+	if err := svc.RevokeOwnCredential(ctx, laptop.ID.String(), "Ada@Example.com", "launcher:"+devbox.ID.String()); err != nil {
+		t.Fatalf("RevokeOwnCredential(her laptop) = %v", err)
+	}
+	if got := own("ada@example.com"); !slices.Equal(got, []uuid.UUID{devbox.ID}) {
+		t.Fatalf("OwnLiveCredentials(ada) after revoking her laptop = %v, want her devbox alone", got)
+	}
+}
+
 // TestAnExpiredLoginLeavesTheListOnceItsLastSessionEnds: an expired login stays listed only while
 // a session it enrolled is live as Lookup means it, unrevoked with its lease unlapsed. One whose
 // session its launcher ended before the login expired is not listed, and one whose session's lease

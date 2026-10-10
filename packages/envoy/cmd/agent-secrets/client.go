@@ -334,8 +334,9 @@ type OperatorMachines struct {
 	Credentials []OperatorMachine `json:"credentials"`
 }
 
-// OperatorMachines lists the machine logins the calling machine login's operator may revoke, as
-// Dispatch's machine-login page lists them, with the raw body for --json.
+// OperatorMachines lists the calling machine login's operator's own machines' logins, as
+// Dispatch's machine-login page lists them but without any service's login, with the raw body
+// for --json.
 func (c *client) OperatorMachines(ctx context.Context, signer Signer) (OperatorMachines, []byte, error) {
 	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/operator/machines", nil)
 	if err != nil {
@@ -348,8 +349,8 @@ func (c *client) OperatorMachines(ctx context.Context, signer Signer) (OperatorM
 	return out, raw, nil
 }
 
-// RevokeOperatorMachine ends machine login id as the calling machine login's operator. id goes
-// into the path escaped, so whatever a person types names one path segment.
+// RevokeOperatorMachine ends one of the calling machine login's operator's own machines' logins.
+// id goes into the path escaped, so whatever a person types names one path segment.
 func (c *client) RevokeOperatorMachine(ctx context.Context, signer Signer, id string) error {
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+url.PathEscape(id)+"/revoke", nil)
 	return err

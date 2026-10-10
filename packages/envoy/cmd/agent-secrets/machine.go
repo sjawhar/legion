@@ -1,9 +1,9 @@
 // packages/envoy/cmd/agent-secrets/machine.go
 //
 // "agent-secrets machine login|login-status|list|revoke": the machine login the host helper holds
-// for every session it registers, started and read through the helper, and the operator's machine
-// logins, listed and ended under it (the broker's operator routes, signed by the helper's
-// sign-launcher op).
+// for every session it registers, started and read through the helper, and the operator's own
+// machines' logins, listed and ended under it (the broker's operator routes, signed by the
+// helper's sign-launcher op).
 package main
 
 import (
@@ -200,9 +200,10 @@ func roughDuration(d time.Duration) string {
 	}
 }
 
-// cmdMachineList implements "machine list": the machine logins the operator may revoke that can
-// still reach a secret, newest first, as Dispatch's machine-login page lists them. --json prints
-// the broker's answer verbatim, the body that page reads.
+// cmdMachineList implements "machine list": the logins of the operator's own machines that can
+// still reach a secret, newest first, each row as Dispatch's machine-login page lists it; that
+// page also lists every service's login, which this leaves out, so the table has no service
+// column. --json prints the broker's answer verbatim.
 func cmdMachineList(args []string, stdout, stderr io.Writer) int {
 	const form = "machine list"
 	flagArgs, positional := splitArgs(args, nil)
@@ -229,17 +230,13 @@ func cmdMachineList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CREDENTIAL_ID\tHOST\tSERVICE\tAPPROVED_BY\tISSUED\tEXPIRES\tSTATE")
+	fmt.Fprintln(tw, "CREDENTIAL_ID\tHOST\tAPPROVED_BY\tISSUED\tEXPIRES\tSTATE")
 	for _, m := range machines.Credentials {
-		service := "-"
-		if m.Service != nil {
-			service = *m.Service
-		}
 		state := "ok"
 		if m.Expired {
 			state = "expired"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.CredentialID, m.Host, service, orDash(m.ApprovedBy),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", m.CredentialID, m.Host, orDash(m.ApprovedBy),
 			m.IssuedAt.UTC().Format(time.RFC3339), m.ExpiresAt.UTC().Format(time.RFC3339), state)
 	}
 	if err := tw.Flush(); err != nil {
@@ -253,9 +250,10 @@ func cmdMachineList(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// cmdMachineRevoke implements "machine revoke CREDENTIAL_ID": it ends one of the operator's machine
-// logins, as Dispatch's machine-login page does, and every session it enrolled. Revoking this
-// machine's own login ends this machine's broker access too, which it warns about on stderr.
+// cmdMachineRevoke implements "machine revoke CREDENTIAL_ID": it ends one of the operator's own
+// machines' logins, as Dispatch's machine-login page does, and every session it enrolled; a
+// service's login is not found here. Revoking this machine's own login ends this machine's broker
+// access too, which it warns about on stderr.
 func cmdMachineRevoke(args []string, stdout, stderr io.Writer) int {
 	const form = "machine revoke"
 	flagArgs, positional := splitArgs(args, nil)
