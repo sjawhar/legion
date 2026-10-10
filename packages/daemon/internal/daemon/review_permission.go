@@ -43,7 +43,7 @@ type permissionKey struct{ repository, login string }
 // account than the author (GitHub resolves some logins to another user) is not either, and logged.
 //
 // GitHub is not asked about the review App's own reviews, which decide by its login alone
-// (workflow's decidesRound), nor about a review on a pull request the daemon does not record, which
+// (workflow's DecidesRound), nor about a review on a pull request the daemon does not record, which
 // the workflow drops; both are answered false. An account answered no write access stands so for
 // reviewPermissionTTL; write access is never kept (reviewPermissionTTL's comment).
 //

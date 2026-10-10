@@ -149,11 +149,12 @@ Legion uses GitHub's own review mechanisms rather than labels:
 
 - The **reviewer** submits a GitHub review: an approval of the head by its commit, or changes
   requested. A plain comment decides nothing, and the architect is told the round is stuck. The
-  daemon hears of a review from GitHub's webhook, and while the round is open it also reads the
-  pull request's reviews with the implement App every two minutes, so a review whose webhook never
-  arrived still decides the round within one read. Either way the newest deciding review counts,
-  and counts once: a review the daemon already applied, by webhook or by read, decides nothing
-  again, in that round or a later one.
+  daemon hears of a review from GitHub's webhook, and it also reads every open pull request's
+  reviews with the implement App every two minutes, so a review whose webhook never arrived still
+  counts within one read. Either way the newest deciding review counts, and counts once: a review
+  the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
+  no round is open (the work is being implemented or tested) decides no round, the next one
+  included.
 - **CI** on the pull request's head counts: red checks while testing or reviewing, or once the
   issue awaits its merge, send the issue back to the implementer, naming the failing checks. Once
   the issue awaits its merge, only a red of the head's own counts: `READY` found the head's own

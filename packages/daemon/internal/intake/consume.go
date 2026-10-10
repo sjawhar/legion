@@ -234,20 +234,36 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	ackMessage(spec.Logger, message)
 }
 
-// resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission,
-// before the fact enters its transaction. Only a review that decides (PullRequestReview.Decides)
-// and names its author is looked up: a comment decides nothing whoever writes it, so it costs no
-// GitHub call. Every other fact passes through untouched.
+// resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission
+// (ResolveAuthorCanWrite), before the fact enters its transaction, within AckWait. Every other fact
+// passes through untouched.
 func resolveReviewPermission(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
 	review, ok := fact.(PullRequestReview)
-	if !ok || spec.ReviewPermission == nil || review.Author == "" || !review.Decides() {
+	if !ok {
 		return fact, nil
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	canWrite, err := spec.ReviewPermission(read, review)
+	review, err := ResolveAuthorCanWrite(read, review, spec.ReviewPermission)
 	if err != nil {
 		return nil, err
+	}
+	return review, nil
+}
+
+// ResolveAuthorCanWrite fills review's AuthorCanWrite from permission, the daemon's reader of the
+// author's repository permission, for a webhook's review (resolveReviewPermission) and the daemon's
+// own read of a pull request's reviews alike, so the workflow's DecidesRound judges both on the same
+// answer. Only a review that decides (Decides) and names its author is looked up: a comment decides
+// nothing whoever writes it, so it costs no GitHub call. No reader (a test, or a daemon without one)
+// leaves AuthorCanWrite false. A failed read is returned with the review unchanged.
+func ResolveAuthorCanWrite(ctx context.Context, review PullRequestReview, permission func(context.Context, PullRequestReview) (bool, error)) (PullRequestReview, error) {
+	if permission == nil || review.Author == "" || !review.Decides() {
+		return review, nil
+	}
+	canWrite, err := permission(ctx, review)
+	if err != nil {
+		return review, err
 	}
 	review.AuthorCanWrite = canWrite
 	return review, nil

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // githubReview is one review as GitHub lists a pull request's reviews (GET /pulls/{number}/reviews):
@@ -30,42 +28,36 @@ type githubReview struct {
 	SubmittedAt time.Time `json:"submitted_at"`
 }
 
-// readReviews is the required-checks pass's read of pr's reviews while its issue's review round is
-// open (workflow.ReviewRoundOpen). The daemon otherwise learns a decision only from its
+// readReviews is the required-checks pass's read of pr's reviews, for every open pull request,
+// whatever phase its issue is in. The daemon otherwise learns a decision only from its
 // pull_request_review webhook, and a delivery that never reaches the notification stream leaves the
-// round open with the decision on GitHub; a restart loses nothing, since the daemon's durable
-// consumer replays what the stream holds, so the read is for the delivery the stream never got. It
-// reads every page of the pull request's reviews with github, the implement App's client the pass
-// read the pull request with, and applies the review its round may still take (reviewToApply) as
-// the intake.PullRequestReview fact the webhook would have carried, which the workflow decides as it
-// decides the webhook's. A round open for a pass costs one read per hundred of its reviews, about
-// thirty an hour, on the installation the rest of the pass reads with; a round that is not open
-// costs none.
+// decision on GitHub unread; a restart loses nothing, since the daemon's durable consumer replays
+// what the stream holds, so the read is for the delivery the stream never got. It reads every page
+// of the pull request's reviews with github, the implement App's client the pass read the pull
+// request with, and applies the review the workflow would hold as the newest had every webhook
+// arrived (reviewToApply), as the intake.PullRequestReview fact the webhook would have carried,
+// which the workflow decides as it decides the webhook's. A pass costs one read per hundred of the
+// pull request's reviews, about thirty an hour for each open pull request, on the installation the
+// rest of the pass reads with.
+//
+// It reads in every phase, not only while a review round is open, because the workflow records a
+// deciding review as the pull request's newest (record.PullRequest.ReviewSeen) whatever phase the
+// issue is in and lets it decide only an open round: a review submitted while the work is in
+// implementing or testing, or in a round CI's red ended, is recorded and decides nothing, so no later
+// round takes it as its own decision. A read made only while a round is open would leave such a
+// review unrecorded and apply it to the next round instead.
 //
 // Nothing beyond the workflow's own order keeps the read and the webhook from deciding twice. Both
 // carry GitHub's review id and submission time, so whichever copy is applied first records the
-// review as the pull request's newest deciding one (record.PullRequest.ReviewSeen), and the other is
-// not after it and records nothing; facts apply one at a time (intake.ApplyFact), so the two copies
-// never both pass that order. A review of a round that already ended is no newer than the mark
-// either, so it neither reopens that round nor decides a later one.
+// review as the pull request's newest deciding one, and the other is not after it and records
+// nothing; facts apply one at a time (intake.ApplyFact), so the two copies never both pass that
+// order.
 //
 // ctx bounds the apply, and read the reads before it. It says whether the pass must stop: ctx
 // ended, or GitHub answered the reviews read with its rate limit, which every later read of the
-// pass on the same installation meets. Any other failure is logged and leaves the round as it stood
-// for the next pass to read again.
+// pass on the same installation meets. Any other failure is logged and applies nothing, and the
+// next pass reads again.
 func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubrest.Client, pr record.PullRequest) bool {
-	issue, err := w.recordedIssue(read, pr.Issue)
-	if err != nil {
-		if ctx.Err() != nil {
-			return true
-		}
-		w.log.Error("read the issue of a pull request to read its reviews; a decision its webhook never delivered stays unread until a later pass reads it",
-			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "error", err)
-		return false
-	}
-	if issue == nil || !workflow.ReviewRoundOpen(*issue) {
-		return false
-	}
 	reviews, err := githubrest.GetPages[githubReview](read, github, fmt.Sprintf("/pulls/%d/reviews", pr.Number))
 	if err != nil {
 		if ctx.Err() != nil {
@@ -88,8 +80,8 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 		if ctx.Err() != nil {
 			return true
 		}
-		w.log.Warn("read whether a review's author may decide its round; a later pass reads it again",
-			"repo", pr.Repo, "pullRequest", pr.Number, "review", review.ID, "author", review.Author, "error", err)
+		w.log.Error("apply none of a pull request's reviews this pass; a later pass reads them again",
+			"repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 		return false
 	}
 	if !ok {
@@ -106,44 +98,64 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 	return false
 }
 
-// reviewToApply is the review of reviews, GitHub's list of pr's, that the workflow would hold as its
-// round's decision had every webhook arrived. It is the newest by submission time, then id
-// (record.ReviewOrder), of the reviews that decide - an approval or a request for changes; a
-// comment, a dismissed review and a pending draft decide nothing - that are newer than the pull
-// request's newest deciding review as the pass listed it (record.PullRequest.ReviewSeen), and whose
-// author is the review App or, read with the webhook's own resolver (reviewerCanWrite), an account
-// with write access to the repository. GitHub lists reviews in the order they were created, and a
-// draft keeps its place when it is submitted later, so the list's order decides nothing. Only the
-// newest is applied: once the reviewer has completed, the first decision applied ends the round,
-// where webhooks delivered in full leave the newest deciding it. Its body is the review's whole
-// body, where the webhook's envelope carries its first 2,048 characters. It says false when no
-// review qualifies, and returns the resolver's error, which ends the search.
+// reviewToApply is the review of reviews, GitHub's list of pr's, that the workflow would hold as the
+// pull request's newest deciding review had every webhook arrived, judged by the workflow's own
+// rules rather than a copy of them: of the reviews that decide (intake.PullRequestReview.Decides)
+// and are newer (intake.PullRequestReview.Order) than the newest the pull request's record held as
+// the pass listed it (record.PullRequest.ReviewSeen), the newest whose author the workflow lets
+// decide (workflow.Engine.DecidesRound), with the author's write access read as a webhook's review
+// reads it (intake.ResolveAuthorCanWrite with reviewerCanWrite). GitHub lists reviews in the order
+// they were created, and a draft keeps its place when it is submitted later, so the list's order
+// decides nothing. Its body is the review's whole body, where the webhook's envelope carries its
+// first 2,048 characters. It says false when no review qualifies. A deciding review GitHub lists
+// without an id or a submission time, which the workflow could not order, is an error, as is a
+// failed permission read; either applies nothing.
+//
+// Each review is judged once, as a webhook's is judged once when it is delivered: a review whose
+// author the workflow did not let decide is kept as refused (refusedReviews) and never judged
+// again, so an account given write access after its review was judged cannot turn that review into
+// a later round's decision, which its webhook could not either. A read that failed judged nothing,
+// and the next pass asks again.
 func (w *workflowRuntime) reviewToApply(ctx context.Context, pr record.PullRequest, reviews []githubReview) (intake.PullRequestReview, bool, error) {
 	var candidates []intake.PullRequestReview
 	for _, listed := range reviews {
 		review := intake.PullRequestReview{Repo: pr.Repo, Number: pr.Number, ID: listed.ID, SubmittedAt: listed.SubmittedAt,
 			State: strings.ToLower(listed.State), CommitID: listed.CommitID, Author: listed.User.Login, Body: listed.Body}
-		order := record.ReviewOrder{SubmittedAt: review.SubmittedAt, ID: review.ID}
-		if review.ID == 0 || review.SubmittedAt.IsZero() || review.Author == "" || !review.Decides() || !order.After(pr.ReviewSeen) {
+		if !review.Decides() {
 			continue
 		}
-		candidates = append(candidates, review)
+		if review.ID == 0 || review.SubmittedAt.IsZero() {
+			return intake.PullRequestReview{}, false, fmt.Errorf("GitHub listed %s's %s review of pull request %s#%d with id %d and submission time %s, which no review can be ordered by",
+				review.Author, review.State, pr.Repo, pr.Number, review.ID, listed.SubmittedAt)
+		}
+		if review.Order().After(pr.ReviewSeen) {
+			candidates = append(candidates, review)
+		}
 	}
 	slices.SortFunc(candidates, func(a, b intake.PullRequestReview) int {
-		return cmp.Or(b.SubmittedAt.Compare(a.SubmittedAt), cmp.Compare(b.ID, a.ID))
+		switch {
+		case a.Order().After(b.Order()):
+			return -1
+		case b.Order().After(a.Order()):
+			return 1
+		}
+		return 0
 	})
 	for _, review := range candidates {
-		if w.reviewAppLogin != "" && review.Author == w.reviewAppLogin {
-			return review, true, nil
+		if w.refusedReviews[review.ID] {
+			continue
 		}
-		canWrite, err := w.reviewerCanWrite(ctx, review)
+		resolved, err := intake.ResolveAuthorCanWrite(ctx, review, w.reviewerCanWrite)
 		if err != nil {
-			return review, false, err
+			return intake.PullRequestReview{}, false, fmt.Errorf("read whether %s may decide review %d: %w", review.Author, review.ID, err)
 		}
-		if canWrite {
-			review.AuthorCanWrite = true
-			return review, true, nil
+		if w.engine.DecidesRound(resolved) {
+			return resolved, true, nil
 		}
+		if w.refusedReviews == nil {
+			w.refusedReviews = map[int64]bool{}
+		}
+		w.refusedReviews[review.ID] = true
 	}
 	return intake.PullRequestReview{}, false, nil
 }

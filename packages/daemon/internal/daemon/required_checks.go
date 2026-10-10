@@ -22,20 +22,19 @@ import (
 // webhooks (repository_ruleset, branch_protection_rule) the Envoy listener does not carry to the
 // daemon, and the listener does not carry a pull request's workflow runs at all, so reading again
 // is how the daemon notices either: a change reaches the verdict within one interval. A pass reads
-// each open pull request once, each base branch at least twice (its rulesets, a page per hundred
-// rules, and its protection), when the base requires a workflow, each pull request's workflow runs
-// once more, and, while its issue's review round is open, each pull request's reviews once more, a
-// page per hundred reviews (readReviews), all on the implement App's installation, whose hourly
-// limit every pane's gh shares: about ninety reads an hour for a pull request on a base of its own,
-// thirty for each more on the same base, thirty more for each pull request whose base requires a
-// workflow, and thirty more for each pull request in review. Two minutes also gives a newly opened
-// pull request its set well before its first CI settles, and bounds how long a review decision
-// whose webhook never arrived stays unread.
+// each open pull request twice (the pull request itself, and its reviews, a page per hundred
+// reviews: readReviews), each base branch at least twice (its rulesets, a page per hundred rules,
+// and its protection), and, when the base requires a workflow, each pull request's workflow runs
+// once more, all on the implement App's installation, whose hourly limit every pane's gh shares:
+// about a hundred and twenty reads an hour for a pull request on a base of its own, sixty for each
+// more on the same base, and thirty more for each pull request whose base requires a workflow. Two
+// minutes also gives a newly opened pull request its set well before its first CI settles, and
+// bounds how long a review decision whose webhook never arrived stays unread.
 const requiredChecksInterval = 2 * time.Minute
 
-// requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews while
-// its round is open, then that branch's rulesets and protection, then its workflow runs, each a
-// single GitHub answer that comes in well under a second.
+// requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews, then
+// that branch's rulesets and protection, then its workflow runs, each a single GitHub answer that
+// comes in well under a second.
 const requiredChecksRead = 30 * time.Second
 
 // watchRequiredChecks reads the checks each open pull request's base branch requires
@@ -63,11 +62,11 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // an intake.PullRequestMergeability fact whenever that read is CONFLICTING or differs from the one
 // recorded - workflow's mergeability decides a CONFLICTING read every time, even one that only
 // confirms the stored value, so a conflict the poll recorded before the issue reached
-// awaiting_merge is still acted on once it gets there. While the pull request's issue has its review
-// round open, it then reads the pull request's reviews and applies a deciding one the daemon has not
-// recorded, whose webhook never arrived (readReviews). It then reads what the base branch requires
-// with the implement App's installation token, the credential the daemon reads GitHub with for its
-// own work (requiredchecks.Required, the reader READY uses), and, when that includes a workflow,
+// awaiting_merge is still acted on once it gets there. It then reads the pull request's reviews and
+// applies a deciding one the daemon has not recorded, whose webhook never arrived (readReviews),
+// whatever phase the issue is in. It then reads what the base branch requires with the implement
+// App's installation token, the credential the daemon reads GitHub with for its own work
+// (requiredchecks.Required, the reader READY uses), and, when that includes a workflow,
 // each required workflow's latest run on the head whose settlement stands for the pull request's
 // (classify.WorkflowHead, requiredchecks.Workflows). It applies an intake.RequiredChecks fact when
 // that read differs from the one recorded, which decides the head's verdict again (workflow's
