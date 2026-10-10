@@ -1,210 +1,194 @@
 import { type ReactNode, useMemo, useState } from "react";
 
-import type { DeliveryPR } from "../../api/types";
-import { Chip } from "../../components/Chip";
+import type { DeliveryTimelineResponse } from "../../api/types";
 import { MultiSelect } from "../../components/MultiSelect";
-import { inputClasses, textSecondaryOnCanvas } from "../../theme/classes";
+import {
+  borderStrong,
+  inputClasses,
+  surfaceBg,
+  textMutedOnCanvas,
+  textPrimaryOnSurface,
+} from "../../theme/classes";
 import {
   DEPLOYED_LABELS,
   type DeployedFacet,
+  FACET_PARAMS,
+  type FacetKey,
   type Filters,
-  NO_ISSUE,
   PLACEHOLDER_LABELS,
-  parentAgentPlaceholder,
   REWORK_LABELS,
   type ReworkFacet,
 } from "./lib/facets";
 
-type MultiKey = "repo" | "parentAgent" | "session" | "issue" | "author";
+type ListFacet = Exclude<FacetKey, "rework" | "deployed">;
 
-const MULTI_FACETS: { key: MultiKey; label: string; searchLabel: string; emptyMessage: string }[] =
-  [
-    {
-      key: "repo",
-      label: "Repository",
-      searchLabel: "Search repositories",
-      emptyMessage: "No repositories yet.",
-    },
-    {
-      key: "parentAgent",
-      label: "Parent agent",
-      searchLabel: "Search parent agents",
-      emptyMessage: "No parent agents yet.",
-    },
-    {
-      key: "session",
-      label: "Session",
-      searchLabel: "Search sessions",
-      emptyMessage: "No sessions yet.",
-    },
-    {
-      key: "issue",
-      label: "Dispatch issue",
-      searchLabel: "Search issues",
-      emptyMessage: "No issues yet.",
-    },
-    {
-      key: "author",
-      label: "Author",
-      searchLabel: "Search authors",
-      emptyMessage: "No authors yet.",
-    },
-  ];
+const LIST_FACETS: { key: ListFacet; label: string }[] = [
+  { key: "repo", label: "Repository" },
+  { key: "parentAgent", label: "Parent agent" },
+  { key: "session", label: "Session" },
+  { key: "issue", label: "Dispatch issue" },
+  { key: "priority", label: "Priority" },
+  { key: "component", label: "Component" },
+  { key: "author", label: "Author" },
+];
 
-/** Every distinct value of one client-side facet among the window's PRs, for the MultiSelect's
- *  `options` list — this slice has no distinct-values endpoint, so the options a picker offers
- *  grow from what the current (unfiltered-by-this-facet) response actually contains; `onCreate`
- *  lets a caller add any other value by typing it (the server still validates/filters by it). */
-function optionsFor(prs: readonly DeliveryPR[], key: MultiKey): string[] {
-  const values = new Set<string>();
-  for (const pr of prs) {
-    switch (key) {
-      case "repo":
-        values.add(pr.repo);
-        break;
-      case "parentAgent":
-        values.add(pr.parent_agent ?? parentAgentPlaceholder(pr));
-        break;
-      case "session":
-        for (const s of pr.sessions) values.add(s);
-        break;
-      case "issue":
-        values.add(pr.issue ?? NO_ISSUE);
-        break;
-      case "author":
-        values.add(pr.author);
-        break;
-      default:
-        break;
-    }
-  }
-  return Array.from(values).sort((a, b) => a.localeCompare(b));
+const REWORK_VALUES: ReworkFacet[] = ["value", "rework"];
+const DEPLOYED_VALUES: DeployedFacet[] = ["deployed", "waiting", "not_tracked"];
+
+const facetLabelClass = `mb-1 block text-xs tracking-wide uppercase ${textMutedOnCanvas}`;
+const triggerClass = `flex h-7 w-full items-center justify-between rounded border px-2 text-left text-xs ${borderStrong} ${surfaceBg} ${textPrimaryOnSurface}`;
+
+/** One facet's searchable checkbox list: "Any <facet>" until something is picked, each value with
+ *  its count, sorted by count. A facet with no values in the window and nothing picked is not
+ *  shown. */
+function Facet({
+  label,
+  values,
+  counts,
+  selected,
+  valueLabel,
+  open,
+  onOpenChange,
+  onChange,
+}: {
+  label: string;
+  values: readonly string[];
+  counts: Readonly<Record<string, number>>;
+  selected: readonly string[];
+  valueLabel: (value: string) => string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onChange: (next: string[]) => void;
+}): ReactNode {
+  if (values.length === 0 && selected.length === 0) return null;
+  const options = [...new Set([...selected, ...values])];
+  const state =
+    selected.length === 0 ? `Any ${label.toLowerCase()}` : `${selected.length} selected`;
+  const countOf = (value: string) => counts[value] ?? 0;
+  return (
+    <div>
+      <span className={facetLabelClass}>{label}</span>
+      <MultiSelect
+        emptyMessage="No matches."
+        label={label}
+        onChange={onChange}
+        onOpenChange={onOpenChange}
+        open={open}
+        optionDetail={(value) => String(countOf(value))}
+        optionDetailLabel={(value) => {
+          const count = countOf(value);
+          return `${count} PR${count === 1 ? "" : "s"}`;
+        }}
+        optionLabel={valueLabel}
+        options={options}
+        searchLabel={`Search ${label.toLowerCase()}\u2026`}
+        selected={selected}
+        triggerAriaLabel={`${label}: ${state}`}
+        triggerClassName={triggerClass}
+      >
+        <span className="truncate">{state}</span>
+      </MultiSelect>
+    </div>
+  );
 }
 
-function labelFor(value: string): string {
-  return PLACEHOLDER_LABELS[value] ?? value;
-}
-
-/** The delivery timeline's facet strip: the client-side facets (`filters.ts`'s module comment
- *  explains why priority/component are not here) plus `priority`/`component`, sent straight to
- *  the server since only it has the joined Dispatch issue data to filter by them. All combinable,
- *  all URL-persisted by the caller (`DeliveryPage`'s `useDeliveryFilters`). */
+/** The delivery timeline's facet column: the search, Rework and Deployed side by side, then one
+ *  facet per list (repository, parent agent, session, Dispatch issue, priority, component,
+ *  author), each counted by the server with every other facet applied and its own ignored. All
+ *  combinable; the caller keeps them in the URL. */
 export function FacetPanel({
-  prs,
+  data,
   filters,
   onChange,
-  priority,
-  onPriorityChange,
-  component,
-  onComponentChange,
 }: {
-  prs: readonly DeliveryPR[];
+  data: DeliveryTimelineResponse;
   filters: Filters;
   onChange: (next: Filters) => void;
-  priority: string[];
-  onPriorityChange: (next: string[]) => void;
-  component: string[];
-  onComponentChange: (next: string[]) => void;
 }): ReactNode {
-  const [openPicker, setOpenPicker] = useState<MultiKey | "priority" | "component" | undefined>(
-    undefined
-  );
-  const multiOptions = useMemo(
-    () =>
-      Object.fromEntries(MULTI_FACETS.map(({ key }) => [key, optionsFor(prs, key)])) as Record<
-        MultiKey,
-        string[]
-      >,
-    [prs]
-  );
-  const setMulti = (key: MultiKey, next: string[]) => onChange({ ...filters, [key]: next });
-  const toggleRework = (value: ReworkFacet) =>
-    onChange({
-      ...filters,
-      rework: filters.rework.includes(value)
-        ? filters.rework.filter((v) => v !== value)
-        : [...filters.rework, value],
-    });
-  const toggleDeployed = (value: DeployedFacet) =>
-    onChange({
-      ...filters,
-      deployed: filters.deployed.includes(value)
-        ? filters.deployed.filter((v) => v !== value)
-        : [...filters.deployed, value],
-    });
+  const [openFacet, setOpenFacet] = useState<FacetKey | undefined>(undefined);
+  const countsOf = (key: FacetKey) => data.facet_counts[FACET_PARAMS[key]];
+  const byCount = (key: FacetKey) => {
+    const counts = countsOf(key);
+    return Object.keys(counts).sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
+  };
+  // How many sub-components each component has in the window's projects: selecting a parent
+  // selects them too (the server expands it), and the prototype lists components flat, so the
+  // option says so. One walk up from each component counts it under every ancestor, rather than
+  // one descendant walk per component as architecture-model.ts's descendantComponents would take.
+  const subComponents = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const component of Object.values(data.components)) {
+      const seen = new Set<string>();
+      for (let parent = component.parent; parent !== null && !seen.has(parent); ) {
+        seen.add(parent);
+        counts.set(parent, (counts.get(parent) ?? 0) + 1);
+        parent = data.components[parent]?.parent ?? null;
+      }
+    }
+    return counts;
+  }, [data.components]);
+  const valueLabel = (key: FacetKey, value: string): string => {
+    const placeholder = PLACEHOLDER_LABELS[value];
+    if (placeholder !== undefined) return placeholder;
+    if (key === "issue") return `${value} \u2014 ${data.issue_titles[value] ?? ""}`;
+    if (key === "component") {
+      const title = data.components[value]?.title ?? value;
+      const children = subComponents.get(value) ?? 0;
+      if (children === 0) return title;
+      return `${title} (includes ${children} sub-component${children === 1 ? "" : "s"})`;
+    }
+    return value;
+  };
+  const facetProps = (key: FacetKey) => ({
+    counts: countsOf(key),
+    onChange: (next: string[]) => onChange({ ...filters, [key]: next }),
+    onOpenChange: (open: boolean) => setOpenFacet(open ? key : undefined),
+    open: openFacet === key,
+    selected: filters[key],
+  });
 
   return (
-    <div className="flex flex-col gap-3 text-sm">
-      <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
-        Search
+    <div className="flex flex-col gap-4 text-sm">
+      <div>
+        <label className={facetLabelClass} htmlFor="facet-search">
+          Search
+        </label>
         <input
-          aria-label="Search merged PRs"
-          className={`mt-1 block min-h-11 w-full max-w-xs rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
+          className={`h-8 w-full rounded border px-2 text-sm ${inputClasses(false)}`}
+          id="facet-search"
           onChange={(event) => onChange({ ...filters, search: event.target.value })}
           placeholder="Title or PR id"
-          type="search"
+          type="text"
           value={filters.search}
         />
-      </label>
-      <div className="flex flex-wrap items-end gap-3">
-        {MULTI_FACETS.map(({ key, label, searchLabel, emptyMessage }) => (
-          <MultiSelect
-            emptyMessage={emptyMessage}
-            key={key}
-            label={label}
-            onChange={(next) => setMulti(key, next)}
-            onCreate={(value) => setMulti(key, [...filters[key], value])}
-            onOpenChange={(open) => setOpenPicker(open ? key : undefined)}
-            open={openPicker === key}
-            options={multiOptions[key]}
-            optionLabel={labelFor}
-            searchLabel={searchLabel}
-            selected={filters[key]}
+      </div>
+      <div className="flex gap-4">
+        <div className="min-w-0 flex-1">
+          <Facet
+            {...facetProps("rework")}
+            label="Rework"
+            valueLabel={(value) => REWORK_LABELS[value as ReworkFacet] ?? value}
+            values={REWORK_VALUES}
           />
-        ))}
-        <MultiSelect
-          emptyMessage="Type a priority (e.g. P0)."
-          label="Priority"
-          onChange={onPriorityChange}
-          onCreate={(value) => onPriorityChange([...priority, value])}
-          onOpenChange={(open) => setOpenPicker(open ? "priority" : undefined)}
-          open={openPicker === "priority"}
-          options={[]}
-          searchLabel="Add a priority"
-          selected={priority}
-        />
-        <MultiSelect
-          emptyMessage="Type a component id."
-          label="Component"
-          onChange={onComponentChange}
-          onCreate={(value) => onComponentChange([...component, value])}
-          onOpenChange={(open) => setOpenPicker(open ? "component" : undefined)}
-          open={openPicker === "component"}
-          options={[]}
-          searchLabel="Add a component id"
-          selected={component}
-        />
+        </div>
+        <div className="min-w-0 flex-1">
+          <Facet
+            {...facetProps("deployed")}
+            label="Deployed"
+            valueLabel={(value) => DEPLOYED_LABELS[value as DeployedFacet] ?? value}
+            values={DEPLOYED_VALUES}
+          />
+        </div>
       </div>
-      <div className="flex flex-wrap gap-2">
-        {(Object.keys(REWORK_LABELS) as ReworkFacet[]).map((value) => (
-          <Chip
-            key={value}
-            onClick={() => toggleRework(value)}
-            selected={filters.rework.includes(value)}
-          >
-            {REWORK_LABELS[value]}
-          </Chip>
-        ))}
-        {(Object.keys(DEPLOYED_LABELS) as DeployedFacet[]).map((value) => (
-          <Chip
-            key={value}
-            onClick={() => toggleDeployed(value)}
-            selected={filters.deployed.includes(value)}
-          >
-            {DEPLOYED_LABELS[value]}
-          </Chip>
-        ))}
-      </div>
+      {LIST_FACETS.map(({ key, label }) => (
+        <Facet
+          {...facetProps(key)}
+          key={key}
+          label={label}
+          valueLabel={(value) => valueLabel(key, value)}
+          values={byCount(key)}
+        />
+      ))}
     </div>
   );
 }

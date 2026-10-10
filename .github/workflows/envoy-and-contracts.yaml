@@ -749,18 +749,19 @@ jobs:
 
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
-  # this package under -race before a PR claimed it), and delivery (its intake handler reads the
-  # routing settings the poll loop publishes, from NATS's delivery goroutine), all under the race
-  # detector. A read that walks a live document without its lock races the room's peers, which no
-  # ordinary run shows: the unit-test step above runs without -race (LEGION-499). Its own job
-  # beside envoy-go because -race runs these packages several times slower, and with its own
-  # package deadline, since go test's ten-minute default is a whole package's. pmdoc's tests shell
-  # out to the generated TypeScript fixtures under internal/dispatch/pmdoc/gen (envoy-go's own
-  # "Check pmdoc fixtures are up to date" step), so this job needs Bun installed and its workspace
-  # linked the same way, though not that freshness check itself - a stale fixture is envoy-go's
-  # failure to catch, not a race. delivery's tests start a NATS container, so the job takes
-  # envoy-go's Ryuk setting and pulls that image first, for the reason envoy-go's own pull step
-  # gives.
+  # this package under -race before a PR claimed it), delivery (its intake handler reads the
+  # routing settings the poll loop publishes, from NATS's delivery goroutine), and store (the
+  # pool's one-connection guard, and the hold mark of its own each concurrent read takes),
+  # all under the race detector. A read that walks a live document without its lock races the
+  # room's peers, which no ordinary run shows: the unit-test step above runs without -race
+  # (LEGION-499). Its own job beside envoy-go because -race runs these packages several times
+  # slower, and with its own package deadline, since go test's ten-minute default is a whole
+  # package's. pmdoc's tests shell out to the generated TypeScript fixtures under
+  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), so
+  # this job needs Bun installed and its workspace linked the same way, though not that freshness
+  # check itself - a stale fixture is envoy-go's failure to catch, not a race. delivery's tests
+  # start a NATS container, so the job takes envoy-go's Ryuk setting and pulls that image first,
+  # for the reason envoy-go's own pull step gives.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -799,8 +800,8 @@ jobs:
             sleep 10
           done
         working-directory: packages/envoy
-      - name: Race-test the document service, its API, pmdoc, and delivery
-        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/...
+      - name: Race-test the document service, its API, pmdoc, delivery, and the store
+        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/...
         working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each

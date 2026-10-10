@@ -166,3 +166,31 @@ test("optionLabel renders the row text and the search matches it while the value
     view.unmount();
   }
 });
+
+test("a row's detail reads after its label and a comma, spoken with its own words when given", () => {
+  const view = render(
+    <MultiSelect
+      emptyMessage="Nothing here."
+      label="Labels"
+      onChange={() => undefined}
+      onOpenChange={() => undefined}
+      open
+      optionDetail={(value) => (value === "api" ? "3" : "1")}
+      optionDetailLabel={(value) => (value === "api" ? "3 issues" : "1 issue")}
+      options={["api", "docs"]}
+      searchLabel="Search labels"
+      selected={[]}
+    />
+  );
+  try {
+    // The visible row runs the count into the label; its accessible name never does.
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "api3",
+      "docs1",
+    ]);
+    expect(screen.getByRole("option", { name: "api, 3 issues" })).toBeDefined();
+    expect(screen.getByRole("option", { name: "docs, 1 issue" })).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});

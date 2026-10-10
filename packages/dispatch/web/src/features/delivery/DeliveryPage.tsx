@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
@@ -7,59 +7,80 @@ import { deliveryTimelineQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
-  bgTransparent,
+  borderStrong,
+  dragHandleBg,
+  linkText,
+  surfaceMutedBg,
+  switchOffBg,
+  switchOnBg,
+  switchThumbBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
+  textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { DeliverySettingsForm } from "./DeliverySettingsForm";
 import { DrillDown } from "./DrillDown";
 import { FacetPanel } from "./FacetPanel";
-import type { ColorFacet } from "./lib/colorScale";
-import type { DeployedFacet, Filters, ReworkFacet } from "./lib/facets";
+import {
+  buildColorScale,
+  COLOR_COUNT_KEYS,
+  COLOR_FACET_OPTIONS,
+  type ColorFacet,
+} from "./lib/colorScale";
+import {
+  type DeployedFacet,
+  FACET_KEYS,
+  FACET_PARAMS,
+  type Filters,
+  type ReworkFacet,
+} from "./lib/facets";
 import { PRList } from "./PRList";
 import { SourceFreshness } from "./SourceFreshness";
 import { Timeline, type TimelineSelection } from "./Timeline";
 
-const ARRAY_KEYS = [
-  "repo",
-  "parentAgent",
-  "session",
-  "issue",
-  "author",
-  "rework",
-  "deployed",
-] as const satisfies readonly (keyof Omit<Filters, "search">)[];
+/** The window the page reads when its URL names none: the prototype's 28 days. */
+const DEFAULT_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
 
-/** Every repeatable facet param the page reads and writes in one URL round trip, including
- *  `priority`/`component` beside `ARRAY_KEYS`'s client-facet set — passed whole to
- *  `useRepeatableSearchParams`, whose memo depends on this array's own identity, so it is a
- *  module-level constant. */
-const URL_ARRAY_KEYS = [...ARRAY_KEYS, "priority", "component"] as const;
+/** How long the search waits after the last keystroke before the server is asked again. */
+const SEARCH_DEBOUNCE_MS = 250;
 
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const COLOR_FACETS = COLOR_FACET_OPTIONS.map((option) => option.value);
+
+/** The colour-by facet the page uses when its URL names none, as the prototype does. */
+const DEFAULT_COLOR_BY: ColorFacet = "repo";
 
 type Mode = "timeline" | "list";
+
+/** How the filtered PRs are shown: dots on the timeline or a sortable list, the facet the merges
+ *  are coloured by, and whether the timeline splits them into one column per value. */
+interface DeliveryView {
+  colorBy: ColorFacet;
+  lanes: boolean;
+  mode: Mode;
+}
+
+/** A sub-window of the read window a brush drag set (`ws`/`we`): it narrows what the chart, the
+ *  list and the count show without a new read, so the facets keep counting the whole window. */
+export interface BrushWindow {
+  start: string;
+  end: string;
+}
 
 interface DeliveryUrlState {
   from: string;
   to: string;
-  mode: Mode;
   filters: Filters;
-  priority: string[];
-  component: string[];
+  view: DeliveryView;
+  brush: BrushWindow | null;
 }
 
 /** The delivery page's full state, read from and written to the URL — the same pattern
- *  `features/project/issue-filters.ts`'s `useIssueFilters` uses: repeatable params via the
- *  shared `useRepeatableSearchParams`, one `update` helper (`useSearchParamsUpdate`) funnelling
- *  every write through `setSearchParams(..., {replace: true})`. `filters`, `priority`, and
- *  `component` are memoized on the URL's own identity (`useRepeatableSearchParams`'s inner
- *  memo), so a render with an unchanged URL hands back the exact same arrays and `Filters`
- *  object rather than fresh ones every render — the identity `deliveryTimelineQuery`'s options
- *  (built from them, also memoized below) depend on to stay stable across renders the URL
- *  didn't change. */
+ *  `features/project/issue-filters.ts`'s `useIssueFilters` uses: repeatable facet params through
+ *  the shared `useRepeatableSearchParams`, one `update` (`useSearchParamsUpdate`) funnelling every
+ *  write through `setSearchParams(..., {replace: true})`. `filters` is memoized on the URL's own
+ *  identity, so a render with an unchanged URL hands `deliveryTimelineQuery` the same options. */
 function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => void] {
   const [searchParams] = useSearchParams();
   const defaultWindowRef = useRef<{ from: string; to: string } | undefined>(undefined);
@@ -69,23 +90,28 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
   if (defaultWindowRef.current === undefined) {
     const nowMs = Date.now();
     defaultWindowRef.current = {
-      from: new Date(nowMs - SEVEN_DAYS_MS).toISOString(),
+      from: new Date(nowMs - DEFAULT_WINDOW_MS).toISOString(),
       to: new Date(nowMs).toISOString(),
     };
   }
   const from = searchParams.get("from") ?? defaultWindowRef.current.from;
   const to = searchParams.get("to") ?? defaultWindowRef.current.to;
-  const mode: Mode = searchParams.get("mode") === "list" ? "list" : "timeline";
   const search = searchParams.get("q") ?? "";
-  const arrayParams = useRepeatableSearchParams(URL_ARRAY_KEYS);
-  const { priority, component } = arrayParams;
+  const colorByParam = searchParams.get("colorBy");
+  const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? DEFAULT_COLOR_BY;
+  const lanes = searchParams.get("lanes") === "1";
+  const mode: Mode = searchParams.get("mode") === "list" ? "list" : "timeline";
+  const view = useMemo(() => ({ colorBy, lanes, mode }), [colorBy, lanes, mode]);
+  const ws = searchParams.get("ws");
+  const we = searchParams.get("we");
+  const brush = useMemo(
+    () => (ws === null || we === null ? null : { start: ws, end: we }),
+    [ws, we]
+  );
+  const arrayParams = useRepeatableSearchParams(FACET_KEYS);
   const filters: Filters = useMemo(
     () => ({
-      repo: arrayParams.repo,
-      parentAgent: arrayParams.parentAgent,
-      session: arrayParams.session,
-      issue: arrayParams.issue,
-      author: arrayParams.author,
+      ...arrayParams,
       rework: arrayParams.rework as ReworkFacet[],
       deployed: arrayParams.deployed as DeployedFacet[],
       search,
@@ -99,70 +125,162 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
       update((params) => {
         params.set("from", next.from);
         params.set("to", next.to);
-        if (next.mode === "list") params.set("mode", "list");
-        else params.delete("mode");
-        for (const key of ARRAY_KEYS) {
+        for (const key of FACET_KEYS) {
           params.delete(key);
           for (const value of next.filters[key]) params.append(key, value);
         }
         if (next.filters.search.trim() === "") params.delete("q");
         else params.set("q", next.filters.search);
-        params.delete("priority");
-        for (const value of next.priority) params.append("priority", value);
-        params.delete("component");
-        for (const value of next.component) params.append("component", value);
+        if (next.view.colorBy === DEFAULT_COLOR_BY) params.delete("colorBy");
+        else params.set("colorBy", next.view.colorBy);
+        if (next.view.lanes) params.set("lanes", "1");
+        else params.delete("lanes");
+        if (next.view.mode === "list") params.set("mode", "list");
+        else params.delete("mode");
+        if (next.brush === null) {
+          params.delete("ws");
+          params.delete("we");
+        } else {
+          params.set("ws", next.brush.start);
+          params.set("we", next.brush.end);
+        }
       });
     },
     [update]
   );
 
-  return [{ from, to, mode, filters, priority, component }, setState];
+  return [{ from, to, filters, view, brush }, setState];
 }
 
-const COLOR_BY_OPTIONS: { value: ColorFacet; label: string }[] = [
-  { value: "repo", label: "Repository" },
-  { value: "author", label: "Author" },
-  { value: "parentAgent", label: "Parent agent" },
-];
+/** `value`, once it has held still for `delayMs`. */
+function useSettled<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [value, delayMs]);
+  return settled;
+}
+
+/** The Timeline | List segmented toggle. */
+function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }): ReactNode {
+  const item = (value: Mode, label: string) => (
+    <button
+      aria-pressed={mode === value}
+      className={`h-8 px-3 text-sm font-medium first:rounded-l-md last:rounded-r-md ${
+        mode === value ? `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}` : textSecondaryOnCanvas
+      }`}
+      onClick={() => onChange(value)}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+  return (
+    <fieldset aria-label="View" className={`mr-4 flex rounded-md border ${borderStrong}`}>
+      {item("timeline", "Timeline")}
+      <span aria-hidden="true" className={`w-px ${dragHandleBg}`} />
+      {item("list", "List")}
+    </fieldset>
+  );
+}
+
+/** The Swimlanes switch. */
+function LanesSwitch({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}): ReactNode {
+  return (
+    <label className="ml-4 flex cursor-pointer items-center gap-2">
+      <button
+        aria-checked={checked}
+        className={`inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${checked ? switchOnBg : switchOffBg}`}
+        onClick={() => onChange(!checked)}
+        role="switch"
+        type="button"
+      >
+        <span
+          className={`block h-4 w-4 rounded-full shadow-lg transition-transform ${switchThumbBg} ${checked ? "translate-x-4.5" : "translate-x-0.5"}`}
+        />
+      </button>
+      <span className={textPrimaryOnCanvas}>Swimlanes</span>
+    </label>
+  );
+}
 
 /** `/delivery`: successful production deploys, pipeline failures, and merged PRs labelled by
- *  agent session, Dispatch issue, priority, and architectural component. Until the timeline's
- *  configuration is set, the server answers `DELIVERY_NOT_CONFIGURED` and the page shows the
- *  settings form in the timeline's place; a save refetches the timeline, which then renders. */
+ *  agent session, Dispatch issue, priority, and architectural component, as the prototype's
+ *  timeline view shows them. Until the timeline's configuration is set, the server answers
+ *  `DELIVERY_NOT_CONFIGURED` and the page shows the settings form in the timeline's place; a save
+ *  refetches the timeline, which then renders. */
 export function DeliveryPage(): ReactNode {
   useDocumentTitle("Delivery · Dispatch");
   const [state, setState] = useDeliveryUrlState();
-  const [colorBy, setColorBy] = useState<ColorFacet>("repo");
   const [selection, setSelection] = useState<TimelineSelection | null>(null);
+  const search = useSettled(state.filters.search.trim(), SEARCH_DEBOUNCE_MS);
 
-  // Every active facet, sent to the server (LEGION-567's plan, "API"): `query.data.prs` is
-  // already the filtered list, so there is no client-side re-filter step here. Memoized so a
-  // render with an unchanged URL hands `deliveryTimelineQuery` back the same options object,
-  // not a fresh one the query key would otherwise have to re-hash every render.
-  const timelineOptions: DeliveryTimelineOptions = useMemo(
-    () => ({
-      from: state.from,
-      to: state.to,
-      repo: state.filters.repo,
-      parent_agent: state.filters.parentAgent,
-      session: state.filters.session,
-      issue: state.filters.issue,
-      author: state.filters.author,
-      rework: state.filters.rework,
-      deployed: state.filters.deployed,
-      priority: state.priority,
-      component: state.component,
-    }),
-    [state.from, state.to, state.filters, state.priority, state.component]
-  );
+  // Every active facet and the search, sent to the server: `query.data.prs` is already the
+  // filtered list. Memoized so a render with an unchanged URL hands `deliveryTimelineQuery` back
+  // the same options object.
+  const timelineOptions: DeliveryTimelineOptions = useMemo(() => {
+    const options: DeliveryTimelineOptions = { from: state.from, to: state.to, q: search };
+    const facets: Record<string, readonly string[]> = {};
+    for (const key of FACET_KEYS) facets[FACET_PARAMS[key]] = state.filters[key];
+    return { ...options, ...facets };
+  }, [state.from, state.to, state.filters, search]);
   const query = useQuery(deliveryTimelineQuery(timelineOptions));
-  const prs = query.data?.prs ?? [];
+  const data = query.data;
+  // When the answer on screen was read. While a facet change refetches, the previous answer stays
+  // on screen (`keepPreviousData`) and the new query reports `dataUpdatedAt` 0, so this keeps the
+  // last time an answer arrived instead of reading that as the epoch. The response carries no
+  // generated time of its own.
+  const answeredAtRef = useRef(0);
+  if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
+  const answeredAt = answeredAtRef.current;
+
+  const activeWindow = useMemo(
+    () =>
+      state.brush ?? (data === undefined ? null : { start: data.window.from, end: data.window.to }),
+    [state.brush, data]
+  );
+  const shownPRs = useMemo(() => {
+    const prs = data?.prs ?? [];
+    if (state.brush === null) return prs;
+    const startMs = Date.parse(state.brush.start);
+    const endMs = Date.parse(state.brush.end);
+    return prs.filter((pr) => {
+      if (pr.merged_at === null) return false;
+      const mergedMs = Date.parse(pr.merged_at);
+      return mergedMs >= startMs && mergedMs <= endMs;
+    });
+  }, [data, state.brush]);
+  // The waiting line's population, whatever the brush: the pull requests still waiting at the
+  // read window's start, and every tracked merge of the read window. The brush narrows the line's
+  // time range, never what it counts, so a merge before the brush that has not shipped holds the
+  // line up across it.
+  const waitingMerges = useMemo(
+    () => [
+      ...(data?.waiting ?? []),
+      ...(data?.prs ?? []).filter((pr) => pr.deployed_status !== "not_tracked"),
+    ],
+    [data]
+  );
+  const colorScale = useMemo(
+    () => buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}),
+    [data, state.view.colorBy]
+  );
+  const allRepos = useMemo(() => Object.keys(data?.color_counts.repo ?? {}), [data]);
 
   const drillDownSelection = useMemo((): TimelineSelection | null => {
     if (selection === null) return null;
     if (selection.kind !== "pr") return selection;
-    return prs.some((pr) => pr.id === selection.id) ? selection : null;
-  }, [selection, prs]);
+    return data?.prs.some((pr) => pr.id === selection.id) ? selection : null;
+  }, [selection, data]);
+
+  const setView = (view: DeliveryView) => setState({ ...state, view });
 
   // Whether the page shows the setup form: the last settled timeline read's answer, held while a
   // read is in flight. A refetch with nothing cached clears `query.error` the moment it starts
@@ -176,34 +294,23 @@ export function DeliveryPage(): ReactNode {
     setNotConfigured(!notConfigured);
   }
   return (
-    <section className="flex h-full flex-col gap-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>Delivery</h1>
-        {notConfigured ? null : (
-          <div className="flex items-center gap-2 text-sm">
-            <label className={textMutedOnCanvas}>
-              Color by
-              <select
-                className={`ml-2 rounded border px-2 py-1 ${bgTransparent}`}
-                onChange={(event) => setColorBy(event.target.value as ColorFacet)}
-                value={colorBy}
+    <section className="flex flex-col gap-3 xl:h-[calc(100dvh-3rem)]">
+      <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Delivery timeline</h1>
+        {data === undefined ? null : (
+          <div className={`text-xs ${textMutedOnCanvas}`}>
+            Generated {new Date(answeredAt).toLocaleString()} · window{" "}
+            {new Date(data.window.from).toLocaleDateString()}–
+            {new Date(data.window.to).toLocaleDateString()}
+            {state.brush === null ? null : (
+              <button
+                className={`ml-3 underline ${linkText}`}
+                onClick={() => setState({ ...state, brush: null })}
+                type="button"
               >
-                {COLOR_BY_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              className="rounded border px-3 py-1"
-              onClick={() =>
-                setState({ ...state, mode: state.mode === "list" ? "timeline" : "list" })
-              }
-              type="button"
-            >
-              {state.mode === "list" ? "Show timeline" : "Show list"}
-            </button>
+                clear brush window
+              </button>
+            )}
           </div>
         )}
       </header>
@@ -224,17 +331,9 @@ export function DeliveryPage(): ReactNode {
         </section>
       ) : (
         <>
-          {query.data === undefined ? null : <SourceFreshness freshness={query.data.freshness} />}
-
-          <FacetPanel
-            component={state.component}
-            filters={state.filters}
-            onChange={(filters) => setState({ ...state, filters })}
-            onComponentChange={(component) => setState({ ...state, component })}
-            onPriorityChange={(priority) => setState({ ...state, priority })}
-            prs={prs}
-            priority={state.priority}
-          />
+          {data === undefined ? null : (
+            <SourceFreshness freshness={data.freshness} readAtMs={answeredAt} />
+          )}
 
           {query.isPending ? <p className={textMutedOnCanvas}>Loading delivery timeline…</p> : null}
           {query.isError ? (
@@ -244,33 +343,85 @@ export function DeliveryPage(): ReactNode {
             />
           ) : null}
 
-          {query.data === undefined ? null : (
-            <div className="flex min-h-0 flex-1 gap-4">
-              <div className="min-w-0 flex-1">
-                {state.mode === "timeline" ? (
-                  <Timeline
-                    colorBy={colorBy}
-                    onBrush={(window) => setState({ ...state, from: window.from, to: window.to })}
-                    onSelect={setSelection}
-                    prs={prs}
-                    runs={query.data.runs}
+          {data === undefined || activeWindow === null ? null : (
+            <>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <ModeToggle
+                  mode={state.view.mode}
+                  onChange={(mode) => setView({ ...state.view, mode })}
+                />
+                <label className={`flex items-center gap-2 ${textMutedOnCanvas}`}>
+                  Color merges by
+                  <select
+                    className={`rounded border px-2 py-1 ${surfaceMutedBg} ${borderStrong} ${textPrimaryOnCanvas}`}
+                    onChange={(event) => {
+                      const colorBy = COLOR_FACETS.find((facet) => facet === event.target.value);
+                      if (colorBy !== undefined) setView({ ...state.view, colorBy });
+                    }}
+                    value={state.view.colorBy}
+                  >
+                    {COLOR_FACET_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {state.view.mode === "timeline" ? (
+                  <LanesSwitch
+                    checked={state.view.lanes}
+                    onChange={(lanes) => setView({ ...state.view, lanes })}
                   />
-                ) : (
-                  <PRList
-                    colorBy={colorBy}
-                    onSelect={(id) => setSelection({ kind: "pr", id })}
-                    prs={prs}
-                    selectedId={selection?.kind === "pr" ? selection.id : undefined}
-                  />
-                )}
+                ) : null}
+                <span className={`ml-4 ${textMutedOnCanvas}`}>
+                  {shownPRs.length} PRs in current filter/window
+                </span>
               </div>
-              <DrillDown
-                onClose={() => setSelection(null)}
-                prs={prs}
-                runs={query.data.runs}
-                selection={drillDownSelection}
-              />
-            </div>
+
+              <div className="flex min-h-0 flex-1 flex-col gap-4 xl:flex-row">
+                <div className="shrink-0 xl:w-56 xl:overflow-y-auto">
+                  <FacetPanel
+                    data={data}
+                    filters={state.filters}
+                    onChange={(filters) => setState({ ...state, filters })}
+                  />
+                </div>
+                <div className="flex h-[75dvh] min-h-[28rem] min-w-0 flex-col xl:h-auto xl:flex-1">
+                  {state.view.mode === "timeline" ? (
+                    <Timeline
+                      colorBy={state.view.colorBy}
+                      colorScale={colorScale}
+                      components={data.components}
+                      filters={state.filters}
+                      lanes={state.view.lanes}
+                      onBrush={(brush) => setState({ ...state, brush })}
+                      onSelect={setSelection}
+                      prs={shownPRs}
+                      runs={data.runs}
+                      waiting={waitingMerges}
+                      window={activeWindow}
+                    />
+                  ) : (
+                    <PRList
+                      allRepos={allRepos}
+                      colorBy={state.view.colorBy}
+                      colorScale={colorScale}
+                      onSelect={(id) => setSelection({ kind: "pr", id })}
+                      onSelectRun={(id) => setSelection({ kind: "deploy", id })}
+                      prs={shownPRs}
+                      selectedId={selection?.kind === "pr" ? selection.id : undefined}
+                    />
+                  )}
+                </div>
+                <DrillDown
+                  components={data.components}
+                  onClose={() => setSelection(null)}
+                  prs={data.prs}
+                  runs={data.runs}
+                  selection={drillDownSelection}
+                />
+              </div>
+            </>
           )}
         </>
       )}
