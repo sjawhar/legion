@@ -51,7 +51,7 @@ agent-secrets DEMO_API_KEY --reason "Publish the docs preview for PR 42 with the
 
 `DEMO_API_KEY` is alice's own secret at the human tier (its tags are `owner=alice@example.com` and
 `tier=human`), so a request for it waits for her approval, even from her own machine: the command
-waits, and prints the Dispatch page where the request is decided.
+waits, and names who approves it, alice, and the Dispatch page where she decides it.
 
 ## 4. Approve it
 
@@ -73,7 +73,7 @@ She approves it, and the page records the decision.
 
 The waiting command checks the broker every few seconds, so it carries on within a few seconds of
 the approval (10 at most): it receives `DEMO_API_KEY` in its environment and runs. The video
-shortens that wait, which took 6 seconds in the recording. The demo command prints the key's length
+shortens that wait, which took 8 seconds in the recording. The demo command prints the key's length
 and last four characters to show it arrived. `agent-secrets status <request>` names who decided the
 request.
 

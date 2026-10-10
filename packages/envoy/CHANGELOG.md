@@ -4,6 +4,15 @@
 
 ### Added
 
+- A pending secret request names whom it waits on. `POST /v1/requests` and
+  `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
+  names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
+  the current policy, so it is the person whose Inbox lists the request even after the secret's
+  owner tag changes; null when no person decides. `agent-secrets request` and
+  `agent-secrets status` print, after a waiting request's id and state, a line naming that approver
+  and where they decide it (`waiting for ada@example.com to approve it in Dispatch: <record page>`),
+  and the exec form's wait prints the same line in place of `approve or deny it …`. `--json` prints
+  the field verbatim; exit codes are unchanged (LEGION-666).
 - The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
   `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
   new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
