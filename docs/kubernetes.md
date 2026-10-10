@@ -872,7 +872,7 @@ advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<
 worker_stream_port: 13371
 daemon_url: http://<the address pods reach the daemon at>:13370
 capabilities:                   # optional: the deployment capabilities decided by name, with the reason (The deployment's capability report, below); a gap is reported, never refused
-  decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>" }
+  decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>", pool-capacity: "<reason>" }
 ```
 
 Every container of every Legion pod reserves cpu and memory with its request equal to its limit, so
@@ -888,7 +888,15 @@ file leaves out, a field or a whole role, takes the daemon's default (`config.De
 | `implementer`, `tester` | 750m | 4Gi | 20Gi / 1Gi |
 | `reviewer` | 750m | 4Gi | 10Gi / 1Gi |
 | `architect`, `planner`, `merger` | 250m | 1Gi | 10Gi / 1Gi |
-| `controller` (`controller: daemon`), and the image probe | 1 | 4Gi | 10Gi / 1Gi |
+| `controller` (`controller: daemon`) | 1 | 4Gi | 10Gi / 1Gi |
+| the image probe (fixed, not a `resources` key) | 250m | 1Gi | 5Gi / 1Gi |
+
+The image probe pod's reservation is the daemon's own and no role's share (`probeReservation`,
+`packages/daemon/internal/daemon/kubernetes.go`): `legion probe-image` starts one Oh My Pi at a
+time and runs no lane or browser, so 250m and 1Gi hold it, and the probe runs at every boot before
+anything is served — a probe that reserved a role's share, as it did the controller's 1 CPU and 4Gi
+until LEGION-632, could leave the daemon unable to boot on a pool with no room for a pod that
+large ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The bound").
 
 At the defaults a six-role issue pod sums to 3 CPU and 15 GiB, its ephemeral-storage limits to 80Gi
 and its requests to 6Gi. `issue_volume` sizes each issue's own volume, the clone, the workspace,
@@ -1139,7 +1147,7 @@ subscription never delivers).
 ### The deployment's capability report
 
 `packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
-every worker is a full agent), 19 rows, each checked at one site. The image rows (`eval-js`,
+every worker is a full agent), 20 rows, each checked at one site. The image rows (`eval-js`,
 `eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once
 the probe passed; the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
@@ -1148,8 +1156,8 @@ dispatch://LEGION-633's integration check and dispatch://LEGION-629's checks, no
 yet, so each reads `live` with the check it awaits, never as proved; the withheld rows carry the ruling that keeps them from
 every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
 dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
-and dispatch://LEGION-205); and the three deployment rows are the daemon's to measure from its own
-configuration, since no image or pod can show them:
+and dispatch://LEGION-205); and the four deployment rows are the daemon's to measure from its own
+configuration and its own boot, since no image or pod can show them:
 
 - `secrets`: `runtime.kubernetes.agent_secrets` is configured and the daemon's broker login is
   `issued`. Under tmux it is open unless decided: no process is enrolled with the broker.
@@ -1161,11 +1169,21 @@ configuration, since no image or pod can show them:
   or the daemon's default, each both request and limit, [Issue sizing](#issue-sizing-one-reservation-per-pod)),
   which a loaded Kubernetes configuration always satisfies; the row would name each role that did
   not. Under tmux it is open unless decided: a pane has no requests or limits.
+- `pool-capacity`: the Legion pool had room for the image probe pod's own 250m / 1Gi reservation at
+  boot — the probe pod scheduled at its first attempt. While it did not (`stuck`,
+  `internal/runtime/sandbox/probe.go`: the pod `Pending` with `PodScheduled=False Unschedulable`
+  for longer than `worker_boot_timeout_seconds`), the daemon stays up and retries without exiting
+  ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The bound"), and once the probe passes
+  the row is open, saying how many attempts waited and the scheduler's last reason (`the image
+  probe pod was Unschedulable <n> time(s) at boot before it scheduled: <reason>; the pool had no
+  room for its 250m / 1Gi reservation`), unless `capabilities.decided.pool-capacity` names a
+  reason. The daemon measures it from the probe's own run (`bootprobe.ImageReport.CapacityWaits`),
+  so `legion start --check-config` never prints it. Under tmux it is present: no probe pod runs.
 
 A deployment row is `present` when the deployment satisfies it, `decided` when `legion.yaml`'s
 `capabilities.decided.<name>: "<reason>"` records a decision on it (the report shows the reason in
 the gap's place; a decision on a satisfied row is moot and the row reads present), and `open`
-otherwise, carrying the line that records one. A name that is not one of the three is refused at
+otherwise, carrying the line that records one. A name that is not one of the four is refused at
 load naming them; a blank reason too. The report appears in four places: the daemon's log, one
 warning per open row at boot and again at the first controller tick after the set of open rows
 changed (the tick asks only when it wakes the controller — one registered, no tick pending — and the
@@ -1297,8 +1315,12 @@ no tree or issue label, one init container (`workspace-init controller`) and one
 `issue-legion-<project>-controller` ([Daemon-launched controller](#daemon-launched-controller)).
 
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
-`shutdownPolicy: Delete`, its one container carrying the controller's reservation
-([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+`shutdownPolicy: Delete`, its one container carrying the probe's own fixed reservation — 250m and
+1Gi, over a 5Gi disk bound and a 1Gi disk request (`probeReservation`,
+`internal/daemon/kubernetes.go`), no role's share, since `legion probe-image` starts one Oh My Pi
+at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from
+booting on a full pool ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes),
+[Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 ### A pod whose address moved
 
@@ -1475,8 +1497,9 @@ smaller ephemeral-storage request (the node-disk bound, below): each role contai
 reservation (`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none
 — [Configuration](#configuration)), both init containers the reservation of the role whose launch
 created the pod (`issuePod.initContainers`, `internal/runtime/sandbox/podkind.go`), the controller's
-launcher and init container the controller's, and the image probe's one container the controller's
-too. So every Legion pod is `Guaranteed` — the kubelet's QoS reads cpu and memory alone, so the
+launcher and init container the controller's, and the image probe's one container the probe's own
+fixed 250m / 1Gi (`probeReservation`, [Configuration](#configuration)), no role's share. So every
+Legion pod is `Guaranteed` — the kubelet's QoS reads cpu and memory alone, so the
 disk bound's request under its limit changes no pod's class — and the pod bursts past its summed
 reservation nowhere; inside it, under gVisor, one role may use what its idle siblings reserved
 (below). At the defaults a six-role issue pod sums to 3 CPU and 15 GiB, the init containers adding
@@ -1519,9 +1542,31 @@ roots alone: a tree of N children runs N+1 pods at once, and nothing caps concur
 pod the pool cannot place stays `Pending`, unscheduled; once it has been for longer than
 `worker_boot_timeout_seconds` the boot watchdog reads it dead ([Liveness rules](#liveness-rules)),
 one launch failure, its relaunch meets the same pool, and the claim fails once its launch failures
-run out — no later than its registration deadline. Size the pool's limits for
-`admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum, or keep
-`admission_cap` within what the limits place.
+run out — no later than its registration deadline. Two pods beside the issue pods count against
+the same limits: the image probe pod, its own 250m / 1Gi, present at every boot and daemon restart
+for as long as the probe runs; and, under `controller: daemon`, the controller's pod, 1 CPU / 4Gi
+at the default, for as long as the daemon runs. Size the pool's limits for
+`admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum plus those two,
+or keep `admission_cap` within what the limits place.
+
+A pool with no room for the probe pod itself does not refuse the boot. The probe pod stays
+`Pending` with `PodScheduled=False Unschedulable`; once it has been so for longer than
+`worker_boot_timeout_seconds` — the same bound the liveness rules give an issue pod, long enough
+for Karpenter to add a node when the pool's limits allow one, so a cold pool scaling up is not
+read as full — the attempt ends waiting on capacity (`stuck`, `internal/runtime/sandbox/probe.go`),
+its Sandbox deleted, and the daemon logs `boot probe is waiting on capacity; running it again` with
+`probe=worker image`, the pod's name and the scheduler's own reason in `detail` (`probe pod
+legion-probe-<project>-<digest12> is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu …`)
+and `retryIn`, the probe's longest interval, 5 min. It then creates the probe Sandbox again, as many
+times as it takes: such a wait is counted against none of the probe's six attempts
+(`bootprobe.Run`, `Outcome.Waiting`), since a full pool says nothing about the image and a daemon
+that exited would not make room. The daemon stays up through it, but serves nothing yet: the probe
+runs before the API is served (`plan.probe` precedes `serve` in `internal/daemon/daemon.go`), so
+`legion state` answers nothing while the probe waits, and the log is where the wait shows. Once a
+probe pod is placed and passes, the `pool-capacity` row of
+[The deployment's capability report](#the-deployments-capability-report) records how many attempts
+waited and the scheduler's last reason, open until `capabilities.decided.pool-capacity` names a
+reason; a boot whose probe pod scheduled at its first attempt reads it `present`.
 
 **The node-disk bound.** Pods of unrelated trees share a node, and what a role writes outside every
 volume — its root filesystem: `$HOME`, Oh My Pi's state home with its Chromium profiles and logs,
@@ -2347,7 +2392,9 @@ deployment instructions. Both its containers, the init container and the launche
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
 the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike, so the pod is
 `Guaranteed`, never the class the kubelet evicts first under node memory pressure; the image probe
-pod carries the same reservation ([Issue sizing](#issue-sizing-one-reservation-per-pod)).
+pod carries its own, smaller reservation, not the controller's, so a controller reservation the
+pool cannot place leaves the probe, and the boot, unaffected
+([Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 The Sandbox is the claim's alone, where an issue's is its tree's. A release of the claim (a switch
 back, or `legion claims stop`) deletes it, and its role Secret and volume with it. The orphan sweep

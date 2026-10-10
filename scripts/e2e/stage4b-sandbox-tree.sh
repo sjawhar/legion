@@ -159,8 +159,10 @@ run_pods_at_once=$((admission_cap + tree1_children))
 # reviewer's cpu and memory, the merger's cpu alone with its memory the default, and the architect's,
 # planner's and implementer's the defaults, every ephemeral-storage request the default 1Gi — while
 # the pod's sum (2.95 CPU, 14 GiB) stays within the defaults' 3 CPU and 15 GiB. The controller's
-# reservation is the image probe pod's; the run writes none for it, since only a daemon under
-# `controller: daemon` may name it.
+# default is data for the checks alone: the file names the controller only while controller_cpu is
+# set (daemon-controller-liveness, under `controller: daemon`), and the image probe pod carries its
+# own fixed 250m / 1Gi (internal/daemon/kubernetes.go probeReservation), never the controller's —
+# so that checkpoint's restart with the controller at 100000 CPU still places its probe pod.
 declare -A default_cpu=([architect]=250m [planner]=250m [implementer]=750m [tester]=750m [reviewer]=750m [merger]=250m [controller]=1)
 declare -A default_memory=([architect]=1Gi [planner]=1Gi [implementer]=4Gi [tester]=4Gi [reviewer]=4Gi [merger]=1Gi [controller]=4Gi)
 declare -A default_ephemeral_storage=([architect]=10Gi [planner]=10Gi [implementer]=20Gi [tester]=20Gi [reviewer]=10Gi [merger]=10Gi [controller]=10Gi)

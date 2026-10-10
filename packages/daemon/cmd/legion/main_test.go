@@ -951,7 +951,8 @@ current-context: legion-daemon
 // measure, so the check says nothing of it. The resource-limits row is never open on a Kubernetes
 // file: the loader fills every role's reservation from the daemon's defaults, with or without a
 // `resources` block and whatever fields it sets (config.RoleResources.Reserved); the tmux cases
-// (tmuxCapabilityGaps) are where it is open. Model fallback is the probe's and never printed here.
+// (tmuxCapabilityGaps) are where it is open. Model fallback is the probe's, and pool capacity the
+// probe's run's, and neither is printed here.
 func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 	legionState(t)
 	const everyRole = `    resources:
@@ -986,12 +987,12 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 }
 
 // A decision may name only a capability the daemon measures from the deployment: anything else is
-// refused as an unknown key naming the three, and a blank reason records nothing, so it is refused
+// refused as an unknown key naming the four, and a blank reason records nothing, so it is refused
 // too — each with exit 1 and no Config OK.
 func TestStartCheckConfigRefusesAnUnknownCapabilityDecision(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct{ name, extra, want string }{
-		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits\n"},
+		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback, resource-limits or pool-capacity\n"},
 		{"a blank reason", "capabilities: {decided: {secrets: \"\"}}\n", "legion start: capabilities.decided.secrets must not be empty\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

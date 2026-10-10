@@ -48,7 +48,10 @@ var workerImageTools = sandbox.Tools{
 // nothing definitive: the daemon's backoff, bounded like `legion probe-image`'s at six attempts.
 // Its transient outcomes (a pod that never finished, a kubelet failure) can repeat for a reason no
 // wait changes, such as a memory limit too small for Oh My Pi, so an unbounded retry would hold a
-// deterministic refusal as a boot that never ends.
+// deterministic refusal as a boot that never ends. A probe pod the pool has no room for is no such
+// outcome: it is waited on at the policy's longest interval, outside the six (bootprobe.Run,
+// Outcome.Waiting), since a full pool is the pool's state and not the image's, and the daemon
+// exiting would not make room.
 var imageProbeRetry = bootprobe.Image
 
 // sandboxReads is what Agent Sandbox needs that readBoot reads: the cluster's client and the
@@ -107,26 +110,46 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		}
 		return nil
 	}
+	probe, err := imageProbe(cfg, p.roleReferences)
+	if err != nil {
+		return err
+	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error) {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
 			return bootprobe.ImageReport{}, fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
-		return sandboxed.ProbeImage(ctx, imageProbe(cfg, reads.opts, p.roleReferences))
+		return sandboxed.ProbeImage(ctx, probe)
 	}
 	return nil
 }
 
+// probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
+// one Oh My Pi at a time, each briefly (pi.agents, the plugin's load, the session-storage
+// setting), runs no lane and no browser (the browser check runs Chromium's --version), and exits,
+// so 250m and 1Gi hold it, over a 5Gi bound on the node's disk and the same 1Gi disk request every
+// role makes. It is no role's share on purpose: the probe runs at every boot, before anything is
+// served, and a probe that reserved a role's share — the controller's 1 CPU and 4Gi, as it did
+// until LEGION-632 — could leave the daemon unable to boot on a pool full enough to place nothing
+// that large, while a 250m / 1Gi pod still fits (stage 4b's daemon-controller-liveness restart,
+// whose controller reservation no node can hold, met exactly that).
+var probeReservation = config.RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
+
 // imageProbe is the probe of the daemon's worker image: this daemon's contract, the role prompts
 // every pod is handed — this daemon's, inlined at each launch, so the probe resolves what they name
-// rather than the image's copy — and the controller's reservation, the one role that runs alone in
-// its pod as the probe does, so the probe pod is Guaranteed as every Legion pod is.
-func imageProbe(cfg config.Config, opts sandbox.Options, references promptrefs.Names) sandbox.ImageProbe {
+// rather than the image's copy — and the probe's own reservation (probeReservation), translated as
+// every role's is (requirements), so the probe pod is Guaranteed as every Legion pod is. The
+// error is the translation's, which only an edit to probeReservation can cause.
+func imageProbe(cfg config.Config, references promptrefs.Names) (sandbox.ImageProbe, error) {
+	resources, err := requirements("the image probe's reservation", probeReservation)
+	if err != nil {
+		return sandbox.ImageProbe{}, err
+	}
 	return sandbox.ImageProbe{
 		Contract: api.DaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
 		RoleReferences: references,
-		Resources:      opts.Resources[claim.RoleController],
-	}
+		Resources:      resources,
+	}, nil
 }
 
 // kubeClient is the client of runtime.kubernetes: the kubeconfig's context it names, or the
@@ -275,14 +298,20 @@ func providerSecretKeys(keys []config.ProviderKey) map[string]string {
 	return secretKeys
 }
 
-// roleRequirements is one role's reservation as a container's requirements: its cpu and memory,
-// each the request and the limit alike, so the pod the role's containers make is Guaranteed and
-// bursts past nothing (the kubelet's QoS reads cpu and memory alone); and its ephemeral storage,
-// the limit on what the container writes to the node's disk and the smaller request the scheduler
-// fits to the node's allocatable disk (the loader holds the request to the limit). The two lists
-// are built apart so neither edit reaches the other.
+// roleRequirements is one role's reservation as a container's requirements (requirements), its
+// errors keyed by the role's `runtime.kubernetes.resources.<role>`.
 func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
-	key := "runtime.kubernetes.resources." + string(role)
+	return requirements("runtime.kubernetes.resources."+string(role), reservation)
+}
+
+// requirements is a reservation as a container's requirements: its cpu and memory, each the
+// request and the limit alike, so the pod the containers make is Guaranteed and bursts past
+// nothing (the kubelet's QoS reads cpu and memory alone); and its ephemeral storage, the limit on
+// what the container writes to the node's disk and the smaller request the scheduler fits to the
+// node's allocatable disk (the loader holds the request to the limit). The two lists are built
+// apart so neither edit reaches the other. key names the reservation in an error: a role's
+// configuration key, or the probe's.
+func requirements(key string, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
 	cpu, err := resource.ParseQuantity(reservation.CPU)
 	if err != nil {
 		return corev1.ResourceRequirements{}, fmt.Errorf("%s.cpu: %w", key, err)

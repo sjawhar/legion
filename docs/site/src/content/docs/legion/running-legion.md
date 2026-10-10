@@ -57,8 +57,16 @@ and the checks that branch requires (its rulesets and its branch protection), th
   `ephemeral_storage_request` what the scheduler reserves of it, each optional, the request at most
   the limit), and the daemon's defaults fill the rest — 750m and 4Gi for the implementer, tester
   and reviewer; 250m and 1Gi for the architect, planner and merger; 1 CPU and 4Gi for the controller
-  (`controller: daemon` only) and the image probe; 20Gi of disk for the implementer and tester and
-  10Gi for every other role, over a 1Gi request each. A six-role issue pod sums to 3 CPU and 15 GiB
+  (`controller: daemon` only); 20Gi of disk for the implementer and tester and 10Gi for every
+  other role, over a 1Gi request each. The image probe pod, which every boot runs before anything
+  is served, carries a fixed reservation of its own and no role's share: 250m and 1Gi over 5Gi of
+  disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi at a time and runs no lane
+  or browser, and a probe sized as a role could keep the daemon from booting on a full pool. A
+  pool with no room even for that does not stop the daemon: its probe pod stays Pending
+  Unschedulable, it logs `boot probe is waiting on capacity` with the scheduler's reason and tries
+  again every 5 minutes, serving nothing until the probe passes, and the `pool-capacity` row of
+  `legion state`'s capability report then records how many attempts waited and why, open until
+  `capabilities.decided.pool-capacity` names a reason. A six-role issue pod sums to 3 CPU and 15 GiB
   at the defaults, its disk limits to 80Gi over 6Gi requested. A container past its disk limit has
   its own pod evicted, the offending issue's alone, rather than the node reaching `DiskPressure`
   where another tree's pod can go; the 1Gi request reserves almost no disk, so a node's root volume
@@ -68,9 +76,10 @@ and the checks that branch requires (its rulesets and its branch protection), th
   the scheduler places it wherever the pool has room and Karpenter adds nodes under the pool's
   limits. Concurrent issue pods are bounded by what the pool's `limits.cpu` and `limits.memory`
   leave for pods of that sum (two per 8-vCPU floor node, about 80 at `limits.cpu: 256`, or
-  `limits.memory` / 15 GiB when that is smaller); `admission_cap` bounds roots alone, a tree of N
-  children runs N+1 pods, and a pod the pool cannot place stays `Pending` until the daemon reads it
-  dead and, once its launch failures run out, fails the claim.
+  `limits.memory` / 15 GiB when that is smaller) once the probe pod and, under `controller: daemon`,
+  the controller's pod are counted; `admission_cap` bounds roots alone, a tree of N children runs
+  N+1 pods, and an issue pod the pool cannot place stays `Pending` until the daemon reads it dead
+  and, once its launch failures run out, fails the claim.
 - **A namespace and a storage class.** Each issue's volume (`issue_volume`, 20Gi by default; the
   daemon-launched controller's pod owns one too) comes from `storage_class`, which is required.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all

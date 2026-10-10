@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -102,4 +103,45 @@ func TestReportCapabilitiesLogsAtBootAndOnChangeAlone(t *testing.T) {
 	if strings.Count(logged.String(), "capability model-fallback is open") != 1 {
 		t.Fatalf("model-fallback was logged after it closed:\n%s", logged.String())
 	}
+}
+
+// What the probe's run saw of the pool reaches the report: a kubernetes daemon whose probe pod
+// waited on capacity before it scheduled reports pool-capacity open, with the count and the
+// scheduler's reason, until the file decides it; one whose pod scheduled at once reports it present.
+func TestReportCapabilitiesCarriesTheProbesCapacityWaits(t *testing.T) {
+	reason := "probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu"
+	decided := map[capabilities.Name]string{capabilities.Secrets: "dispatch://LEGION-205 enrolls pods later"}
+	cfg := config.Config{
+		Runtime:      config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{Resources: config.DefaultResources()}},
+		Capabilities: config.Capabilities{Decided: decided},
+	}
+	var logged bytes.Buffer
+	s := &supervision{cfg: cfg, log: slog.New(slog.NewTextHandler(&logged, nil)), probed: true,
+		imageReport: bootprobe.ImageReport{ModelFallback: "on", CapacityWaits: 2, CapacityReason: reason}}
+
+	if got, want := s.reportCapabilities(), []string{"pool-capacity"}; !slices.Equal(got, want) {
+		t.Fatalf("reportCapabilities = %v, want %v", got, want)
+	}
+	if want := "the image probe pod was Unschedulable 2 time(s) at boot before it scheduled: " + reason; !strings.Contains(logged.String(), want) {
+		t.Fatalf("the open row was logged without the count and the reason:\n%s", logged.String())
+	}
+
+	decided[capabilities.PoolCapacity] = "the pool is sized for the trees; the probe waits"
+	if got := s.reportCapabilities(); len(got) != 0 {
+		t.Fatalf("reportCapabilities with the row decided = %v, want none open", got)
+	}
+
+	s.imageReport.CapacityWaits, s.imageReport.CapacityReason = 0, ""
+	if got := states(s.deployment().Report())[capabilities.PoolCapacity]; got.Status != capabilities.StatusPresent || got.Detail != "the image probe pod scheduled at its first attempt" {
+		t.Fatalf("pool-capacity with no wait = %s (%s), want present", got.Status, got.Detail)
+	}
+}
+
+// states is a report by capability.
+func states(report []capabilities.State) map[capabilities.Name]capabilities.State {
+	m := map[capabilities.Name]capabilities.State{}
+	for _, state := range report {
+		m[state.Name] = state
+	}
+	return m
 }

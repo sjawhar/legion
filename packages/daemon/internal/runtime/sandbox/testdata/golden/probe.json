@@ -42,14 +42,14 @@
             "name": "probe",
             "resources": {
               "limits": {
-                "cpu": "1",
-                "ephemeral-storage": "10Gi",
-                "memory": "4Gi"
+                "cpu": "250m",
+                "ephemeral-storage": "5Gi",
+                "memory": "1Gi"
               },
               "requests": {
-                "cpu": "1",
+                "cpu": "250m",
                 "ephemeral-storage": "1Gi",
-                "memory": "4Gi"
+                "memory": "1Gi"
               }
             },
             "securityContext": {

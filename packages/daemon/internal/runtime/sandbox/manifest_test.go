@@ -42,13 +42,26 @@ func goldenOptions() Options {
 func reservations() map[claim.Role]corev1.ResourceRequirements {
 	translated := map[claim.Role]corev1.ResourceRequirements{}
 	for role, reservation := range config.DefaultResources() {
-		cpu, memory := resource.MustParse(reservation.CPU), resource.MustParse(reservation.Memory)
-		translated[role] = corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest)},
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage)},
-		}
+		translated[role] = requirementsOf(reservation)
 	}
 	return translated
+}
+
+// probeReservation is the image probe's own reservation as the daemon hands it
+// (internal/daemon/kubernetes.go, probeReservation), translated the same way: 250m and 1Gi, with a
+// 5Gi disk bound over a 1Gi request — not a role's share, written here as data as the defaults are.
+func probeReservation() corev1.ResourceRequirements {
+	return requirementsOf(config.RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
+}
+
+// requirementsOf is reservation as a container's requirements, translated as roleRequirements
+// translates it.
+func requirementsOf(reservation config.RoleResources) corev1.ResourceRequirements {
+	cpu, memory := resource.MustParse(reservation.CPU), resource.MustParse(reservation.Memory)
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest)},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage)},
+	}
 }
 
 // Every container of every pod the runtime builds reserves cpu and memory and bursts past neither:
@@ -56,26 +69,26 @@ func reservations() map[claim.Role]corev1.ResourceRequirements {
 // Guaranteed class — judged over every container of the pod, the init containers included — and
 // each is bounded on the node's disk, an ephemeral-storage request under its limit. An issue pod's
 // six launchers each carry their role's reservation and its two init containers the launching
-// role's; the controller's pod carries the controller's on both its containers, and so does the
-// image probe's one, which the daemon hands the controller's.
+// role's; the controller's pod carries the controller's on both its containers; and the image
+// probe's one container carries the probe's own, which the daemon hands it.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := reservations()
-	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: want[claim.RoleController], RoleReferences: testRoleReferences}, time.Now())
+	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Now())
 	for name, tc := range map[string]struct {
 		pod corev1.PodSpec
-		// launch is the role whose launch creates the pod, whose reservation every container that
-		// is not a role's own carries: the init containers, and the probe's one.
-		launch     claim.Role
+		// launch is the reservation every container that is not a role's own carries: the init
+		// containers', the role whose launch creates the pod; the probe's one, the probe's own.
+		launch     corev1.ResourceRequirements
 		containers int
 	}{
-		"root":       {podOf(t, r, rootSpec(t)), claim.RoleArchitect, 8},
-		"worker":     {podOf(t, r, workerSpec(t)), claim.RoleTester, 8},
-		"controller": {podOf(t, r, controllerSpec(t)), claim.RoleController, 2},
-		"probe":      {probe.Spec.PodTemplate.Spec, claim.RoleController, 1},
+		"root":       {podOf(t, r, rootSpec(t)), want[claim.RoleArchitect], 8},
+		"worker":     {podOf(t, r, workerSpec(t)), want[claim.RoleTester], 8},
+		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 2},
+		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			containers := slices.Concat(tc.pod.InitContainers, tc.pod.Containers)
@@ -83,12 +96,12 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 				t.Fatalf("the pod runs %d containers, want %d", len(containers), tc.containers)
 			}
 			for _, c := range containers {
-				role := tc.launch
+				expected, whose := tc.launch, "the launch's"
 				if named := claim.Role(c.Name); claim.IsRole(named) || named == claim.RoleController {
-					role = named
+					expected, whose = want[named], string(named)+"'s"
 				}
-				if !reflect.DeepEqual(c.Resources, want[role]) {
-					t.Errorf("container %s carries %+v, want %s's reservation %+v", c.Name, c.Resources, role, want[role])
+				if !reflect.DeepEqual(c.Resources, expected) {
+					t.Errorf("container %s carries %+v, want %s reservation %+v", c.Name, c.Resources, whose, expected)
 				}
 				for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
 					request, limit := c.Resources.Requests[kind], c.Resources.Limits[kind]

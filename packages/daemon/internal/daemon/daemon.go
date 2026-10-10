@@ -692,10 +692,10 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
-	// imageReport is what the worker image's passed probe reported of the image, from its OK
-	// line (bootprobe.ImageReport); under tmux, the model-fallback mark alone, read by
-	// plan.modelFallback. probed is whether the probe passed (kubernetes), so the image rows of the
-	// capability report read present.
+	// imageReport is what the worker image's passed probe reported: of the image, from its OK line,
+	// and of the pool, the attempts that waited on its capacity (bootprobe.ImageReport); under
+	// tmux, the model-fallback mark alone, read by plan.modelFallback. probed is whether the probe
+	// passed (kubernetes), so the image rows of the capability report read present.
 	imageReport bootprobe.ImageReport
 	probed      bool
 	// reportedGaps are the open capabilities the last report logged (reportCapabilities), under
@@ -748,13 +748,15 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 }
 
 // deployment is Deployment with what this boot learned: the broker login's state, whether the
-// image passed its probe, and the model-fallback mark the probe or the gate read.
+// image passed its probe, the model-fallback mark the probe or the gate read, and how many of the
+// probe's attempts waited on the pool's capacity before one scheduled, with the scheduler's reason.
 func (s *supervision) deployment() capabilities.Deployment {
 	d := Deployment(s.cfg)
 	if s.plan.secretsLogin != nil {
 		d.SecretsLogin = s.plan.secretsLogin.LoginStatus().State
 	}
 	d.Probed, d.ModelFallback = s.probed, s.imageReport.ModelFallback
+	d.ProbeCapacityWaits, d.ProbeCapacityReason = s.imageReport.CapacityWaits, s.imageReport.CapacityReason
 	return d
 }
 

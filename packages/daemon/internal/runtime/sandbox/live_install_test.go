@@ -25,7 +25,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
@@ -334,7 +333,7 @@ func (r *liveRig) checkImageProbe() error {
 		return fmt.Errorf("probe pod %s (phase %s): %w", name, pod.Status.Phase, err)
 	}
 	container := pod.Spec.Containers[0]
-	note("operator", "probe pod %s read in phase %s: container %s cpu %s, memory %s, request = limit, the controller's reservation, ephemeral-storage %s under a limit of %s; qosClass %s; no affinity",
+	note("operator", "probe pod %s read in phase %s: container %s cpu %s, memory %s, request = limit, the probe's own reservation, ephemeral-storage %s under a limit of %s; qosClass %s; no affinity",
 		name, pod.Status.Phase, container.Name, container.Resources.Limits.Cpu().String(), container.Resources.Limits.Memory().String(), container.Resources.Requests.StorageEphemeral().String(), container.Resources.Limits.StorageEphemeral().String(), pod.Status.QOSClass)
 	bursting := pod.DeepCopy()
 	doubled := bursting.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
@@ -460,15 +459,16 @@ func (r *liveRig) checkImageProbeCapabilityRefusal() error {
 }
 
 // imageProbe is the probe as the daemon asks for it: its contract, the references of the role
-// prompts it hands every pod (prompts.RoleReferences), and the controller's reservation, the one
-// role that runs alone in its pod as the probe does (internal/daemon/kubernetes.go imageProbe), so
-// the probe pod is Guaranteed as every Legion pod is. The probe command it sends, with
+// prompts it hands every pod (prompts.RoleReferences), and the probe's own fixed reservation
+// (internal/daemon/kubernetes.go imageProbe, probeReservation) — 250m and 1Gi, not a role's share,
+// so a probe pod fits a pool with little room — with cpu and memory the request and the limit
+// alike, so the probe pod is Guaranteed as every Legion pod is. The probe command it sends, with
 // --role-references and, the run having a provider key, --provider-env-dir, is noted.
 func (r *liveRig) imageProbe() ImageProbe {
 	p := ImageProbe{
 		Contract: api.DaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: prompts.RoleReferences(),
 		Retry:     bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
-		Resources: liveResources()[claim.RoleController],
+		Resources: probeReservation(),
 	}
 	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
 	note("runtime", "the probe command: %s", strings.Join(command, " "))

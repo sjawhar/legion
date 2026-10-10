@@ -413,7 +413,9 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 // its cpu and memory the request and the limit alike — the file's values where it set them, here
 // one role's — so every container the runtime builds from them is Guaranteed, and its ephemeral
 // storage the limit the file or the default set with the request under it; and the image probe
-// carries the controller's, the one role that runs alone in its pod as the probe does.
+// carries its own fixed reservation (probeReservation), 250m and 1Gi over a 5Gi disk bound and a
+// 1Gi disk request, translated the same way and no role's share — a probe that reserved the
+// controller's 1 CPU and 4Gi could not boot the daemon on a pool with room for less.
 func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
@@ -444,12 +446,29 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 			t.Errorf("%s's requirements = %+v, want %+v (cpu and memory request == limit; ephemeral-storage request under its limit)", role, got, want)
 		}
 	}
-	probe := imageProbe(cfg, opts, promptrefs.New())
-	if !reflect.DeepEqual(probe.Resources, opts.Resources[claim.RoleController]) {
-		t.Errorf("the image probe carries %+v, want the controller's %+v", probe.Resources, opts.Resources[claim.RoleController])
+	probe, err := imageProbe(cfg, promptrefs.New())
+	if err != nil {
+		t.Fatalf("imageProbe: %v", err)
 	}
-	if cpu := probe.Resources.Requests[corev1.ResourceCPU]; cpu.Cmp(resource.MustParse("1")) != 0 {
-		t.Errorf("the image probe requests cpu %s, want the controller's default 1", cpu.String())
+	wantProbe, err := requirements("the image probe's reservation", probeReservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(probe.Resources, wantProbe) {
+		t.Errorf("the image probe carries %+v, want its own reservation %+v", probe.Resources, wantProbe)
+	}
+	for kind, want := range map[corev1.ResourceName]string{corev1.ResourceCPU: "250m", corev1.ResourceMemory: "1Gi", corev1.ResourceEphemeralStorage: "1Gi"} {
+		if request := probe.Resources.Requests[kind]; request.Cmp(resource.MustParse(want)) != 0 {
+			t.Errorf("the image probe requests %s %s, want %s", kind, request.String(), want)
+		}
+	}
+	for kind, want := range map[corev1.ResourceName]string{corev1.ResourceCPU: "250m", corev1.ResourceMemory: "1Gi", corev1.ResourceEphemeralStorage: "5Gi"} {
+		if limit := probe.Resources.Limits[kind]; limit.Cmp(resource.MustParse(want)) != 0 {
+			t.Errorf("the image probe is limited to %s %s, want %s", kind, limit.String(), want)
+		}
+	}
+	if controller := opts.Resources[claim.RoleController]; reflect.DeepEqual(probe.Resources, controller) {
+		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", controller)
 	}
 }
 

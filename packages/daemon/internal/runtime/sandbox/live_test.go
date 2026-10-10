@@ -139,11 +139,12 @@ var liveOverrides = map[claim.Role]config.RoleResources{
 	claim.RoleReviewer:    {Memory: "1Gi"},
 }
 
-// liveResources are the reservations the rig hands the runtime (Options.Resources) and the image
-// probe (the controller's, as the daemon hands it): the daemon's defaults as it translates them
-// (reservations, manifest_test.go) with liveOverrides applied field by field, as resolveKubernetes
-// settles a file's `resources` block. Cpu and memory are each the request and the limit alike;
-// the ephemeral-storage limit and request are set apart, as the file sets them.
+// liveResources are the reservations the rig hands the runtime (Options.Resources): the daemon's
+// defaults as it translates them (reservations, manifest_test.go) with liveOverrides applied field
+// by field, as resolveKubernetes settles a file's `resources` block. Cpu and memory are each the
+// request and the limit alike; the ephemeral-storage limit and request are set apart, as the file
+// sets them. The image probe carries none of these: its own fixed reservation (probeReservation,
+// manifest_test.go), as the daemon hands it.
 func liveResources() map[claim.Role]corev1.ResourceRequirements {
 	resources := reservations()
 	for role, override := range liveOverrides {

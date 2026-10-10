@@ -93,7 +93,9 @@ func (r RoleResources) Reserved() bool {
 
 // defaultResources is each role's reservation when the file sets none: the roles that build and
 // test a change get the most, the roles that read and write get less, and the controller, which
-// runs alone in its pod, gets a pod of its own size. The image probe pod takes the controller's.
+// runs alone in its pod, gets a pod of its own size. The image probe pod takes none of these: its
+// own fixed 250m and 1Gi (internal/daemon/kubernetes.go, probeReservation), since it starts one Oh
+// My Pi at a time and runs no lane, and a probe sized as a role could not boot on a full pool.
 // The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
 // filesystem: $HOME, the state home, the Go and Bun caches a build fills), 20Gi for the two roles
 // that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it to
