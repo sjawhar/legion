@@ -10,7 +10,7 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors";
  * proves the capability from inside the session, the way the agent would use it: the `task` tool
  * resolving the agents the role's prompts dispatch, one real web search, the configured MCP servers
  * connecting, the repository's own extensions and skills loaded, the ten Envoy tools registered and
- * `dispatch read` answering, and `gh api user`.
+ * `dispatch read` answering, and the role's App login through `gh api graphql {viewer{login}}`.
  *
  * The daemon renders the report and never refuses a session for it, so a failing check is a
  * failing row, never a stopped boot: `measureCapabilities` never throws. Every collaborator a check
@@ -377,13 +377,19 @@ const checkDispatchEnvoyTools: Check = async (host, input, signal) => {
   );
 };
 
+/** The role's own GitHub identity through GraphQL `viewer`, never REST `GET /user`: a role's `gh`
+ * runs on its App's installation token, which GitHub answers `GET /user` to with 403 "Resource not
+ * accessible by integration", and `{viewer{login}}` is how such a token reads its own identity —
+ * the read the repository's proofs make (`internal/api/real_github_test.go`,
+ * `scripts/e2e/stage4b-sandbox-tree.sh`). */
 const checkGitHub: Check = async (host, input, signal) => {
-  const result = await host.run("gh", ["api", "user", "--jq", ".login"], {
-    cwd: input.cwd,
-    signal,
-  });
-  if (result.code !== 0) return failed(`gh api user failed: ${commandFailure(result)}`);
-  return ok(`gh api user: ${result.stdout.trim()}`);
+  const result = await host.run(
+    "gh",
+    ["api", "graphql", "-f", "query={viewer{login}}", "--jq", ".data.viewer.login"],
+    { cwd: input.cwd, signal }
+  );
+  if (result.code !== 0) return failed(`gh viewer login failed: ${commandFailure(result)}`);
+  return ok(`gh viewer login: ${result.stdout.trim()}`);
 };
 
 const CHECKS: Readonly<Record<LiveCapability, Check>> = {

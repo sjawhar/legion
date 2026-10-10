@@ -519,7 +519,7 @@ function fakeCapabilityHost(overrides: Partial<CapabilityHost> = {}): Capability
     loadSkills: async () => ({ skills: [] }),
     run: async (command) =>
       command === "gh"
-        ? { code: 0, stdout: "octocat\n", stderr: "" }
+        ? { code: 0, stdout: "legion-reviewer[bot]\n", stderr: "" }
         : { code: 0, stdout: "REPO-43\n", stderr: "" },
     ...overrides,
   };
@@ -1052,7 +1052,7 @@ describe("Legion OMP extension", () => {
                 ok: false,
                 detail: `Envoy tools missing: ${[...ENVOY_TOOL_NAMES].join(", ")}`,
               },
-              { name: "github", ok: true, detail: "gh api user: octocat" },
+              { name: "github", ok: true, detail: "gh viewer login: legion-reviewer[bot]" },
             ],
           },
         },

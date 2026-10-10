@@ -1123,7 +1123,9 @@ passing one reports:
   <issue>` answers, which is why the row's summary reads "reaches Dispatch through the `dispatch`
   command and Envoy through the pi-envoy tools" — `ten Envoy tools registered; dispatch read
   <issue> answered from <path>`.
-- `github`: `gh api user` answers under the role's token file — `gh api user: <login>`.
+- `github`: `gh api graphql -f query='{ viewer { login } }'` answers the role's App login under the
+  role's token file (REST `GET /user` is not a call an App installation token may make, so the row
+  never reads it) — `gh viewer login: <login>`.
 
 The daemon renders a live row from its live sessions' reports. A live session is a claim that is
 ready, working or idle whose report came from its current process (the report's `incarnation` is

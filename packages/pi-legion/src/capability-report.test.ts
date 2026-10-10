@@ -59,7 +59,7 @@ function fakeHost(overrides: Partial<CapabilityHost> = {}): CapabilityHost & {
     run: async (command, args, options) => {
       runs.push({ command, args, cwd: options.cwd, signal: options.signal });
       return command === "gh"
-        ? { code: 0, stdout: "octocat\n", stderr: "" }
+        ? { code: 0, stdout: "legion-implementer[bot]\n", stderr: "" }
         : { code: 0, stdout: "LEGION-663 · Capability report\n", stderr: "" };
     },
     ...overrides,
@@ -579,7 +579,7 @@ describe("dispatch-envoy-tools", () => {
         run: async (command) =>
           command === "dispatch"
             ? { code: 1, stdout: "", stderr: "dispatch: issue LEGION-663 not found\nrun --help\n" }
-            : { code: 0, stdout: "octocat\n", stderr: "" },
+            : { code: 0, stdout: "legion-implementer[bot]\n", stderr: "" },
       })
     );
     expect(withStderr["dispatch-envoy-tools"]).toEqual({
@@ -591,7 +591,7 @@ describe("dispatch-envoy-tools", () => {
         run: async (command) =>
           command === "dispatch"
             ? { code: 2, stdout: "", stderr: "" }
-            : { code: 0, stdout: "octocat\n", stderr: "" },
+            : { code: 0, stdout: "legion-implementer[bot]\n", stderr: "" },
       })
     );
     expect(silent["dispatch-envoy-tools"]).toEqual({
@@ -602,12 +602,19 @@ describe("dispatch-envoy-tools", () => {
 });
 
 describe("github", () => {
-  test("passes with the login gh api user answers", async () => {
+  test("passes with the login the viewer query answers", async () => {
     const host = fakeHost();
     const rows = await measure(host);
-    expect(rows.github).toEqual({ ok: true, detail: "gh api user: octocat" });
+    expect(rows.github).toEqual({ ok: true, detail: "gh viewer login: legion-implementer[bot]" });
     const run = host.runs.find((candidate) => candidate.command === "gh");
-    expect(run?.args).toEqual(["api", "user", "--jq", ".login"]);
+    expect(run?.args).toEqual([
+      "api",
+      "graphql",
+      "-f",
+      "query={viewer{login}}",
+      "--jq",
+      ".data.viewer.login",
+    ]);
     expect(run?.cwd).toBe(workspace);
   });
 
@@ -619,14 +626,15 @@ describe("github", () => {
             ? {
                 code: 1,
                 stdout: "",
-                stderr: "gh: HTTP 401: Bad credentials (https://api.github.com/user)\n",
+                stderr: "gh: HTTP 401: Bad credentials (https://api.github.com/graphql)\n",
               }
             : { code: 0, stdout: "", stderr: "" },
       })
     );
     expect(withStderr.github).toEqual({
       ok: false,
-      detail: "gh api user failed: gh: HTTP 401: Bad credentials (https://api.github.com/user)",
+      detail:
+        "gh viewer login failed: gh: HTTP 401: Bad credentials (https://api.github.com/graphql)",
     });
     const silent = await measure(
       fakeHost({
@@ -636,7 +644,7 @@ describe("github", () => {
             : { code: 0, stdout: "", stderr: "" },
       })
     );
-    expect(silent.github).toEqual({ ok: false, detail: "gh api user failed: exit code 4" });
+    expect(silent.github).toEqual({ ok: false, detail: "gh viewer login failed: exit code 4" });
   });
 
   test("passes under a GitHub App installation token, the only credential a Legion role holds", async () => {
