@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -390,7 +391,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		if err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
-		if _, err := WriteGHConfig(ghConfigDir, rendered); err != nil {
+		if _, err := ghconfig.Write(ghConfigDir, rendered); err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
 		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)

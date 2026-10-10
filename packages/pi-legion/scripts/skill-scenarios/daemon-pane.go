@@ -110,10 +110,10 @@ func pane() error {
 	}
 	ghConfigDir := ""
 	if req.GHToken != "" {
-		// The runtime's own writer (tmux.WriteGHConfig), so the rig's directory is the daemon's layout;
+		// ghconfig's one writer of a role's gh directory, so the rig's directory is the daemon's layout;
 		// the App label and expiry only feed the runtime's log lines, which the rig does not write.
 		ghConfigDir = runtime.GHConfigDir(req.StateDir, token)
-		if _, err := tmux.WriteGHConfig(ghConfigDir, ghconfig.Render(req.GHToken, "", time.Time{})); err != nil {
+		if _, err := ghconfig.Write(ghConfigDir, ghconfig.Render(req.GHToken, "", time.Time{})); err != nil {
 			return fmt.Errorf("write the claim's gh files: %w", err)
 		}
 	}
