@@ -300,28 +300,49 @@ func (d *launchers) stop(ctx context.Context, token claim.Token, podUID string, 
 }
 
 // bindLauncherSecrets binds each launcher role's Secret of the pod l launches to the new pod's uid,
-// so only that pod's launchers authenticate with it.
+// so only that pod's launchers authenticate with it. A write the API server refuses as a conflict
+// — the gh-credential refresher rewrote the Secret between this read and this write
+// (refreshGitHubCredential) — is retried once over a fresh read, so the refresher's gh files and the
+// binding both land; a launch that failed here instead would leave the new pod running, unbound,
+// until the supervisor's next attempt replaced it. Any other failure, or a second conflict, is
+// returned.
 func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch, uid string) error {
+	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	for _, role := range l.roles {
 		name := roleSecretName(s.Name, role)
-		updating, cancel := call(ctx)
-		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(updating, name, metav1.GetOptions{})
-		cancel()
+		read := func() (*corev1.Secret, error) {
+			reading, cancel := call(ctx)
+			defer cancel()
+			secret, err := secrets.Get(reading, name, metav1.GetOptions{})
+			if err != nil {
+				return nil, fmt.Errorf("bind launcher secret %s: %w", name, err)
+			}
+			if !ownedBySandbox(secret.OwnerReferences, s.UID) {
+				return nil, fmt.Errorf("bind launcher secret %s: it is not owned by Sandbox %s", name, s.Name)
+			}
+			return secret, nil
+		}
+		secret, err := read()
 		if err != nil {
-			return fmt.Errorf("bind launcher secret %s: %w", name, err)
+			return err
 		}
-		if !ownedBySandbox(secret.OwnerReferences, s.UID) {
-			return fmt.Errorf("bind launcher secret %s: it is not owned by Sandbox %s", name, s.Name)
-		}
-		if secret.Annotations == nil {
-			secret.Annotations = map[string]string{}
-		}
-		secret.Annotations[launcherPodUIDAnnotation] = uid
-		updating, cancel = call(ctx)
-		_, err = r.kube.CoreV1().Secrets(r.namespace).Update(updating, secret, metav1.UpdateOptions{})
-		cancel()
-		if err != nil {
-			return fmt.Errorf("bind launcher secret %s to pod UID: %w", name, err)
+		for retried := false; ; retried = true {
+			if secret.Annotations == nil {
+				secret.Annotations = map[string]string{}
+			}
+			secret.Annotations[launcherPodUIDAnnotation] = uid
+			updating, cancel := call(ctx)
+			_, err = secrets.Update(updating, secret, metav1.UpdateOptions{})
+			cancel()
+			if err == nil {
+				break
+			}
+			if !apierrors.IsConflict(err) || retried {
+				return fmt.Errorf("bind launcher secret %s to pod UID: %w", name, err)
+			}
+			if secret, err = read(); err != nil {
+				return err
+			}
 		}
 		r.cacheLauncherCredential(s, secret)
 	}

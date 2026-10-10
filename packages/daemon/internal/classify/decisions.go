@@ -261,8 +261,8 @@ func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
 // mid-round and spend a fix attempt with no code changed. A head whose push is not recorded yet is
 // read as one that may change code. A red that only declared review workflows make goes to the
 // reviewer's round too, at any head: such a workflow fails on its findings and stays red on a
-// finding the implementer cannot make go away, since only the Legion reviewer's Accepted: closes a
-// bot's thread, so sending it back would spend fix attempts on a verdict only the reviewer can
+// finding the implementer cannot make go away, since a bot's thread is the reviewer's to adjudicate
+// and resolve, so sending it back would spend fix attempts on a verdict only the reviewer can
 // answer. Any other red required workflow is a failing check like any other, and sends the work
 // back.
 func RedSendsBack(pr record.PullRequest, reviewWorkflows []string) bool {

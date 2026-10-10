@@ -40,15 +40,20 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 	}{
 		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate`", "end the tree with `close_root`", "Every notice about an issue you own arrives on your own role topic", "to merge a pull request that deletes it"}, architectOperations...)},
 		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "to merge a pull request that deletes it"}, architectOperations...)},
-		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "push it with `legion push`", "whose `verdict` is `\"changes_requested\"`"}},
+		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "ends its head's commit message with `skip-checks: true` as the last line", "finds, with your pane's jj, the newest commit on the issue branch carrying `.legion/<issue>/<phase>.json`", "The daemon reads no handoff file and no branch head", "A refusal records nothing"}},
+		// The implementer disarms the merger's submission on a round that follows a withdrawn READY.
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"refuses READY while the head still carries it"}},
-		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
+			"refuses READY while the head still carries it", "`gh pr merge <n> -R <owner>/<repo> --disable-auto`"}},
+		// The tester runs the application, not CI again (dispatch://LEGION-631).
+		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
+			"read CI for everything static", "try to break it"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed"}},
-		// The packet limit the merger is told is the one the handoff route enforces.
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "refuses READY unless every check the base branch requires",
-			"refuses READY while that head still carries `.legion/<issue>/`", fmt.Sprintf("at most %d characters", record.MessagePostLimit)}},
+		// The packet limit the merger is told is the one the handoff route enforces. The merger submits
+		// the merge itself once READY is accepted, and its packet says so.
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base", "`READY_CHECKS_NOT_GREEN`: a check the base branch requires",
+			"refuses READY while that head still carries `.legion/<issue>/`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
+			"`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`", "Merge: submitted on acceptance"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)
@@ -76,15 +81,17 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 					t.Errorf("the snapshot's %s is not the embedded part", part)
 				}
 			}
-			// The runtimes join the parts byte for byte ($(cat …)), so the role's part and the shared
-			// one must meet at one blank line, as the paragraphs within a part do.
+			// The runtimes join the parts byte for byte ($(cat …)), so the role's Go daemon part and
+			// the shared one must meet at one blank line, as the paragraphs within a part do. The
+			// phrases each role is held to are read from the whole composed prompt, shared parts and
+			// the Go daemon's alike.
 			var text strings.Builder
-			for i, path := range parts.RolePromptPaths[len(tc.shared):] {
+			for i, path := range parts.RolePromptPaths {
 				body, err := os.ReadFile(path)
 				if err != nil {
-					t.Fatalf("read Go daemon part: %v", err)
+					t.Fatalf("read part: %v", err)
 				}
-				if joined := text.String(); i > 0 {
+				if joined := text.String(); i > len(tc.shared) {
 					gap := len(joined) - len(strings.TrimRight(joined, "\n")) + len(body) - len(strings.TrimLeft(string(body), "\n"))
 					if gap != 2 {
 						t.Errorf("Go daemon parts %q join %s with %d newlines, want one blank line", tc.goParts, path, gap)
@@ -94,10 +101,10 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			}
 			for _, requirement := range append([]string{
 				"This Go daemon advances phases",
-				"re-read your issue record with `legion state`",
+				"re-read your issue record with the `legion` tool's `read_record`",
 			}, tc.contains...) {
 				if !strings.Contains(text.String(), requirement) {
-					t.Errorf("Go daemon parts %q omit %q", tc.goParts, requirement)
+					t.Errorf("the composed %s prompt omits %q", tc.name, requirement)
 				}
 			}
 		})
@@ -152,7 +159,7 @@ func TestTheComposedPlannerDispatchesItsPlanChecksFromTheHeadlessResidue(t *test
 }
 
 // No role's handoffs reach the default branch: retro's last commit removes the issue's own
-// .legion/<issue>/ from the head a human merges (dispatch://LEGION-605). No phase worker's composed
+// .legion/<issue>/ from the head that merges (dispatch://LEGION-605). No phase worker's composed
 // prompt still carries the rule this replaced: that the approved and the merged head keep .legion/,
 // and that the daemon strips the leftovers from the next issue's branch. The merger's check of the
 // commits above the approved head leaves out retro's removal beside its docs/solutions/ ones.

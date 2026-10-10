@@ -1,9 +1,11 @@
 package prompts
 
 import (
+	"embed"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -22,7 +24,7 @@ var (
 	modeNeutral        = append(append([]string{"core/common.md"}, coreFiles()...), "mechanics/interactive.md")
 	reusableParts      = append(slices.Clone(modeNeutral), "mechanics/headless.md")
 	headlessOnly       = []string{
-		"LEGION_", "legion gh", "legion handoff", "handoff_", "legion threads", "envoy_publish", ".legion/",
+		"LEGION_", "GH_CONFIG_DIR", "handoff_", "skip-checks", "envoy_publish", ".legion/",
 		"roleToken", "spawn_worker", "legion-worker",
 		// Naming a task agent is headless mechanics: the daemon's load probe checks that a pane's Oh
 		// My Pi finds every agent a role prompt names and runs it on its own model, and nothing
@@ -88,11 +90,12 @@ func TestEveryRoleHasItsPartAndTheMergerHasNoCore(t *testing.T) {
 
 func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	const (
-		readSource = "read the code that already does the nearest thing"
-		noDefer    = "Nothing needed for correctness is deferred"
-		fastChecks = "run the repository's fast local checks"
-		redTest    = "the test itself is not theirs to change"
-		dontModify = "make the tester's red test pass; do not modify it"
+		readSource       = "read the code that already does the nearest thing"
+		noDefer          = "Nothing needed for correctness is deferred"
+		fastChecks       = "run the repository's fast local checks"
+		testerRunsTheApp = "read CI for everything static"
+		redTest          = "the test itself is not theirs to change"
+		dontModify       = "make the tester's red test pass; do not modify it"
 	)
 	contains := func(file, needle string, want bool) {
 		t.Helper()
@@ -110,9 +113,12 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 	contains("core/oracle.md", readSource, true)
 	contains("core/oracle.md", noDefer, false)
-	for _, role := range []string{"implementer", "tester"} {
-		contains("core/"+role+".md", fastChecks, true)
-	}
+	// The implementer runs the repository's fast local checks before a push; the tester runs the
+	// application and reads CI for the static lanes (dispatch://LEGION-631), so the rule to rerun
+	// them is the implementer's alone.
+	contains("core/implementer.md", fastChecks, true)
+	contains("core/tester.md", fastChecks, false)
+	contains("core/tester.md", testerRunsTheApp, true)
 	contains("core/tester.md", redTest, true)
 	contains("core/implementer.md", dontModify, true)
 	for _, role := range []string{"planner", "reviewer", "oracle"} {
@@ -120,6 +126,7 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 	for _, role := range []string{"planner", "implementer", "reviewer", "oracle"} {
 		contains("core/"+role+".md", redTest, false)
+		contains("core/"+role+".md", testerRunsTheApp, false)
 	}
 }
 
@@ -207,6 +214,26 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 	for agent, files := range agents {
 		if _, err := os.Stat(filepath.Join("..", "..", "..", "pi-legion", "agents", agent+".md")); err != nil {
 			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
+		}
+	}
+}
+
+// The merger submits the merge itself once READY is accepted (dispatch://LEGION-631), and Legion
+// enforces no GitHub restriction the repository itself does not: a part that says Legion never
+// merges, shared or the Go daemon's, contradicts the merger's own step. The phrases, in any case,
+// are a pattern rather than spelled out, so a grep for them over this directory finds only prompt
+// text.
+func TestNoPartSaysLegionNeverMerges(t *testing.T) {
+	saysLegionNeverMerges := regexp.MustCompile(`(?i)never merg(es)|merg(e|es) nothing`)
+	for dir, parts := range map[string]embed.FS{"roles": roleParts, "go": goParts} {
+		err := eachPart(parts, dir, func(name string, body []byte) error {
+			if phrase := saysLegionNeverMerges.Find(body); phrase != nil {
+				t.Errorf("%s/%s says %q", dir, name, phrase)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("read the %s parts: %v", dir, err)
 		}
 	}
 }

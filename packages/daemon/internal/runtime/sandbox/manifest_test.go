@@ -248,8 +248,8 @@ func mountHolding(c corev1.Container, path string) *corev1.VolumeMount {
 }
 
 // PI_SHELL_PREFIX is a shell command Oh My Pi's bash tool runs before each command, in tmux's form
-// over the pod's own directories — worker-bin on the tree volume, then legion's — never a
-// path list (P3).
+// over the pod's one directory of its own — legion's in the image; no directory of the tree volume,
+// since the agent's gh is the image's — never a path list (P3).
 func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -257,7 +257,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	}
 	env := envOf(workerOf(t, r, workerSpec(t), false))
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
-	want := shellprefix.For("/legion/worker-bin", "/opt/legion/bin")
+	want := shellprefix.For("/opt/legion/bin")
 	if got != want {
 		t.Fatalf("PI_SHELL_PREFIX\n got: %s\nwant: %s", got, want)
 	}
@@ -402,40 +402,6 @@ func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
 	}
 }
 
-// Oh My Pi copies its own environment once for every `gh` it runs to serve a pr:// or issue://
-// read, so the worker container is told LEGION_GRANT_FILE from its start; the extension writes a
-// grant there before each such call (LEGION-262). The file is the claim's, on the state volume in
-// memory — never on the tree volume every agent of the tree can read — and no init container,
-// none of which redeems a grant, is told one.
-func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := workerSpec(t)
-	pod := podOf(t, r, spec, false)
-	main := workerOf(t, r, spec, false)
-	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
-	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
-		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
-	}
-	for _, init := range pod.InitContainers {
-		if got, ok := envOf(init)["LEGION_GRANT_FILE"]; ok {
-			t.Errorf("init container %s is told LEGION_GRANT_FILE=%q; no init container redeems a grant", init.Name, got)
-		}
-	}
-	var volume string
-	if mount := mountHolding(main, want); mount != nil {
-		volume = mount.Name
-	}
-	for _, v := range pod.Volumes {
-		if v.Name == volume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
-			return
-		}
-	}
-	t.Fatalf("the grant file %s is on volume %q, which is not an in-memory emptyDir", want, volume)
-}
-
 // A pod's own IP changes on every restart, so a daemon that runs as a pod hands pods a stable
 // address instead, a Kubernetes Service's DNS name: StreamURL is advertise_host at the worker
 // stream's port (shimAddress, internal/daemon/daemon.go) and DaemonURL is daemon_url. Neither
@@ -471,6 +437,13 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
 // Secret, the worker's container included; the controller's pod has no workspace-fetch, so none of
 // its containers reaches the token at all.
+//
+// What the boundary protects is identity, not a repository-write token kept off the tree volume:
+// an implement-role container now holds the implement App's token — the same lease as the
+// provisioning token — read-only in its own gh volume (GHConfigDir), and a review-role container
+// the review App's. What the fetch container's boundary still keeps is that no review-role
+// container ever holds the implement App's token, which is what lets the reviewer's approval
+// count and the daemon's fix-attempt counting read a push's App from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -583,7 +556,8 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = ghrepo.Repository{} }, "no repository"},
 		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
 		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
-		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "credential-shaped"},
+		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "x" }, "credential-shaped"},
+		"gh token in env":     {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "Env sets GH_TOKEN"},
 		"boot token secret":   {func(s *runtime.SpawnSpec) { s.Secrets[bootTokenKey] = "x" }, "is a variable the runtime sets itself"},
 		"provisioning secret": {func(s *runtime.SpawnSpec) { s.Secrets[provisionTokenKey] = "x" }, "a key the runtime writes itself"},
 		"dispatch secret":     {func(s *runtime.SpawnSpec) { s.Secrets[dispatchTokenKey] = "x" }, "DISPATCH_TOKEN_FILE is a variable the runtime sets itself"},
@@ -601,7 +575,7 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 
 // New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
-// does not choose.
+// does not choose, no source for the provisioning token or the roles' gh files.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
@@ -617,6 +591,8 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"bearer no url":     {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
 		"another pool":      {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
 		"the pool restated": {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
+		"no tokens":         {func(o *Options) { o.Tokens = nil }, "no provisioning token source"},
+		"no gh credential":  {func(o *Options) { o.GitHubCredential = nil }, "no github credential function"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
@@ -1390,7 +1366,7 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		"LEGION_E2E_NOTE": literal,
-		"PI_SHELL_PREFIX": shellprefix.For(workerBin, filepath.Dir(r.tools.Legion)),
+		"PI_SHELL_PREFIX": shellprefix.For(filepath.Dir(r.tools.Legion)),
 	} {
 		if got := env[name]; got != want {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)

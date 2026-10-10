@@ -104,8 +104,8 @@ READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pul
 
 followed by the pull request's outcome and its known risks. That is your cue: read it, and merge the
 pull request on GitHub as you would any other, under the repository's branch protection and
-code-owner rules. Legion never merges, and nothing in Legion approves a pull request on your behalf
-or changes who may merge.
+code-owner rules. Nothing in Legion approves a pull request on your behalf or changes who may
+merge.
 
 After the merge, the implementer checks the change in production and records what it saw on the
 pull request and the issue. The architect then signs off with a comment summarizing the evidence,
@@ -124,8 +124,8 @@ default) in case the work resumes.
   it closes the issue with that reason. You can also close the issue yourself from the dashboard.
 
 A status written by an agent session on a running issue is set back by the daemon, and the
-architect is told who wrote it; only a person's move in the dashboard, or the controller's and
-operator's `legion status`, takes a running tree out.
+architect is told who wrote it; only a person's move in the dashboard, the controller's
+`set_status`, or an operator's `legion status`, takes a running tree out.
 
 ## What each status means
 

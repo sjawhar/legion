@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,8 @@ import (
 )
 
 // A pane commits as its role's App: the launch carries the six git identity variables every worker
-// pane gets, and a launch whose identity cannot be resolved does not happen.
+// pane gets, nothing else of the Apps, and a launch whose identity cannot be resolved does not
+// happen.
 func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	stateDir := t.TempDir()
 	token, err := claim.NewToken("s1", "S1-1", claim.RoleImplementer)
@@ -48,14 +50,13 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
 	}
 	s.repo = ghrepo.Repository{}
-	for name, want := range map[string]string{
+	identity := map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
 		"GIT_AUTHOR_NAME": bot.Name, "GIT_AUTHOR_EMAIL": bot.Email,
 		"GIT_COMMITTER_NAME": bot.Name, "GIT_COMMITTER_EMAIL": bot.Email,
-	} {
-		if spec.Env[name] != want {
-			t.Errorf("the launch's %s = %q, want %q", name, spec.Env[name], want)
-		}
+	}
+	if !maps.Equal(spec.Env, identity) {
+		t.Errorf("the launch's Env = %v, want the six git identity variables alone", spec.Env)
 	}
 
 	s.identity = func(context.Context, claim.Role) (runtime.GitIdentity, error) {

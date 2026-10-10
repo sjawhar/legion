@@ -2,17 +2,29 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
+// HandoffCompleteRequest is what a worker reports when its phase is done. Commit is the commit the
+// completion is of: for a file-backed phase the pushed commit carrying .legion/<issue>/<phase>.json,
+// which the `legion` tool's handoff_complete finds in the pane with its jj (as `legion handoff
+// complete` did) before posting; for every other phase the commit the workspace stands on. The
+// daemon reads no handoff file and no branch head: what each handoff holds is the role prompt's to
+// spell, and the workflow refuses only a commit the role already reported for its previous phase
+// (HANDOFF_NOT_NEW).
 type HandoffCompleteRequest struct {
 	GrantID string `json:"grantId"`
 	Summary string `json:"summary"`
@@ -21,8 +33,13 @@ type HandoffCompleteRequest struct {
 	Commit  string `json:"commit"`
 }
 
-// HandoffCompleteResponse confirms that the completion fact committed.
-type HandoffCompleteResponse struct{}
+// HandoffCompleteResponse confirms that the completion fact committed. Note is what READY's checks
+// say when READY was published without reading the head's checks - the pull request was already
+// merged, or its base requires none (readyChecks) - so the merger's answer does not read like a
+// head whose every required check was read and passed; every other completion answers none.
+type HandoffCompleteResponse struct {
+	Note string `json:"note,omitempty"`
+}
 
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
@@ -89,11 +106,21 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", "issue is not recorded")
 		return
 	}
+	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
+	// workflow committed would be recorded as processed under this completion's key (the READY
+	// packet's hazard above), while a refusal here records nothing, and the corrected retry at the
+	// same commit is applied.
+	var note string
+	if req.Ready {
+		if note, ok = s.readyNote(w, r, grant, issue); !ok {
+			return
+		}
+	}
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
 	// review round — with the role and what it reported: the commit, the verdict, and READY. A
 	// retried call for the same phase is the same fact; the next phase's completion at the same
 	// commit (the implementer's retro, then its production check) is a different one, and so is a
-	// corrected report at the same commit (a merger's --ready after READY_REQUIRED), since a
+	// corrected report at the same commit (a merger's ready: true after READY_REQUIRED), since a
 	// refusal is recorded as processed. The position is read before the fact's own transaction:
 	// should the issue move in between, the engine re-reads it there and refuses a completion whose
 	// role no longer owns the phase.
@@ -122,7 +149,62 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
 		return
 	}
-	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
+	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: note})
+}
+
+// readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub for a
+// merger's ready: true, and is the note they leave. Every refusal is written before the fact is
+// applied, so nothing is recorded under the completion's key and the corrected retry at the same
+// commit is applied:
+//
+//   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
+//     requires one).
+//   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_HEAD_CARRIES_HANDOFFS,
+//     READY_CHECKS_NOT_GREEN.
+//   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
+//
+// The reads are made as the implement App, whose token never leaves the daemon; a runtime that
+// boots without Apps publishes no READY (leaseForGrant).
+func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue) (note string, ok bool) {
+	var repository ghrepo.Repository
+	if s.repository != nil {
+		repository, ok = s.repository(issue.Project)
+	}
+	if !ok || repository.IsZero() {
+		writeFailure(w, http.StatusConflict, "NO_REPOSITORY", fmt.Sprintf("the project %s of %s has no repository configured, so its pull request cannot be read", issue.Project, issue.Key))
+		return "", false
+	}
+	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
+	if !ok {
+		return "", false
+	}
+	ctx := r.Context()
+	pr, err := s.issuePullRequest(ctx, issue.Key)
+	if err != nil {
+		s.log.Error("api: read the pull request of a completing issue", "issue", issue.Key, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request")
+		return "", false
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
+	note, refused := readyChecks(ctx, github, repository, issue.Key, pr)
+	if refused != nil {
+		refused.write(w)
+		return "", false
+	}
+	return note, true
+}
+
+// issuePullRequest is the pull request recorded for issue, nil when it has none.
+func (s *server) issuePullRequest(ctx context.Context, issue string) (*record.PullRequest, error) {
+	if s.pool == nil || s.records == nil {
+		return nil, errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	return s.records.PullRequest(ctx, tx, issue)
 }
 
 // handoffPosition reads the issue record, its tree's generation (the root's), and its review round:

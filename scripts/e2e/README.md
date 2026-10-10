@@ -17,7 +17,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
-| `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
+| `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 
 ## TestRealGitHubCredentialSurface
 
@@ -28,10 +28,10 @@ LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
 ```
 
 The test is intentionally gated because it calls GitHub as both installed Apps. It resolves each
-App key through its `private_key_command`, registers the implementer and reviewer claims through
-the actual API, and drives the binary it builds from this checkout. The test's temporary grant
-files, built binary, and clone directory are removed by Go's test cleanup; the GitHub operations
-are read-only except for locally cloning the smoke repository.
+App key through its `private_key_command`, mints each App's lease through the real token source,
+writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against
+them. The test's temporary gh directories and clone directory are removed by Go's test cleanup;
+the GitHub operations are read-only except for locally cloning the smoke repository.
 
 
 ## stage1-skeleton.sh
@@ -233,7 +233,10 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envo
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
-then squash-merges one disposable pull request as the proof human into `sjawhar/legion-smoke`.
+and sees one disposable pull request merged into `sjawhar/legion-smoke`: the proof reads the pull
+request's state first and squash-merges it by hand as the proof human only when the merger armed
+nothing, the merger's own submission on its READY being the expected path under this branch's
+prompt.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
 `secrets` CLI, and the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the
 gateway's Anthropic endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)),
@@ -292,26 +295,31 @@ It proves admission order and slotless children, then drives a root from `todo` 
 architect's spec and gate registration, which the architect does on its own (the proof never
 prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
 the proof's one-file smoke spec), the human approval, planner, implementer pull request,
-tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
+tester, reviewer, retro, merger READY, the merge (the merger's own submission, or the ordinary
+human squash merge when the merger armed nothing), production check, and
 architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
 the round returns to implementing only once the reviewer's handoff is recorded, authored and
-committed by the review App, and each review, like the final approval, names the commit carrying
-that round's reviewer handoff, the head the reviewer's own handoff push made (the order the Go
+committed by the review App, and each review, like the final approval, names the issue branch's
+head at that round's reviewer completion, the head the reviewer's own handoff push made (the order the Go
 reviewer prompt gives; the proof names only the decision); in round one the proof human, a GitHub
 App and so a bot account like a CI bot and none of Legion's role Apps, also opens a file-level
 review thread (the run reads the thread's author back and stops, naming it, when the devbox `gh`
 posted as anything else, such as the user after its App routing failed). The implementer answers
-that thread in round one's correction, and the thread must stay open, since the pull request
-author's reply closes nothing. The round-two reviewer accepts it with `Accepted:`, and round two's
-correction must leave it resolved by the implementer's `legion threads resolve`, carrying that
-acceptance. Each round names one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
+that thread in round one's correction and resolves it with its own `gh` (the pull request author's
+`resolveReviewThread`), as it does every thread it answers; the round-two reviewer adjudicates it,
+replying in its own words and naming its node id to the implementer as accepted (the review App
+cannot resolve a thread, so the reviewer names the threads it accepts and the implementer resolves
+them with plain `gh`; this one it already had), so the thread then carries the reviewer's reply and
+stays resolved. No word of
+a reply resolves anything. Each round names one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaches testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
-handoff for that round when the issue reaches testing, and the commit carrying every planner,
-implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
-from the issue's workspace). It also proves `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
+handoff for that round when the issue reaches testing, and the pushed commit carrying the handoff
+that every planner, implementer, tester, and reviewer completion reported is authored and
+committed by that role's own App, read from the issue's workspace). It also proves `pr-blocked`,
+READY refusing after a later spec version until a human approves it, a held
 worker after its launch budget and the architect's retry relaunching it, a root whose human
 decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
 architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
@@ -319,14 +327,13 @@ it writes `done`, every status write on the issue is the daemon's, the freed slo
 waiting root, and the journal has the gate's changes request, the close, the linger, the slot
 release and the architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
-credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
-`<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
-on the command's one grant, and `gh pr merge` is refused. Then `idle-pr-read` has the implementer
-and the root architect each read the pull request through Oh My Pi's `read` tool (`pr://`), with
-no bash command first, once their last grant is over 60 s old — a grant's lifetime — and requires
-the read's own `Created:` line back, judged from the transcript: Oh My Pi serves the read by
-running `gh` with the environment it copied at its start, so this passes only when the pane named
-`LEGION_GRANT_FILE` from that start and the plugin minted a grant for the read itself (LEGION-262).
+credentials (`in-agent-credentials`): in one bash tool call of a real implementer pane, plain `gh`
+— the daemon's PATH's, with no Legion shim in front of it — authenticates as
+`legion-implementer[bot]` from the gh files the pane's `GH_CONFIG_DIR` names, a `task` subagent
+of that pane does the same with no bash command of the parent's first, since it inherits the same
+directory, and `gh auth status` names account `x-access-token`; nothing of the pane's redeems a
+grant for GitHub, no pane carries a grant file, and no agent runs `legion` from bash, so there is
+no `idle-pr-read` checkpoint, which proved a per-read grant mint (LEGION-262) that no longer exists.
 `notices-reach-architects-alone` reads every phase-worker session in the isolated profile (a
 session's role is its newest Envoy role claim) and fails on any workflow notice delivered to one:
 every notice kind is for the architect that owns its issue, on that architect's role topic, and the
@@ -368,10 +375,9 @@ held names the holder, says every minute how long it has waited, and fails after
 naming it. The lock is on an open descriptor, so a holder that dies or is killed frees it with no
 stale lock left behind.
 Each check is named in the transcript;
-seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
+negative controls demonstrate that the status-actor, held-worker, re-closed-gate
 and worker-notice assertions reject deliberately corrupted observations before the captured
-observations pass again (the idle read's three: its result refused as it was before LEGION-262, the
-read inside its previous grant's lifetime, and a bash command before it; the worker notice's: a copy
+observations pass again (the worker notice's: a copy
 of one phase-worker session with a `pr-blocked` delivery appended).
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
@@ -451,8 +457,11 @@ task's surfaces through it: a Go prompt part a restart rewrites, the refused roo
 phase-stall follow-up (a planner whose turn ends with its phase open gets the follow-up, and the
 tool's `handoff_complete` closes it), park and re-run, the
 phase-finished notice's summary and verdict, the daemon posting and publishing the merger's READY
-(directly, across a refused gate, with and without a merge queue holder, and refused at
-`record.MessagePostLimit` one unit over), and the early-merge and closed-unmerged notices. Every
+(directly, across a refused gate, with and without a merge queue holder, and refused
+`READY_PACKET_TOO_LONG` on the merger's own over-cap packet through the tool; the cap's exact
+boundary, `record.MessagePostLimit` one unit over, is the daemon's own test in
+`internal/api/handoff_test.go`), that the merger's pane carries no grant file and ran no `legion`
+from bash (`merger-pane-mints-no-grant`), and the early-merge and closed-unmerged notices. Every
 proof pull request is retargeted to a scratch base before any merge (the one merged at
 `awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
 merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
@@ -792,8 +801,10 @@ the run that owns it. A signal to the whole process group does not stop the remo
   claim, so the daemon sets back its status write on a live root as it does any outside session's.
   The run takes trees out with `legion status` from the operator shell, the daemon's own write.
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, tree 1's pull request, which
-  the proof human merges, and `done`'s cleanup pull request on `proof/clean-main-legsmoke`, which the
-  proof human merges too. The teardown closes any pull request the run left open, such as one from a
+  the proof reads first and the proof human merges by hand only when the merger armed nothing (the
+  merger's own submission on its READY is the expected path under this branch's prompt), and
+  `done`'s cleanup pull request on `proof/clean-main-legsmoke`, which the proof human merges. The
+  teardown closes any pull request the run left open, such as one from a
   run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. It also closes
   the cleanup pull request if it is still open, with a comment naming the run, and deletes its
   branch, when the run stopped after `done` made that branch and before the merge deleted it (a
@@ -858,13 +869,15 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `issue-cap-moves` | the proof human's `backlog` on tree 2's live root is set back: the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot; `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone |
 | `tree-moved` | tree 1's planner and implementer take it to `testing` with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author |
 | `ci-red-takeover` | CI settling red while tree 1's tester is in a turn takes the phase back without its completion, and interrupts that turn before the implementer starts. The control: the tester runs `/usr/bin/sleep 20 && date … > /tmp/stage4b-takeover-control`, which nothing interrupts, and the file is written. The witness: the tester runs the same chain with `/usr/bin/sleep 1207` into `/tmp/stage4b-takeover-witness`, its claim `working` and the sleep in its pod's process list; the proof human commits `.fail-me` to the pull request's branch, the smoke repository's `fail-on-demand` check fails on it, and tree 1 returns to `implementing`. The tester then goes idle on its first session in its first pod, its sleep gone and the witness never written. The daemon log's lines of the takeover (kept as `ci-red-takeover-log.jsonl`) hold the tester's turn over, the start going on only after it, and the implementer's CI-red task reaching its session after it too; the tester's turn interrupted, which the log can carry or not (`takeover_interrupted` is optional since 829b4f94), must come no later than it being over when the line exists. A control that puts the task at the row's own interrupt time, or, with none logged, at the timestamp taken just before the `.fail-me` commit (edb4eb62, 80d0c82b), must fail. The implementer, told to, deletes `.fail-me`, tree 1 returns to `testing`, and the tester, handed testing again on its first session in its first pod, has still written no witness |
-| `tree-reviewed` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author. Once both thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`. The reviewer first submits `COMMENT` and completes without a decision: there is no approval, the issue stays in `reviewing`, and the architect receives a completion-written `review-stuck` notice naming a commit of the pull request (`notice-review-stuck.jsonl`). The driver tells the architect only to handle that notice, naming no topic, head or decision. A message in the reviewer's session must carry the architect's `reply_role` and arrive after completion; earlier round reports cannot count. These messages are kept as `architect-ask.jsonl`; an ask before the driver's steer is noted as the stronger pass. Once asked, the reviewer requests changes with exactly one inline thread and a review naming its handoff head. The implementer appends the requested line and the tester verifies it. The re-review's decision is the reviewer's own; a second request for changes fails the proof. The thread is recorded after correction and at approval, then the issue leaves `reviewing` for retro or merging |
-| `review-thread` | when the approval landed, the reviewer's thread read `isResolved: false` with the reviewer's own `Accepted:` as its newest submitted comment: the approval did not wait on a resolution only the pull request author's App can make, and that nothing makes before the merger's run (LEGION-316). Controls: the same record resolved, and with the implementer's reply as its newest comment, both fail |
+| `tree-reviewed` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author. Once both thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`. The reviewer first submits `COMMENT` and completes without a decision: there is no approval, the issue stays in `reviewing`, and the architect receives a completion-written `review-stuck` notice naming a commit of the pull request (`notice-review-stuck.jsonl`). The driver tells the architect only to handle that notice, naming no topic, head or decision. A message in the reviewer's session must carry the architect's `reply_role` and arrive after completion; earlier round reports cannot count. These messages are kept as `architect-ask.jsonl`; an ask before the driver's steer is noted as the stronger pass. Once asked, the reviewer requests changes with exactly one inline thread and a review naming its handoff head. The implementer appends the requested line, answers the thread and resolves it with its own `gh`; the tester verifies it. Before the re-review the proof bot (the proof human, a GitHub App that is none of Legion's role Apps) opens a second thread, and the reviewer is told to reply on it and name its node id to the implementer as accepted over Envoy, which resolves it with its own `gh`. The re-review's decision is the reviewer's own; a second request for changes fails the proof. Both threads are recorded at approval (the reviewer's also after the correction; the bot's may still be open there, since the approval does not wait for the implementer's resolution), then the issue leaves `reviewing` for retro or merging |
+| `review-thread` | threads are resolved by id, by the pull request's author, on no magic word (LEGION-631): after the correction round the reviewer's thread read `isResolved: true` with the implementer's reply as its newest submitted comment (the pull request author's `resolveReviewThread`, run by the implementer's own `gh` before it completed); at the approval it still read resolved with the reviewer's own reply newest; the bot's thread, which the reviewer answered and named by node id to the implementer over Envoy (the review App cannot resolve one), reads resolved with the reviewer's reply (`bot-thread-resolved.json`; the implementer, live after its phase, resolved it with its own `gh`, so the approval need not have waited for it), and the implementer's session holds the reviewer's delivery naming the id (`bot-thread-named-to-implementer.jsonl`); `POST /legion/v1/threads/resolve` on the daemon answers 404 (`threads-resolve-404.json`): no daemon route resolves a thread (acceptance 4). Controls: the implementer's record left unresolved, and the reviewer's record with a later implementer reply appended, both fail; the bot's record left unresolved, or stripped of the reviewer's reply, fails |
 | `completion-closed` | each phase worker of tree 1 — planner, implementer, tester, reviewer — stays live once its phase ends: it goes idle on the session and in the pod (by uid) it first registered with, and its live session answers every `handoff_complete` call of the legion tool, holds one success for each assignment it completed, and records the phase stall `closed` after that call, with no phase-stall follow-up after its last success: the 4b.13b acceptance's stall check (`stage3-4b13b-acceptance.sh`'s `phase-stall-follow-up`), which a stop inside the call fails (LEGION-283). The sessions and each verdict are kept as `completion-<role>.jsonl` and `completion-<role>-verdict.json`. Its control: the planner's session cut at its `handoff_complete` call, the transcript such a stop leaves, is refused |
 | `resident-answer` | tree 1's finished planner, asked a question while tree 1 is in merging, answers it in the session and pod it first registered with; nothing relaunches it, and tree 1 stays in merging |
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery, a `wait`, or a `read` of its `proc://` job, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-reviewed keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on a model the operator fixture's `overlay.yml` gives a role |
+| `github-credential` | plain `gh` as the role's App inside the pod, and isolation inside one pod: in tree 1's issue pod, the implementer's `gh` — the image's `/usr/local/bin/gh`, with no Legion shim in front of it — authenticates as `legion-implementer[bot]` from the gh files its `GH_CONFIG_DIR` (`/var/run/legion/gh`, the read-only `gh-implementer` projection of its role Secret) holds, and `gh auth status` there names account `x-access-token`; its Oh My Pi environment carries `GH_CONFIG_DIR`, an empty `GH_TOKEN`, none of the old tool pins, no grant file (`LEGION_GRANT_FILE`, `LEGION_GRANT`), no App login variable and a PATH with no `worker-bin`; a `task` subagent of that session answers the same login with no `legion` command of the parent's first, since it inherits the directory, and the implementer's own bash runs `jj undo --help` and reports jj's first help line, nothing refusing it (acceptance 4c); in the same pod the reviewer container's `gh` is `legion-reviewer[bot]` from a different `hosts.yml`, each role container mounts `gh-<its role>` alone and the pod shares no process namespace; the daemon logged `github credential written` for every role of the pod and names no token route; GitHub's record of each commit attributes the planner's handoff push to `legion-reviewer[bot]` and the implementer's head to `legion-implementer[bot]`; the planner's handoff-only push ends its message with `skip-checks: true` and has no check run, the implementer's code head carries no CI-skipping line and has check runs, and the daemon recorded each pushed head as that role's completion (acceptance 4a); the negative control is the same `gh` with `GH_CONFIG_DIR=/nonexistent`, which fails naming `GH_TOKEN` |
+| `github-credential-refresh` | the hour boundary, on the architect's container (the pod's longest-lived, read first at tree-separation): the daemon logged `sandbox runtime: github credential refreshed` for the sandbox and role with a later expiry than its `written` line's, in the same pod by uid, and the architect's `hosts.yml` then changed in place within the kubelet's sync (the propagation delay is noted); its plain `gh` authenticates as `legion-reviewer[bot]` on the new file, which the daemon wrote at least fifteen minutes before the first lease expired; once the first lease's expiry has passed, the token first written answers `401` while the refreshed one answers `legion-reviewer[bot]`; the tokens live in the proof's shell alone |
 | `idle-resident` | every finished worker of tree 1 still runs in the pod it first registered with, that pod Running, no Sandbox of tree 1 is Suspended while its issue is open, and the tree volume is bound |
 | `kill-launcher-resume` | once the merger runs, killing only its launcher PID 1 restarts that container and resumes the merger's session at a new process generation in the same pod; every peer container identity remains unchanged |
 | `fence` | a whole-pod deletion is never adopted. The merger resumes in a new pod UID; its former private boot token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
@@ -876,7 +889,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session, the call that posted it comes on a turn a `tick on LEGSMOKE` delivery started once the start turn had ended, never in its start turn. That call is the controller's first `dispatch message --issue <report>` run through bash, made any way Oh My Pi offers: the `bash` tool, a write to its `xd://bash` device, or `eval` code calling `tool.bash(...)` ([`lib/omp-tool-calls.jq`](lib/omp-tool-calls.jq), which `stage3-4b13b-acceptance.sh`'s merger check reads too; `lib/report-after-tick.test.ts`). `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
 | `daemon-controller-liveness` | under `controller: daemon` the daemon's liveness sweep writes the two lines a log monitor on the daemon counts, with the text and on the cadence it writes them under `controller: operator` ([`lib/controller-liveness-verdict.jq`](lib/controller-liveness-verdict.jq), tested by `bun test scripts/e2e/lib`, which also holds the daemon's source to both texts and the machine's to its launch lines). The operator's controller quits, and the listener answers 404 for the controller role. The daemon restarts with `controller: daemon` and `runtime.kubernetes.resources.controller` sized to run: the controller it launches registers, holds the role and is ready, `controllerLocator` names its session, and for 270 s (two boot timeouts and 30 s) the daemon logs neither line, the negative control (`controller-liveness-up.json`). It restarts with the controller's CPU request at 100000, more than any node holds, re-adopts the running controller, and the driver deletes its pod. The relaunch's Running patch makes a pod whose role launcher never connects, so each launch onto it fails at the boot timeout (`supervise: launch failed`) with no process recorded. The daemon logs `controller liveness: the controller role has no live holder; the controller is gone` on at least 3 sweeps, naming the dead session, and `controller not registered; run legion controller start only under controller: operator; …` at least twice, 120 s or more apart, with `mode: daemon`, `registered: true` and a claim state that is not a live controller's, one of them after the first failed launch. The controller's claim launches on no pod but the deleted one (a relaunch can catch that pod while it terminates, return it and see it die), and the pod watch shows each pod requesting 100000 CPU, the pods the relaunch made, Unschedulable and never scheduled; the deleted pod and the one the Agent Sandbox controller recreates from the old template request 250m and are not judged (`controller-liveness-down.json`). It restarts with `controller: operator`: the boot retires the controller's claim, its Sandbox and volume go, its registration ends (`controllerLocator` empty), and the sweep logs `controller not registered; run legion controller start`, exactly, with `mode: operator` (`controller-liveness-operator.json`). The rest of the run keeps `controller: operator` with no controller registered |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths in a row (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out. A kill of either that lands after its task's turn has ended is given a new task and repeated, as in `controller`, and restarts the implementer's run of deaths |
-| `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done`; the close suspends every role of tree 1, architect to merger; tree 1's events carry its architect's `issue.claimed`, and done leaves its root issue unclaimed. The READY packet names the pull request's head, and `reviewThreads` shows every thread resolved, the reviewer's included (`review-threads-at-ready.json`). Control: the same record with the reviewer's thread unresolved fails |
+| `done` | the merger's READY and the merge — the proof reads the pull request first and the proof human merges by hand only when the merger armed nothing, the merger's own submission on its READY being the expected path under this branch's prompt; the note names who merged and the merge commit — then the production check and sign-off take tree 1 to `done`; the close suspends every role of tree 1, architect to merger; tree 1's events carry its architect's `issue.claimed`, and done leaves its root issue unclaimed. The READY packet names the pull request's head, and `reviewThreads` shows every thread resolved, the reviewer's and the bot's included (`review-threads-at-ready.json`): the end state the implementer's `gh` left, its own threads and the bot's the reviewer named to it, since the merger resolves nothing and READY reads no thread state. Control: the same record with the reviewer's thread unresolved fails |
 | `node-release` | tree 1's Sandboxes stay Suspended, its volume Bound, and no pod of the run is left on its node: after the pool's consolidation the node is gone, or, when a pod of another project (a production daemon running beside the run) is on it, Pending or Running, the node stays; the note says which, and a timeout lists what the node still held |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/<tree 1>/workspace-recovered.json` naming `legion/<tree 1>` |
@@ -1107,8 +1120,8 @@ path: what `npm pack` ships (`package.json` `files`: `dist/` with the one bundle
 `dist/skills`, the Legion plugin's `agents/`, and the packed manifest). Every script that installs a
 branch-built plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh),
 which `controller-start-tmux.sh`, `stage2-tmux-supervision.sh`, `stage3-devbox-workflow.sh`,
-`stage3-4b13b-acceptance.sh`, `stage4b-sandbox-tree.sh` and `dispatch-user-turns.sh` call, and the
-grant rig's branch mode (`packages/pi-legion/scripts/grant-rig/setup.sh`). The worker image packs
+`stage3-4b13b-acceptance.sh`, `stage4b-sandbox-tree.sh`, `dispatch-user-turns.sh` and the
+skill-scenario rig (`packages/pi-legion/scripts/skill-scenarios/rig.sh`) call. The worker image packs
 on its own, as the release does: `packages/daemon/docker/worker.Dockerfile`'s two plugin `RUN`s each
 rewrite `omp.extensions` with `jq` and run `bun pm pack`, and the prepack
 (`scripts/pi-plugin-prepack.sh`) refuses to pack any other `omp.extensions`, which holds all of
@@ -1159,8 +1172,8 @@ Runs in one checkout take turns at each package's manifest from the save to the 
 whole window); a run that has to wait says so on stderr. Without the lock, a run that starts while
 another has the manifest rewritten saves that rewrite as its "before" and puts it back at its own
 exit: both runs exit 0 and jj snapshots the rewritten `package.json`. Two stage proofs in one
-checkout, or a stage proof and the grant rig, can pack at the same time, and the lock takes them in
-turn; the two packages' packs never wait on each other.
+checkout, or a stage proof and the skill-scenario rig, can pack at the same time, and the lock takes
+them in turn; the two packages' packs never wait on each other.
 
 ## lib/install-plugin-profile.sh
 
@@ -1658,7 +1671,10 @@ that quotes it.
 
 The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's
-`handoff_commit` is the commit its last accepted completion reported, and the daemon empties it
+`handoff_commit` is the commit its `handoff_complete` reported at its last completion the daemon
+accepted (for a file-backed phase the pushed commit carrying the handoff, which the `legion` tool
+finds in the pane and refuses unpushed, so a push before the completion is the role's rule; for
+retro, READY and the production check the commit the workspace stands on), and the daemon empties it
 when a transition starts that role on a new phase (`clearHandoff`,
 `packages/daemon/internal/workflow/effects.go`); the implementer's `rounds` counts its returns
 to implementing. Read right after the transition a completion caused, a role's non-empty

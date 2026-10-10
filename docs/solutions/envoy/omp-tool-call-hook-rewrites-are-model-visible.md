@@ -11,7 +11,7 @@ tags:
   - model-imitation
   - secretsd
 date: 2026-09-13
-status: active
+status: superseded by LEGION-631 — the two lessons stand, but the hook mints a grant only before a bash command that invokes `legion`; gh and git read the role's App token from the gh files under GH_CONFIG_DIR, which the daemon writes and refreshes in place, and the gh shim, worker-bin, `legion gh` and `legion credential` are gone
 module: pi-envoy
 related_issues:
   - "LEGION-12"

@@ -22,9 +22,9 @@ on:
       - "patches/**"
       - "package.json"
       - "bun.lock"
-      # The Go module: envoy-smoke compiles in workspace mode, pi-legion's grant rig runs its code,
-      # and the worker image's Dockerfile pins the jj the pi-legion tests drive. The Go daemon's own
-      # suite is the Tests workflow's (pr-and-main.yaml), on every pull request.
+      # The Go module: envoy-smoke compiles in workspace mode, pi-legion's skill-scenario rig runs
+      # its code, and the worker image's Dockerfile pins the jj the pi-legion tests drive. The Go
+      # daemon's own suite is the Tests workflow's (pr-and-main.yaml), on every pull request.
       - "packages/daemon/**"
       - ".github/actions/install-jj/**"
       - "go.work"
@@ -236,9 +236,9 @@ jobs:
               - '.github/actions/install-jj/**'
             # The Legion plugin: the same shape over its eight skills, the Oh My Pi pin its
             # real-binary test runs (extensions/legion-phase-stall-omp.test.ts), and the daemon: the
-            # rigs' scripts/grant-rig/run.test.ts runs daemon-pane.go inside the daemon module, so a
-            # change to the daemon (or to the worker image's jj, whose version its Dockerfile there
-            # pins for the tests) runs it.
+            # skill-scenario rig's scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go
+            # inside the daemon module, so a change to the daemon (or to the worker image's jj,
+            # whose version its Dockerfile there pins for the tests) runs it.
             pi_legion:
               - 'packages/pi-legion/**'
               - 'packages/pi-shared/**'
@@ -465,7 +465,7 @@ jobs:
       # is read from .omp-pin, the repository's one copy of it, installed through the mise
       # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
-      # scripts/grant-rig/run.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
+      # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/daemon/go.mod

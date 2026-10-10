@@ -9,7 +9,7 @@ tags:
   - process-identity
   - merge-queue
 date: 2026-09-13
-status: active
+status: superseded by LEGION-631 — the runbook lesson stands, but `legion gh` and the worker-bin shim are gone (the controller never touches GitHub, and a pane's gh is the daemon PATH's, reading its App token from the gh files under GH_CONFIG_DIR)
 module: daemon
 related_issues:
   - "LEGION-16"

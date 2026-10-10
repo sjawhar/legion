@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -31,7 +32,8 @@ const (
 	initContainer  = "workspace-init"
 )
 
-// The pod's volumes.
+// The pod's volumes. ghVolume is the prefix of each issue-pod role's gh volume (roleVolume), the
+// projection of its role Secret's two gh files its container alone mounts at GHConfigDir.
 const (
 	provisionVolume = "provision"
 	feedVolume      = "feed"
@@ -39,6 +41,7 @@ const (
 	tempVolume      = "tmp"
 	configVolume    = "config"
 	providersVolume = "providers"
+	ghVolume        = "gh"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -74,9 +77,8 @@ var runtimeOwned = map[string]bool{
 	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"DISPATCH_URL": true, "LEGION_GH_PATH": true,
-	"LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true, "LEGION_CREDENTIAL_HELPER": true, "PATH": true,
-	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true,
+	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
+	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
@@ -98,8 +100,9 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones and each launcher
 // role's private ones. The agent-secrets volumes are reserved whether or not this deployment
-// enrolls: an operator's pod may never claim them. A key volume is a workflow role's alone: the
-// controller never enrolls (enrolledWith), so no pod carries one of its.
+// enrolls: an operator's pod may never claim them. A key volume and a gh volume are a workflow
+// role's alone: the controller never enrolls (enrolledWith) and holds no GitHub credential
+// (podKind.holdsGitHubCredential), so no pod carries one of its.
 func legionVolumeNames() []string {
 	names := []string{
 		treeVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
@@ -108,7 +111,7 @@ func legionVolumeNames() []string {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role))
 	}
 	for _, role := range claim.Roles {
-		names = append(names, roleVolume(agentSecretsKeyVolume, role))
+		names = append(names, roleVolume(agentSecretsKeyVolume, role), roleVolume(ghVolume, role))
 	}
 	slices.Sort(names)
 	return names
@@ -117,11 +120,11 @@ func legionVolumeNames() []string {
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // each role container and the image probe's: an operator's mount may be neither at, under, nor
 // above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
-// deployment enrolls.
+// deployment enrolls, and GHConfigDir whether or not the pod is an issue's.
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
 	}
 	slices.Sort(paths)
 	return paths
@@ -415,11 +418,24 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 // launcherContainers are the pod's launcher containers, one per role of l.roles: an issue pod's
 // six, the controller's one. Each runs only `legion launcher`; the per-generation worker-shim argv
 // and plain environment arrive in the launcher's start command, while values the kubelet must
-// resolve (the downward API, the operator's secret refs) are set on every container.
+// resolve (the downward API, the operator's secret refs) are set on every container. An issue
+// pod's role container also mounts its own gh volume, read-only, at GHConfigDir: the role's
+// GitHub credential, which no other role's container can read.
 func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMount) []corev1.Container {
 	resolved, _ := r.launchEnvironment(l)
 	containers := make([]corev1.Container, 0, len(l.roles))
 	for _, role := range l.roles {
+		mounts := []corev1.VolumeMount{
+			{Name: treeVolume, MountPath: TreeRoot},
+			{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
+			{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
+			{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
+			{Name: roleVolume(stateVolume, role), MountPath: StateDir},
+			{Name: configVolume, MountPath: xdgConfigHome},
+		}
+		if l.kind.holdsGitHubCredential() {
+			mounts = append(mounts, corev1.VolumeMount{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true})
+		}
 		containers = append(containers, corev1.Container{
 			Name:  string(role),
 			Image: r.image,
@@ -428,16 +444,9 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
 				"--stop-grace", r.terminationGrace.String(),
 			},
-			Env:        slices.Clone(resolved),
-			WorkingDir: l.workspace,
-			VolumeMounts: slices.Concat([]corev1.VolumeMount{
-				{Name: treeVolume, MountPath: TreeRoot},
-				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
-				{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
-				{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
-				{Name: roleVolume(stateVolume, role), MountPath: StateDir},
-				{Name: configVolume, MountPath: xdgConfigHome},
-			}, providersMounts, agentSecretsMounts(r.enrolledWith(role), role), r.pod.VolumeMounts),
+			Env:             slices.Clone(resolved),
+			WorkingDir:      l.workspace,
+			VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.enrolledWith(role), role), r.pod.VolumeMounts),
 			Resources:       r.resources[role],
 			SecurityContext: restrictedContainer(),
 		})
@@ -465,11 +474,14 @@ func kubeletEscape(text string) string {
 
 // volumes are the pod's volume and jj config home with, between them, the volumes only its kind's
 // init containers mount (podKind.initVolumes), then each launcher role's token projection, private
-// credential directory and state.
+// credential directory, state and, in an issue pod, its gh volume: the two gh files of its role
+// Secret (GitHubHostsKey as hosts.yml, GitHubConfigKey as config.yml), read-only to the pod's
+// user, from the same Secret as the launcher token, so the refresher's one Update reaches the
+// container's GHConfigDir.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
-	roleVolumes := make([]corev1.Volume, 0, len(l.roles)*3)
+	roleVolumes := make([]corev1.Volume, 0, len(l.roles)*4)
 	for _, role := range l.roles {
 		roleVolumes = append(roleVolumes,
 			corev1.Volume{Name: roleVolume("launcher", role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
@@ -479,6 +491,16 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			corev1.Volume{Name: roleVolume("private", role), VolumeSource: memory},
 			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
 		)
+		if l.kind.holdsGitHubCredential() {
+			roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: roleSecretName(l.name, role),
+				Items: []corev1.KeyToPath{
+					{Key: GitHubHostsKey, Path: ghconfig.HostsFile},
+					{Key: GitHubConfigKey, Path: ghconfig.ConfigFile},
+				},
+				DefaultMode: new(int32(0o440)),
+			}}})
+		}
 	}
 	tree := corev1.Volume{Name: treeVolume, VolumeSource: corev1.VolumeSource{
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.volume)},
@@ -738,22 +760,22 @@ func (r *Runtime) ProvisionBound() time.Duration {
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells
-// its agents (podKind.agentEnv: a tree agent its tree, issue, workspace and checkout, the
-// controller LEGION_CONTROLLER=1), then the rest of the variables every tmux pane is told
-// (runtime/tmux/spawn.go, panePairs), then the operator's (runtime.kubernetes.pod), then the spec's
-// own, then one `<NAME>_FILE` pointer per secret into the generation's private launcher directory,
-// then one per providers secret into the providers mount, then, under a session database
-// (Options.SessionDSNKey), OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming its mounted
-// URL, which a pod created before the store was set does not mount: Oh My Pi refuses to start on an
-// unreadable URL file, so that generation fails rather than keeping files. None of them repeats
-// another: the runtime refuses a spec naming one of its own (runtimeOwned), and the daemon an
-// operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
-// runtime.GrantFile on the state volume, which is empty at start: the extension makes its
-// directory. POD_UID is the pod's own incarnation, from the downward API. The secrets broker is
-// told only to a role that enrolls (enrolledWith).
-func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
+// its agents (podKind.agentEnv: a tree agent its tree, issue, workspace and the gh files its
+// credential is read from, the controller LEGION_CONTROLLER=1), then the rest of the variables
+// every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
+// (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
+// the generation's private launcher directory, then one per providers secret into the providers
+// mount, then, under a session database (Options.SessionDSNKey), OMP_SESSION_STORAGE=sql and
+// OMP_SESSION_SQL_DSN_FILE naming its mounted URL, which a pod created before the store was set
+// does not mount: Oh My Pi refuses to start on an unreadable URL file, so that generation fails
+// rather than keeping files. None of them repeats another: the runtime refuses a spec naming one
+// of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
+// a spec's. POD_UID is the pod's own incarnation, from the downward API. The secrets broker is
+// told only to a role that enrolls (enrolledWith). PI_SHELL_PREFIX puts the `legion` directory
+// first on PATH alone: a pod's gh is the image's, so no directory of the tree volume leads PATH.
+func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
-	env := l.kind.agentEnv(r, l, credentialHelper)
+	env := l.kind.agentEnv(l)
 	add := func(name, value string) { env = append(env, corev1.EnvVar{Name: name, Value: value}) }
 	add("LEGION_ROLE", string(spec.Role))
 	add("LEGION_GENERATION", strconv.FormatUint(spec.Generation, 10))
@@ -773,9 +795,8 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	}
 	legionDir := filepath.Dir(r.tools.Legion)
 	add("PATH", podPath(legionDir))
-	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
+	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
-	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
 	if broker := r.enrolledWith(spec.Role); broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
@@ -804,14 +825,13 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	return env
 }
 
-// launchEnvironment is mainEnvironment, with the pod's credential helper, split into its two
-// carriers: the variables the kubelet resolves (the downward API, the operator's Secret
-// references), set on every role container, and the plain NAME=value pairs the launcher's start
-// command carries to each generation's child.
+// launchEnvironment is mainEnvironment split into its two carriers: the variables the kubelet
+// resolves (the downward API, the operator's Secret references), set on every role container, and
+// the plain NAME=value pairs the launcher's start command carries to each generation's child.
 func (r *Runtime) launchEnvironment(l launch) ([]corev1.EnvVar, []string) {
 	var resolved []corev1.EnvVar
 	var plain []string
-	for _, entry := range r.mainEnvironment(l, "!"+r.tools.Legion+" credential") {
+	for _, entry := range r.mainEnvironment(l) {
 		if entry.ValueFrom != nil {
 			resolved = append(resolved, entry)
 		} else {
@@ -855,11 +875,12 @@ func (r *Runtime) handedAddresses(role claim.Role) []handedAddress {
 	}
 }
 
-// podPath is a main container's PATH: worker-bin, then the directory of the `legion` every
-// container runs, then the image's PATH, which a container's env PATH replaces, with that directory
-// once — in the worker image it is the image PATH's first entry.
+// podPath is a main container's PATH: the directory of the `legion` every container runs, then the
+// image's PATH, which a container's env PATH replaces, with that directory once — in the worker
+// image it is the image PATH's first entry. No directory of the tree volume: the gh, git and jj an
+// agent runs are the image's, and its credential is the gh files under GH_CONFIG_DIR.
 func podPath(legionDir string) string {
-	entries := []string{workerBin, legionDir}
+	entries := []string{legionDir}
 	for _, entry := range strings.Split(imagePath, ":") {
 		if entry != legionDir {
 			entries = append(entries, entry)

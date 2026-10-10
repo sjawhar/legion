@@ -12,7 +12,7 @@ tags:
   - LEGION-37
   - flaky-tests
 date: 2026-09-13
-status: active
+status: superseded by LEGION-631 — `legion handoff complete` and `legion gh` no longer exist; a phase completes through the `legion` tool's `handoff_complete` after a plain `jj git push`, and a pane's `gh` is the plain binary acting as the role's App from `GH_CONFIG_DIR` with no bash-tool grant to redeem (§3's 409 was LEGION-37's, §5's trap has nothing left to apply to), while §1, §2 and §4 stand
 module: legion
 related_issues:
   - "LEGION-33"

@@ -4,7 +4,7 @@
 // loaded, and the Legion pane runner (`runLegionPane`) that puts those together as one Legion pane
 // against a stand-in daemon and listener. The profile format, the flags and the RPC stream are the
 // Oh My Pi pin's (the repository's .omp-pin), so a pin bump that changes one is fixed here once.
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { linkOmpNatives } from "./omp-natives";
@@ -353,9 +353,10 @@ export function toolResultsIn(request: Request): ToolResult[] {
 export interface LegionPaneOptions {
   /**
    * Names every fixture string a case's assertions may meet: the scratch root's `legion-<name>-`
-   * prefix, the grant ids `<name>-grant-<n>`, the claim's `<name>-secret`, the listener's
-   * `<name>-machine`, the boot token `<name>-boot`, the Dispatch token `<name>-dispatch-token` and
-   * the claim token `legion-<name>-<issue>-<role>`, the issue lower-cased.
+   * prefix, the grant ids `<name>-grant-<n>` the `legion` tool's own operations mint, the claim's
+   * `<name>-secret`, the listener's `<name>-machine`, the boot token `<name>-boot`, the Dispatch
+   * token `<name>-dispatch-token` and the claim token `legion-<name>-<issue>-<role>`, the issue
+   * lower-cased.
    */
   readonly name: string;
   /** `LEGION_ROLE`. */
@@ -379,8 +380,8 @@ export interface LegionPaneOptions {
   /** Tried first for every request the stand-in serves; `undefined` falls through to the runner's
    * own routes (the gateway, the daemon's claim and grant routes, the Envoy listener). */
   readonly answer?: (url: URL, body: Record<string, unknown>) => Response | undefined;
-  /** Runs once the scratch root, `bin` (first on the pane's PATH) and `state` with its `secrets`
-   * exist, before the profile is written and omp is spawned: what the pane's workspace must hold. */
+  /** Runs once the scratch root, `bin` (first on the pane's PATH) and `state` exist, before the
+   * profile is written and omp is spawned: what the pane's workspace must hold. */
   readonly prepare?: (paths: {
     readonly workspace: string;
     readonly bin: string;
@@ -406,8 +407,6 @@ export interface LegionPane {
   readonly selfChecks: () => Request[];
   /** Every `tool_result` the host sent back to the gateway, in conversation order. */
   readonly toolResults: () => ToolResult[];
-  /** One line per invocation of the stand-in `legion`: its arguments, then the grant it read. */
-  readonly legionLog: () => Promise<string[]>;
   /** The persisted transcript's entries of `customType`, in order, each its `data`. */
   readonly transcriptEntries: (customType: string) => Promise<unknown[]>;
   /** The pane's issue workspace. */
@@ -416,11 +415,12 @@ export interface LegionPane {
 
 /**
  * Runs one Legion pane on the real Oh My Pi until its run settles: the Legion and Envoy
- * extensions from this checkout, booted against a stand-in for the daemon's claim routes and the
- * Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and the role claim is
- * two listener calls), with a stand-in model gateway that answers the pane's turns from
- * `replies`, and a stand-in `legion` on PATH that records what it was run with. The daemon's
- * assignment arrives as the RPC `prompt`.
+ * extensions from this checkout, booted against a stand-in for the daemon's claim and grant
+ * routes and the Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and
+ * the role claim is two listener calls), with a stand-in model gateway that answers the pane's
+ * turns from `replies`. The daemon's assignment arrives as the RPC `prompt`. Nothing in a pane
+ * runs `legion` from bash (LEGION-631), so no stand-in `legion` is on its PATH: `bin` holds what
+ * `prepare` put there.
  */
 export async function runLegionPane(
   binary: string,
@@ -441,9 +441,8 @@ export async function runLegionPane(
   const { root, home, workspace, sessions } = await ompRoot(binary, `legion-${name}-`, cleanup);
   const state = path.join(root, "state");
   const bin = path.join(root, "bin");
-  const legionLog = path.join(root, "legion.log");
   await mkdir(bin, { recursive: true });
-  await mkdir(path.join(state, "secrets"), { recursive: true, mode: 0o700 });
+  await mkdir(state, { recursive: true, mode: 0o700 });
   await options.prepare?.({ workspace, bin, state });
 
   let answered = 0;
@@ -515,18 +514,6 @@ export async function runLegionPane(
   });
   await writeStandinProfile(home, base);
 
-  const legion = path.join(bin, "legion");
-  await writeFile(
-    legion,
-    [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> '${legionLog}'`,
-      `printf 'grant %s\\n' "$(cat "$LEGION_GRANT_FILE")" >> '${legionLog}'`,
-      "",
-    ].join("\n")
-  );
-  await chmod(legion, 0o755);
-
   // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
   // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
   // extension sends from `agent_end` instead starts its continuation after that frame, so
@@ -560,7 +547,6 @@ export async function runLegionPane(
               LEGION_BOOT_TOKEN: `${name}-boot`,
               LEGION_STATE_DIR: state,
               LEGION_WORKSPACE: workspace,
-              LEGION_GRANT_FILE: path.join(state, "secrets", `${claimToken}-grant`),
             }
           : {}),
         ...options.env,
@@ -623,14 +609,6 @@ export async function runLegionPane(
         }
       }
       return results;
-    },
-    legionLog: async () => {
-      // No log file: the stand-in never ran.
-      const text = await readFile(legionLog, "utf8").catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return "";
-        throw error;
-      });
-      return text.split("\n").filter(Boolean);
     },
     transcriptEntries: async (customType) => {
       const files = (await readdir(sessions, { recursive: true })).filter((file) =>
