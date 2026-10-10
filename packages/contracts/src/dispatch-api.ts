@@ -609,6 +609,10 @@ export interface Version {
   readonly summary: string | null;
   readonly authors: Actor[];
   readonly created_at: string;
+  /** How many bytes the version stores: a document's markdown (the rendering the version
+   *  recorded), or a file's or an image's bytes. The server reads it from the stored row without
+   *  rendering the document, so a list can name a document near the size cap without opening it.
+   *  Absent on a document version from a server that predates it. */
   readonly size?: number;
   readonly mime?: string;
   readonly sha256?: string;
