@@ -94,19 +94,23 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 
 // decideChecks records pr, its checks verdict changed from prior's by a CI settlement or a new
 // read of what the base branch requires (the fact by names), and decides, with the issue's phase
-// in hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In
-// reviewing, the round decides what the verdict comes to (reviewRound, settleRound): it can be what
-// an approval waits for, a red at a code head sends the work back, and a round the verdict leaves
-// stuck another way than before is told. In awaiting_merge, the head's own red withdraws the READY
-// (classify.RedWithdrawsReady), and the transition tells the merge queue role so (withdrawReady).
-// In testing, a red at a code head (classify.RedSendsBack) sends the work back. A red only the
-// project's declared review workflows make (Config.ReviewWorkflows) sends nothing back from testing
-// or reviewing (classify.RedOnlyByReviewWorkflows): the tester finishes, and the reviewer's round
-// adjudicates the workflows' findings, its start task naming the red (the tester's pass) and its
-// stuck round telling the architect (stuckApprovedWorkflowRed). Any other red required workflow
-// sends the work back as a red required check does. The implementer's task and the architect's
-// checks-red notice name the red required checks and workflows, and the implementer's next push is
-// a counted fix attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
+// in hand, what it moves. An exhausted fix-attempt count is posted and told to the architect once
+// (classify.BlockFixAttempt), and from then on no red at that count sends the work back from any
+// phase (classify.FixAttemptsExhausted): the architect decides what follows, as its pr-blocked
+// notice says, whether the red is the one that exhausted the count, a re-run failing again, or a
+// red returning after the head read green. Below the cap, in reviewing, the round decides what the
+// verdict comes to (reviewRound, settleRound): it can be what an approval waits for, a red at a
+// code head sends the work back, and a round the verdict leaves stuck another way than before is
+// told. In awaiting_merge, the head's own red withdraws the READY (classify.RedWithdrawsReady), and
+// the transition tells the merge queue role so (withdrawReady). In testing, a red at a code head
+// (classify.RedSendsBack) sends the work back. A red only the project's declared review workflows
+// make (Config.ReviewWorkflows) sends nothing back from testing or reviewing
+// (classify.RedOnlyByReviewWorkflows): the tester finishes, and the reviewer's round adjudicates the
+// workflows' findings, its start task naming the red (the tester's pass) and its stuck round
+// telling the architect (stuckApprovedWorkflowRed). Any other red required workflow sends the work
+// back as a red required check does. The implementer's task and the architect's checks-red notice
+// name the red required checks and workflows, and the implementer's next push is a counted fix
+// attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
 func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, prior record.PullRequest, by string) error {
 	var blocked bool
 	*pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts)
@@ -130,7 +134,9 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 		if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
 			return err
 		}
-		return e.notice(ctx, tx, pr.Issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: message})
+		if err := e.notice(ctx, tx, pr.Issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: message}); err != nil {
+			return err
+		}
 	}
 	if issue == nil {
 		return nil
@@ -144,7 +150,7 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), by)
 		return err
 	case phase.AwaitingMerge:
-		if !classify.RedWithdrawsReady(*pr) {
+		if !classify.RedWithdrawsReady(*pr) || classify.FixAttemptsExhausted(*pr, e.cfg.MaxFixAttempts) {
 			return nil
 		}
 		// A required workflow's result is as old as the pass's last read of the runs, up to two
@@ -158,7 +164,7 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 			return e.store.PutPullRequest(ctx, tx, *pr)
 		}
 	default:
-		if !classify.RedSendsBack(*pr, e.cfg.ReviewWorkflows) {
+		if !classify.RedSendsBack(*pr, e.cfg.ReviewWorkflows) || classify.FixAttemptsExhausted(*pr, e.cfg.MaxFixAttempts) {
 			return nil
 		}
 	}
@@ -319,7 +325,9 @@ const (
 	roundRejected
 	// roundSentBack is CI red at a head a push that may change code made (classify.RedSendsBack): the
 	// work goes back to implementing whatever the round holds, since only a red at the reviewer's own
-	// handoff head, or one only declared review workflows make, is the round's to decide.
+	// handoff head, or one only declared review workflows make, is the round's to decide. At an
+	// exhausted fix-attempt count (classify.FixAttemptsExhausted) no red sends the work back, and the
+	// round's own decision governs.
 	roundSentBack
 	// roundStuck is a round its reviewer completed that nothing on its way will end (stuckCause).
 	roundStuck
@@ -371,20 +379,22 @@ func (r round) stuckAs(other round) bool {
 // completion, which is its handoff landing - part of its phase's contract, as every role's is - and
 // the decision it posted on GitHub, recorded on the round. Either may arrive second, and an
 // approval also waits for the head's checks to settle green. A red at a code head sends the work
-// back first. A round whose reviewer never completes is not ended by the decision alone: the
-// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-legion's
-// phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
-// stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
-// the head, since the decision it needs is of the head. An approved round under a red only declared
-// review workflows make is stuck on their findings, which the reviewer adjudicates and re-runs
-// (stuckApprovedWorkflowRed), once its approval is of the head's code; the run that passes on the
-// head ends it. An approval of other code is stuck on that first (stuckApprovedOtherCode), since a
-// green head would not end the round either. An approved round whose head's own settlement left a
-// required check pending or without a result, or whose head has no run of a required workflow, is
-// stuck too: the check may never report (a run nobody reruns, a check only a commit status
-// reports), nor the workflow run, and a later settlement or run that passes it still ends the
-// round. A required workflow still running, or not read at the head yet, keeps the round open until
-// the daemon's next read of it.
+// back first, unless the pull request's fix attempts are exhausted: then the daemon's own move on a
+// red is withheld, and only the round's decision ends it - a request for changes still sends the
+// work back, as a decision, not as a red. A round whose reviewer never completes is not ended by
+// the decision alone: the reviewer's pane gets one follow-up turn when a turn ends with its phase
+// open (pi-legion's phase-stall check), and past that the issue stays in reviewing, as a tester's
+// that never completes stays in testing. A completed round that nothing on its way would end is
+// stuck, its reason naming the head, since the decision it needs is of the head. An approved round
+// under a red only declared review workflows make is stuck on their findings, which the reviewer
+// adjudicates and re-runs (stuckApprovedWorkflowRed), once its approval is of the head's code; the
+// run that passes on the head ends it. An approval of other code is stuck on that first
+// (stuckApprovedOtherCode), since a green head would not end the round either. An approved round
+// whose head's own settlement left a required check pending or without a result, or whose head has
+// no run of a required workflow, is stuck too: the check may never report (a run nobody reruns, a
+// check only a commit status reports), nor the workflow run, and a later settlement or run that
+// passes it still ends the round. A required workflow still running, or not read at the head yet,
+// keeps the round open until the daemon's next read of it.
 func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}
@@ -411,7 +421,7 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 	switch {
 	case completed && decided == "approved" && verdict == "green" && classify.ApprovalStands(*pr, row.Decision.Head):
 		return round{outcome: roundApproved}
-	case classify.RedSendsBack(*pr, e.cfg.ReviewWorkflows):
+	case classify.RedSendsBack(*pr, e.cfg.ReviewWorkflows) && !classify.FixAttemptsExhausted(*pr, e.cfg.MaxFixAttempts):
 		return round{outcome: roundSentBack}
 	case !completed:
 		return round{}

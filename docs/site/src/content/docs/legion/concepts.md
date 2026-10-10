@@ -184,7 +184,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
   the issue and tells the architect; neither stops a worker. Every move back to an earlier phase
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
-  daemon's own move when CI turns red or the head starts conflicting with its base.
+  daemon's own move when CI turns red or the head starts conflicting with its base. Once
+  `max_fix_attempts` runs out, CI red no longer sends the work back by itself: the issue stays in
+  its phase through every red at that count until the architect moves it, or a worker's own
+  decision does (a tester's fail, a review's request for changes). The next push onto the red is
+  told again.
 
 ## READY and the human merge
 
