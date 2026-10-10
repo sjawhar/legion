@@ -14,6 +14,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
@@ -110,6 +112,37 @@ func cmdSecret(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stderr, "agent-secrets secret: unknown form %q; the forms are %s\n", args[0], secretFormNames())
 	return exitUsageError
+}
+
+// requireSecretBrokerURL refuses a non-https broker URL for the secret forms unless the broker's
+// host is loopback (127.0.0.0/8, ::1 or localhost). openSession calls it, so every secret form is
+// gated while the exec form and the machine and pod paths (the other newClient callers) keep
+// today's behaviour, and a form's -h, which never opens a session, is unaffected. The secret forms
+// trust the broker's settings to steer a write, so a plain-http broker a network attacker can answer
+// is refused before the first call; an unparseable URL is left to the client, which names it.
+func requireSecretBrokerURL(raw string) error {
+	base := strings.TrimSuffix(raw, "/")
+	if base == "" {
+		return nil
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return nil
+	}
+	if u.Scheme == "https" || (u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return nil
+	}
+	return usageErr{fmt.Errorf("AGENT_SECRETS_URL %q must be https, or http only when the broker's host is loopback (127.0.0.1, [::1] or localhost): the secret forms trust the broker's settings, so a plain-http broker on the network is refused", base)}
+}
+
+// isLoopbackHost reports whether host is "localhost" (any case) or a loopback IP literal
+// (127.0.0.0/8 or ::1).
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 // usageErr is a secret form's usage error, which exits 2.
@@ -398,6 +431,9 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
 	if base == "" {
 		return nil, usageErr{errors.New("AGENT_SECRETS_URL is required")}
+	}
+	if err := requireSecretBrokerURL(base); err != nil {
+		return nil, err
 	}
 	broker := newClient(base)
 	settings, err := broker.Settings(ctx)

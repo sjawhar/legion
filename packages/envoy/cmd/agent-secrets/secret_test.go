@@ -343,6 +343,42 @@ func TestSecretRefusesSettingsInconsistentWithKeyARN(t *testing.T) {
 	}
 }
 
+// The secret forms refuse a non-https broker URL unless its host is loopback: the forms trust the
+// broker's settings, so a plain-http broker on the network is refused before any call.
+func TestSecretRefusesNonLoopbackHTTPBrokerURL(t *testing.T) {
+	calledAWS := false
+	restore := awsClients
+	awsClients = func(context.Context, string, string) (secretsAPI, stsAPI, error) {
+		calledAWS = true
+		return nil, nil, fmt.Errorf("awsClients must not run")
+	}
+	t.Cleanup(func() { awsClients = restore })
+	t.Setenv("AGENT_SECRETS_URL", "http://example.internal")
+	for _, form := range [][]string{{"list"}, {"show", "KEY"}, {"create", "KEY", "--owner", "me", "--tier", "agent"}, {"set", "KEY"}, {"retag", "KEY", "--owner", "me"}, {"delete", "KEY"}, {"restore", "KEY"}} {
+		_, errOut, code := runSecret(form...)
+		if code != exitUsageError || !strings.Contains(errOut, "must be https") || !strings.Contains(errOut, "loopback") {
+			t.Fatalf("%v: exit=%d stderr=%q; want a usage error naming the https/loopback rule", form, code, errOut)
+		}
+	}
+	if calledAWS {
+		t.Fatal("the URL refusal must happen before any AWS call")
+	}
+}
+
+// http on a loopback host is accepted: dev-broker.sh serves the broker there.
+func TestSecretAcceptsLoopbackHTTPBrokerURL(t *testing.T) {
+	local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	startSecretBroker(t, servedBy(local)) // httptest serves http://127.0.0.1:port
+	useAWS(t, local, testAccount, adaSignIn)
+	_, errOut, code := runSecret("show", "HELD_KEY")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q; want a loopback http broker accepted", code, errOut)
+	}
+	if strings.Contains(errOut, "must be https") {
+		t.Fatalf("loopback http was refused: %q", errOut)
+	}
+}
+
 // TestSecretCreateResolvesOwnerMeFromTheSessionName: --owner me is the sign-in's session name, the
 // person's email, lowercased; the secret is created on the broker's key with the value read from
 // standard input less its one trailing newline, and the broker is asked to serve it.
