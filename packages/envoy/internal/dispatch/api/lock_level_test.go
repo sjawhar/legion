@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -72,7 +73,10 @@ var (
 // did not spell, an owner table outside its `from` or a lock clause the query never assembles.
 func TestNoForUpdateOnOwnerTables(t *testing.T) {
 	sources := moduleSources(t, "../../..")
-	constants := stringConstants(t, sources)
+	constants, err := stringConstants(sources)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var offences []string
 	seen := map[string]struct{}{}
 	for _, source := range sources {
@@ -154,9 +158,9 @@ func moduleSources(t *testing.T, root string) []moduleSource {
 // once would leave the inner constant a gap and drop its text from every statement built on the
 // outer one. Dropping an ambiguous key can unresolve a chain that named it, so a pass takes keys
 // away as well as adding them and the iteration is not monotone; it is bounded by the number of
-// declarations and fails rather than spinning.
-func stringConstants(t *testing.T, sources []moduleSource) map[string]string {
-	t.Helper()
+// declarations and fails rather than spinning. It returns its error rather than failing a test, so
+// the copy-lock guard's graph, built once for the test binary, can keep it.
+func stringConstants(sources []moduleSource) (map[string]string, error) {
 	type declaration struct {
 		pkg   string
 		key   string
@@ -209,12 +213,11 @@ func stringConstants(t *testing.T, sources []moduleSource) map[string]string {
 			resolved[declared.key] = text
 		}
 		if maps.Equal(resolved, constants) {
-			return constants
+			return constants, nil
 		}
 		constants = resolved
 	}
-	t.Fatalf("string constants did not settle in %d passes", len(declarations)+1)
-	return nil
+	return nil, fmt.Errorf("string constants did not settle in %d passes", len(declarations)+1)
 }
 
 // sqlStatements returns every string expression in a parsed Go file - a literal or a

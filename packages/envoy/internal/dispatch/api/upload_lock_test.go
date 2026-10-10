@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -81,7 +80,7 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 func TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	logs := &syncedLog{}
+	logs := &storetest.LockedLog{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
@@ -179,7 +178,7 @@ func TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTh
 		}
 	}
 	if upload.response.Code != http.StatusCreated || answer.response.Code != http.StatusOK {
-		t.Fatalf("upload: %s\nanswer: %s\nwant 201 and 200; the server logged:\n%s", upload, answer, logs.lines("API handler failed"))
+		t.Fatalf("upload: %s\nanswer: %s\nwant 201 and 200; the server logged:\n%s", upload, answer, logs.Lines("API handler failed"))
 	}
 	awaitCopyShows(t, ctx, database, copied.ID, `state="answered" answered_by="alice"`)
 }
@@ -258,31 +257,6 @@ func awaitCopyShows(t *testing.T, ctx context.Context, database *store.Store, co
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-}
-
-// syncedLog is a log sink the handlers of concurrent requests write while the test reads it.
-type syncedLog struct {
-	mu   sync.Mutex
-	text strings.Builder
-}
-
-func (l *syncedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.text.Write(p)
-}
-
-// lines is the logged lines holding substring.
-func (l *syncedLog) lines(substring string) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	var matched []string
-	for line := range strings.Lines(l.text.String()) {
-		if strings.Contains(line, substring) {
-			matched = append(matched, line)
-		}
-	}
-	return strings.Join(matched, "")
 }
 
 // The upload holds the document's owner row across the room lock it then waits for, so that lock

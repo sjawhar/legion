@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -66,10 +67,19 @@ var (
 // passed as an argument runs at the call, except to time.AfterFunc or a Go method, which run it on
 // a goroutine of its own and so in a transaction of its own; go statements are skipped for the
 // same reason, and deferred calls count toward what a function takes but not toward its order. A
-// branch that ends in a return or a panic carries nothing past its if. The check does not tell
-// transactions apart, so a function that commits one transaction and takes the copy lock in the
-// next reads as one; none does. TestCopyLockOrderGuardFollowsTheLockTakers holds the resolution
-// to the chains this rule is about, so the check cannot pass by losing them.
+// branch that ends in a return or a panic carries nothing past its if.
+//
+// It orders calls, not statements. What a statement takes is read from its SQL into the function
+// whose body holds it, and ordered only where that function is called: in that body itself, the
+// call that runs the statement (tx.Exec, QueryRow, the pool's methods) takes nothing as far as the
+// check sees. So an inline statement that writes a pending row or appends an event before a call
+// that takes the copy lock in the same body passes, and so does an inline copy lock after a call
+// that took either; a statement is ordered only through a function of its own, as
+// markSettlementPending, clearSettlementPending, lockProjectCopies and events.Broker.Append each
+// run theirs. Nor does it tell transactions apart, so a function that commits one transaction and
+// takes the copy lock in the next reads as one; none does.
+// TestCopyLockOrderGuardFollowsTheLockTakers holds the resolution to the chains this rule is about,
+// so the check cannot pass by losing them.
 func TestCopyLockComesBeforeEveryPendingRowAndEvent(t *testing.T) {
 	graph := copyLockGraph(t)
 	var offences []string
@@ -207,11 +217,26 @@ func (m *moduleImporter) Import(path string) (*types.Package, error) {
 	return pkg, nil
 }
 
+// sharedCopyLockGraph is the graph the guard's tests read, built once per test binary: building it
+// runs go list and type-checks the Dispatch server. A failed build's error is kept and reported by
+// each test that asks for the graph.
+var sharedCopyLockGraph = sync.OnceValues(buildCopyLockGraph)
+
 func copyLockGraph(t *testing.T) *lockGraph {
 	t.Helper()
-	root, err := filepath.Abs("../../..")
+	graph, err := sharedCopyLockGraph()
 	if err != nil {
 		t.Fatal(err)
+	}
+	return graph
+}
+
+// buildCopyLockGraph reads the packages from its own go list and the files on disk, which
+// `go test -overlay` does not reach: a mutation probe of the guard edits the file itself.
+func buildCopyLockGraph() (*lockGraph, error) {
+	root, err := filepath.Abs("../../..")
+	if err != nil {
+		return nil, err
 	}
 	command := exec.Command("go", "list", "-deps", "-export", "-json=ImportPath,Dir,GoFiles,Export,Module", "./cmd/dispatch")
 	command.Dir = root
@@ -219,7 +244,7 @@ func copyLockGraph(t *testing.T) *lockGraph {
 	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("list the Dispatch server's packages: %v\n%s", err, stderr.String())
+		return nil, fmt.Errorf("list the Dispatch server's packages: %w\n%s", err, stderr.String())
 	}
 	listed := map[string]listedPackage{}
 	decoder := json.NewDecoder(bytes.NewReader(output))
@@ -228,7 +253,7 @@ func copyLockGraph(t *testing.T) *lockGraph {
 		if err := decoder.Decode(&pkg); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
-			t.Fatalf("decode go list: %v", err)
+			return nil, fmt.Errorf("decode go list: %w", err)
 		}
 		listed[pkg.ImportPath] = pkg
 	}
@@ -251,16 +276,19 @@ func copyLockGraph(t *testing.T) *lockGraph {
 		},
 	}
 	if _, err := modules.Import("github.com/sjawhar/envoy/cmd/dispatch"); err != nil {
-		t.Fatalf("type-check the Dispatch server: %v", err)
+		return nil, fmt.Errorf("type-check the Dispatch server: %w", err)
 	}
 	if len(modules.problems) > 0 {
-		t.Fatalf("type-check the Dispatch server: %v", errors.Join(modules.problems...))
+		return nil, fmt.Errorf("type-check the Dispatch server: %w", errors.Join(modules.problems...))
 	}
 
-	constants := stringConstants(t, modules.sources)
+	constants, err := stringConstants(modules.sources)
+	if err != nil {
+		return nil, err
+	}
 	copyLock, ok := constants["docs.projectCopiesLock"]
 	if !ok {
-		t.Fatal("docs.projectCopiesLock, the statement the copy lock is taken with, is gone: point the guard at its replacement")
+		return nil, errors.New("docs.projectCopiesLock, the statement the copy lock is taken with, is gone: point the guard at its replacement")
 	}
 	copyLock = sqlWhitespace.ReplaceAllString(strings.ToLower(copyLock), " ")
 	graph := &lockGraph{
@@ -307,7 +335,7 @@ func copyLockGraph(t *testing.T) *lockGraph {
 			}
 		}
 	}
-	return graph
+	return graph, nil
 }
 
 // addFile registers every function, method and function literal source declares.
