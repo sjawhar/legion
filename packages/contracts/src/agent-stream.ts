@@ -61,6 +61,12 @@ export const AGENT_STREAM_LIMITS = {
   historyBytes: 512 * 1024,
   /** Shortest gap between two snapshots of the same streaming message. */
   snapshotIntervalMs: 100,
+  /** Slash commands one `commands` frame lists. */
+  commands: 500,
+  /** `AgentStreamCommand.name`, an identifier. */
+  commandNameChars: 100,
+  /** `AgentStreamCommand.description`, one line of help. */
+  commandDescriptionChars: 200,
 } as const;
 
 /** Marks text a cap cut short. */
@@ -109,6 +115,21 @@ export interface AgentStreamToolResult {
 }
 
 /**
+ * One slash command a person can send the session from Dispatch (LEGION-394). The session runs a
+ * Send or Aside that starts with `/name` as typed input, as its own terminal would: a built-in its
+ * headless host can run, an extension command, a file command or prompt template (`prompt`), or a
+ * skill (`skill:<name>`). A built-in only the terminal's own interface runs (`/new`, `/resume`) is
+ * listed with `terminalOnly`, and sending it gets the session's reply that it did not run.
+ */
+export interface AgentStreamCommand {
+  /** The command without its slash: `compact`, `skill:dispatch`. */
+  readonly name: string;
+  readonly description?: string;
+  readonly source: "builtin" | "extension" | "prompt" | "skill";
+  readonly terminalOnly?: true;
+}
+
+/**
  * One frame. `seq` is the session's own monotonic counter: frames for one message arrive in any
  * order the host's concurrent handlers produce them, so a viewer applies a frame only when its
  * `seq` beats the one it already holds for that id.
@@ -125,6 +146,17 @@ export type AgentStreamFrame =
       readonly kind: "tool-result";
       readonly seq: number;
       readonly result: AgentStreamToolResult;
+    }
+  /**
+   * The slash commands the session takes from Dispatch, the whole list each time it changes, and
+   * the last frame of a replay. A session whose host cannot run typed input from an extension
+   * sends none, and a viewer then offers no completion.
+   */
+  | {
+      readonly v: typeof AGENT_STREAM_PROTOCOL;
+      readonly kind: "commands";
+      readonly seq: number;
+      readonly commands: readonly AgentStreamCommand[];
     };
 
 /** What the relay asks a session for, and the ping that keeps it publishing. */
