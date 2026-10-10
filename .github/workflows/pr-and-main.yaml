@@ -129,7 +129,7 @@ jobs:
               ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
               ./cmd/agent-secrets ./cmd/agent-secrets-helper)
           done
-          for target in $(jq -r '.["agent-secrets-client"][]' .github/go-release-targets.json); do
+          for target in $(jq -r '.["agent-secrets-client"][]' .github/agent-secrets-client-targets.json); do
             (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
               go build -buildvcs=false -o /dev/null ./cmd/agent-secrets)
             (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \

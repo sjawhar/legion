@@ -31,6 +31,7 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+      - ".github/agent-secrets-client-targets.json"
   workflow_dispatch:
 
 # Every job declares its own permissions (build, docker, release below); nothing runs under this
@@ -365,9 +366,10 @@ jobs:
           VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
             --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \
+            --patch-path .github/agent-secrets-client-targets.json \
             -- packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
             scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh \
-            .github/go-release-targets.json)
+            .github/go-release-targets.json .github/agent-secrets-client-targets.json)
 
           if [ "$VERSION" = "empty" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -442,8 +444,8 @@ jobs:
       # github backend, in the layout its installer expects — bin/agent-secrets,
       # bin/agent-secrets-helper. A linux archive, agent-secrets-<arch>.tar.gz for each
       # architecture the envoy key of .github/go-release-targets.json names, holds both; a
-      # darwin archive, agent-secrets-darwin-<arch>.tar.gz for each target its
-      # agent-secrets-client key names, holds bin/agent-secrets alone, since the helper's
+      # darwin archive, agent-secrets-darwin-<arch>.tar.gz for each target
+      # .github/agent-secrets-client-targets.json names, holds bin/agent-secrets alone, since the helper's
       # build constraints admit linux only: a laptop runs the CLI, never the helper.
       # They are built here, after the release tag is decided
       # above, so the tag is stamped into each binary: `--version` prints it and the helper's
@@ -481,7 +483,7 @@ jobs:
               "out/$arch/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets ./cmd/agent-secrets-helper
             tar czf "../../agent-secrets-assets/agent-secrets-$arch.tar.gz" -C "out/$arch" agent-secrets
           done
-          for target in $(jq -r '.["agent-secrets-client"][]' ../../.github/go-release-targets.json); do
+          for target in $(jq -r '.["agent-secrets-client"][]' ../../.github/agent-secrets-client-targets.json); do
             os=${target%/*}
             arch=${target#*/}
             dir="out/$os-$arch"
