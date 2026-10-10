@@ -122,6 +122,10 @@ the discard of unread input at Ctrl-Z, the two checks behind the refusal of a co
 ignored, and disabling core dumps. It is built and checked for macOS, and read from its kernel
 source, but not exercised.
 
+On macOS, `poll(2)` may not report `/dev/tty` ready, so reading the value from it directly
+(`agent-secrets secret set NAME < /dev/tty`) can leave the prompt waiting after you press Enter;
+Ctrl-C ends it and restores the terminal. Run the command from the terminal's own standard input.
+
 ## Which sign-in may do what
 
 Before anything is read or written, every form asks AWS whose sign-in it holds
