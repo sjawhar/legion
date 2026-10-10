@@ -33,6 +33,11 @@ controls at the end of the Spec tab row work with them:
 
 Other documents carry the same controls in their header.
 
+Every version records how big it is stored: a document's markdown in bytes, as a file's are. The
+issue's Artifacts tab and the project's Documents tab show each document's latest size beside its
+kind, and a document's version list shows every version's, so you can find a document close to
+the 1 MiB limit without opening it.
+
 ## Comments in the margin
 
 Comments on a document sit in the margin beside the text they are about. On a wide screen the
