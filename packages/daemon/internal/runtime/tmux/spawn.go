@@ -151,8 +151,8 @@ type PaneInputs struct {
 	StateDir, Workspace, DaemonURL, EnvoyURL, DispatchURL, DispatchTokenFile string
 	NATSURLs                                                                 []string
 	// GHConfigDir is the claim's directory of gh files (runtime.GHConfigDir), the pane's
-	// GH_CONFIG_DIR; "" is none, and the pane is then told no gh variable at all: a controller
-	// pane, which has no App, and every pane of a runtime with no GitHub credential function.
+	// GH_CONFIG_DIR; "" is none, and the pane is then told no gh variable at all: every pane of a
+	// runtime whose GitHubCredential function is nil.
 	GHConfigDir string
 }
 
@@ -385,7 +385,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	ghConfigDir := ""
-	if spec.Role != claim.RoleController && r.gitHubCredential != nil {
+	if r.gitHubCredential != nil {
 		ghConfigDir = runtime.GHConfigDir(r.stateDir, spec.Claim)
 		rendered, err := r.gitHubCredential(ctx, spec.Role)
 		if err != nil {

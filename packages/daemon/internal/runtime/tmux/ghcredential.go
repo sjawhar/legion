@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -35,12 +34,12 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // refreshGitHubCredentials brings the gh files of every tracked pane to the current render of its
 // role's GitHub credential, so the pane's plain gh and the clone's `gh auth git-credential` helper
 // read the token the daemon holds now. It walks a snapshot of the watch (trackedProcesses), takes
-// each pane's role from its claim token (claim.Token.Role), skips a token that names no role and
-// the controller, which has no App, renders the credential, and rewrites hosts.yml only when it
-// differs (ghconfig.Write), recreating a directory that is gone. A render or a write that fails is
-// logged and the pane keeps its last token until the next tick. A runtime with no credential
-// function (Options.GitHubCredential nil: a daemon with no GitHub Apps) wrote no pane any gh
-// files, so it has nothing to refresh.
+// each pane's role from its claim token (claim.Token.Role), skips only a token that names no
+// role, renders the credential, and rewrites hosts.yml only when it differs (ghconfig.Write),
+// recreating a directory that is gone. A render or a write that fails is logged and the pane
+// keeps its last token until the next tick. A runtime with no credential function
+// (Options.GitHubCredential nil: a daemon with no GitHub Apps) wrote no pane any gh files, so it
+// has nothing to refresh.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	if r.gitHubCredential == nil {
 		return
@@ -48,7 +47,7 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	for _, entry := range r.trackedProcesses() {
 		token := entry.locator.Claim
 		role, ok := token.Role()
-		if !ok || role == claim.RoleController {
+		if !ok {
 			continue
 		}
 		rendered, err := r.gitHubCredential(ctx, role)
