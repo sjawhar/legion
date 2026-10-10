@@ -216,7 +216,9 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 // newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller:
 // constructs the client from runtime.kubernetes.agent_secrets and starts its
 // machine login on a background context at boot, logging the confirmation code exactly once —
-// pod enrollment is held until a person signed in to Dispatch approves it on the credential page. The client
+// pod enrollment is held until a person signed in to Dispatch approves it on the credential page.
+// A boot login that fails, expires or is denied is retried by the client on a later enrollment
+// (agentsecrets.Client.doProof), so no restart is needed. The client
 // itself is returned too, read-only, so the state route can show the login's current status
 // (source.State, agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever
 // handed the daemon's key or its won credential. Nil, nil without the block.
@@ -229,7 +231,7 @@ func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *
 	go func() {
 		code, err := client.Login(context.Background())
 		if err != nil {
-			log.Error("agent-secrets machine login failed", "error", err)
+			log.Error("agent-secrets machine login failed; a pod enrollment retries it", "error", err)
 			return
 		}
 		log.Info(fmt.Sprintf(

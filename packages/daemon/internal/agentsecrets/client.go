@@ -39,22 +39,39 @@ var (
 	pollMaxInterval     = 10 * time.Second
 )
 
+// loginRetryInitial and loginRetryMax bound the wait between machine logins that end without a
+// credential (refused, unreachable, expired undecided, or denied): the first wait is
+// loginRetryInitial, each one after it doubles, up to loginRetryMax, and an issued login resets it.
+// The broker refills the one bucket every service's login shares at one login a minute
+// (DefaultLauncherLimits in packages/envoy/internal/broker/api/limits.go), so a daemon retrying at
+// its cap spends a fifth of that and cannot keep the bucket empty for other services. Package-level
+// so tests can shrink them.
+var (
+	loginRetryInitial = 30 * time.Second
+	loginRetryMax     = 5 * time.Minute
+)
+
 // Client speaks the broker's machine-login and enrollment routes. URL is the broker's base URL
 // with no path (also the request object's audience); HTTP is the client every call
 // goes through, nil for http.DefaultClient. cred is the launcher credential a login has won, if
-// any; login is the most recent login's status. Both are set only by Login and its poll goroutine,
-// and cleared only when the broker refuses cred as invalid. loginMu serializes Login's own
-// check-then-start sequence: atomic.Pointer alone lets two concurrent callers both observe "not
-// pending" and both mint a key and POST, silently discarding one credential's poll goroutine —
-// loginMu makes "start at most one pending login" atomic, so every concurrent caller observes the
-// same winner.
+// any; login is the most recent login's status; failure is why the most recent login the broker
+// never opened failed (cleared when one opens), and failedLogins and nextLogin pace the next
+// attempt after a login that ended without a credential (retryLogin). cred and login are set only
+// by Login and its poll goroutine, and cred cleared only when the broker refuses it as invalid.
+// loginMu serializes Login's own check-then-start sequence and the retry pacing: atomic.Pointer
+// alone lets two concurrent callers both observe "not pending" and both mint a key and POST,
+// silently discarding one credential's poll goroutine — loginMu makes "start at most one pending
+// login" atomic, so every concurrent caller observes the same winner.
 type Client struct {
 	URL  string
 	HTTP *http.Client
 
-	cred    atomic.Pointer[credential]
-	login   atomic.Pointer[LoginState]
-	loginMu sync.Mutex
+	cred         atomic.Pointer[credential]
+	login        atomic.Pointer[LoginState]
+	failure      atomic.Pointer[string]
+	loginMu      sync.Mutex
+	failedLogins int       // guarded by loginMu
+	nextLogin    time.Time // guarded by loginMu: no retryLogin starts a login before it
 }
 
 // credential is a won launcher credential: the key it is bound to (which never leaves process
@@ -119,14 +136,36 @@ func IsPermanent(err error) bool {
 // signed in to Dispatch approves, so it names no approver), POSTs it to /v1/launcher-credentials, spawns the poll
 // goroutine, and returns the confirmation code. Idempotent while a login is pending: a second
 // call returns the same code without starting another one — loginMu holds this true even under
-// real concurrency, so callers racing Login (doProof's automatic re-login-on-401, from concurrent
-// Enroll/Revoke calls sharing one Client) never start more than one pending login.
+// real concurrency, so callers racing Login (doProof's automatic re-login, from concurrent
+// Enroll/Revoke calls sharing one Client) never start more than one pending login. A login the
+// broker does not open (a refusal, or no answer) records why for noCredentialError, and the next
+// retryLogin waits for it.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	c.loginMu.Lock()
 	defer c.loginMu.Unlock()
+	return c.loginLocked(ctx)
+}
+
+// loginLocked is Login with loginMu held.
+func (c *Client) loginLocked(ctx context.Context) (string, error) {
 	if state := c.LoginStatus(); state.State == "pending" {
 		return state.Code, nil
 	}
+	code, err := c.open(ctx)
+	if err != nil {
+		reason := err.Error()
+		c.failure.Store(&reason)
+		c.failedLogins++
+		c.nextLogin = time.Now().Add(loginRetryWait(c.failedLogins))
+		return "", err
+	}
+	c.failure.Store(nil)
+	return code, nil
+}
+
+// open sends one machine login and, once the broker opens it, records it pending and starts its
+// poll goroutine.
+func (c *Client) open(ctx context.Context) (string, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets login: generate key: %w", err)
@@ -191,10 +230,16 @@ func (c *Client) poll(ctx context.Context, key *ecdsa.PrivateKey, pendingID, cod
 			}
 			continue
 		}
+		c.loginMu.Lock()
 		if state == "issued" {
 			c.cred.Store(&credential{key: key, id: credentialID})
+			c.failedLogins, c.nextLogin = 0, time.Time{}
+		} else {
+			c.failedLogins++
+			c.nextLogin = time.Now().Add(loginRetryWait(c.failedLogins))
 		}
 		c.login.Store(&LoginState{State: state, Code: code})
+		c.loginMu.Unlock()
 		return
 	}
 }
@@ -278,13 +323,15 @@ func (c *Client) Revoke(ctx context.Context, id string) error {
 }
 
 // doProof signs a launcher proof over this call with the held credential's key and sends it as
-// the Proof header — never Authorization, which no route on this client uses any more. A 401
-// (LAUNCHER_INVALID) clears the credential that failed and starts a fresh login before returning
-// the caller a NO_MACHINE_CREDENTIAL naming the new code, exactly as when there was no credential
-// at all.
+// the Proof header — never Authorization, which no route on this client uses any more. With no
+// credential it starts a fresh login when none is pending and the retry wait has passed
+// (retryLogin), and answers NO_MACHINE_CREDENTIAL naming the login's state. A 401
+// (LAUNCHER_INVALID) clears the credential that failed and starts a fresh login at once before
+// answering the same way.
 func (c *Client) doProof(ctx context.Context, method, path string, body any) (int, []byte, error) {
 	cred := c.cred.Load()
 	if cred == nil {
+		c.retryLogin(ctx)
 		return 0, nil, c.noCredentialError()
 	}
 	proof, err := signLauncherProof(cred.key, cred.id, method, c.URL+path, time.Now())
@@ -307,12 +354,43 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 	return status, raw, nil
 }
 
+// retryLogin starts a fresh machine login when the client holds no credential, no login is
+// pending, and the wait after the last login that ended without a credential has passed: the
+// supervisor's next observation of a pod then retries the login the daemon's boot started, with
+// no restart. Its failure is recorded by loginLocked, and noCredentialError reports it.
+func (c *Client) retryLogin(ctx context.Context) {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	if c.cred.Load() != nil || c.LoginStatus().State == "pending" || time.Now().Before(c.nextLogin) {
+		return
+	}
+	_, _ = c.loginLocked(ctx)
+}
+
+// loginRetryWait is the wait after failed consecutive logins that ended without a credential:
+// loginRetryInitial, doubled for each one after the first, never more than loginRetryMax.
+func loginRetryWait(failed int) time.Duration {
+	wait := loginRetryInitial
+	for i := 1; i < failed && wait < loginRetryMax; i++ {
+		wait *= 2
+	}
+	return min(wait, loginRetryMax)
+}
+
 // noCredentialError is the fail-closed refusal Enroll/Revoke return with no live launcher
-// credential: non-permanent, naming the pending login's code so the caller knows what to tell a
-// human, never the key or the credential id.
+// credential: non-permanent, naming the login's state — pending, expired or denied with its code,
+// why the broker never opened the last login, or that none has started — so the caller knows what
+// to tell a human, never the key or the credential id.
 func (c *Client) noCredentialError() error {
 	state := c.LoginStatus()
-	return &APIError{Code: "NO_MACHINE_CREDENTIAL", Message: "machine login pending; code " + state.Code}
+	message := "machine login " + state.State + "; code " + state.Code
+	switch reason := c.failure.Load(); {
+	case reason != nil && state.State != "pending":
+		message = "machine login failed: " + *reason
+	case state.State == "none":
+		message = "no machine login yet"
+	}
+	return &APIError{Code: "NO_MACHINE_CREDENTIAL", Message: message}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, mutate func(*http.Request)) (int, []byte, error) {

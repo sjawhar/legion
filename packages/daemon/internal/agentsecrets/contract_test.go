@@ -139,3 +139,45 @@ func TestContractMachineLoginEnrollRevokeExpireReenroll(t *testing.T) {
 	eventually(t, func() bool { return client.LoginStatus().State == "issued" },
 		"LoginStatus reaches issued after the second approval")
 }
+
+// TestContractADeniedBootLoginIsRetriedByTheNextEnrollment drives the retry against the real
+// broker: the boot login is denied through the real UI deny route, the next Enroll starts a fresh
+// login with a new code (answering NO_MACHINE_CREDENTIAL that names it), and once that code is
+// approved the pod enrolls, with no restart.
+func TestContractADeniedBootLoginIsRetriedByTheNextEnrollment(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, 0, 0)
+	rig := brokertest.NewRig(t)
+	ctx := context.Background()
+	client := &Client{URL: rig.URL}
+
+	code, err := client.Login(ctx)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	var looked wireMachineLoginRecord
+	if err := json.Unmarshal(body, &looked); status != http.StatusOK || err != nil || looked.RecordID == "" {
+		t.Fatalf("POST /v1/machine-logins/lookup = %d %s (%v)", status, body, err)
+	}
+	if status, body := rig.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/deny",
+		map[string]any{"approver": rig.Operator, "code": code}); status != http.StatusOK {
+		t.Fatalf("deny the boot login = %d: %s", status, body)
+	}
+	eventually(t, func() bool { return client.LoginStatus().State == "denied" }, "the boot login to read denied")
+
+	podToken := rig.MintPodToken(t, "pod-uid-1")
+	pod := PodEnrollment{PodUID: "pod-uid-1", Thumbprint: "tp-pod-1", PodToken: podToken}
+	_, err = client.Enroll(ctx, pod)
+	var apiErr *APIError
+	retried := client.LoginStatus()
+	if !errors.As(err, &apiErr) || apiErr.Code != "NO_MACHINE_CREDENTIAL" || retried.State != "pending" || retried.Code == code {
+		t.Fatalf("Enroll after the denial = %v, login %+v; want NO_MACHINE_CREDENTIAL and a fresh pending code, not %q", err, retried, code)
+	}
+	approveMachineLogin(t, rig, retried.Code)
+	eventually(t, func() bool { return client.LoginStatus().State == "issued" }, "the retried login to read issued")
+	enr, err := client.Enroll(ctx, pod)
+	if err != nil || enr.ID == "" {
+		t.Fatalf("Enroll after the retried login was approved = %+v, %v; want an enrollment", enr, err)
+	}
+}
