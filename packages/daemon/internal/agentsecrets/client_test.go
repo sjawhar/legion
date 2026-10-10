@@ -818,6 +818,78 @@ func TestALoginThatFailedWaitsBeforeTheNext(t *testing.T) {
 	}
 }
 
+// TestADeniedOrExpiredCodeWaitsBeforeTheNextLogin: a code a person denied, or one that expired
+// undecided, starts the wait as a refused login does, so enrollments inside it start no login and
+// the broker never sees a fresh code on every observation.
+func TestADeniedOrExpiredCodeWaitsBeforeTheNextLogin(t *testing.T) {
+	for _, ended := range []string{"denied", "expired"} {
+		t.Run(ended, func(t *testing.T) {
+			withFastPolling(t)
+			withLoginRetry(t, time.Hour, 4*time.Hour)
+			broker, server := newFakeBroker(t)
+			c := &Client{URL: server.URL, HTTP: server.Client()}
+			if _, err := c.Login(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			broker.setPending(1, ended, "")
+			eventually(t, func() bool { return c.LoginStatus().State == ended }, "the boot login to end "+ended)
+			for range 50 {
+				wantEnrollNoCredential(t, c)
+			}
+			if got := broker.loginAttemptCount(); got != 1 {
+				t.Fatalf("broker saw %d logins after the code was %s, want only the boot login: an Enroll inside the wait must start none", got, ended)
+			}
+		})
+	}
+}
+
+// TestAnApprovedLoginResetsTheWait: a refused login, then an approved one, then a refused one
+// waits loginRetryInitial again, not the doubled wait of a second failure in a row.
+func TestAnApprovedLoginResetsTheWait(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, time.Hour, 4*time.Hour)
+	refused := enrollAnswer{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"too many"}`}
+	broker, server := newFakeBroker(t)
+	broker.refuseLogins = []enrollAnswer{refused}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
+	if _, err := c.Login(context.Background()); err == nil {
+		t.Fatal("boot Login succeeded, want the broker's 429")
+	}
+	if _, err := c.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	broker.setPending(1, "issued", "cred-1")
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the second login to become issued")
+
+	// The broker refuses the credential, and the fresh login doProof starts at once is refused too.
+	broker.mu.Lock()
+	broker.enrollAnswers = []enrollAnswer{{status: http.StatusUnauthorized, body: `{"code":"LAUNCHER_INVALID","error":"expired"}`}}
+	broker.refuseLogins = []enrollAnswer{refused}
+	broker.mu.Unlock()
+	if _, err := c.Enroll(context.Background(), podEnrollment); err == nil {
+		t.Fatal("Enroll succeeded, want the refused credential's fresh login to fail")
+	}
+	if got := c.LoginStatus(); got.State != "failed" {
+		t.Fatalf("LoginStatus = %+v, want failed", got)
+	}
+	c.loginMu.Lock()
+	failed, wait := c.failedLogins, time.Until(c.nextLogin)
+	c.loginMu.Unlock()
+	if failed != 1 || wait <= loginRetryInitial-time.Minute || wait > loginRetryInitial {
+		t.Fatalf("after failure, approval, failure: %d failed logins, next login in %v; want 1 and about %v", failed, wait, loginRetryInitial)
+	}
+}
+
+// wantEnrollNoCredential enrolls the pod and requires the no-credential refusal.
+func wantEnrollNoCredential(t *testing.T, c *Client) {
+	t.Helper()
+	_, err := c.Enroll(context.Background(), podEnrollment)
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "NO_MACHINE_CREDENTIAL" {
+		t.Fatalf("Enroll = %v, want NO_MACHINE_CREDENTIAL", err)
+	}
+}
+
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
 	raw, err := json.Marshal(v)
