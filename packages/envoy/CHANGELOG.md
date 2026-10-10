@@ -141,14 +141,16 @@
   to an IAM-form URL on RDS. Going back to the password once a broker runs this release takes the
   reverse order, since a broker on this release exits 1 at boot while either is set: roll the image
   back to legion-envoy v7.6.0 or later, the 7.x releases that sign in by IAM token, which hold every
-  broker migration to date and still accept the variable; then restore the variable and the
-  `${BROKER_DATABASE_PASSWORD}` placeholder in the URL together. Undoing the configuration change
-  that moved a deployment off the variable therefore brings no broker up on this release. Before
-  going back, check that the RDS master user does not hold `rds_iam`, directly or through a role
-  (if it does, its password sign-in is refused), and that its secret's value is current. When IAM
-  sign-in itself is what is broken, make the rollback one change: the image and the variable in
-  one task-definition revision, so no broker boots on this release with the variable or on 7.x
-  without a working sign-in.
+  broker migration to date and still accept the variable. Once the Legion daemon sends no
+  `login_hint` (sjawhar/legion#1870), roll back to v7.10.0 or later instead: earlier brokers need
+  that hint on a service's machine login and answer the daemon's next fresh login with a 500. Then
+  restore the variable and the `${BROKER_DATABASE_PASSWORD}` placeholder in the URL together.
+  Undoing the configuration change that moved a deployment off the variable therefore brings no
+  broker up on this release. Before going back, check that the RDS master user does not hold
+  `rds_iam`, directly or through a role (if it does, its password sign-in is refused), and that its
+  secret's value is current. When IAM sign-in itself is what is broken, make the rollback one
+  change: the image and the variable in one task-definition revision, so no broker boots on this
+  release with the variable or on 7.x without a working sign-in.
 - Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
   only the person its request names: the broker reads the service from the signed request, opens
   its record with the approver `anyone` and ignores any `login_hint` it carries, and the decision,
