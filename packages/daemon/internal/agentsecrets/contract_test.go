@@ -2,7 +2,8 @@
 // mounted through its brokertest.NewRig) instead of client_test.go's fakeBroker: this is the
 // byte-compatibility proof for jws.go, judged by the broker's own real record.VerifyRequestObject
 // and proof.Verifier, not by a reimplementation of the wire contract by inspection. It skips
-// without BROKER_TEST_DATABASE_URL (brokertest.NewRig's own skip).
+// without BROKER_TEST_DATABASE_URL (brokertest.NewRig's own skip), except on GitHub Actions, where
+// the Tests workflow's test job sets it and a skip would hide that it stopped (newBrokerRig).
 //
 // This is the only file in this module that imports anything under github.com/sjawhar/envoy/...:
 // that import is test-only, never leaking into the daemon's production build.
@@ -27,10 +28,22 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/sjawhar/envoy/brokertest"
 )
+
+// newBrokerRig is brokertest.NewRig, failing rather than skipping on GitHub Actions when
+// BROKER_TEST_DATABASE_URL is unset: the Tests workflow's test job names its Postgres service
+// there, and a silent skip would let both contract tests stop running unnoticed.
+func newBrokerRig(t *testing.T) *brokertest.Rig {
+	t.Helper()
+	if os.Getenv("BROKER_TEST_DATABASE_URL") == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
+		t.Fatal("BROKER_TEST_DATABASE_URL is unset on GitHub Actions: the Tests workflow's test job names its Postgres service")
+	}
+	return brokertest.NewRig(t)
+}
 
 // wireMachineLoginRecord is the small slice of POST /v1/machine-logins/lookup's response this
 // test actually reads.
@@ -86,7 +99,7 @@ func expireLauncherCredential(t *testing.T, rig *brokertest.Rig) {
 // also approved and driven to issued before the test returns, so no poll goroutine outlives it.
 func TestContractMachineLoginEnrollRevokeExpireReenroll(t *testing.T) {
 	withFastPolling(t)
-	rig := brokertest.NewRig(t)
+	rig := newBrokerRig(t)
 	ctx := context.Background()
 	client := &Client{URL: rig.URL}
 
@@ -147,7 +160,7 @@ func TestContractMachineLoginEnrollRevokeExpireReenroll(t *testing.T) {
 func TestContractADeniedBootLoginIsRetriedByTheNextEnrollment(t *testing.T) {
 	withFastPolling(t)
 	withLoginRetry(t, 0, 0)
-	rig := brokertest.NewRig(t)
+	rig := newBrokerRig(t)
 	ctx := context.Background()
 	client := &Client{URL: rig.URL}
 
