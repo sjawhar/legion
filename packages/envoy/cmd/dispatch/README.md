@@ -452,6 +452,12 @@ cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and wi
 the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
 `0`.
 
+Migration `0090_refs_excerpts` adds three nullable columns to `refs` with no default
+(`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row:
+the stored excerpt `GET /api/v1/references` answers a document mention with, which every version
+write fills and the reference-excerpt reconciliation fills for every row stored before it
+(`packages/envoy/AGENTS.md`). Its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

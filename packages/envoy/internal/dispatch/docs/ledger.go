@@ -381,6 +381,18 @@ func (l *Ledger) seeded(artifactID string, tree *pmdoc.Node, actor model.Actor) 
 	l.seeds[artifactID] = ledgerSeed{actor: actor, tree: tree}
 }
 
+// writtenTree is the tree this transaction last wrote to artifactID: its live write's rendering
+// (applyLive), else the tree it seeded (SeedText); nil when it holds neither.
+func (l *Ledger) writtenTree(artifactID string) *pmdoc.Node {
+	if write := l.liveWriteFor(artifactID); write != nil && write.tree != nil {
+		return write.tree
+	}
+	if l == nil {
+		return nil
+	}
+	return l.seeds[artifactID].tree
+}
+
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.
 // Each update is already durable, so the room's own persistence of it is suppressed. A room that
 // cannot take its update is failed, and reloads the durable document on its next access.

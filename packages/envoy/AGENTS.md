@@ -1212,7 +1212,17 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`.
+exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
+the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
+480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
+`excerpt_version`, migration 0090) when the mention is indexed, cut from the tree the version was
+rendered from (`refs.MentionExcerpts`, `refs.RecordExcerpts`: `writeVersionTx`, and an upload's
+and a seeded spec's `docs.Service.IndexDocumentReferences`), so the route reads no document
+(LEGION-531). `cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, which stores
+the excerpt of every document whose mentions hold none of its latest version (every row 0090
+found, each one `rebuild-refs` inserts), one batch of 20 documents per tick, every 2 s while a
+batch is full and every five minutes after; until then the route answers such a mention with the
+document's name.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the

@@ -1363,6 +1363,11 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err != nil {
 		return versionWriteResult{}, err
 	}
+	// The mentions' excerpts are cut from the tree this version was rendered from, in its own
+	// transaction, so GET /api/v1/references serves them without rendering the document.
+	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, markdown, tree); err != nil {
+		return versionWriteResult{}, err
+	}
 	// The open approval request follows the document version without leaving its thread or opening
 	// another Inbox row. The request remains waiting on its agent until it is handed back.
 	moved, err := MoveApprovalAsk(ctx, tx, s.events, artifactID, version, actor, s.serverURL)

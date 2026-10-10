@@ -31,7 +31,10 @@ type Rebuild struct {
 // source, so the index converges on what the live write paths produce: the latest version of
 // every document, every ask question, every comment body, and every issue message (issue-less
 // messages are never indexed). An edge that survives keeps its created_at and source_seq; one
-// the rebuild introduces has no source_seq, since no event introduced it.
+// the rebuild introduces has no source_seq, since no event introduced it, and no excerpt: a
+// document mention's excerpt is cut from the document's tree, which only the document service
+// reads, so its reconciliation (docs.Service.RunReferenceExcerptReconciliation) stores it, and an
+// edge that survives keeps the excerpt it holds.
 func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, error) {
 	var report Rebuild
 	sources := []struct {
