@@ -102,8 +102,7 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // role's private ones. The agent-secrets volumes are reserved whether or not this deployment
 // enrolls: an operator's pod may never claim them. A key volume is a workflow role's alone: the
 // controller never enrolls (enrolledWith), so no pod carries one of its. A gh volume is any
-// launcher role's, the controller's included: every launcherRoles entry holds a GitHub credential
-// (podKind.holdsGitHubCredential).
+// launcher role's, the controller's included: every launcherRoles entry holds a GitHub credential.
 func legionVolumeNames() []string {
 	names := []string{
 		treeVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
@@ -433,9 +432,7 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
 			{Name: roleVolume(stateVolume, role), MountPath: StateDir},
 			{Name: configVolume, MountPath: xdgConfigHome},
-		}
-		if l.kind.holdsGitHubCredential() {
-			mounts = append(mounts, corev1.VolumeMount{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true})
+			{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true},
 		}
 		containers = append(containers, corev1.Container{
 			Name:  string(role),
@@ -475,10 +472,9 @@ func kubeletEscape(text string) string {
 
 // volumes are the pod's volume and jj config home with, between them, the volumes only its kind's
 // init containers mount (podKind.initVolumes), then each launcher role's token projection, private
-// credential directory, state and, in an issue pod, its gh volume: the two gh files of its role
-// Secret (GitHubHostsKey as hosts.yml, GitHubConfigKey as config.yml), read-only to the pod's
-// user, from the same Secret as the launcher token, so the refresher's one Update reaches the
-// container's GHConfigDir.
+// credential directory, state and gh volume: the two gh files of its role Secret (GitHubHostsKey
+// as hosts.yml, GitHubConfigKey as config.yml), read-only to the pod's user, from the same Secret
+// as the launcher token, so the refresher's one Update reaches the container's GHConfigDir.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
@@ -492,16 +488,14 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			corev1.Volume{Name: roleVolume("private", role), VolumeSource: memory},
 			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
 		)
-		if l.kind.holdsGitHubCredential() {
-			roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-				SecretName: roleSecretName(l.name, role),
-				Items: []corev1.KeyToPath{
-					{Key: GitHubHostsKey, Path: ghconfig.HostsFile},
-					{Key: GitHubConfigKey, Path: ghconfig.ConfigFile},
-				},
-				DefaultMode: new(int32(0o440)),
-			}}})
-		}
+		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: roleSecretName(l.name, role),
+			Items: []corev1.KeyToPath{
+				{Key: GitHubHostsKey, Path: ghconfig.HostsFile},
+				{Key: GitHubConfigKey, Path: ghconfig.ConfigFile},
+			},
+			DefaultMode: new(int32(0o440)),
+		}}})
 	}
 	tree := corev1.Volume{Name: treeVolume, VolumeSource: corev1.VolumeSource{
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.volume)},

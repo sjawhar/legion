@@ -278,7 +278,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	decides := fact.Decides()
 	if decides && !e.decidesRound(fact, reviewerSession) {
 		if e.byReviewApp(fact.Author) {
-			e.logOnCommit(ctx, "workflow: a review decides nothing: the review App submitted it from a session that is not the reviewer's",
+			e.warnOnCommit(ctx, "workflow: a review decides nothing: the review App submitted it from a session that is not the reviewer's",
 				"issue", issue.Key, "pull_request", pr.Number, "state", state, "footer_session", fact.LegionSession(),
 				"reviewer_session", reviewerSession, "reviewer_claim", string(reviewer.Claim), "body_truncated", fact.BodyTruncated)
 		} else {
@@ -457,7 +457,7 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 		return round{}
 	case decided == "":
 		return round{outcome: roundStuck, cause: stuckUndecided, head: pr.HeadSHA,
-			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES, from the review App or an account with write access to the repository, ends the round, and a COMMENT decides nothing",
+			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES ends the round, from an account with write access to the repository or from the reviewer's own session as the review App (its Legion footer naming the session recorded on the reviewer's claim: a review-App review with no footer or another session's is set aside and decides nothing), and a COMMENT decides nothing",
 				pr.Number, pr.HeadSHA)}
 	case verdict == "red" && !reviewRed:
 		return round{outcome: roundStuck, cause: stuckApprovedRed, head: pr.HeadSHA,

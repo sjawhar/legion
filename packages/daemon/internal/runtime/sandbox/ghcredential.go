@@ -34,24 +34,23 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 	}
 }
 
-// refreshGitHubCredentials brings the role Secrets of every live pod whose kind holds a credential
-// to the current render of each role's GitHub credential, so the gh files its container projects
-// (GHConfigDir) carry the token the daemon holds now: the kubelet rewrites the projection in place
-// once the Secret changes. It walks the pod store for the pods of this project whose kind holds a
-// credential (podKind.holdsGitHubCredential: every issue pod role and the controller's) and that
-// are Pending or Running and not being deleted — a pod waiting to be scheduled starts its
-// launchers from the Secret as it is then — and, for each of the kind's roles, reads the role's
-// Secret, skips one another Sandbox owns (the pod's Sandbox replaced since the pod was listed),
-// renders the credential, and leaves a Secret whose hosts.yml is already the render untouched. A
-// render that fails is logged and the role keeps its last token until the next tick; a write that
-// conflicts is retried once on a fresh read. Nothing of the Secret but the two gh keys changes: the
-// launcher token, whose hash binds the launcher (credentialFromSecret), and the annotations stay as
-// they are.
+// refreshGitHubCredentials brings the role Secrets of every live pod to the current render of each
+// role's GitHub credential, so the gh files its container projects (GHConfigDir) carry the token
+// the daemon holds now: the kubelet rewrites the projection in place once the Secret changes. It
+// walks the pod store for the pods of this project (every launcher role's container holds its
+// App's gh files, the controller's included) that are Pending or Running and not being deleted —
+// a pod waiting to be scheduled starts its launchers from the Secret as it is then — and, for each
+// of the kind's roles, reads the role's Secret, skips one another Sandbox owns (the pod's Sandbox
+// replaced since the pod was listed), renders the credential, and leaves a Secret whose hosts.yml
+// is already the render untouched. A render that fails is logged and the role keeps its last token
+// until the next tick; a write that conflicts is retried once on a fresh read. Nothing of the
+// Secret but the two gh keys changes: the launcher token, whose hash binds the launcher
+// (credentialFromSecret), and the annotations stay as they are.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	for _, obj := range r.pods.GetStore().List() {
 		pod := obj.(*corev1.Pod)
 		kind, err := podKindOf(pod.Labels)
-		if err != nil || !kind.holdsGitHubCredential() {
+		if err != nil {
 			continue
 		}
 		if phase := pod.Status.Phase; (phase != corev1.PodPending && phase != corev1.PodRunning) || pod.DeletionTimestamp != nil {

@@ -148,11 +148,11 @@ type Options struct {
 	Tokens       ProvisionTokens
 	// GitHubCredential is the daemon's function for a role's gh files
 	// (runtime.GitHubCredential): hosts.yml and config.yml rendered from the role's App token. It
-	// is called for every role whose pod kind holds a credential (podKind.holdsGitHubCredential)
-	// when the pod's role Secrets are written (writeLauncherSecrets), and again for each by the
-	// refresher (refreshGitHubCredentials), which rewrites the Secret when the render changed: every
-	// workflow role of an issue pod and the controller's, which acts as the review App. Required:
-	// configure refuses nil as it refuses a nil Tokens.
+	// is called for every launcher role when the pod's role Secrets are written
+	// (writeLauncherSecrets), and again for each by the refresher (refreshGitHubCredentials), which
+	// rewrites the Secret when the render changed: every workflow role of an issue pod and the
+	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
+	// nil Tokens.
 	GitHubCredential runtime.GitHubCredential
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.

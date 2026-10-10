@@ -62,41 +62,71 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 	if review.Author == w.reviewAppLogin {
 		return false, nil
 	}
-	var pr *record.PullRequest
-	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		var err error
-		pr, err = w.records.PullRequestByNumber(ctx, tx, review.Repo, review.Number)
-		return err
-	}); err != nil {
-		return false, fmt.Errorf("read the record of pull request %s#%d: %w", review.Repo, review.Number, err)
-	}
-	if pr == nil {
-		return false, nil
-	}
-	repository, err := ghrepo.Parse("the review's repository", review.Repo)
+	repository, recorded, err := w.reviewedRepository(ctx, review)
 	if err != nil {
 		return false, err
+	}
+	if !recorded {
+		return false, nil
 	}
 	key := permissionKey{repository: strings.ToLower(repository.String()), login: strings.ToLower(review.Author)}
 	if w.noWriteAccess(key) {
 		return false, nil
 	}
 	if left := w.rateLimitLeft(); left > 0 {
-		return false, &intake.RetryLater{After: left,
-			Err: fmt.Errorf("read %s's permission on %s: GitHub's rate limit stands for another %s, so this read was not made", review.Author, repository.String(), left)}
+		return false, rateLimitRefusal(left, fmt.Sprintf("read %s's permission on %s", review.Author, repository.String()))
 	}
 	canWrite, err := w.readPermission(ctx, repository, review.Author)
 	if err != nil {
-		var later *intake.RetryLater
-		if errors.As(err, &later) {
-			w.holdRateLimit(later.After)
-		}
-		return false, err
+		return false, w.holdIfLimited(err)
 	}
 	if !canWrite {
 		w.keepNoWriteAccess(key)
 	}
 	return canWrite, nil
+}
+
+// reviewedRepository reads the record of the pull request review is on and parses its repository,
+// the one lookup reviewerCanWrite and reviewBody both need before either reads GitHub. A review on
+// a pull request the daemon does not record answers recorded=false, which both callers take as
+// nothing left to do: the workflow drops such a review unread, so no check of it is ever read.
+func (w *workflowRuntime) reviewedRepository(ctx context.Context, review intake.PullRequestReview) (repository ghrepo.Repository, recorded bool, err error) {
+	var pr *record.PullRequest
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		pr, err = w.records.PullRequestByNumber(ctx, tx, review.Repo, review.Number)
+		return err
+	}); err != nil {
+		return ghrepo.Repository{}, false, fmt.Errorf("read the record of pull request %s#%d: %w", review.Repo, review.Number, err)
+	}
+	if pr == nil {
+		return ghrepo.Repository{}, false, nil
+	}
+	repository, err = ghrepo.Parse("the review's repository", review.Repo)
+	if err != nil {
+		return ghrepo.Repository{}, false, err
+	}
+	return repository, true, nil
+}
+
+// rateLimitRefusal is the intake.RetryLater a read answers when GitHub's rate limit already
+// stands for left, so the read is never made: what names the read reviewerCanWrite's permission
+// read and reviewBody's body read each say for themselves.
+func rateLimitRefusal(left time.Duration, what string) *intake.RetryLater {
+	return &intake.RetryLater{After: left,
+		Err: fmt.Errorf("%s: GitHub's rate limit stands for another %s, so this read was not made", what, left)}
+}
+
+// holdIfLimited holds GitHub's rate limit (holdRateLimit) when err is an intake.RetryLater, and
+// returns err unchanged either way, as every read past the rate-limit check above must do with
+// whatever it meets: reviewAppClient's mint, readPermission's read, and reviewBody's own read of
+// the review.
+func (w *workflowRuntime) holdIfLimited(err error) error {
+	var later *intake.RetryLater
+	if errors.As(err, &later) {
+		w.holdRateLimit(later.After)
+	}
+	return err
 }
 
 // reviewAppClient mints the review App's installation token for repository and returns a

@@ -89,10 +89,9 @@ const (
 )
 
 // The keys of a role's Secret that carry its GitHub credential beside the launcher token: the
-// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every role whose pod kind
-// holds a credential (podKind.holdsGitHubCredential): every workflow role of an issue pod and the
-// controller's. credentialFromSecret hashes the launcher token alone, so the refresher rewrites
-// these two without changing the launcher's binding.
+// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every launcher role: every
+// workflow role of an issue pod and the controller's. credentialFromSecret hashes the launcher
+// token alone, so the refresher rewrites these two without changing the launcher's binding.
 const (
 	GitHubHostsKey  = "github-hosts"
 	GitHubConfigKey = "github-config"

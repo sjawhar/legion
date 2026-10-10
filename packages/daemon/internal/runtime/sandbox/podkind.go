@@ -41,12 +41,6 @@ type podKind interface {
 	initVolumes(l launch) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(l launch) []corev1.EnvVar
-	// holdsGitHubCredential is whether each of the pod's roles holds a GitHub App token: its role
-	// Secret carries the role's gh files (GitHubHostsKey, GitHubConfigKey) beside the launcher
-	// token, its container projects them read-only at GHConfigDir, and the refresher rewrites them
-	// from the daemon's function. An issue pod's roles do; so does the controller's, which acts as
-	// the review App (appauth.AppRoleFor).
-	holdsGitHubCredential() bool
 	// colocate is whether a new pod must share a node with another pod scheduled now, and affinity
 	// the placement that follows.
 	colocate(r *Runtime, l launch) bool
@@ -201,8 +195,8 @@ func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 // the empty string, which gh ignores, so no value the image or an operator's rc file could leave in
 // the environment outranks the file: a non-empty GH_TOKEN would. No tool path or helper is told:
 // the agent's gh, git and jj are the image's on PATH, and the helper is the clone's own
-// configuration. Every kind whose holdsGitHubCredential is true appends this once, so the four
-// pairs are written in one place.
+// configuration. Every launcher role's container, the controller's included, holds its App's gh
+// files, so this is appended once for every kind.
 func ghAgentEnv() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "GH_CONFIG_DIR", Value: GHConfigDir},
@@ -211,10 +205,6 @@ func ghAgentEnv() []corev1.EnvVar {
 		{Name: "GH_HOST", Value: ""},
 	}
 }
-
-// holdsGitHubCredential is true: every workflow role has an App (appauth.AppRoleFor), whose token
-// its gh and git read from its own gh volume.
-func (issuePod) holdsGitHubCredential() bool { return true }
 
 // colocate is whether another pod of the tree is scheduled now (treePodScheduled).
 func (issuePod) colocate(r *Runtime, l launch) bool { return r.treePodScheduled(l) }
@@ -388,11 +378,6 @@ func (controllerPod) agentEnv(launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
 	return append(env, ghAgentEnv()...)
 }
-
-// holdsGitHubCredential is true: the controller acts as the review App (appauth.AppRoleFor), so
-// its Secret holds the review App's gh files beside the launcher token and its pod mounts a gh
-// volume like a workflow role's.
-func (controllerPod) holdsGitHubCredential() bool { return true }
 
 // colocate is never: the controller shares no volume with any other pod.
 func (controllerPod) colocate(*Runtime, launch) bool { return false }

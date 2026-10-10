@@ -16,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -379,12 +378,11 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // writeLauncherSecrets makes, for each launcher role of the pod (l.roles), a role-private Secret
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
-// launcher's start command instead (launcherCommand). In a pod whose kind holds a GitHub credential
-// (podKind.holdsGitHubCredential) — an issue pod's roles and the controller's — the Secret also
-// carries the role's GitHub credential, its gh hosts.yml and config.yml rendered from the role's
-// App token (Options.GitHubCredential), which its container projects at GHConfigDir; a mint that
-// fails fails the launch naming the role, as a provisioning-token mint does, since a pod whose gh
-// holds no token would start every role unable to reach GitHub.
+// launcher's start command instead (launcherCommand). The Secret also carries the role's GitHub
+// credential, its gh hosts.yml and config.yml rendered from the role's App token
+// (Options.GitHubCredential), which its container projects at GHConfigDir; a mint that fails fails
+// the launch naming the role, as a provisioning-token mint does, since a pod whose gh holds no
+// token would start every role unable to reach GitHub.
 func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch) error {
 	for _, role := range l.roles {
 		token, err := launcherToken()
@@ -392,16 +390,13 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch
 			return err
 		}
 		data := map[string][]byte{LauncherTokenFile: []byte(token)}
-		var rendered ghconfig.Rendered
-		if l.kind.holdsGitHubCredential() {
-			minting, cancel := call(ctx)
-			rendered, err = r.gitHubCredential(minting, role)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("write the github credential for %s: %w", role, err)
-			}
-			data[GitHubHostsKey], data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
+		minting, cancel := call(ctx)
+		rendered, err := r.gitHubCredential(minting, role)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("write the github credential for %s: %w", role, err)
 		}
+		data[GitHubHostsKey], data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
 		if err := r.upsertSecret(ctx, corev1.Secret{
 			ObjectMeta: r.secretMeta(s, l, roleSecretName(s.Name, role)),
 			Type:       corev1.SecretTypeOpaque,
@@ -409,9 +404,7 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch
 		}); err != nil {
 			return err
 		}
-		if l.kind.holdsGitHubCredential() {
-			r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
-		}
+		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
 	}
 	return nil
 }

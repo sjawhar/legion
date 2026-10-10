@@ -128,7 +128,9 @@ func TestReviewBodyWithRateLimitHeldMakesNoRequest(t *testing.T) {
 // A rate-limited read is returned as an intake.RetryLater naming GitHub's wait, so intake waits it
 // out before the review's delivery is tried again, the same as a rate-limited permission read.
 func TestReviewBodyRateLimitedReadRetriesLater(t *testing.T) {
+	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.Header().Set("Retry-After", "120")
 		http.Error(w, "rate limited", http.StatusForbidden)
 	}))
@@ -146,5 +148,19 @@ func TestReviewBodyRateLimitedReadRetriesLater(t *testing.T) {
 	}
 	if later.After != 120*time.Second {
 		t.Fatalf("RetryLater.After = %s, want 120s", later.After)
+	}
+	if left := w.rateLimitLeft(); left <= 0 {
+		t.Fatalf("rateLimitLeft() = %s after a rate-limited body read, want it held", left)
+	}
+	if calls != 1 {
+		t.Fatalf("GitHub was asked %d times, want once", calls)
+	}
+
+	_, err = w.reviewBody(context.Background(), review)
+	if !errors.As(err, &later) {
+		t.Fatalf("a second read within the held limit = %v; want an intake.RetryLater", err)
+	}
+	if calls != 1 {
+		t.Fatalf("GitHub was asked %d times across two reads within the held limit, want once", calls)
 	}
 }

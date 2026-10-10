@@ -136,6 +136,12 @@ func (e *Engine) logOnCommit(ctx context.Context, msg string, args ...any) {
 	intake.OnCommit(ctx, func() { e.log.Info(msg, args...) })
 }
 
+// warnOnCommit is logOnCommit at Warn, for a committed fact that stalls a round and tells nobody
+// else: a log monitor keys on it where an Info line would drown.
+func (e *Engine) warnOnCommit(ctx context.Context, msg string, args ...any) {
+	intake.OnCommit(ctx, func() { e.log.Warn(msg, args...) })
+}
+
 // refused is a committed 409: the fact changed nothing, and the caller is told why.
 func refused(code, message string) intake.Result {
 	return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: code, Message: message}}
