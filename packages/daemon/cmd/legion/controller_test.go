@@ -186,11 +186,11 @@ type controllerOptions struct {
 	tokenContents string
 	omitToken     bool
 	exitCode      int
-	// waitForHostsToken, when set, has the recording Oh My Pi poll
-	// $GH_CONFIG_DIR/hosts.yml for this token for up to five seconds, so a test of the
-	// refresh loop can prove the loop wrote a second token while Oh My Pi still ran, before
-	// it records argv, env, and cwd and exits with exitCode.
-	waitForHostsToken string
+	// waitForFile, when set, has the recording Oh My Pi wait until that file exists before it
+	// records argv, env, and cwd and exits with exitCode, so a test of the refresh loop keeps
+	// Oh My Pi running exactly until it has observed what it needs, whatever the machine's load,
+	// and then releases it by creating the file.
+	waitForFile string
 }
 
 func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOptions) *operatorMachine {
@@ -269,7 +269,7 @@ readlink /proc/self/fd/0 >%[1]s/stdin
 env -0 >%[1]s/env
 pwd >%[1]s/cwd
 exit %[2]d
-`, record, opts.exitCode, waitForHostsTokenScript(opts.waitForHostsToken))
+`, record, opts.exitCode, waitForFileScript(opts.waitForFile))
 	if err := os.WriteFile(omp, []byte(script), 0o700); err != nil {
 		t.Fatalf("write the recording omp: %v", err)
 	}
@@ -285,21 +285,51 @@ exit %[2]d
 	return c
 }
 
-// waitForHostsTokenScript is the recording Oh My Pi's poll loop for token: fifty sleeps of a
-// tenth of a second, five seconds, read to let the refresh loop's test start Oh My Pi before the
-// loop's first write. Empty when token is empty, so a test with no loop to wait for records and
-// exits at once.
-func waitForHostsTokenScript(token string) string {
-	if token == "" {
+// waitForFileScript is the recording Oh My Pi's wait for file: a poll every tenth of a second,
+// bounded at two minutes so a test that never releases it still ends. Empty when file is empty,
+// so a test with no loop to wait for records and exits at once.
+func waitForFileScript(file string) string {
+	if file == "" {
 		return ""
 	}
 	return fmt.Sprintf(`i=0
-while [ "$i" -lt 50 ]; do
-  if [ -f "$GH_CONFIG_DIR/hosts.yml" ] && grep -q %q "$GH_CONFIG_DIR/hosts.yml"; then break; fi
+while [ "$i" -lt 1200 ] && [ ! -e %q ]; do
   i=$((i + 1))
   sleep 0.1
 done
-`, token)
+`, file)
+}
+
+// awaitFile polls until file exists, failing the test after timeout.
+func awaitFile(t *testing.T, file string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(file); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was never written", file)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// awaitFileContaining polls until file holds want, failing the test after timeout with what it
+// held last.
+func awaitFileContaining(t *testing.T, file, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		body, err := os.ReadFile(file)
+		if err == nil && strings.Contains(string(body), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never held %q; last read %q (%v)", file, want, body, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion manifest
@@ -1232,7 +1262,8 @@ func TestControllerStartWritesTheControllersGitHubCredentialUnderGh(t *testing.T
 
 // The refresh loop keeps the controller's gh directory fresh while Oh My Pi runs: a token the
 // daemon mints after Oh My Pi starts reaches hosts.yml before Oh My Pi exits, and the log records
-// the refresh.
+// the refresh. The recording Oh My Pi runs until the test releases it, once it has seen the second
+// token land, so the proof does not depend on the machine's speed.
 func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T) {
 	old := controllerGitHubRefreshInterval
 	controllerGitHubRefreshInterval = 50 * time.Millisecond
@@ -1240,7 +1271,8 @@ func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T
 
 	tokens := newControllerCredentialTokens("ghs_first")
 	d := newControllerDaemonWithTokens(t, tokens)
-	c := newControllerStart(t, d, controllerOptions{waitForHostsToken: "ghs_second", exitCode: 7})
+	release := filepath.Join(t.TempDir(), "release")
+	c := newControllerStart(t, d, controllerOptions{waitForFile: release, exitCode: 7})
 
 	type result struct {
 		code int
@@ -1251,19 +1283,26 @@ func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T
 		code, _, errb := c.run()
 		done <- result{code, errb}
 	}()
-	time.Sleep(200 * time.Millisecond)
+	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
+	// The first write holds the first token; only then does the daemon's lease change, so the
+	// loop, not the first fetch, is what carries the second token into the file.
+	awaitFileContaining(t, hostsFile, "ghs_first", 30*time.Second)
 	tokens.set("ghs_second")
+	awaitFileContaining(t, hostsFile, "ghs_second", 30*time.Second)
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	var r result
 	select {
 	case r = <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("legion controller start did not return")
 	}
 	if r.code != 7 {
 		t.Fatalf("legion controller start = %d, want 7 (Oh My Pi's exit code); stderr %q", r.code, r.errb)
 	}
-	hosts, err := os.ReadFile(filepath.Join(c.defaultDir, "gh", "hosts.yml"))
+	hosts, err := os.ReadFile(hostsFile)
 	if err != nil || string(hosts) != ghconfig.Hosts("ghs_second") {
 		t.Fatalf("hosts.yml = %q, %v; want the second token", hosts, err)
 	}
@@ -1275,7 +1314,8 @@ func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T
 
 // A superseded capability (a later legion controller start) ends the refresh loop: the gh
 // directory keeps the first token, the log records the stop, and no further request reaches the
-// daemon.
+// daemon. The recording Oh My Pi runs until the test releases it, once it has seen the stop logged
+// and the requests settle.
 func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *testing.T) {
 	old := controllerGitHubRefreshInterval
 	controllerGitHubRefreshInterval = 50 * time.Millisecond
@@ -1283,7 +1323,8 @@ func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *test
 
 	tokens := newControllerCredentialTokens("ghs_first")
 	d := newControllerDaemonWithTokens(t, tokens)
-	c := newControllerStart(t, d, controllerOptions{waitForHostsToken: "never-appears-xyz"})
+	release := filepath.Join(t.TempDir(), "release")
+	c := newControllerStart(t, d, controllerOptions{waitForFile: release})
 
 	done := make(chan struct{})
 	go func() {
@@ -1291,39 +1332,31 @@ func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *test
 		close(done)
 	}()
 	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(hostsFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("hosts.yml was never written")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitFile(t, hostsFile, 30*time.Second)
 	// Mint a second capability, which supersedes the one this controller holds.
 	status, _, err := (operator{base: d.url, bearer: controllerOperatorToken}).do(context.Background(), http.MethodPost,
 		"/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion})
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("mint a second capability: status %d, err %v", status, err)
 	}
+	logFile := filepath.Join(c.defaultDir, "github-credential.log")
+	awaitFileContaining(t, logFile, "github credential refresh stopped", 30*time.Second)
+	before := requestsTo(d, "/legion/v1/controller/github-credential")
+	time.Sleep(10 * controllerGitHubRefreshInterval)
+	if after := requestsTo(d, "/legion/v1/controller/github-credential"); after != before {
+		t.Fatalf("%d further github-credential requests reached the daemon after the stop, want 0 more", after-before)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("legion controller start did not return")
-	}
-	logBody, err := os.ReadFile(filepath.Join(c.defaultDir, "github-credential.log"))
-	if err != nil || !strings.Contains(string(logBody), "github credential refresh stopped") {
-		t.Fatalf("github-credential.log = %q, %v; want a stopped line", logBody, err)
 	}
 	hosts, err := os.ReadFile(hostsFile)
 	if err != nil || string(hosts) != ghconfig.Hosts("ghs_first") {
 		t.Fatalf("hosts.yml = %q, %v; want it to keep the first token", hosts, err)
-	}
-	before := requestsTo(d, "/legion/v1/controller/github-credential")
-	time.Sleep(200 * time.Millisecond)
-	if after := requestsTo(d, "/legion/v1/controller/github-credential"); after != before {
-		t.Fatalf("%d further github-credential requests reached the daemon after the stop, want 0 more", after-before)
 	}
 }
 
