@@ -1,0 +1,86 @@
+{
+  "completed": "2026-10-10T02:01:25.437268894Z",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "answer": "D1: one predicate on both gates (decidesRound, reviewersAnswer): a review-App review is the reviewer's when the reviewer claim's recorded session is non-empty and the review body's last Legion footer names it; no footer, unparseable, or another session is set aside and logged; AuthorCanWrite unchanged; while the reviewer's session is unrecorded the login decides (logged). Footer parser intake.PullRequestReview.LegionSession(); record.Store.ClaimSession on record.Postgres; existing fixtures seed no claims row so they keep deciding; T1 seeds one and pins the four cases.",
+        "finding": "F1 The review-attribution rule has no predicate; every reading touches ~25 verdict fixtures."
+      },
+      {
+        "answer": "D2: POST /legion/v1/controller/github-credential, body {secret: \u003ccapability\u003e}, constant-time compare with controller.Record.CapabilityHash under controllerMu (403 INVALID_CONTROLLER_CAPABILITY), 409 under controller: daemon, 500/502 mint failures via a helper shared with leaseForGrant; answers ghconfig.Rendered fields; mirrored in contracts with a fixture. Fetch after the mint; a non-config failure refuses with exit 1 like every post-mint failure today; the capability (not the operator bearer) so a superseded start stops refreshing.",
+        "finding": "F2 The operator-side token route: no capability auth exists, and a fetch after the mint cuts the incumbent off."
+      },
+      {
+        "answer": "D2 step 4: goroutine after the first write, one-minute tick, ghconfig.Write rewrites only on change, failures keep the file and retry, 403/409 end the loop, lines go to \u003cstateDir\u003e/github-credential.log, nothing to stderr once Oh My Pi runs, exit code untouched; ghconfig.Write makes \u003cstateDir\u003e/gh 0700; the probe runs before the directory exists as today.",
+        "finding": "F3 The refresh loop has no home; stderr is the TUI."
+      },
+      {
+        "answer": "D6: DaemonAPIVersion 19 with its entry, pi-legion package.json daemonApiVersion, contracts fixture version.json, CHANGELOG, in one commit; no plugin code change (the number gates the pair); renumber at each forward merge if 19 is taken (collision note); rollout stated.",
+        "finding": "F4 The daemon API contract bump to 19 is required and unnamed."
+      },
+      {
+        "answer": "D7: the subject is the walk's candidates; each state is skip plus a named summary line; the controller takes nothing and sets nothing on MERGED or CLOSED; the exact gh pr view command is in the row; recorded as clarification 4 for the architect.",
+        "finding": "F5 The triage row's merged rule cannot be expressed by the controller's tools; subject ambiguous."
+      },
+      {
+        "answer": "D8: a skills-guard test pins the four states, the command, the footer sentence and the rg regex over the spec's three paths plus the wider sweep; acceptance 2's check is the live gh of acceptance 1 (write-capable viewer legion-reviewer[bot]) plus the rg.",
+        "finding": "F6 'Pinned by a test or a stage 4b fixture' has no machine check for skill prose; acceptance 2 names no command."
+      },
+      {
+        "answer": "D4: the gh loop moves to launcherRoles (agent-secrets stays on claim.Roles); AppRoleFor gains RoleController under Review with the test renamed; claim.Roles and IsRole unchanged.",
+        "finding": "F7 legionVolumeNames excludes the controller's gh volume; AppRoleFor panics."
+      },
+      {
+        "answer": "D4: yes, as for every role (a pod without the two keys cannot mount its Secret volume); T4 pins it; ghcredential_test and controller_test assertions flip to three keys and a refreshed Secret; goldens regenerated with -update.",
+        "finding": "F8 A failed App mint now fails the controller's launch; two refresher tests flip."
+      },
+      {
+        "answer": "D5: the tmux special cases are deleted (one rule for both runtimes), delivery.go keeps its guard for the no-checkout reason; D10 and D8 sweep docs/site, controller.yaml.example, AGENTS.md, README and pin the wider set (clarification 7).",
+        "finding": "F9 The acceptance rg reaches tmux/adopt comments and misses docs/site, the example file and AGENTS.md."
+      },
+      {
+        "answer": "D2 step 2: GITHUB_TOKEN_SOURCE_UNAVAILABLE/GITHUB_OWNER_UNCONFIGURED starts with an empty 0700 gh directory, one stderr line, no loop; the skill says so in one sentence; controller-start-tmux.sh asserts the line (D9).",
+        "finding": "F10 legion controller start against a daemon with no GitHub Apps (controller-start-tmux.sh)."
+      },
+      {
+        "answer": "D9: tree 1's pull request (OPEN at both checks); the pod check in daemon-controller-liveness phase 1, the operator's in controller before its quit with GH_CONFIG_DIR=$work/controller-state/gh; STAGE4B_SKIP_CONTROLLER proves neither; README rows; the implementer's pod proof is the acceptance table's third row, the stage runs through the operator lane.",
+        "finding": "F11 Stage 4b: fixture PR, the operator's GH_CONFIG_DIR, the skippable lane, the implementer's pod proof."
+      },
+      {
+        "answer": "D7: any pull-request comment or review the controller posts ends with the footer with phase controller; the daemon reads only session; nothing validates phase (envoy normalize.go marks legion_footer only).",
+        "finding": "F12 Whether the controller's GitHub writes carry the footer and under what phase."
+      },
+      {
+        "answer": "Base section: merge legion/LEGION-631@origin into the bookmark's position as the first move (descends from both, so legion push accepts), PR base legion/LEGION-631, forward merges as the branch moves, retarget with a forward merge onto main after the squash; the implementer follows its own pane's pre-#1843 commands, not the tree's text.",
+        "finding": "F13 Base, retarget and the pre-#1843 deployment."
+      },
+      {
+        "answer": "Clarifications 1-3 and 6 record them as readings for the architect; the plan guards exactly the two gates and reports a walk candidate's closed pull request in the summary.",
+        "finding": "F14 Four spec claims are narrower or imprecise."
+      }
+    ]
+  },
+  "issue": "LEGION-668",
+  "phase": "plan",
+  "planDocument": "dispatch://LEGION-668/artifact/plan-md",
+  "planReview": {
+    "rounds": 1,
+    "verdict": "approved"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase's push, PR body, proof and footer rules, with references/pr-body.md for the E2E line and references/conflicts-and-rewrites.md for the forward merges and the retarget",
+      "ce-simplify-code: the simplify pass the PR body records"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review round's order and references/review-threads.md for threads",
+      "thermonuclear-deep-review: the diff-scoped correctness and security audit",
+      "thermonuclear-code-quality: the diff-scoped maintainability audit"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines what the tester verifies and what a proof is"
+    ]
+  },
+  "schemaVersion": 1,
+  "specDepartures": []
+}
