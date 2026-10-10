@@ -14,6 +14,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import type { LegionCapabilityRow } from "@legion/contracts/legion-api";
 import { readSessionTitle, sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import { noteInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -35,6 +36,7 @@ import type {
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
+import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
 
 const natsConnections: {
@@ -107,7 +109,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 // The extension modules must load after their OMP and NATS host dependencies are mocked. The
 // Envoy entry is the sibling plugin's, reached by path: these panes run both, as a Legion pane does.
 const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy");
-const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
+const {
+  default: legionExtension,
+  setLegionBootstrapExitForTests,
+  setLegionCapabilityHostForTests,
+} = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -121,6 +127,7 @@ type TestPi = {
   readonly zod: PiApi["zod"] & {
     readonly discriminatedUnion: (key: string, options: readonly unknown[]) => unknown;
   };
+  readonly agents?: PiApi["agents"];
   readonly sendMessage: PiApi["sendMessage"];
   readonly sendUserMessage: PiApi["sendUserMessage"];
   readonly appendEntry: PiApi["appendEntry"];
@@ -248,7 +255,9 @@ type AppendedEntry = {
  * process and a `/new` clears its title in place. `set` records each `pi.setSessionName` call. */
 type HostTitle = { name?: string; source?: "auto" | "user"; readonly set: string[] };
 
-function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
+function createPi(
+  options: { readonly bindEnvoy?: boolean; readonly agentsExposed?: boolean } = {}
+): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
@@ -331,6 +340,18 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     },
     registerTool: (tool) => tools.push(tool),
     getActiveTools: () => activeTools,
+    ...(options.agentsExposed === true
+      ? {
+          agents: {
+            list: () => [],
+            get: () => undefined,
+            ensureLive: async () => {
+              throw new Error("no test pane runs a task agent");
+            },
+            prompt: async () => undefined,
+          },
+        }
+      : {}),
     setActiveTools: async (tools) => {
       activeTools.splice(0, activeTools.length, ...tools);
     },
@@ -479,6 +500,31 @@ interface DaemonRequest {
   readonly body: unknown;
 }
 
+/** A capability host where every check passes: `oracle` and `deep-worker` resolve, the search
+ * provider answers, no MCP server is configured, nothing is on disk to discover, and both commands
+ * exit 0. `overrides` replace members. */
+function fakeCapabilityHost(overrides: Partial<CapabilityHost> = {}): CapabilityHost {
+  return {
+    discoverAgents: async () => ({ agents: [{ name: "oracle" }, { name: "deep-worker" }] }),
+    disabledAgents: async () => [],
+    runSearchQuery: async () => ({
+      content: [{ type: "text", text: "[1] Jujutsu" }],
+      details: { response: { provider: "stub" } },
+    }),
+    loadMCPConfigs: async () => ({ configs: {}, sources: {} }),
+    discoverMCPServers: async () => {
+      throw new Error("no MCP server is configured in a test pane");
+    },
+    discoverExtensionPaths: async () => [],
+    loadSkills: async () => ({ skills: [] }),
+    run: async (command) =>
+      command === "gh"
+        ? { code: 0, stdout: "legion-reviewer[bot]\n", stderr: "" }
+        : { code: 0, stdout: "REPO-43\n", stderr: "" },
+    ...overrides,
+  };
+}
+
 interface ClaimPane {
   readonly claimToken: string;
   /** The daemon's `claims/register` answer: the claim it issued this pane. */
@@ -489,6 +535,7 @@ interface ClaimPane {
     readonly role: LegionRole;
     readonly generation: number;
     readonly secret: string;
+    readonly promptAgents: readonly string[];
   };
   readonly bootToken: string;
   /** Every request the pane made, daemon and Envoy listener alike, in order. */
@@ -529,6 +576,12 @@ async function claimPane(options: {
   readonly sessionId?: string;
   readonly sessionFile?: string;
   readonly workspace?: string;
+  /** The registration's `promptAgents`: the task agents the role's prompts dispatch. */
+  readonly promptAgents?: readonly string[];
+  /** The pane's capability host; `fakeCapabilityHost()` unless a test builds another. */
+  readonly capabilityHost?: () => CapabilityHost;
+  /** Whether the host exposes `pi.agents`; the subagents row fails first without it. */
+  readonly agentsExposed?: boolean;
   readonly register?: () => Response | Promise<Response>;
   readonly ready?: (attempt: number) => Response | Promise<Response>;
   readonly readyPosted?: () => void;
@@ -552,6 +605,7 @@ async function claimPane(options: {
     role: options.role,
     generation: 2,
     secret: `secret-${sessionId}`,
+    promptAgents: options.promptAgents ?? [],
   };
   const bootToken = `boot-${sessionId}`;
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-pane-state-"));
@@ -614,8 +668,11 @@ async function claimPane(options: {
     exits.push(code);
     throw new Error("process would exit");
   });
+  // The pane measures its six capability rows through this host, never the production one, which
+  // reaches Oh My Pi's own modules and runs the pane's `gh` and `dispatch`.
+  setLegionCapabilityHostForTests(options.capabilityHost ?? (() => fakeCapabilityHost()));
   const intervals: (() => void)[] = [];
-  const fixture = createPi({ bindEnvoy: options.bindEnvoy });
+  const fixture = createPi({ bindEnvoy: options.bindEnvoy, agentsExposed: options.agentsExposed });
   if (options.title !== undefined) {
     fixture.title.name = options.title.name;
     fixture.title.source = options.title.source;
@@ -949,7 +1006,12 @@ describe("Legion OMP extension", () => {
     );
   });
   test("a claim registers, claims its Envoy role, and reports ready through the claim routes alone", async () => {
-    const pane = await bootPane({ role: "tester", sessionId: "ses_worker" });
+    const pane = await bootPane({
+      role: "tester",
+      sessionId: "ses_worker",
+      promptAgents: ["deep-worker", "oracle"],
+      agentsExposed: true,
+    });
 
     expect(daemonRequests(pane.requests)).toEqual([
       {
@@ -969,6 +1031,30 @@ describe("Legion OMP extension", () => {
           sessionId: "ses_worker",
           secret: pane.registration.secret,
           generation: pane.registration.generation,
+          capabilities: {
+            measuredAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/),
+            elapsedMs: expect.any(Number),
+            rows: [
+              {
+                name: "subagents",
+                ok: true,
+                detail: "task resolves 2 agents, every one the prompts dispatch",
+              },
+              { name: "web-search", ok: false, detail: "web_search is not a registered tool" },
+              { name: "mcp", ok: true, detail: "no MCP server configured" },
+              {
+                name: "repository-extensions",
+                ok: true,
+                detail: "the repository carries no .omp/extensions, .omp/skills or .claude/skills",
+              },
+              {
+                name: "dispatch-envoy-tools",
+                ok: false,
+                detail: `Envoy tools missing: ${[...ENVOY_TOOL_NAMES].join(", ")}`,
+              },
+              { name: "github", ok: true, detail: "gh viewer login: legion-reviewer[bot]" },
+            ],
+          },
         },
       },
     ]);
@@ -983,6 +1069,66 @@ describe("Legion OMP extension", () => {
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
     expect(pane.exits).toEqual([]);
+  });
+  test("the ready's capability report measures the registration's promptAgents against the task tool's agents", async () => {
+    const measured = await bootPane({
+      role: "implementer",
+      sessionId: "ses_capabilities",
+      promptAgents: ["oracle", "plan-reviewer"],
+      agentsExposed: true,
+      capabilityHost: () => fakeCapabilityHost({ disabledAgents: async () => ["oracle"] }),
+    });
+    const ready = daemonRequests(measured.requests).find(
+      (request) => request.path === "/legion/v1/claims/ready"
+    )?.body as { readonly capabilities: { readonly rows: LegionCapabilityRow[] } };
+    expect(ready.capabilities.rows).toHaveLength(6);
+    expect(ready.capabilities.rows[0]).toEqual({
+      name: "subagents",
+      ok: false,
+      detail:
+        "agents the prompts dispatch that the task tool does not resolve: plan-reviewer; disabled by task.disabledAgents: oracle",
+    });
+    expect(measured.exits).toEqual([]);
+    expect(measured.errors).toEqual([]);
+
+    // Without `pi.agents` the subagents row says so; the pane boots all the same.
+    const unexposed = await bootPane({ role: "planner", sessionId: "ses_no_agents" });
+    const unexposedReady = daemonRequests(unexposed.requests).find(
+      (request) => request.path === "/legion/v1/claims/ready"
+    )?.body as { readonly capabilities: { readonly rows: LegionCapabilityRow[] } };
+    expect(unexposedReady.capabilities.rows[0]).toEqual({
+      name: "subagents",
+      ok: false,
+      detail: "pi.agents is not exposed",
+    });
+    expect(unexposed.exits).toEqual([]);
+  });
+  test("a measurer that fails outright costs the report alone: one log line, ready without capabilities, no exit", async () => {
+    const pane = await bootPane({
+      role: "reviewer",
+      sessionId: "ses_no_measurer",
+      capabilityHost: () => {
+        throw new Error("no capability host in this pane");
+      },
+    });
+    expect(
+      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/claims/ready")
+    ).toEqual([
+      {
+        path: "/legion/v1/claims/ready",
+        body: {
+          claimToken: pane.claimToken,
+          sessionId: "ses_no_measurer",
+          secret: pane.registration.secret,
+          generation: pane.registration.generation,
+        },
+      },
+    ]);
+    expect(pane.errors).toEqual([
+      "[legion] capability measurement failed; ready carries no report: no capability host in this pane",
+    ]);
+    expect(pane.exits).toEqual([]);
+    expect(pane.tools.find((tool) => tool.name === "legion")).toBeDefined();
   });
   test("does nothing for a session with no Legion environment markers", async () => {
     const requests: { readonly path: string }[] = [];
@@ -1943,19 +2089,22 @@ describe("Legion OMP extension", () => {
     pane.intervals[0]?.();
     await secondReady.promise;
 
-    const ready = {
+    // The same ready, the boot's capability report included: the regain measures nothing anew.
+    const readyBodies = daemonRequests(pane.requests).filter(
+      (request) => request.path === "/legion/v1/claims/ready"
+    );
+    expect(readyBodies).toHaveLength(2);
+    expect(readyBodies[0]).toEqual({
       path: "/legion/v1/claims/ready",
       body: {
         claimToken: pane.claimToken,
         sessionId: "ses_regain",
         secret: pane.registration.secret,
         generation: pane.registration.generation,
+        capabilities: expect.objectContaining({ rows: expect.any(Array) }),
       },
-    };
-    expect(daemonRequests(pane.requests).filter((request) => request.path === ready.path)).toEqual([
-      ready,
-      ready,
-    ]);
+    });
+    expect(readyBodies[1]).toEqual(readyBodies[0]);
   });
 });
 

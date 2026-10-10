@@ -234,6 +234,38 @@ func TestValidateRefusesALocatorNothingCouldBeActedOnThrough(t *testing.T) {
 	}
 }
 
+// Label names the process a locator addresses as a log line and a capability row read it: the pod
+// and role container of a sandbox, the pane of a tmux locator, and the claim alone for a locator
+// naming no process.
+func TestLabelNamesThePodPaneOrClaim(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		locator Locator
+		want    string
+	}{
+		{
+			name: "pod",
+			locator: Locator{Runtime: RuntimeSandbox, Claim: "legion-legion-legion-209-implementer", Incarnation: "pod-uid/3",
+				Sandbox: &SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-209", PodUID: "pod-uid", Container: "implementer", Generation: 3}},
+			want: "pod legion-legion-legion-209/implementer",
+		},
+		{
+			name:    "pane",
+			locator: Locator{Runtime: RuntimeTmux, Claim: "legion-legion-legion-209-implementer", Incarnation: "4242:1", Tmux: &TmuxLocator{Window: "@1", Pane: "%1"}},
+			want:    "pane @1:%1",
+		},
+		{
+			name:    "no process",
+			locator: Locator{Claim: "legion-legion-legion-209-implementer"},
+			want:    "claim legion-legion-legion-209-implementer",
+		},
+	} {
+		if got := testCase.locator.Label(); got != testCase.want {
+			t.Errorf("%s: Label() = %q, want %q", testCase.name, got, testCase.want)
+		}
+	}
+}
+
 // A Known is one claim: every runtime refuses one whose locator is another claim's process, or not
 // a locator at all, before it releases or sweeps anything. A claim with no process is known with
 // no locator.

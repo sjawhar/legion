@@ -84,12 +84,16 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 18 for contract 18's token file (LEGION-631: the three routes that redeemed a grant for a
-GitHub or git credential and the grant request's `push` are gone, the pane gains the GitHub
-variables above and loses the absolute-path pins of its gh, git and jj, the credential-helper
-variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no `commit` and answers
-`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 17's `dispatch` command
-instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
+number is 19 for contract 19's capability report (LEGION-663: `claims/register` answers
+`promptAgents`, `claims/ready` takes an optional `capabilities` report, each claim view on
+`GET /legion/v1/state` carries its session's latest report as `capabilities`, and `live` is gone
+from the capability status enum), after contract 18's token file (LEGION-631: the three routes that
+redeemed a grant for a GitHub or git credential and the grant request's `push` are gone, the pane
+gains the GitHub variables above and loses the absolute-path pins of its gh, git and jj, the
+credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no
+`commit` and answers `note`; `POST /legion/v1/threads/resolve` is deleted), contract 17's
+`dispatch` command instructions in every daemon role prompt (LEGION-588), contract 16's
+`capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
 grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries
@@ -149,11 +153,26 @@ worker — the daemon registers both on one route, a root being the claim whose 
 the persisted transcript; `claims/register` with the pane's boot token and this build's
 `daemonApiVersion` (`pluginContract`), where any 4xx exits the process with one log line naming
 the route, status, and daemon sentence (`exitOnRegistrationRefusal`) and a 5xx or transport
-failure propagates without exiting; jj session attribution; the Envoy role, which is the claim
+failure propagates without exiting; the capability measurement, started once the registration has
+answered and run beside the next two steps (`measureCapabilities` in `src/capability-report.ts`:
+the six live rows of the daemon's capability table — `subagents`, `web-search`, `mcp`,
+`repository-extensions`, `dispatch-envoy-tools`, `github` — each check within 8 s and the report
+within 10 s, measured against the registration's `promptAgents`, the session's active tools and
+the host's `pi.agents`; a failing or timed-out check is a failing row, and a measurer that throws
+costs the report, never the boot); jj session attribution; the Envoy role, which is the claim
 token and the topic the daemon sends an architect every notice on (no claim subscribes to an
 issue's notice topic, so no phase worker is woken by an architect's notice); and `claims/ready`,
-retried three times a second apart on a 5xx or transport failure only, and run again whenever the
-Envoy heartbeat regains the role. A session with no Legion environment boots nothing and gets no
+awaited on the measurement and carrying its report as `capabilities`, retried three times a second
+apart on a 5xx or transport failure only, and run again with the same report whenever the Envoy
+heartbeat regains the role. The controller measures nothing: its ready carries no report. The
+production measurer (`ompCapabilityHost`) reaches Oh My Pi's own modules through string-literal
+`import()` of `@oh-my-pi/pi-coding-agent` and its subpaths `config/settings`,
+`extensibility/settings`, `extensibility/extensions/loader`, `mcp/config` and `task/settings`,
+declared in `packages/pi-shared/src/omp-host.d.ts`: the modules exist only inside Oh My Pi's
+bundle, whose loader resolves a bare specifier of them only as a literal, so they load lazily at
+measurement time and never under `bun test` or in a session that is no Legion session; a test
+substitutes its host through `setLegionCapabilityHostForTests` in `extensions/legion.ts`. A session
+with no Legion environment boots nothing and gets no
 tool. There is no tool-call hook: nothing a pane runs is refused or minted for. The boot registers
 the `legion` tool: architects register gates, release children, request a backward move, choose
 retry or escalation, sign off, close an admitted root tree (a root architect only), and read
@@ -321,6 +340,7 @@ which hands both plugin entries to the Oh My Pi child by path.
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
+| Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-envoy` |
 | Rigs | `scripts/skill-scenarios/` | The skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section); its tester-proof scenario boots a real phase worker through this extension against a stand-in daemon (`daemon-standin.ts`), with the pane built by the daemon's own functions (`daemon-pane.go`, `daemon-pane.test.ts`: no inherited key, no grant file reaches the pane). The grant rig that proved the per-command grant mint went with the mint (LEGION-631) |

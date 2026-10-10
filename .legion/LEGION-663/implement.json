@@ -1,0 +1,113 @@
+{
+  "checks": [
+    "cd packages/daemon \u0026\u0026 go vet -tags e2e ./... \u0026\u0026 gofmt -l . -\u003e clean",
+    "cd packages/daemon \u0026\u0026 go test ./internal/capabilities/ ./internal/claim/ ./internal/api/ ./internal/projection/ ./internal/runtime/ -\u003e ok; go test -run 'Capabilit|Report|Deployment|PromptAgents' ./internal/daemon/ -\u003e ok (the api harness and store tests skip in this pod: no LEGION_TEST_PG_DSN; the daemon/admit/intake/natsauth packages' other failures here are Postgres, Docker/testcontainers, cgo and the pod's own LEGION_WORKSPACE env, none in files this change touches)",
+    "bunx biome check . -\u003e exit 0 (20 pre-existing warnings, none in changed files); packages contracts/pi-shared/pi-legion/envoy-client: bun run lint, typecheck, test, build -\u003e green (pi-legion 214 pass, 7 skip without LEGION_TEST_OMP; contracts 186 pass; envoy-client's 2 failures are the pod's ENVOY_TOKEN_FILE leaking into transport.test.ts, green with it unset)",
+    "LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts -\u003e 7 pass on the real omp 18.8.3 with the production host active (run by the extension task's worker)",
+    "PATH=\u003cgojq as jq\u003e:$PATH bun test scripts/e2e/lib -\u003e 204 pass (the pod has no jq; gojq stood in)",
+    "bash -n scripts/e2e/stage4b-sandbox-tree.sh -\u003e clean; bash .github/scripts/check-private-names.sh -\u003e clean; check-plugin-names, check-zod-version, check-bun-workspace-manifests -\u003e clean",
+    "round 2: cd packages/pi-legion \u0026\u0026 bun test src/capability-report.test.ts -t \"installation token\" -\u003e 1 pass (the tester's red test, unmodified: no hunk of the round touches it); bun test -\u003e 216 pass, 7 skip (omp tests without LEGION_TEST_OMP); bunx tsc --noEmit, bunx biome check extensions/ src/, bun run build -\u003e clean; bunx biome check . -\u003e exit 0 (20 pre-existing warnings); packages/contracts bun test 186 pass; packages/pi-shared tsc clean; check-private-names clean; grep -rn \"gh api user\" packages/pi-legion docs skills -\u003e none",
+    "round 3: cd packages/daemon \u0026\u0026 gofmt -l internal/ \u0026\u0026 go vet ./internal/capabilities/ ./internal/api/ \u0026\u0026 go test ./internal/capabilities/ ./internal/api/ ./internal/claim/ -\u003e ok (api harness skips without Postgres); packages/pi-legion bun test -\u003e 218 pass, 7 skip; tsc, biome, build clean; packages/contracts bun test 186 pass; pi-shared tsc clean"
+  ],
+  "commits": [
+    "a86735c17ad6 feat(daemon): the capability table renders a live row from the sessions' reports",
+    "a0875b50dde3 feat(daemon): claims/ready carries the session's capability report and register the prompts' task agents",
+    "cf00606ba587 feat(daemon): the daemon keeps each session's capability report and renders the live rows from the live ones",
+    "8ce393ec9381 feat(contracts): daemon API contract 19 carries the capability report, promptAgents and the claim view's capabilities",
+    "f469be4f0a71 feat(pi-legion): a session measures the six live capabilities at boot and reports them with its ready",
+    "a2881e08733e docs: how the six live capability rows are proved by each session's report, and what an open live row means to the controller",
+    "1add78134de3 test(e2e): stage 4b proves the live capability rows: full-agent on tree 2 and full-agent-negative on tree 3",
+    "891d3b643c20 test(e2e): the cleanup harnesses seed full-agent-negative's globals",
+    "563cd6a81268 refactor: the simplify pass over the capability report",
+    "93527e6ec21e fix(pi-legion): the github check reads the role's App login through GraphQL viewer, never REST GET /user",
+    "59dac7013aab fix: a reported detail is one clean line the state always parses, the report's store write outlives the agent's connection, and the MCP probe tears down on an early abort"
+  ],
+  "completed": "2026-10-10T08:19:24.127514613Z",
+  "filesChanged": [
+    "packages/daemon: internal/capabilities/{capabilities,deployment,image}.go (+tests)",
+    "packages/daemon: internal/claim/wire.go",
+    "packages/daemon: internal/api/{server,claims,state,version}.go (+tests, goldens)",
+    "packages/daemon: internal/projection/project.go (+tests, golden)",
+    "packages/daemon: internal/store/capabilities.go, migrations/0036_claim_capabilities.up.sql (+tests)",
+    "packages/daemon: internal/daemon/daemon.go (+capability_reports_test.go)",
+    "packages/daemon: internal/runtime/locator.go (Label) (+test)",
+    "packages/daemon: internal/record/outbox.go (doc)",
+    "packages/contracts: src/legion-api.ts (+test)",
+    "packages/contracts: fixtures/daemon-api/{version,register,ready,state,state-controller-claim}.json",
+    "packages/contracts: CHANGELOG.md",
+    "packages/pi-legion: src/capability-report.ts (new, +test)",
+    "packages/pi-legion: src/claim-session.ts",
+    "packages/pi-legion: src/daemon-client.ts (+test)",
+    "packages/pi-legion: extensions/legion.ts (+tests)",
+    "packages/pi-legion: extensions/legion-role-claim.test.ts",
+    "packages/pi-legion: scripts/skill-scenarios/daemon-standin.ts",
+    "packages/pi-legion: package.json (daemonApiVersion 19)",
+    "packages/pi-legion: AGENTS.md",
+    "packages/pi-legion: CHANGELOG.md",
+    "packages/pi-shared: src/omp-host.d.ts",
+    "docs: docs/kubernetes.md",
+    "docs: docs/site/src/content/docs/legion/troubleshooting.md",
+    "docs: skills/legion-controller/SKILL.md",
+    "scripts/e2e: scripts/e2e/stage4b-sandbox-tree.sh",
+    "scripts/e2e: scripts/e2e/README.md",
+    "scripts/e2e: scripts/e2e/lib/{stage4b-verdict,smoke-cleanup}.test.ts"
+  ],
+  "forTheTester": [
+    "The tester's evidence is STAGE4B_UNTIL=full-agent-negative bash scripts/e2e/stage4b-sandbox-tree.sh at this head's worker image, queued through the architect; checkpoints in order: ... repository-configuration, full-agent, finished-idle-planner-death, ..., controller, full-agent-negative, controller-walk. The predicates are in the script and scripts/e2e/README.md's table.",
+    "The api handler tests (TestReadyWithACapabilityReport..., TestRegisterAnswersAnEmptyPromptAgentsList...) and the store tests (internal/store/capabilities_test.go) need LEGION_TEST_PG_DSN; they run in CI's test job.",
+    "The pull request's base is legion/LEGION-631 (#1843, open at 57077591). When #1843 merges, the active role forward-merges main@origin, retargets the pull request to main and re-reads main's DaemonAPIVersion (17 today); the merger publishes no READY while the base is not main."
+  ],
+  "issue": "LEGION-663",
+  "phase": "implement",
+  "planDepartures": [
+    "full-agent-negative cannot run 'after controller' on tree 2's planner as the plan placed it: tree 2 is moved to backlog at issue-cap-moves, long before a controller is live, and tree 1 opens the pull request that merges. The one live tree without a pull request while a controller runs is tree 3, held, between its hold and its take-out. So the controller checkpoint now ends at the held notice reaching the controller, full-agent-negative runs on tree 3's planner with the controller live (web_search off in tree 3's workspace, kill, open row naming pod/role/issue/fact, the report-time warning carrying the new incarnation, the tick naming web-search to the controller, the planner answering a nonce, the file removed, kill, present again), and controller-walk carries the former tail (take-out from the operator shell, pods gone, the walk candidate, the tick, the root claim). STAGE4B_SKIP_CONTROLLER skips all three.",
+    "The simplify pass added runtime.Locator.Label (the one renderer of 'pod \u003cname\u003e/\u003ccontainer\u003e' / 'pane \u003cwindow\u003e:\u003cpane\u003e' / 'claim \u003ctoken\u003e') in internal/runtime, outside the plan's file list, so the capabilities package and the daemon's log share it."
+  ],
+  "proof": [
+    {
+      "command": "env -u ENVOY_NATS_URL LEGION_DAEMON_URL=http://127.0.0.1:18663 ENVOY_URL=http://127.0.0.1:18663 LEGION_TREE=LEGION-663 LEGION_ISSUE=LEGION-663 LEGION_ROLE=tester LEGION_PROJECT=legion LEGION_GENERATION=1 LEGION_BOOT_TOKEN=scratch-boot LEGION_STATE_DIR=/tmp/legion-663-proof/state LEGION_WORKSPACE=$LEGION_WORKSPACE omp --mode rpc --no-ui --no-title --session-dir /tmp/legion-663-proof/sessions -e /opt/legion/pi-envoy -e $LEGION_WORKSPACE/packages/pi-legion --cwd $LEGION_WORKSPACE \u003c/dev/null; then read the recorded claims/ready body",
+      "criterion": "At session start, once its claim has registered, the Legion extension measures the six rows from inside the session and reports them with its readiness report (spec 'What changes', bullet 1); subagents, web-search, mcp, repository-extensions and dispatch-envoy-tools read ok with their facts (plan, 'The implementer's own proof')",
+      "headSha": "563cd6a812683dfe0d041d598eb5bac3965a2552",
+      "negativeControl": "The same session from a scratch workspace /tmp/legion-663-proof/negative holding .omp/config.yml with 'web_search: enabled: false' (and the stage 4b bun MCP fixture under two names, an .omp/extensions/fixture.ts and an .omp/skills/probe/SKILL.md): the ready body's rows read web-search ok:false 'web_search is not a registered tool', mcp ok 'connected: fixture-omp-mcp (.omp/mcp.json), fixture-root-mcp (.mcp.json)' (both marker files written by the probe's client), repository-extensions ok 'discovered: .omp/extensions/fixture.ts, .omp/skills/probe/SKILL.md', subagents and dispatch-envoy-tools ok, github as above; elapsedMs 786",
+      "observed": "The stand-in recorded register -\u003e interests/subscribe -\u003e roles/set -\u003e ready; the ready body carried capabilities {measuredAt 2026-10-10T05:16:24.072Z, elapsedMs 817, rows: subagents ok 'task resolves 11 agents, every one the prompts dispatch'; web-search ok 'web_search registered; provider parallel answered in 803 ms'; mcp ok 'no MCP server configured'; repository-extensions ok 'the repository carries no .omp/extensions, .omp/skills or .claude/skills'; dispatch-envoy-tools ok 'ten Envoy tools registered; dispatch read LEGION-663 answered from /opt/legion/pi-envoy/bin/dispatch'; github ok:false 'gh api user failed: legion gh: Unable to redeem LEGION_GRANT: daemon returned 404: {\"error\":\"no stand-in route /legion/v1/gh-token\"}'} — the github row names the fact: this pod's gh is main's grant shim, which the stand-in cannot feed (contract 18's token file is #1843's, not yet deployed), so the row's positive proof is the Stage 4b run at this branch's image, as the plan says",
+      "surface": "A scratch Oh My Pi 18.8.3 session (omp --mode rpc) in the issue workspace with /opt/legion/pi-envoy and the built packages/pi-legion as its explicit extensions, this pod's real profile, model route, search provider and Dispatch, against a bun stand-in (/tmp/legion-663-proof/standin.ts) serving the daemon's claim routes (register answering the golden register.json with promptAgents, ready recording its body) and the Envoy listener (no NATS)"
+    },
+    {
+      "command": "awk the heredoc out of scripts/e2e/stage4b-sandbox-tree.sh into /tmp/omp-probe/fixture/.omp/mcp-fixture.ts; write .mcp.json and .omp/mcp.json naming it with /tmp/omp-probe/fixture-markers/mcp-{root,omp}; cd /tmp/omp-probe/fixture \u0026\u0026 omp --mode rpc --no-ui --no-session --extension /tmp/omp-probe/probe-mcp.mjs \u003c/dev/null (the probe imports discoverMCPServers, waits for pending connections, prints each configured server's status and pi.getActiveTools())",
+      "criterion": "The Stage 4b fixture's MCP servers are real stdio MCP servers Oh My Pi's client connects to, still writing their markers (plan task 7: 'the implementer proves the bun MCP fixture locally')",
+      "headSha": "1add78134de383aee288498294ec973754403fd5",
+      "negativeControl": "The fixture's previous shape (sh -c 'touch marker \u0026\u0026 sleep 600', no MCP protocol) is what the plan replaces because Oh My Pi's client never reaches 'connected' on it; and in the proof above a server configured but not answering reads through the same probe as a status other than 'connected' with the error discoverMCPServers records — the capability-report unit tests pin that row as 'not connected: \u003cname\u003e (\u003cerror\u003e)'",
+      "observed": "PROBE_MCP={\"configs\":[\"fixture-omp-mcp\",\"fixture-root-mcp\"],\"statuses\":{\"fixture-omp-mcp\":\"connected\",\"fixture-root-mcp\":\"connected\"},\"errors\":[],\"mcpMs\":382,\"mcpTools\":[\"mcp__fixture_omp_mcp_fixture_echo\",\"mcp__fixture_root_mcp_fixture_echo\"]}; both markers mcp-omp and mcp-root existed afterwards (run against the working copy that became this commit; the heredoc is byte-identical at the code head 563cd6a812683dfe0d041d598eb5bac3965a2552)",
+      "surface": "The .omp/mcp-fixture.ts heredoc extracted from scripts/e2e/stage4b-sandbox-tree.sh into a scratch workspace configured under both fixture names, driven by Oh My Pi 18.8.3's own MCP client (discoverMCPServers) from a probe extension in omp --mode rpc"
+    },
+    {
+      "command": "REAL_DAEMON_URL=$LEGION_DAEMON_URL bun /tmp/legion-663-proof/standin.ts \u0026 env -u ENVOY_NATS_URL LEGION_DAEMON_URL=http://127.0.0.1:18663 ENVOY_URL=http://127.0.0.1:18663 LEGION_TREE=LEGION-663 LEGION_ISSUE=LEGION-663 LEGION_ROLE=tester LEGION_PROJECT=legion LEGION_GENERATION=1 LEGION_BOOT_TOKEN=scratch-boot LEGION_STATE_DIR=/tmp/legion-663-proof/state LEGION_WORKSPACE=$LEGION_WORKSPACE omp --mode rpc --no-ui --no-title --session-dir /tmp/legion-663-proof/sessions3 -e /opt/legion/pi-envoy -e $LEGION_WORKSPACE/packages/pi-legion --cwd $LEGION_WORKSPACE \u003c/dev/null; read the recorded claims/ready body",
+      "criterion": "The github row proves the session's GitHub identity under the role's own credential: `gh api graphql -f query='{ viewer { login } }'` answers the role's App login (spec v4 bullet 1), so the six rows read present in a pod",
+      "headSha": "93527e6ec21eb8a7342f8b439f1a7ad804e57455",
+      "negativeControl": "The same session with a credential-less gh first on PATH (a wrapper running /usr/local/bin/gh under an empty GH_CONFIG_DIR with GH_TOKEN, GITHUB_TOKEN and LEGION_GRANT_FILE unset): the github row read ok:false 'gh viewer login failed: gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.' while the other five rows passed (elapsedMs 1094), and the session still reached ready",
+      "observed": "The ready body's capabilities: measuredAt 2026-10-10T06:37:16.334Z, elapsedMs 802, all six rows ok — subagents 'task resolves 11 agents, every one the prompts dispatch'; web-search 'web_search registered; provider parallel answered in 800 ms'; mcp 'no MCP server configured'; repository-extensions 'the repository carries no .omp/extensions, .omp/skills or .claude/skills'; dispatch-envoy-tools 'ten Envoy tools registered; dispatch read LEGION-663 answered from /opt/legion/pi-envoy/bin/dispatch'; github 'gh viewer login: legion-implementer[bot]' (the stand-in log shows the pane's gh-token redemption proxied to the real daemon answering 200)",
+      "surface": "A scratch Oh My Pi 18.8.3 session (omp --mode rpc) in the issue workspace with /opt/legion/pi-envoy and the built packages/pi-legion as explicit extensions, this pod's real profile, search provider, Dispatch and gh (the daemon's worker-bin shim), against the bun stand-in (/tmp/legion-663-proof/standin.ts) serving claims/register, claims/ready (recording its body) and the listener, and proxying POST /legion/v1/gh-token to the pod's own daemon so the pane's gh redeemed the implementer App's real installation token"
+    },
+    {
+      "command": "REAL_DAEMON_URL=$LEGION_DAEMON_URL bun /tmp/legion-663-proof/standin.ts \u0026 env -u ENVOY_NATS_URL LEGION_DAEMON_URL=http://127.0.0.1:18663 ENVOY_URL=http://127.0.0.1:18663 LEGION_TREE=LEGION-663 LEGION_ISSUE=LEGION-663 LEGION_ROLE=tester LEGION_PROJECT=legion LEGION_GENERATION=1 LEGION_BOOT_TOKEN=scratch-boot LEGION_STATE_DIR=/tmp/legion-663-proof/state LEGION_WORKSPACE=/tmp/legion-663-proof/negative omp --mode rpc --no-ui --no-title --session-dir /tmp/legion-663-proof/sessions5 -e /opt/legion/pi-envoy -e $LEGION_WORKSPACE/packages/pi-legion --cwd /tmp/legion-663-proof/negative \u003c/dev/null; cd packages/daemon \u0026\u0026 go test ./internal/capabilities/ -run TestNormalize -v",
+      "criterion": "Review round 1: a session's report never breaks the plugins' strict state parse and the MCP probe leaves no client behind on an abort (reviewer findings 1, 3 and 4), while the six checks still report as before at this head",
+      "headSha": "59dac7013aab6a8e6ed02afdc517fdaae4dd8182",
+      "negativeControl": "packages/contracts legion-api.test.ts: a parsed state.json copy with an open row's detail blanked is refused by the strict schema (the guard the daemon's floor now keeps every report inside); capability-report.test.ts: a manager made only after the mcp check's 20 ms budget aborted it is still torn down (calls [disconnectAll, wait]), where the previous code left it running",
+      "observed": "The ready body at 2026-10-10T08:18:45.280Z, elapsedMs 744: subagents ok 'task resolves 11 agents, every one the prompts dispatch'; web-search ok:false 'web_search is not a registered tool'; mcp ok 'connected: fixture-omp-mcp (.omp/mcp.json), fixture-root-mcp (.mcp.json)' with both markers written; repository-extensions ok 'discovered: .omp/extensions/fixture.ts, .omp/skills/probe/SKILL.md'; dispatch-envoy-tools ok; github ok 'gh viewer login: legion-implementer[bot]'. TestNormalizeKeepsTheLiveRowsInTableOrder passes its new cases: a failing row with detail '' or whitespace reads 'no detail reported', 'not connected: evil\\nserver\\x1b[31m (boom)' reads 'not connected: evil server [31m (boom)', a passing row's empty detail stays empty",
+      "surface": "The scratch Oh My Pi 18.8.3 session (omp --mode rpc, /opt/legion/pi-envoy and the rebuilt packages/pi-legion as explicit extensions, this pod's profile, search provider, Dispatch and gh on the implementer App's real token through the stand-in's gh-token proxy) in the fixture workspace /tmp/legion-663-proof/negative (.omp/config.yml web_search off, the stage 4b bun MCP fixture under two names, .omp/extensions/fixture.ts, .omp/skills/probe/SKILL.md); the daemon side by go test ./internal/capabilities/ (Normalize's floor and cleaning cases) and packages/contracts bun test (the state schema refuses a blank open detail and accepts an empty incarnation)"
+    }
+  ],
+  "pullRequest": {
+    "base": "legion/LEGION-631",
+    "baseHead": "5707759137292b0fea32092d24bccda2286d7a7e",
+    "codeHead": "59dac7013aab6a8e6ed02afdc517fdaae4dd8182",
+    "number": 1874,
+    "url": "https://github.com/sjawhar/legion/pull/1874"
+  },
+  "schemaVersion": 1,
+  "summary": "Every root architect's and phase worker's session measures the six live capability rows inside Oh My Pi as it boots (after claims/register, beside the jj attribution and the Envoy role claim) and sends the report with claims/ready; the daemon normalises it (never a refusal), keeps the latest report per claim in memory and in claim_capabilities (migration 0036), logs 'capabilities: session reported' and one 'capability \u003cname\u003e is open: \u003cdetail\u003e' warning per failing row at report time, renders each live row present/open/unchecked from the sessions whose claim is ready/working/idle at the report's incarnation, shows each claim's report on its view, and names open live rows on the controller's tick. Daemon API contract 18 -\u003e 19 (register promptAgents, ready capabilities, claim view capabilities, no live status). Stage 4b gains a bun stdio MCP fixture and the full-agent and full-agent-negative checkpoints. Round 2 (the tester's fail): the github check reads the role's App login through GraphQL {viewer{login}} instead of REST GET /user, which an App installation token cannot call (403 Resource not accessible by integration); the row's detail names the login it read; the docs, AGENTS and CHANGELOG wording moved with it; the tester's red test (8a113f75) passes unmodified. Round 3 (review round 1, changes requested): Normalize puts every detail on one clean line (control characters out) and floors a failing row's empty detail to 'no detail reported' so the strict state parse never breaks; the claim view's incarnation may be empty; the ready handler hands the report hook the decision context so a disconnecting agent cannot cancel the store write; the MCP probe tears down on an abort that came while the manager was being made; a connection error's URL userinfo is redacted.",
+  "unresolved": [
+    "The 'present' deployment row judged over every live session means one tree whose repository disables a tool (as full-agent-negative does deliberately) opens the row deployment-wide until that process relaunches; the plan lists this as a concern for the architect.",
+    "The pod-side proof of the github row ran against the implementer App's token redeemed through today's deployment (the grant shim); under #1843 the same gh reads the token file in GH_CONFIG_DIR — the Stage 4b run at the retargeted head proves that path."
+  ]
+}

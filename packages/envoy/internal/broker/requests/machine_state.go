@@ -91,11 +91,16 @@ type SecretDecision struct {
 	Source   string `json:"-"`
 }
 
+// Request is one agent_secret request as Create and Get answer it. Approver is the approver its
+// credential-request record names (a person's canonical login, or record.AnyoneApprover), read
+// from the record rather than the current policy, since the record is what the approver's list
+// shows; it is nil when the request has no record, because the policy decided it at once.
 type Request struct {
 	ID        string           `json:"request_id"`
 	State     string           `json:"state"`
 	GrantID   *string          `json:"grant_id"`
 	RecordID  *string          `json:"record_id"`
+	Approver  *string          `json:"approver"`
 	Secrets   []SecretDecision `json:"secrets"`
 	DecidedAt *time.Time       `json:"decided_at"`
 	DecidedBy *string          `json:"decided_by"`
@@ -438,7 +443,7 @@ func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRo
 	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
-	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID}, nil
+	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID, Approver: &body.Approver}, nil
 }
 
 // lockIdenticalPending takes the advisory lock Create serializes identical requests from one

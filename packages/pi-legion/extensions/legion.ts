@@ -18,6 +18,11 @@ import {
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
+import {
+  type CapabilityHost,
+  measureCapabilities,
+  ompCapabilityHost,
+} from "../src/capability-report";
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
@@ -48,6 +53,14 @@ import {
 let exitProcess: (code: number) => never = (code) => process.exit(code) as never;
 export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
   exitProcess = hook;
+}
+
+// The host the claim session's capability report measures through: Oh My Pi's own modules and
+// the pane's `dispatch` and `gh`. A test substitutes a fake, since the production host reaches
+// modules that exist only inside Oh My Pi's bundle and runs the pane's commands.
+let capabilityHost: () => CapabilityHost = ompCapabilityHost;
+export function setLegionCapabilityHostForTests(host: () => CapabilityHost): void {
+  capabilityHost = host;
 }
 
 async function persistedTranscript(
@@ -137,6 +150,18 @@ export default function legionExtension(pi: PiApi): void {
   const claimSession = createClaimSession({
     daemon: roleDaemon,
     persistedTranscript,
+    // The six live rows, measured against this session's tool surface as session_start sees it
+    // (`pi.getActiveTools()` answers only from a handler), the host's `pi.agents`, and the task
+    // agents the registration says the role's prompts dispatch.
+    measureCapabilities: (context, input) =>
+      measureCapabilities(capabilityHost(), {
+        cwd: context.cwd,
+        sessionId: context.sessionManager.getSessionId(),
+        issue: input.issue,
+        promptAgents: input.promptAgents,
+        activeTools: pi.getActiveTools(),
+        agentsExposed: pi.agents !== undefined,
+      }),
     exitProcess: (code) => exitProcess(code),
   });
   const controllerSession = createControllerSession({

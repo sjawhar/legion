@@ -12,12 +12,14 @@
 # Three roots are set todo under admission_cap 2. Tree 1 runs the whole workflow with real agents to
 # `done`, through one changes-requested review round whose thread the reviewer opens, lingers, and
 # closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
-# node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
-# admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
-# is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
-# killed mid-turn and an implementer killed until it is held, and is taken out the same way. Between
-# the operator's controller and tree 4, the daemon runs under `controller: daemon` and back
-# (daemon-controller-liveness). Each
+# node, carrying the repository-configuration fixture, supplies the capability report every
+# session sends at its start (full-agent), and is then moved to backlog. Tree 3 is
+# admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs and,
+# held, the planner whose workspace turns a capability off and on (full-agent-negative), and is
+# taken out from an operator shell (controller-walk). Tree 4 is admitted once tree 3 has left,
+# supplies a planner killed mid-turn and an implementer killed until it is held, and is taken out
+# the same way. Between the operator's controller and tree 4, the daemon runs under
+# `controller: daemon` and back (daemon-controller-liveness). Each
 # checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
 # two plugins' versions recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
@@ -174,6 +176,10 @@ sampler_pid=
 interests_pid=
 shape_pid=
 controller_session=
+# full-agent-negative's workspace .omp/config.yml, in the pod and workspace named, while it is in
+# place: the teardown removes it, best effort.
+negative_config_pod=
+negative_config_workspace=
 host=
 # The production services' hosts, which scrub keeps out of what the run prints (set in prerequisites).
 service_hosts=()
@@ -960,6 +966,11 @@ restart_daemon() {
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
 log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log"; }
+# capability_open_lines NAME prints the daemon log's `capability NAME is open: …` warnings, one JSON
+# object a line: a session's report of a row its check failed, which carries the session's
+# incarnation, and the deployment's own at boot and at a tick after the open rows changed, which
+# carries none (internal/daemon capabilityReported, capabilities.Deployment.Log).
+capability_open_lines() { jq -R -c --arg m "capability $1 is open" 'fromjson? | select(.msg | startswith($m))' "$daemon_log"; }
 # left_planning ISSUE prints when and for what ISSUE first left planning, from the daemon's log, and
 # fails when it has not.
 left_planning() {
@@ -1521,10 +1532,11 @@ stream_missing() {
 
 # push_fixture ISSUE: legion/ISSUE on the smoke repository, one commit on main carrying a
 # repository's own configuration: AGENTS.md, an Oh My Pi extension and tool, two MCP servers under
-# distinct names, an LSP config, a Codex tool, and a Claude plugin list. Each one, if the agent's
-# process loads it, writes its own marker under /tmp/legion-fixture/ in the pod. The workspace of
-# ISSUE is provisioned from that bookmark (internal/workspace createWorkspace), so tree 2's pods
-# carry the fixture; tree 2 never opens a pull request, so nothing of it reaches the smoke main.
+# distinct names (one stdio server, bun on the pod's PATH, configured twice), an LSP config, a
+# Codex tool, and a Claude plugin list. Each one, if the agent's process loads it, writes its own
+# marker under /tmp/legion-fixture/ in the pod. The workspace of ISSUE is provisioned from that
+# bookmark (internal/workspace createWorkspace), so tree 2's pods carry the fixture; tree 2 never
+# opens a pull request, so nothing of it reaches the smoke main.
 push_fixture() {
   local issue=$1 dir
   dir=$work/fixture
@@ -1548,11 +1560,59 @@ mkdirSync("/tmp/legion-fixture", { recursive: true });
 writeFileSync("/tmp/legion-fixture/omp-tool", "imported\n");
 export default { name: "fixture_marker", description: "fixture", parameters: { type: "object", properties: {} }, execute: async () => "ok" };
 EOF
+  # A stdio MCP server Oh My Pi's client connects to (newline-delimited JSON-RPC), which writes the
+  # marker its first argument names at start; the server path is relative to the workspace, where
+  # Oh My Pi spawns a stdio server. The markers may be written by the session's own connection or by
+  # the capability probe's second client (packages/pi-legion/src/capability-report.ts).
+  cat >"$dir/.omp/mcp-fixture.ts" <<'EOF'
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+const marker = process.argv[2];
+if (marker) {
+  mkdirSync(dirname(marker), { recursive: true });
+  writeFileSync(marker, "");
+}
+const answer = (id: unknown, result: unknown) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+const refuse = (id: unknown, code: number, message: string) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
+let pending = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
+  pending += chunk;
+  let at = pending.indexOf("\n");
+  while (at >= 0) {
+    const line = pending.slice(0, at).trim();
+    pending = pending.slice(at + 1);
+    at = pending.indexOf("\n");
+    if (line === "") continue;
+    let message: { id?: unknown; method?: string; params?: { protocolVersion?: string; arguments?: { text?: unknown } } };
+    try { message = JSON.parse(line); } catch { continue; }
+    // A notification (notifications/initialized, notifications/cancelled) carries no id and gets no answer.
+    if (message.id === undefined || message.id === null) continue;
+    switch (message.method) {
+      case "initialize":
+        answer(message.id, { protocolVersion: message.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "legion-stage4b-fixture", version: "0.0.1" } });
+        break;
+      case "ping":
+        answer(message.id, {});
+        break;
+      case "tools/list":
+        answer(message.id, { tools: [{ name: "fixture_echo", description: "Echoes text (Stage 4b fixture).", inputSchema: { type: "object", properties: { text: { type: "string" } } } }] });
+        break;
+      case "tools/call":
+        answer(message.id, { content: [{ type: "text", text: String(message.params?.arguments?.text ?? "") }] });
+        break;
+      default:
+        refuse(message.id, -32601, `method not found: ${String(message.method)}`);
+    }
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+EOF
   cat >"$dir/.mcp.json" <<'EOF'
-{ "mcpServers": { "fixture-root-mcp": { "command": "sh", "args": ["-c", "mkdir -p /tmp/legion-fixture && touch /tmp/legion-fixture/mcp-root && sleep 600"] } } }
+{ "mcpServers": { "fixture-root-mcp": { "command": "bun", "args": [".omp/mcp-fixture.ts", "/tmp/legion-fixture/mcp-root"] } } }
 EOF
   cat >"$dir/.omp/mcp.json" <<'EOF'
-{ "mcpServers": { "fixture-omp-mcp": { "command": "sh", "args": ["-c", "mkdir -p /tmp/legion-fixture && touch /tmp/legion-fixture/mcp-omp && sleep 600"] } } }
+{ "mcpServers": { "fixture-omp-mcp": { "command": "bun", "args": [".omp/mcp-fixture.ts", "/tmp/legion-fixture/mcp-omp"] } } }
 EOF
   cat >"$dir/lsp.json" <<'EOF'
 { "servers": { "fixture-lsp": { "command": ["sh", "-c", "mkdir -p /tmp/legion-fixture && touch /tmp/legion-fixture/lsp && sleep 600"], "fileTypes": ["md"] } } }
@@ -1576,7 +1636,9 @@ Run `touch /tmp/legion-fixture/claude-plugin`.
 EOF
   git -C "$dir" checkout -q -b "$fixture_branch"
   git -C "$dir" add -A
-  git -C "$dir" -c user.name="stage4b proof" -c user.email="stage4b@legion.invalid" commit -qm "Stage 4b fixture: a repository's own configuration, each with a marker ($issue)"
+  git -C "$dir" -c user.name="stage4b proof" -c user.email="stage4b@legion.invalid" commit -q \
+    -m "Stage 4b fixture: a repository's own configuration, each with a marker ($issue)" \
+    -m "The MCP markers may be written by the session's own connection or by the capability probe's second client."
   git -C "$dir" push -q origin "$fixture_branch" || fail "push the fixture branch $fixture_branch to $repo"
   note "pushed the repository-configuration fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD))"
 }
@@ -1718,6 +1780,8 @@ cleanup() {
   # The review pair exists only once tree-moved has named the reviewer's session; a run cut before
   # that has nothing to record.
   [ -z "$pair_session" ] || record_pair >/dev/null 2>&1
+  # full-agent-negative's workspace file, should the run end between its write and its removal.
+  [ -z "$negative_config_pod" ] || pod_exec "$negative_config_pod" planner sh -c "rm -f '$negative_config_workspace/.omp/config.yml'" >/dev/null 2>&1
   stop_pid "$daemon_pid"
   collect_transcripts
   stop_tree "$watch_pid"
@@ -2435,10 +2499,12 @@ pass
 
 begin repository-configuration
 # Tree 2's pods carry the repository's own configuration (push_fixture). Each marker names a loading
-# path the pod's agent loaded, as an agent in any checkout does. The markers live in the
-# pod's own /tmp, which goes with the pod when its tree closes, and are read while the planner waits
-# after its first turn, before it plans. The argv the pod ran
-# its agent with is recorded beside them.
+# path the pod's agent loaded, as an agent in any checkout does; the two MCP markers may be written
+# by the session's own connection or by the capability probe's second client
+# (packages/pi-legion/src/capability-report.ts), both the pod's agent connecting. The markers live
+# in the pod's own /tmp, which goes with the pod when its tree closes, and are read while the
+# planner waits after its first turn, before it plans. The argv the pod ran its agent with is
+# recorded beside them.
 nonce="fixture-read-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then answer this message with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
 on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
@@ -2462,6 +2528,49 @@ grep -qF -- '--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion'
 note "the planner runs with discovery on and the two explicit roots, /opt/legion/pi-envoy then /opt/legion/pi-legion"
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
 on_tree "$tree2" wait_for_phase "$tree2" implementing "$plan_seconds"
+pass
+
+begin full-agent
+# Every live session measured the six live capability rows at its boot and reported them with its
+# ready (LEGION-663): tree 1's and tree 2's roles are live, and tree 2's planner, finished and idle,
+# still runs the process of its first boot, whose report the fixture makes the fullest: two MCP
+# servers connected and an extension discovered. The daemon renders each row present from the live
+# reports, every row's detail naming the pod of a live claim; the planner's own view carries its
+# report at its running incarnation; the log's report line for that incarnation holds the rows; and
+# no live row has read open so far. The newest session's report may be seconds away, so the rows
+# are waited for.
+live_names='["subagents", "web-search", "mcp", "repository-extensions", "dispatch-envoy-tools", "github"]'
+live_rows_of() { jq -c --argjson names "$live_names" '[.capabilities[] | select(.name | IN($names[]))]'; }
+live_rows_present() { daemon_state | live_rows_of | jq -e 'length == 6 and all(.status == "present")' >/dev/null; }
+live_rows_report() { note "the live capability rows: $(daemon_state | live_rows_of)"; }
+timeout_hook=live_rows_report
+until_true 300 "the six live capability rows to read present" live_rows_present
+timeout_hook=limit_pending_blocked
+# The rows and the live claims' pods come from one read of the state, so each row's detail names the
+# pod of a claim live at the same moment.
+state_json=$(daemon_state)
+rows=$(live_rows_of <<<"$state_json")
+pods=$(jq -c '[.issues[] | (.architect, (.workers // {})[].claim) | .locator.sandbox.name // empty] | unique' <<<"$state_json")
+jq -e --argjson pods "$pods" 'all(.detail as $d | ($d | contains("pod ")) and any($pods[]; . as $p | $d | contains($p)))' <<<"$rows" >/dev/null ||
+  fail "a live capability row's detail names no pod of a live claim (pods $pods): $rows"
+while IFS= read -r line; do note "$line"; done < <(jq -r '.[] | "\(.name): \(.status): \(.detail)"' <<<"$rows")
+# Tree 2's planner's view: its first boot's report, every row proved, at its running incarnation.
+planner_view=$(claim_view "$tree2" planner)
+jq -e --argjson names "$live_names" '(.capabilities.ok | sort) == ($names | sort) and .capabilities.open == [] and .capabilities.incarnation == .locator.incarnation' <<<"$planner_view" >/dev/null ||
+  fail "tree 2's planner view does not carry every live row proved by its running process: $(jq -c '{locator, capabilities}' <<<"$planner_view")"
+report_incarnation=$(jq -r .locator.incarnation <<<"$planner_view")
+# The daemon's report line for that process holds the fixture's rows.
+reported=$(log_lines "capabilities: session reported" | jq -c --arg inc "$report_incarnation" 'select(.incarnation == $inc)' | tail -1)
+[ -n "$reported" ] || fail "the daemon log holds no 'capabilities: session reported' line for tree 2's planner process $report_incarnation"
+jq -e 'def row($n): first(.[] | select(.name == $n)) | .detail;
+  (.rows | fromjson) | (row("mcp") | contains("fixture-omp-mcp") and contains("fixture-root-mcp")) and (row("repository-extensions") | contains("fixture.ts"))' <<<"$reported" >/dev/null ||
+  fail "tree 2's planner's reported rows name neither both MCP fixtures nor the fixture extension: $(jq -r .rows <<<"$reported")"
+note "tree 2's planner (process $report_incarnation) reported in $(jq -r .elapsedMs <<<"$reported") ms: $(jq -r '.rows | fromjson | map("\(.name): \(.detail)") | join("; ")' <<<"$reported")"
+# No live row has read open: neither a session's report nor the deployment's own warning.
+opened=$(jq -R -c 'fromjson? | select(.msg | test("^capability (subagents|web-search|mcp|repository-extensions|dispatch-envoy-tools|github) is open"))' "$daemon_log")
+[ -z "$opened" ] || fail "the daemon log already holds a live row open: $(head -3 <<<"$opened" | tr '\n' ' ')"
+jq -cn --argjson rows "$rows" --argjson planner "$planner_view" --argjson reported "$reported" '{rows: $rows, planner: $planner, reported: $reported}' >"$evidence/full-agent.json"
+note "the six live rows read present, tree 2's planner's view carries them proved at its running process, and no live row has read open"
 pass
 
 begin finished-idle-planner-death
@@ -3384,11 +3493,16 @@ note "the shape watcher checked every pod the run's claims run in since the move
 pass
 
 begin controller
-# `legion controller start` on the devbox registers with the Sandbox daemon; tree 3 supplies the
-# held phase whose notice reaches it; `legion status … backlog` from the operator shell takes
-# tree 3 out, and Dispatch shows it.
+# `legion controller start` on the devbox registers with the Sandbox daemon, and tree 3 supplies the
+# held phase whose notice reaches it. Tree 3 then stays held through full-agent-negative, the one
+# live tree without a pull request while a controller runs, and controller-walk takes it out with
+# `legion status … backlog` from the operator shell, which Dispatch shows.
 if [ -n "$skip_controller" ]; then
 take_out "$tree3"
+skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
+begin full-agent-negative
+skipped "STAGE4B_SKIP_CONTROLLER: needs the controller's tick"
+begin controller-walk
 skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
 else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
@@ -3520,7 +3634,94 @@ note "the controller session $controller_session received the held notice for $t
 # controller's profile (make_omp_home, lib/omp-home.sh).
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
 note "the controller's session is under $profile_agent/sessions; $HOME/.omp/profiles/$profile does not exist"
-interests_sample "$check"
+pass
+
+begin full-agent-negative
+# A live row a session's check fails reads open, named by the session's pod, from the ready that
+# reported it until that process is gone (LEGION-663). Tree 3, held, is the one live tree without a
+# pull request while a controller runs, and its finished, idle planner the role whose workspace can
+# take a configuration no pull request carries: a workspace .omp/config.yml turns web_search off,
+# the planner is killed at its launcher PID 1, and its relaunch, reading the file at its boot,
+# reports web-search failing. The daemon runs it all the same (dispatch://LEGION-663: run, and
+# report): the row reads open with the planner's pod, role, issue and the fact, the report's
+# warning carries the relaunch's incarnation, the next tick names the row to the controller, and
+# the planner answers. With the file removed and the planner killed once more, the relaunch proves
+# the row and the daemon renders it present again.
+workspace3=/legion/workspaces/$repo/${tree3,,}
+pod3=$(claim_sandbox "$tree3" planner) || fail "tree 3's planner has no Sandbox"
+# The teardown removes the file, best effort, should the run end between its write and its removal.
+negative_config_pod=$pod3
+negative_config_workspace=$workspace3
+pod_exec "$pod3" planner sh -c "cd '$workspace3' && mkdir -p .omp && printf 'web_search:\n  enabled: false\n' > .omp/config.yml" ||
+  fail "could not write $workspace3/.omp/config.yml in $pod3/planner"
+note "wrote $workspace3/.omp/config.yml (web_search: enabled: false) in $pod3/planner"
+before=$(claim_view "$tree3" planner)
+end_claim_process "$tree3" planner kill
+# planner3_reported: tree 3's planner is ready or idle as a process other than the one killed, and
+# its view carries that process's own report.
+planner3_reported() {
+  claim_view "$tree3" planner | jq -e --arg killed "$ended_incarnation" \
+    '(.state | IN("ready", "idle")) and (.locator.incarnation // "") != "" and .locator.incarnation != $killed
+      and .capabilities.incarnation == .locator.incarnation' >/dev/null
+}
+on_tree "$tree3" until_true 600 "tree 3's planner to be relaunched with the file and its new process to report" planner3_reported
+open_view=$(claim_view "$tree3" planner)
+open_incarnation=$(jq -r .locator.incarnation <<<"$open_view")
+note "tree 3's planner (process $(jq -r .locator.incarnation <<<"$before")) was killed at its launcher PID 1 and relaunched as process $open_incarnation, which reported"
+web_search_row() { daemon_state | jq -ce '.capabilities[] | select(.name == "web-search")'; }
+open_row=$(web_search_row) || fail "legion state carries no web-search row"
+jq -e --arg pod "pod $pod3/planner" --arg issue "$tree3" \
+  '.status == "open" and (.detail | contains($pod) and contains("planner") and contains($issue) and contains("web_search is not a registered tool"))' <<<"$open_row" >/dev/null ||
+  fail "the web-search row does not read open for $pod3/planner ($tree3) with 'web_search is not a registered tool': $open_row"
+note "web-search: $(jq -r '"\(.status): \(.detail)"' <<<"$open_row")"
+jq -e '.capabilities.open | any(.name == "web-search")' <<<"$open_view" >/dev/null ||
+  fail "tree 3's planner view does not list web-search under capabilities.open: $(jq -c .capabilities <<<"$open_view")"
+# The daemon warned at the report, naming the process that sent it.
+warned=$(capability_open_lines web-search | jq -c --arg inc "$open_incarnation" 'select(.incarnation == $inc)' | tail -1)
+[ -n "$warned" ] || fail "the daemon log holds no 'capability web-search is open' warning for process $open_incarnation: $(capability_open_lines web-search | tail -3 | tr '\n' ' ')"
+note "the daemon warned at the report: $(jq -r .msg <<<"$warned")"
+# The next tick names the open row to the controller (a tick alone carries openCapabilities,
+# admit.Admission.wakeController). controller_tick_names NAME: an Envoy delivery in the controller's
+# session carries openCapabilities and NAME on one line.
+controller_tick_names() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    grep -F '"customType":"envoy-message"' "$file" | grep -F openCapabilities | grep -qF "$1" && return 0
+  done
+  return 1
+}
+until_true 300 "a tick naming web-search among its openCapabilities to reach the controller session $controller_session" controller_tick_names web-search
+note "the controller session $controller_session received a tick naming web-search open"
+# The daemon ran the planner it reported: it answers.
+nonce="full-agent-negative-$RANDOM$RANDOM"
+send_agent "$tree3" planner "Stage 4b proof full-agent-negative operation: answer this message with the single word $nonce and wait for the next instruction."
+on_tree "$tree3" until_true 600 "tree 3's planner, reported with web-search open, to answer $nonce" assistant_said "$tree3" planner "$nonce"
+note "tree 3's planner answered $nonce as process $open_incarnation: reported open, and running"
+# The file gone, the next process proves the row.
+pod_exec "$pod3" planner sh -c "cd '$workspace3' && rm -f .omp/config.yml && rmdir .omp 2>/dev/null || true" ||
+  fail "could not remove $workspace3/.omp/config.yml in $pod3/planner"
+negative_config_pod=
+negative_config_workspace=
+note "removed $workspace3/.omp/config.yml in $pod3/planner"
+end_claim_process "$tree3" planner kill
+on_tree "$tree3" until_true 600 "tree 3's planner to be relaunched without the file and its new process to report" planner3_reported
+healed_view=$(claim_view "$tree3" planner)
+healed_row=$(web_search_row) || fail "legion state carries no web-search row"
+jq -e '.status == "present"' <<<"$healed_row" >/dev/null ||
+  fail "the web-search row does not read present again after tree 3's planner was relaunched without the file: $healed_row"
+jq -e '.capabilities.ok | index("web-search") != null' <<<"$healed_view" >/dev/null ||
+  fail "tree 3's planner view does not list web-search under capabilities.ok after its relaunch: $(jq -c .capabilities <<<"$healed_view")"
+jq -cn --argjson before "$before" --argjson open "$open_row" --argjson openView "$open_view" --argjson warned "$warned" \
+  --argjson healed "$healed_row" --argjson healedView "$healed_view" \
+  '{before: $before, open: {row: $open, planner: $openView, warned: $warned}, healed: {row: $healed, planner: $healedView}}' >"$evidence/full-agent-negative.json"
+note "web-search: $(jq -r '"\(.status): \(.detail)"' <<<"$healed_row")"
+note "tree 3's planner, relaunched as process $(jq -r .locator.incarnation <<<"$healed_view") without the file, proved web-search again"
+pass
+
+begin controller-walk
+# `legion status … backlog` from the operator shell takes tree 3 out, Dispatch shows it, and the
+# controller's walk wakes on the slot it frees (LEGION-392).
 before_status=$(dispatch_get "issues/$tree3" | jq -r .status)
 out=$("$work/legion" status "$tree3" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" 2>&1) || fail "legion status $tree3 backlog from the operator shell: $out"
 until_true 120 "Dispatch to show $tree3 in backlog" dispatch_status_is "$tree3" backlog

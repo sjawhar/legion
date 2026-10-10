@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -101,6 +102,17 @@ type Options struct {
 	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
 	// before the route answers the agent, so it returns at once.
 	ClaimReady func(c supervise.Claim)
+	// PromptAgents is the sorted names of every task agent the role prompts dispatch
+	// (prompts.RoleReferences), which the registration answers so a session's capability report
+	// measures the agents its role is told to run (LEGION-663). Nil or empty answers an empty list.
+	PromptAgents []string
+	// CapabilityReported is told, after a ready the claim took, of the capability report that ready
+	// carried, normalised (capabilities.Normalize), with the claim as the ready left it. A ready that
+	// carries no report — the controller's — tells no one, and so does a ready the claim refuses.
+	// Nil tells no one. It may persist the report before it returns — the daemon's writes the
+	// store — on a context that outlives the agent's connection, and the route answers the agent
+	// once it has returned.
+	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 }
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
@@ -139,6 +151,9 @@ type server struct {
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
+	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
+	promptAgents       []string
+	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -176,6 +191,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
+		promptAgents:       opts.PromptAgents,
+		capabilityReported: opts.CapabilityReported,
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,

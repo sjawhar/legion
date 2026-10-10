@@ -20,6 +20,7 @@ import {
   LegionOperatorClaimsResponse,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  LegionReadyRequest,
   LegionRegisterResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
@@ -40,6 +41,9 @@ const schemas: Record<string, z.ZodType> = {
   // daemon's own controller (`controller: daemon`) holds its claim on no issue.
   "state-controller-claim.json": LegionStateResponse,
   "register.json": LegionRegisterResponse,
+  // The claim wire's `claim.ReadyRequest` with a capability report, the one request body a Go
+  // golden test writes: what a session posts on `claims/ready` (contract 19).
+  "ready.json": LegionReadyRequest,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
   "error.json": LegionErrorResponse,
@@ -254,9 +258,10 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
 // The state's capability report (contract 16): the golden carries a decided row with the operator's
 // reason and an open row with the legion.yaml line that records a decision, beside the present
 // (codegraph among them: the image carries the tooling and a pod's launch loads it with extension
-// discovery on), live and withheld rows, and the report is never absent from a state. `installed`
-// and `unchecked` stay in the schema's enum with no row carrying them here: `installed` was
-// codegraph's until LEGION-629, and `unchecked` is a row before any probe reported.
+// discovery on) and withheld rows, and the six live rows unchecked — no session has reported, so
+// the deployment renders each as `unchecked` with its ruling (contract 19) — and the report is
+// never absent from a state. `installed` stays in the schema's enum with no row carrying it here:
+// it was codegraph's until LEGION-629.
 test("the state golden carries the deployment's capability report", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -280,8 +285,14 @@ test("the state golden carries the deployment's capability report", () => {
     status: "present",
     detail: "checked by the daemon's probe of the worker image, which passed",
   });
+  expect(rows.subagents).toEqual({
+    name: "subagents",
+    status: "unchecked",
+    detail:
+      "no session has reported yet (dispatch://LEGION-663): dispatches task subagents, each on the model its role configures",
+  });
   const statuses = state.capabilities.map((row) => row.status);
-  for (const status of ["present", "live", "withheld", "decided", "open"] as const) {
+  for (const status of ["present", "unchecked", "withheld", "decided", "open"] as const) {
     expect(statuses).toContain(status);
   }
 
@@ -294,9 +305,95 @@ test("a capability row's status is one the report renders, and the report cannot
   unknownStatus.capabilities = [{ ...unknownStatus.capabilities[0], status: "missing" }];
   expect(LegionStateResponse.safeParse(unknownStatus).success).toBeFalse();
 
+  // Contract 16's `live` promised a check to come; since contract 19 a live row is `present`,
+  // `open` or `unchecked` from the sessions' reports, and a daemon still rendering `live` is one
+  // the plugin was not built against.
+  const live = fixture("state.json") as { capabilities: { status: string }[] };
+  live.capabilities = [{ ...live.capabilities[0], status: "live" }];
+  expect(LegionStateResponse.safeParse(live).success).toBeFalse();
+
   const dropped = fixture("state.json") as Record<string, unknown>;
   delete dropped.capabilities;
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
+// A session's own report (contract 19): `claims/ready` carries what the session measured of the
+// live rows, and the state shows each claim's latest report partitioned into the names that passed
+// and the gaps that did not, with the incarnation of the process that reported.
+test("the register golden names the task agents the role's prompts dispatch", () => {
+  const registration = LegionRegisterResponse.parse(fixture("register.json"));
+
+  expect(registration.promptAgents).toEqual([
+    "deep-worker",
+    "oracle",
+    "plan-gap-analyst",
+    "plan-reviewer",
+    "thermonuclear-code-quality",
+    "thermonuclear-deep-review",
+  ]);
+
+  const mutated = fixture("register.json") as Record<string, unknown>;
+  delete mutated.promptAgents;
+  expect(LegionRegisterResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("the ready golden carries the session's capability report", () => {
+  const ready = LegionReadyRequest.parse(fixture("ready.json"));
+
+  expect(ready.capabilities?.rows).toHaveLength(3);
+  expect(ready.capabilities?.rows.map((row) => [row.name, row.ok])).toEqual([
+    ["subagents", true],
+    ["dispatch-envoy-tools", true],
+    ["github", false],
+  ]);
+
+  // A passing check with nothing to add sends an empty detail; a report is optional on the wire
+  // (the controller's ready carries none).
+  const bare = fixture("ready.json") as { capabilities: { rows: Record<string, unknown>[] } };
+  bare.capabilities.rows = [{ name: "github", ok: true, detail: "" }];
+  expect(LegionReadyRequest.safeParse(bare).success).toBeTrue();
+  const withoutReport = fixture("ready.json") as Record<string, unknown>;
+  delete withoutReport.capabilities;
+  expect(LegionReadyRequest.safeParse(withoutReport).success).toBeTrue();
+});
+
+test("the state golden shows a claim's capability report beside its locator", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  const implementer = state.issues["LEGION-208"]?.workers.implementer?.claim;
+
+  expect(implementer?.capabilities).toEqual({
+    measuredAt: "2026-09-22T09:17:03Z",
+    incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+    ok: ["subagents", "dispatch-envoy-tools"],
+    open: [{ name: "github", detail: "gh api user: HTTP 401: Bad credentials" }],
+  });
+  expect(implementer?.capabilities?.incarnation).toBe(implementer?.locator?.incarnation);
+  // The planner has reported nothing: a claim view without `capabilities` parses.
+  expect(state.issues["LEGION-208"]?.workers.planner?.claim.capabilities).toBeUndefined();
+
+  const withoutReport = fixture("state.json") as {
+    issues: Record<string, { workers: Record<string, { claim: Record<string, unknown> }> }>;
+  };
+  delete withoutReport.issues["LEGION-208"]?.workers.implementer?.claim.capabilities;
+  expect(LegionStateResponse.safeParse(withoutReport).success).toBeTrue();
+
+  // The implementer's report in a parsed copy of the golden, altered one member at a time.
+  const parsedReport = () => {
+    const document = LegionStateResponse.parse(fixture("state.json"));
+    const report = document.issues["LEGION-208"]?.workers.implementer?.claim.capabilities;
+    if (report === undefined) throw new Error("state.json: the implementer has no report");
+    return { document, report };
+  };
+
+  // A report the API recorded from a claim whose machine held no process names no incarnation.
+  const unlocated = parsedReport();
+  unlocated.report.incarnation = "";
+  expect(LegionStateResponse.safeParse(unlocated.document).success).toBeTrue();
+
+  // The daemon floors an open row's detail (`capabilities.Normalize`); the schema stays the guard.
+  const blank = parsedReport();
+  blank.report.open = [{ name: "github", detail: "" }];
+  expect(LegionStateResponse.safeParse(blank.document).success).toBeFalse();
 });
 
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is

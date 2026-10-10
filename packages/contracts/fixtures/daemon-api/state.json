@@ -51,6 +51,20 @@
                 "container": "implementer",
                 "generation": 5
               }
+            },
+            "capabilities": {
+              "measuredAt": "2026-09-22T09:17:03Z",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+              "ok": [
+                "subagents",
+                "dispatch-envoy-tools"
+              ],
+              "open": [
+                {
+                  "name": "github",
+                  "detail": "gh api user: HTTP 401: Bad credentials"
+                }
+              ]
             }
           },
           "rounds": 2
@@ -116,8 +130,8 @@
   "capabilities": [
     {
       "name": "subagents",
-      "status": "live",
-      "detail": "to be proved by a live check against a running pod: dispatches task subagents, each on the model its role configures"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): dispatches task subagents, each on the model its role configures"
     },
     {
       "name": "eval-js",
@@ -146,8 +160,8 @@
     },
     {
       "name": "web-search",
-      "status": "live",
-      "detail": "to be proved by a live check against a running pod: searches the web through the web-search tool"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): searches the web through the web-search tool"
     },
     {
       "name": "skills",
@@ -156,23 +170,23 @@
     },
     {
       "name": "mcp",
-      "status": "live",
-      "detail": "to be proved by a live check against a running pod: reaches the MCP servers the deployment configures"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): reaches the MCP servers the deployment configures"
     },
     {
       "name": "repository-extensions",
-      "status": "live",
-      "detail": "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries"
     },
     {
       "name": "dispatch-envoy-tools",
-      "status": "live",
-      "detail": "to be proved by a live check against a running pod: reaches Dispatch and Envoy through the pi-envoy tools"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): reaches Dispatch through the `dispatch` command and Envoy through the pi-envoy tools"
     },
     {
       "name": "github",
-      "status": "live",
-      "detail": "to be proved by a live check against a running pod (dispatch://LEGION-631): reads and writes GitHub through its plain `gh` and `git` on its role's App token file"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-631): reads and writes GitHub through its plain `gh` and `git` on its role's App token file"
     },
     {
       "name": "secrets",

@@ -4,6 +4,14 @@
 
 ### Added
 
+- Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
+  `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
+  capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may
+  be empty), with the `ready.json` fixture the Go golden test writes. `LegionRegisterResponse`
+  gains `promptAgents`, the sorted task agents the role's prompts dispatch, and the claim view on
+  `GET /legion/v1/state` gains an optional `capabilities` (`measuredAt`, `incarnation`, `ok`,
+  `open[{name, detail}]`), the claim's latest report as the daemon shows it — daemon API contract
+  19 (LEGION-663).
 - Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
   `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
   `previous_answer` names the answer a human changed (LEGION-622).
@@ -17,6 +25,9 @@
 
 ### Changed
 
+- `live` is removed from the capability row's `status` enum on `GET /legion/v1/state`: a live row
+  is `present`, `open` or `unchecked` from the sessions' reports, and a row no session has reported
+  reads `unchecked` beside an image row no probe has checked — daemon API contract 19 (LEGION-663).
 - Added `WriteAdvice.suggestions`, `Suggestions` and `WriteSuggestion`: `POST /api/v1/issues` and
   `POST /api/v1/issues/{key}/asks` now return, without ever refusing or delaying the write, the
   three fused-search hits (sjawhar/legion#1764) most like what was just filed and, for an ask,
