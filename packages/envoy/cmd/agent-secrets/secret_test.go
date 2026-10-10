@@ -301,6 +301,48 @@ func TestSecretCreateRefusesAMachinesOwnRole(t *testing.T) {
 	}
 }
 
+// The secret forms refuse settings whose aws_account_id or aws_region disagrees with the account and
+// region in kms_key_arn, before any AWS call: the account the sign-in is checked against is the key
+// ARN's, not a field a spoofed or plain-http broker could set on its own.
+func TestSecretRefusesSettingsInconsistentWithKeyARN(t *testing.T) {
+	calledAWS := false
+	restore := awsClients
+	awsClients = func(context.Context, string, string) (secretsAPI, stsAPI, error) {
+		calledAWS = true
+		return nil, nil, fmt.Errorf("awsClients must not run")
+	}
+	t.Cleanup(func() { awsClients = restore })
+	region, account := policy.KeyARNParts(policytest.KeyARN)
+	for _, tc := range []struct {
+		name     string
+		settings Settings
+		want     string
+	}{
+		{"account differs", Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: "999999999999", AWSRegion: region}, "999999999999"},
+		{"region differs", Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: account, AWSRegion: "eu-west-1"}, "eu-west-1"},
+		{"invalid key ARN", Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: "not-an-arn", AWSAccountID: account, AWSRegion: region}, "invalid KMS key ARN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/settings" {
+					writeJSON(w, tc.settings)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv("AGENT_SECRETS_URL", srv.URL)
+			_, errOut, code := runSecret("list")
+			if code != 1 || !strings.Contains(errOut, tc.want) {
+				t.Fatalf("exit=%d stderr=%q; want a failure naming %q", code, errOut, tc.want)
+			}
+		})
+	}
+	if calledAWS {
+		t.Fatal("the settings refusal must happen before any AWS call")
+	}
+}
+
 // TestSecretCreateResolvesOwnerMeFromTheSessionName: --owner me is the sign-in's session name, the
 // person's email, lowercased; the secret is created on the broker's key with the value read from
 // standard input less its one trailing newline, and the broker is asked to serve it.

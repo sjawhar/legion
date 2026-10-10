@@ -404,11 +404,33 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the broker's settings: %w", err)
 	}
+	if err := checkSettingsKeyARN(settings); err != nil {
+		return nil, err
+	}
 	sm, st, err := awsClients(ctx, profile, settings.AWSRegion)
 	if err != nil {
 		return nil, err
 	}
 	return &secretSession{ctx: ctx, broker: broker, settings: settings, sm: sm, st: st}, nil
+}
+
+// checkSettingsKeyARN refuses, before any AWS call, settings whose aws_account_id or aws_region does
+// not match the account and region in kms_key_arn. The broker derives both from the key ARN the same
+// way (internal/broker/api handlers_secrets.go, policy.KeyARNParts), so the account the sign-in is
+// checked against (requireAccount) and the region the SDK is pinned to are the key ARN's, not a
+// separately-sent field a spoofed or plain-http broker could set on its own to steer a write.
+func checkSettingsKeyARN(settings Settings) error {
+	if !policy.ValidKeyARN(settings.KMSKeyARN) {
+		return fmt.Errorf("the broker's settings name an invalid KMS key ARN %q (expected arn:aws:kms:<region>:<account>:key/<key id>)", settings.KMSKeyARN)
+	}
+	region, account := policy.KeyARNParts(settings.KMSKeyARN)
+	if settings.AWSAccountID != account {
+		return fmt.Errorf("the broker's settings name account %s, but its KMS key ARN %s is in account %s: the broker's settings are inconsistent", settings.AWSAccountID, settings.KMSKeyARN, account)
+	}
+	if settings.AWSRegion != region {
+		return fmt.Errorf("the broker's settings name region %s, but its KMS key ARN %s is in region %s: the broker's settings are inconsistent", settings.AWSRegion, settings.KMSKeyARN, region)
+	}
+	return nil
 }
 
 // connectReader is openSession for a read: it refuses a sign-in in another account
