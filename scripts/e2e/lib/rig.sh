@@ -19,6 +19,14 @@
 # assertion dies on a correct system. Ask the producer for the bounded output (`--limit 1`, `--jq`)
 # or capture its whole output first and judge the variable; a `| head -1` is safe only inside a
 # `fail` message, guarded by `|| true`, or on a local-file grep whose few lines fit the pipe buffer.
+#
+# A run has several trees live at once, in one namespace and in clones that fetch every branch, so
+# every read of tree state scopes to the tree under test: a jj revset is intersected with that
+# tree's own chain (`& ::<its pull request's head>`, `@|@-` of its workspace), a kubectl selector
+# carries its issue, tree or role label, and a daemon-log read is keyed by its sandbox and role. A
+# query over the whole repository or namespace answers for whichever tree acted last, and "the
+# newest" is a sibling's as soon as two trees act within the same minute. A deliberately run-wide
+# read — every pod's shape, the admission cap, a negative over the whole log — says so in its comment.
 
 # until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
 # polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run

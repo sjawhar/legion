@@ -2891,11 +2891,16 @@ on_tree "$tree1" until_true 600 "the implementer to report jj undo --help's firs
 # is the App whose token the pane pushes with) is read for each head: the repository's events feed
 # is lossy (a push can be missing from it while later ones are listed), so it is no oracle.
 pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
-# One line is asked of jj (`--limit 1`, the newest match first in jj's order), never cut from more
-# with `head`: under pipefail a consumer that stops reading sends the kubectl-backed producer
+[ -n "$pr_head" ] || fail "pull request #$pr_number has no head"
+# The planner's handoff is the newest such commit on tree 1's own chain, `::$pr_head` — the ancestors
+# of the pull request's head as GitHub reads it, pushed from this very clone — never a match over the
+# whole repository: the clone sees every branch it fetched, and a sibling tree's later planner
+# handoff is the newest `plan: record handoff` there (the seventh live run read LEGSMOKE-650's for
+# LEGSMOKE-649's). One line is asked of jj (`--limit 1`, newest first in jj's order), never cut from
+# more with `head`: under pipefail a consumer that stops reading sends the kubectl-backed producer
 # SIGPIPE, and the pipeline exits 141 whenever the log holds a second match.
-plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph --limit 1 -T 'commit_id ++ "\n"')
-[ -n "$plan_head" ] || fail "no 'plan: record handoff' commit on tree 1's workspace"
+plan_head=$(workspace_jj "$tree1" log -r "description(glob:\"plan: record handoff*\") & ::$pr_head" --no-graph --limit 1 -T 'commit_id ++ "\n"')
+[ -n "$plan_head" ] || fail "no 'plan: record handoff' commit among the ancestors of pull request #$pr_number's head $pr_head in tree 1's workspace"
 for pair in "$plan_head:legion-reviewer[bot]:the planner's handoff commit" "$pr_head:legion-implementer[bot]:the implementer's head"; do
   IFS=: read -r sha want what <<<"$pair"
   actor=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.committer.login // "nobody"') || fail "GitHub could not read $what $sha on $repo"
@@ -3487,6 +3492,10 @@ boot_rotated() {
 }
 on_tree "$tree1" until_true 600 "the merger's boot token to rotate in its replacement role container" boot_rotated
 refused_msg="worker-stream: rejected hello (stale worker generation)"
+# A deliberately run-wide count: the daemon's rejected-hello line names no pod, claim or
+# generation (`internal/stream/listener.go`, `l.log.Warn("worker-stream: rejected hello (" + reason
+# + ")")`), so the replayed token's refusal is read as the count's rise over the next thirty seconds;
+# the one other tree live here, tree 3, sits between phases with nothing replacing its pods.
 refused_before=$(log_lines "$refused_msg" | wc -l)
 if out=$(timeout 60 "$work/legion" worker-shim --connect "tcp://$host:$port_worker_stream" --boot-token-file "$work/old-boot-token" -- true 2>&1); then
   fail "the worker stream accepted a hello with the previous generation's boot token"
@@ -4313,15 +4322,22 @@ note "tree 1's Sandboxes and the volumes they owned, the root's and $child2's, a
 pass
 
 begin re-admission
+# The volume-lost line names the session of the claim it relaunched (`supervise/machine.go`,
+# `"session", m.claim.Session`) and nothing else, so it is read for tree 1's own sessions — those
+# its suspended claims kept through the close — never counted over the whole log, where another
+# tree's loss would satisfy the wait early or push the count past one.
+tree1_sessions=$(daemon_state | jq -c --arg issue "$tree1" '[.issues[$issue] | (.architect.session // empty), ((.workers // {}) | .[] | .claim.session // empty)]')
+[ "$(jq length <<<"$tree1_sessions")" -gt 0 ] || fail "tree 1's suspended claims keep no session to read the volume-lost line for: $(daemon_state | jq -c --arg issue "$tree1" '.issues[$issue] | {architect, workers}')"
+lost_lines() { log_lines "$lost_msg" | jq -c --argjson sessions "$tree1_sessions" 'select(.session as $s | $sessions | index($s))'; }
 set_status "$tree1" todo
-lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
+lost_seen() { [ "$(lost_lines | wc -l)" -ge 1 ]; }
 on_tree "$tree1" until_true 900 "the re-admitted tree 1 to report its issue's volume lost and relaunch a fresh architect" lost_seen
 on_tree "$tree1" wait_for_worker "$tree1" architect
 pod=$(issue_pod "$tree1")
 recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
-lost=$(log_lines "$lost_msg" | wc -l)
-[ "$lost" = 1 ] || fail "the daemon reported the issue's volume lost $lost times, want exactly once"
+lost=$(lost_lines | wc -l)
+[ "$lost" = 1 ] || fail "the daemon reported tree 1's issue volume lost $lost times for its sessions $tree1_sessions, want exactly once"
 note "the daemon logged \"$lost_msg\" once, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
 pass
 
