@@ -721,6 +721,28 @@ func TestPromptJobSplitPasteMarkAfterTheLineIsRead(t *testing.T) {
 	s.noShellValue("headtail", "pastelate")
 }
 
+// A paste-start mark split so that only its first bytes arrive in the read that ends the line, with
+// the rest arriving after the quiet window would have ended, still opens a paste: while a partial
+// mark is pending the drain waits a second for the rest, longer than the quiet window, so a terminal
+// that splits those six bytes across writes that far apart does not give the terminal back before
+// the mark completes and the paste's content runs in the shell. The entry is refused as more than
+// one line. The helper shortens the paste bound so the refusal does not wait the full bound for a
+// close mark that never comes.
+func TestPromptJobSplitPasteMarkRestAfterTheQuietWindowIsRead(t *testing.T) {
+	s := newPromptShell(t)
+	s.env = "AGENT_SECRETS_JOB_PASTE_BOUND=1s "
+	s.start(false, false)
+	s.send("headtail\r\x1b[20")
+	s.wait("QUIET_READY")
+	time.Sleep(500 * time.Millisecond)
+	s.send("0~pastelate\x03")
+	time.Sleep(300 * time.Millisecond)
+	s.send("echo PASTE_$((2+3))\r\x1b[201~")
+	s.wait("RETURNED a value of more than one line must be piped in")
+	s.send("\x15")
+	s.noShellValue("headtail", "pastelate", "PASTE_$((", "PASTE_5")
+}
+
 // A second bracketed paste that begins in the same read that closes a pasted line opens like any
 // other: the prompt keeps reading, so its rest, arriving after the quiet window would have ended,
 // is discarded rather than run by the shell, and the pasted line is refused as more than one line.

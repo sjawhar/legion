@@ -73,9 +73,11 @@ given up, and the command exits 1, storing nothing; input that arrives after it 
 your shell. Most terminal emulators and tmux support bracketed paste.
 
 Without brackets the CLI drains input until 200 ms of quiet pass after the line, with no total
-limit, and Ctrl-C ends the drain. **That quiet window is not a guarantee about an entire paste:**
-bytes arriving
-later can reach your shell. If those bytes are a second line, the first line may already have been
+limit, and Ctrl-C ends the drain. A paste-start mark split so that only its first bytes arrive
+before the line ends holds the drain for one second for the rest of the mark, so a late paste still
+opens and is read through rather than reaching your shell. **That quiet window is not a guarantee
+about an entire paste:** bytes arriving later can reach your shell. If those bytes are a second
+line, the first line may already have been
 accepted as the value. Pipe multi-line values in rather than pasting them, and use
 `secret set NAME < FILE` to replace a value. The refusal names the command that pipes the value in:
 

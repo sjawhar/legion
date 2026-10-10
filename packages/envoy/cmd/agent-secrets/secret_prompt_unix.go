@@ -26,6 +26,12 @@ import (
 // the rest of a paste can arrive in a later write than its first line.
 const pasteGapDeciseconds = 2
 
+// splitMarkGapMillis is how long, in milliseconds, the post-line drain waits for the rest of a
+// paste-start mark split across writes, longer than pasteGapDeciseconds: its completion opens a
+// paste whose content would otherwise reach the shell, and a terminal may split those six bytes
+// across writes a quiet window apart.
+const splitMarkGapMillis = 1000
+
 // maxPasteDrain bounds how long the reader waits for an open bracketed paste's closing mark: it
 // gives the paste up once it has fallen quiet this long without closing. The drain of unbracketed
 // input after the line has no total bound; it ends after pasteGapDeciseconds of quiet. Tests
@@ -674,17 +680,22 @@ func eraseWord(b []byte) []byte {
 }
 
 // drainAfterTheLine reads, and so discards, what follows the line, feeding each read to r. Outside
-// a paste it ends once the terminal has been quiet for pasteGapDeciseconds. An open paste restarts
-// the bound at each read, as the main loop does: it is read through its closing mark however far
-// apart its writes arrive, given up only once it has fallen quiet for the whole bound, so a signal
-// key inside it is pasted text; a signal key outside a paste acts as it does in the line, and the
-// rest of that read is discarded. Anything but line endings, and a paste or paste mark still open
-// when the drain ends, is more than one line (r.more).
+// a paste it ends once the terminal has been quiet for pasteGapDeciseconds, except that a
+// paste-start mark left pending holds it for splitMarkGapMillis, long enough for the rest of a mark
+// split across writes to arrive and open its paste. An open paste restarts the bound at each read,
+// as the main loop does: it is read through its closing mark however far apart its writes arrive,
+// given up only once it has fallen quiet for the whole bound, so a signal key inside it is pasted
+// text; a signal key outside a paste acts as it does in the line, and the rest of that read is
+// discarded. Anything but line endings, and a paste or paste mark still open when the drain ends, is
+// more than one line (r.more).
 func drainAfterTheLine(tty *promptTerminal, r *promptReader, buf []byte) error {
 	for {
-		if r.inPaste {
+		switch {
+		case r.inPaste:
 			tty.wait = int(maxPasteDrain.Milliseconds())
-		} else {
+		case len(r.pending) > 0:
+			tty.wait = splitMarkGapMillis
+		default:
 			tty.wait = pasteGapDeciseconds * 100
 		}
 		n, err := tty.read(buf)
