@@ -130,6 +130,10 @@ export interface AskBlockFacts {
   readonly answeredAt: string | undefined;
   readonly answeredBy: string;
   readonly blockId: string;
+  /** The ask on another document this block is a copy of and that document's `dispatch://`
+   *  address, which settlement names in `copied_from` and `copied_from_document`; the copy has no
+   *  ask of its own and is answered on that document. */
+  readonly copiedFrom: { readonly ask: string; readonly document: string } | undefined;
   /** Why the block cannot be answered as written, or undefined when it parses. */
   readonly malformedReason: string | undefined;
   readonly multiple: boolean;
@@ -167,6 +171,13 @@ export function askBlockFacts(node: ProseMirrorNode): AskBlockFacts {
     answeredAt: typeof node.attrs.answered_at === "string" ? node.attrs.answered_at : undefined,
     answeredBy: String(node.attrs.answered_by ?? ""),
     blockId: String(node.attrs.blockId),
+    copiedFrom:
+      typeof node.attrs.copied_from === "string" &&
+      node.attrs.copied_from !== "" &&
+      typeof node.attrs.copied_from_document === "string" &&
+      node.attrs.copied_from_document !== ""
+        ? { ask: node.attrs.copied_from, document: node.attrs.copied_from_document }
+        : undefined,
     malformedReason:
       invalid ??
       (question === ""

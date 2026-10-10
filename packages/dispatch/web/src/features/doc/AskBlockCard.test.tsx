@@ -23,6 +23,8 @@ const schema = new Schema({
         answered_at: { default: undefined },
         answered_by: { default: undefined },
         blockId: { default: null },
+        copied_from: { default: undefined },
+        copied_from_document: { default: undefined },
         invalid: { default: undefined },
         multiple: { default: false },
         selected: { default: undefined },
@@ -220,6 +222,127 @@ test.each([
     // The reference copy control lives in the card's metadata line, once.
     expect(card.section.querySelectorAll('[aria-label^="Copy reference"]')).toHaveLength(1);
     expect(within(hosted).getByRole("button", { name: /^Copy reference/ })).toBeDefined();
+  } finally {
+    card.unmount();
+  }
+});
+
+test.each([
+  ["open", "open there"],
+  ["answered", "answered there"],
+  ["resolved", "resolved there"],
+] as const)("a block copied from a %s ask names its source's document and state from its own attributes", (state, there) => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+      state,
+    }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE-1 plan" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-b-1");
+    expect(card.header.getByText(/Copied from/).textContent).toBe(
+      `Copied from CORE-1 plan, ${there}`
+    );
+    // No ask of its own: no composer, the block's attributes record what its source shows.
+    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a block copied from an issue's spec links to the spec", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({ copied_from: "ask-source", copied_from_document: "dispatch://CORE-1/spec" }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "the spec" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a project document's copied block links to its source under the project", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE/artifact/plan",
+    }),
+    owner: { project: "CORE", slug: "notes" },
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE/plan" });
+    expect(link.getAttribute("href")).toBe("/projects/CORE/documents/plan#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+test("three copied blocks render their sources without reading one ask", () => {
+  const cards = ["open", "answered", "resolved"].map((state) =>
+    renderCard({
+      indexed: false,
+      node: askNode({
+        copied_from: `ask-${state}`,
+        copied_from_document: "dispatch://CORE-1/spec",
+        state,
+      }),
+    })
+  );
+  try {
+    for (const card of cards) {
+      expect(card.header.getByRole("link", { name: "the spec" })).toBeDefined();
+    }
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    for (const card of cards) card.unmount();
+  }
+});
+
+test("a copy whose source was answered after it settled shows the answer settlement wrote into it", () => {
+  // Answering the source settles its copies again, which writes the answer into each copied block.
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      answer: "After the fix lands.",
+      answered_at: new Date(Date.now() - 60_000).toISOString(),
+      answered_by: "bob",
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+      selected: ["Ship"],
+      state: "answered",
+    }),
+  });
+  try {
+    expect(card.header.getByText(/Copied from/).textContent).toBe(
+      "Copied from CORE-1 plan, answered there"
+    );
+    expect(card.section.querySelector("[data-dispatch-ask-answer]")?.textContent).toBe(
+      "After the fix lands."
+    );
+    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a block with an ask of its own names no source, whatever its attributes hold", () => {
+  const card = renderCard({
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/spec",
+      state: "open",
+    }),
+  });
+  try {
+    expect(card.header.queryByText(/Copied from/)).toBeNull();
   } finally {
     card.unmount();
   }

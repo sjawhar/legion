@@ -430,33 +430,34 @@ func deleteHeldPendingAuthors(ctx context.Context, tx pgx.Tx, room string, held 
 // row in tx, which holds the document's advisory lock, without moving the row's age: a committed
 // write, a seed, or an issue's close names who made the document's latest change.
 func recordLatestEditSource(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor) error {
-	return markSettlementPending(ctx, tx, room, lastActor, true, false)
+	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, false)
 }
 
 // markUpdateOwed records, in the transaction appending a document update, that the document owes
 // a settlement from now, keeping the latest edit source the row names.
 func markUpdateOwed(ctx context.Context, tx pgx.Tx, room string) error {
-	return markSettlementPending(ctx, tx, room, nil, false, true)
+	return markSettlementPending(ctx, tx, []string{room}, nil, false, true)
 }
 
 // markUpdateOwedBy is markUpdateOwed for an update credited to an edit, which names lastActor as
 // its latest edit source, nil for an edit no one peer can be credited with.
 func markUpdateOwedBy(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor) error {
-	return markSettlementPending(ctx, tx, room, lastActor, true, true)
+	return markSettlementPending(ctx, tx, []string{room}, lastActor, true, true)
 }
 
-// markSettlementPending records, in the transaction that appends a document update, that the
-// document owes a settlement. With setLastActor it also records lastActor as the latest edit
-// source that settlement names on its events, nil for an edit no one peer can be credited with
-// (creditContentChange); without it the row keeps the one it has. The timer that runs the
+// markSettlementPending records, in the transaction that appends a document update, that each
+// document of rooms owes a settlement. With setLastActor it also records lastActor as the latest
+// edit source that settlement names on its events, nil for an edit no one peer can be credited
+// with (creditContentChange); without it each row keeps the one it has. The timer that runs the
 // settlement lives only in memory, so one a shutdown cuts short is found here by the room's next
-// load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that covers
-// the update deletes the row in the transaction that commits its writes (clearSettlementPending).
-// The caller holds the document's advisory lock, which orders this row's writers as it orders
-// updates. updateMarkedAt is true only for a newly appended update: recording the latest edit
-// source after a write or while closing an issue must not make an old row wait another
-// resumption age.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, room string, lastActor *model.Actor, setLastActor, updateMarkedAt bool) error {
+// load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
+// covers the update deletes the row in the transaction that commits its writes
+// (clearSettlementPending). A caller marking its own document holds that document's advisory lock,
+// which orders the row's writers as it orders updates; owedCopiesOf marks the copies of an ask on
+// other documents, in one statement however many there are. updateMarkedAt is true for a newly
+// appended update and for an owed copy: recording the latest edit source after a write or while
+// closing an issue must not make an old row wait another resumption age.
+func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastActor *model.Actor, setLastActor, updateMarkedAt bool) error {
 	var encoded any
 	if lastActor != nil {
 		actor, err := json.Marshal(lastActor)
@@ -466,11 +467,12 @@ func markSettlementPending(ctx context.Context, tx pgx.Tx, room string, lastActo
 		encoded = string(actor)
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id, last_actor) values ($1, $2::jsonb)
+		insert into doc_settlements_pending (artifact_id, last_actor)
+		select unnest($1::uuid[]), $2::jsonb
 		on conflict (artifact_id) do update set
 			last_actor = case when $3 then excluded.last_actor else doc_settlements_pending.last_actor end,
 			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end
-	`, room, encoded, setLastActor, updateMarkedAt); err != nil {
+	`, rooms, encoded, setLastActor, updateMarkedAt); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
 	}
 	return nil

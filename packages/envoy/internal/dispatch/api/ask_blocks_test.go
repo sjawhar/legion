@@ -396,6 +396,279 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "uploaded-ask", "Ship the uploaded decision?")
 }
 
+// A record copy of a spec uploaded as a second document of the issue carries the spec's ask
+// blocks under their ids. It opens no ask in anyone's Inbox: each copied block shows the state and
+// answer of the ask it was copied from (LEGION-651).
+func TestAnUploadedCopyOfASpecOpensNoAskForItsCopiedBlocks(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	spec := "Context\n\n" +
+		":::ask{#rec-answered urgency=\"med\" multiple=\"false\"}\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::\n\n" +
+		":::ask{#rec-resolved urgency=\"med\" multiple=\"false\"}\nWrite the changelog?\n:::\n\n" +
+		":::ask{#rec-open urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	issue := createInteractionIssue(t, handler, "TEST", "Record copy", spec)
+	for _, block := range []struct{ id, question string }{
+		{"rec-answered", "Ship on Monday?"}, {"rec-resolved", "Write the changelog?"}, {"rec-open", "Which region?"},
+	} {
+		awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, block.id, block.question)
+	}
+	asks := map[string]string{}
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	for _, ask := range decodeBody[[]model.Ask](t, listed) {
+		if ask.BlockID != nil {
+			asks[*ask.BlockID] = ask.ID
+		}
+	}
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks["rec-answered"]+"/answer", map[string]any{
+		"selected": []string{"Yes"},
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	if resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks["rec-resolved"]+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Waived.",
+	}, "alice"); resolved.Code != http.StatusOK {
+		t.Fatalf("resolve: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	current := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	record := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, current).Markdown
+	if !strings.Contains(record, `state="answered"`) || !strings.Contains(record, `state="resolved"`) {
+		t.Fatalf("spec before the copy = %s", record)
+	}
+
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "spec-record.md", "content": record,
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the record copy: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	copied := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+copied+"/text", nil, "alice").Body.String()
+		if strings.Contains(text, `#rec-answered urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\"`) &&
+			strings.Contains(text, `copied_from=\"`+asks["rec-answered"]+`\"`) &&
+			strings.Contains(text, `#rec-resolved urgency=\"med\" multiple=\"false\" state=\"resolved\" copied_from=\"`+asks["rec-resolved"]+`\"`) &&
+			strings.Contains(text, `#rec-open urgency=\"med\" multiple=\"false\" state=\"open\" copied_from=\"`+asks["rec-open"]+`\"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the copy never showed its sources' states: %s", text)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Settlement of the copy has run; a few more passes would have opened its asks by now.
+	time.Sleep(200 * time.Millisecond)
+	var onCopy []string
+	all := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	for _, ask := range decodeBody[[]model.Ask](t, all) {
+		if ask.BlockArtifact != nil && ask.BlockArtifact.ID == copied {
+			onCopy = append(onCopy, *ask.BlockID+" "+ask.State)
+		}
+	}
+	if len(onCopy) != 0 {
+		t.Fatalf("the record copy opened asks %v, want none", onCopy)
+	}
+}
+
+// An answer to a copy's source, or its resolution, made after the copy settled reaches the copy a
+// settlement later, in its live text and in its latest version, which is what the decision card and
+// dispatch request-approval's refusal read: the routes settle the copies of the ask they close.
+func TestAnsweringOrResolvingACopysSourceSettlesTheCopy(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	spec := "Context\n\n" +
+		":::ask{#later-answered urgency=\"med\" multiple=\"false\"}\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::\n\n" +
+		":::ask{#later-resolved urgency=\"med\" multiple=\"false\"}\nWrite the changelog?\n:::\n"
+	issue := createInteractionIssue(t, handler, "TEST", "Source answered after its copy", spec)
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "later-answered", "Ship on Monday?")
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "later-resolved", "Write the changelog?")
+	asks := map[string]string{}
+	for _, ask := range decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")) {
+		if ask.BlockID != nil {
+			asks[*ask.BlockID] = ask.ID
+		}
+	}
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "spec-record.md", "content": spec,
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the copy: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	copied := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	answeredOpener := `:::ask{#later-answered urgency="med" multiple="false" state="answered" answered_by="alice" `
+	resolvedOpener := `:::ask{#later-resolved urgency="med" multiple="false" state="resolved" copied_from="` + asks["later-resolved"] + `"`
+	// latest is the copy's live text and the markdown of its latest version.
+	latest := func() (string, string) {
+		read := decodeBody[struct {
+			Markdown string `json:"markdown"`
+			Version  *int   `json:"version"`
+		}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+copied+"/text", nil, "alice"))
+		if read.Version == nil {
+			return read.Markdown, ""
+		}
+		version := decodeBody[struct {
+			Markdown string `json:"markdown"`
+		}](t, dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", copied, *read.Version), nil, "alice"))
+		return read.Markdown, version.Markdown
+	}
+	awaitCopy := func(what string, holds func(string) bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			live, version := latest()
+			if holds(live) && holds(version) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the copy never showed %s; live:\n%s\nlatest version:\n%s", what, live, version)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	awaitCopy("its open sources", func(text string) bool {
+		return strings.Contains(text, `#later-answered urgency="med" multiple="false" state="open" copied_from="`+asks["later-answered"]+`"`) &&
+			strings.Contains(text, `#later-resolved urgency="med" multiple="false" state="open" copied_from="`+asks["later-resolved"]+`"`)
+	})
+
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks["later-answered"]+"/answer", map[string]any{
+		"selected": []string{"Yes"}, "text": "From the record.",
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer the source: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	if resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks["later-resolved"]+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Waived.",
+	}, "alice"); resolved.Code != http.StatusOK {
+		t.Fatalf("resolve the source: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	awaitCopy("its sources' answer and resolution", func(text string) bool {
+		return strings.Contains(text, answeredOpener) &&
+			strings.Contains(text, `selected="[&#x22;Yes&#x22;]" answer="From the record." copied_from="`+asks["later-answered"]+`"`) &&
+			strings.Contains(text, resolvedOpener)
+	})
+	var onCopy, pending int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select count(*) from asks where block_artifact_id = $1),
+			(select count(*) from doc_settlements_pending where artifact_id = $1)
+	`, copied).Scan(&onCopy, &pending); err != nil {
+		t.Fatalf("read the copy's asks and pending settlement: %v", err)
+	}
+	if onCopy != 0 || pending != 0 {
+		t.Fatalf("the copy holds %d asks and %d pending settlements, want none of either", onCopy, pending)
+	}
+}
+
+// A record copy taken while an ask was open asks the ask's wording of then. Once the ask is
+// reworded with other options (PATCH) and the new wording is answered, the answer route settles the
+// copy (SettleCopiesOf), and that settlement opens the copy's own ask for its block rather than
+// writing the answer to a question the copy does not ask into the record.
+func TestAnAnswerToACopysSourceAfterItsRewordingOpensTheCopysOwnAsk(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	spec := "Context\n\n:::ask{#ship urgency=\"med\" multiple=\"false\"}\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::\n"
+	issue := createInteractionIssue(t, handler, "TEST", "Source reworded after its copy", spec)
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ship", "Ship on Monday?")
+	var source string
+	for _, ask := range decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")) {
+		if ask.BlockID != nil && *ask.BlockID == "ship" {
+			source = ask.ID
+		}
+	}
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "spec-record.md", "content": spec,
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the copy: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	copied := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	// copyText is the copy's live text and the markdown of its latest version.
+	copyText := func() (string, string) {
+		read := decodeBody[struct {
+			Markdown string `json:"markdown"`
+			Version  *int   `json:"version"`
+		}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+copied+"/text", nil, "alice"))
+		if read.Version == nil {
+			return read.Markdown, ""
+		}
+		version := decodeBody[struct {
+			Markdown string `json:"markdown"`
+		}](t, dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", copied, *read.Version), nil, "alice"))
+		return read.Markdown, version.Markdown
+	}
+	shown := `#ship urgency="med" multiple="false" state="open" copied_from="` + source + `"`
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		live, version := copyText()
+		if strings.Contains(live, shown) && strings.Contains(version, shown) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the copy never showed its open source; live:\n%s\nlatest version:\n%s", live, version)
+		}
+	}
+
+	reworded := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+source, map[string]any{
+		"question": "Ship on Tuesday?",
+		"options":  []model.AskOption{{Label: "Tuesday", Description: "Ship it."}, {Label: "No", Description: "Later."}},
+	}, "alice")
+	if reworded.Code != http.StatusOK {
+		t.Fatalf("reword the source: status=%d body=%s", reworded.Code, reworded.Body.String())
+	}
+	editedAt := decodeBody[model.Ask](t, reworded).EditedAt
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+source+"/answer", map[string]any{
+		"selected": []string{"Tuesday"}, "expected_edited_at": editedAt,
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer the reworded source: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	own := `:::ask{#ship urgency="med" multiple="false" state="open"}` + "\nShip on Monday?"
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		live, version := copyText()
+		if strings.Contains(live, `state="answered"`) || strings.Contains(version, `state="answered"`) {
+			t.Fatalf("the copy of the earlier wording shows the answer to the reworded question; live:\n%s\nlatest version:\n%s", live, version)
+		}
+		if strings.Contains(live, own) && strings.Contains(version, own) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the copy never opened its own ask; live:\n%s\nlatest version:\n%s", live, version)
+		}
+	}
+	var onCopy []string
+	for _, ask := range decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")) {
+		if ask.BlockArtifact != nil && ask.BlockArtifact.ID == copied {
+			onCopy = append(onCopy, *ask.BlockID+" "+ask.State+" "+ask.Question)
+		}
+	}
+	if len(onCopy) != 1 || onCopy[0] != "ship open Ship on Monday?" {
+		t.Fatalf("the copy's asks = %v, want its own open ship asking the earlier wording", onCopy)
+	}
+	var pending int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from doc_settlements_pending where artifact_id = $1`, copied).Scan(&pending); err != nil {
+		t.Fatalf("read the copy's pending settlement: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("the copy owes %d settlements, want none", pending)
+	}
+}
+
 // A free-text ask block (no bullet list) must put `"options": []` on the wire - in the ask.opened
 // event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
 // and a null there takes the page down.

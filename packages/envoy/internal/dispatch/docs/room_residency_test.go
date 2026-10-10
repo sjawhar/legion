@@ -421,7 +421,7 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
-	logs := &lockedLog{}
+	logs := &storetest.LockedLog{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(previous) })
@@ -648,24 +648,6 @@ see [link](https://a.example/) here
 	if after != before {
 		t.Fatalf("once a read's tree was edited the room reads\n%s\nwant\n%s", after, before)
 	}
-}
-
-// lockedLog collects what every goroutine logs.
-type lockedLog struct {
-	mu      sync.Mutex
-	written strings.Builder
-}
-
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.written.Write(p)
-}
-
-func (l *lockedLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.written.String()
 }
 
 // newRetiringRoomService is newTestService on its own database, with a Shutdown cleanup bounded by

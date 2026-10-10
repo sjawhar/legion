@@ -1534,6 +1534,62 @@ against its schema content rule. Schema changes are additive: add a type, add a 
 attribute, add an enum choice, or widen a content rule. Tightening content, removing or renaming a
 type or attribute, or requiring a new attribute requires a document migration and version bump.
 
+An ask block whose id no ask of its document indexes is a copy when another document of the same
+owner (the same issue, or for a project document the same project's other documents) holds an ask
+under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the
+block asks - its question, options, `multiple` and urgency, which a copy carries unchanged
+(`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
+blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
+`block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
+such as `decision` can name unrelated questions on two documents. A match on an earlier wording
+counts only while the ask is open, or when its answer or resolution was given while that wording was
+current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording
+current and before the `ask.edited` that retired it, ordered by `events.id`, which the broker
+allocates in commit order (`askHistory.shownBy`). An answer or resolution given after the rewording
+decides a question the block does not ask, so the block is no copy of that ask and opens its own, as
+a block whose options differ does. Where several asks match, the earliest asked is the source,
+whether it matched on its current wording or an earlier one, so two unrelated asks of one owner
+under one id asking the same thing are one question to a copy. A copy opens no ask: settlement
+writes its source's state and answer into the block, names the source in
+the server-owned `copied_from` and its document's `dispatch://` address (`refs.ArtifactRef`) in
+`copied_from_document`, neither of which an upload can set (`asUploaded`). The block is read-only
+there, since the copy has no ask row an answer or resolve route could reach and settlement only
+reads the source's; `dispatch request-approval`'s refusal and the dashboard's decision card name
+the source, its document and its state from those attributes, reading no ask. A copy shows its
+source as of its own last settlement, and settles again when its own content changes, when a
+restart resumes a settlement it owed, when its source is answered or resolved, and when settlement
+retracts its source: the answer and resolve routes (`SettleCopiesOf`) and a retracting settlement
+(`reconcileAskBlocks`) mark owed, in one `doc_settlements_pending` upsert (`markSettlementPending`), and
+arm once they commit, the settlement of every other document of the owner whose latest version
+holds the block with no ask of its own under that id (`owedCopiesOf`). After a retraction the first
+of those to settle opens the block's own ask, credited to the author who wrote the block into it,
+whom the room keeps owed while the block is a copy; every other copy then matches that ask and
+names it, so copies of one owner share one ask once their source is retracted and the question
+waits in one place, and a block pasted elsewhere and then cut, in either order, is open in one
+place. That needs the owner's copies to settle one at a time: an issue's documents do, under their
+issue's row (`lockArtifactOwner`), but a project document's owner row is the document itself, so a
+project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
+takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
+the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
+hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other
+advisory lock here takes (a document's room, a project's rank allocation, the events' commit
+order), so it never waits on one of those; two projects whose hashes collide only take turns on
+their copy bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before
+the events' commit-order lock (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check
+of every Dispatch function's calls in statement order), and a settlement deletes its own pending
+row before it appends its first event, since a route marking that document owed holds the row
+while it waits for the commit-order lock. Every other writer of a document's own pending row takes
+it before it appends an event too: an upload's or a seed's document write marks it
+(`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of
+the edit source touches a row the transaction already holds
+(`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
+copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0087), an
+issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
+unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
+reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an
+answer or a resolution of a block ask costs in proportion to the owner's markdown bytes.
+
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
 The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
@@ -1587,7 +1643,8 @@ rowspan, or rows the budget ran out partway through. Where a table outside the a
 it first, the check can write span cells the document did not, and the ask is refused unless
 padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
-canonical markdown.
+canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
+from and that ask's document.
 
 ## Critical conventions
 

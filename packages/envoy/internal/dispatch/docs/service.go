@@ -1486,6 +1486,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if versioning {
 		settledVersion++
 	}
+	// Every update this settlement read is settled once it commits, so the row that left the
+	// settlement to a later load goes with that commit. It goes before the first event this
+	// settlement appends: a transaction marking this document owed as a copy (owedCopiesOf) holds
+	// its row while it waits for the events' commit-order lock, which this settlement would then be
+	// holding. The pending authors stay unless this settlement's version lists them (deleted
+	// below): a settlement that writes no version lists no one.
+	if err := clearSettlementPending(ctx, tx, room); err != nil {
+		abandon(err)
+		return
+	}
 	if err := reconciliation.nameVersion(ctx, tx, room, owner, settledVersion); err != nil {
 		abandon(err)
 		return
@@ -1532,14 +1542,6 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		abandon(err)
 		return
 	}
-	// Every update this settlement read is settled once it commits, so the row that left the
-	// settlement to a later load goes with that commit. The pending authors stay unless this
-	// settlement's version listed them (deleted above): a settlement that writes no version lists
-	// no one.
-	if err := clearSettlementPending(ctx, tx, room); err != nil {
-		abandon(err)
-		return
-	}
 	// The commit marks the in-flight credits the version listed consumed before it releases the
 	// room's state (commitConsuming); a settlement that writes no version takes out none.
 	committed := authorCapture{state: state}
@@ -1565,6 +1567,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	finishSlots()
 	for _, event := range published {
 		s.events.Publish(event)
+	}
+	// A copy of an ask this settlement retracted opens its own ask at its next settlement, which
+	// its pending row (reconcileAskBlocks, owedCopiesOf) also leaves to the resumption should this
+	// process stop first.
+	for _, copy := range reconciliation.owedCopies {
+		s.scheduleSettle(copy)
 	}
 	s.sweepUnrecordedMarks(room, versioned)
 }

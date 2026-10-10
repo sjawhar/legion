@@ -408,12 +408,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	previous := model.AskEditPrevious{
-		Question: ask.Question,
-		Options:  ask.Options,
-		Multiple: ask.Multiple,
-		Urgency:  ask.Urgency,
-	}
+	previous := model.NewAskEditPrevious(ask)
 	if input.Question != nil {
 		ask.Question = *input.Question
 	}

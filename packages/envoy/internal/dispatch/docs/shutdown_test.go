@@ -341,7 +341,7 @@ func TestShutdownLeavesASettlementThatMustWriteIntoItsRoomToResume(t *testing.T)
 	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the edit to be stored: %v", err)
 	}
-	logs := &lockedLog{}
+	logs := &storetest.LockedLog{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(previous) })

@@ -405,6 +405,24 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A document uploaded or seeded with another document's ask blocks, under their block ids and with
+  the same question, options, `multiple` and urgency, on the same issue (or the same project for a
+  project document) opens no ask for them: each copied block shows the state and answer of the ask
+  it was copied from, read-only, and names it and its document in the server-owned `copied_from`
+  and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
+  copied block, answered and resolved ones included. Of several matching asks the earliest asked
+  is the source, whichever wording it matched on. A block matching only a source's earlier wording
+  is a copy of it while the source is open, or when the source's answer or resolution was given
+  while it asked that wording, ordered by the events' commit order; one answered or resolved after
+  the rewording opens its own ask, so no copy shows a decision on a question it does not ask.
+  Answering or resolving the source reaches its copies a settlement later.
+  `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its
+  document and its state from those attributes. A copy whose text is changed, or an id no ask of
+  the owner indexes, still opens one, and so do a source's copies once its block
+  leaves its document: settlement of the source retracts its ask and settles every copy, the first
+  opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
+  project's documents as on an issue's. Migration `0087_artifacts_project_documents` adds the
+  partial index a project document's lookups read (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

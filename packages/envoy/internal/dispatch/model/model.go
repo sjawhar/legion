@@ -666,6 +666,12 @@ type AskEditPrevious struct {
 	Urgency  string      `json:"urgency"`
 }
 
+// NewAskEditPrevious is the mutable content ask asks as it stands: what an edit records as the
+// ask's previous content, and what a copied ask block is compared with.
+func NewAskEditPrevious(ask Ask) AskEditPrevious {
+	return AskEditPrevious{Question: ask.Question, Options: ask.Options, Multiple: ask.Multiple, Urgency: ask.Urgency}
+}
+
 // AskEdit is one recorded rewording of an ask, read back from its ask.edited
 // events: the question as it stood before the edit, who edited it, and when.
 type AskEdit struct {
