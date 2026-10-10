@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
@@ -194,6 +196,68 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 		}
 		return processCPUTime() - before
 	})
+}
+
+// Writing a tree of many blocks into a document takes time linear in its blocks (LEGION-465).
+// Update inserted the children a fragment gains one index at a time, and ygo's fragment insert walks
+// the fragment's children to the index it is given - an element no document holds yet copies the
+// children it has buffered instead - so n blocks took about n²/2 steps. On one machine at a load
+// of 140 to 200, seeding 16,384 one-word paragraphs took 2.1 s of CPU and 65,536 took 36 s, a quote
+// of 21,844 rules 4.3 s, and replacing a quote of 21,844 empty headings with a quote of as many
+// rules 11 s through the upload route. Nothing in Update bounds the blocks: a rebuild from the
+// latest version writes a stored rendering whole, whatever it weighs, so the seed of paragraphs
+// runs to the mebibyte a document may hold (updateSeedTarget). Each write's own CPU time is
+// measured, as TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText measures a parse's.
+func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
+	for _, test := range []struct {
+		name, from, to string
+		target         int
+	}{
+		{"seeding paragraphs", "", "a\n\n", updateSeedTarget},
+		{"seeding a quote of rules", "", "> ***\n", updateShapeTarget},
+		{"replacing headings with paragraphs", "#\n", "a\n\n", updateShapeTarget},
+		{"replacing a quote of headings with a quote of rules", "> #\n", "> ***\n", updateShapeTarget},
+	} {
+		full := test.target / len(test.to)
+		small := full / growthStep
+		t.Run(test.name, func(t *testing.T) {
+			growsLinearly(t, test.name, []int{small * len(test.to), full * len(test.to)}, linearSlack, func(size int) time.Duration {
+				blocks := size / len(test.to)
+				doc := crdt.New()
+				fragment := doc.GetXmlFragment("prosemirror")
+				if test.from != "" {
+					writeUpdate(t, doc, fragment, repeatedBlocks(t, test.from, blocks))
+				}
+				want := repeatedBlocks(t, test.to, blocks)
+				before := processCPUTime()
+				writeUpdate(t, doc, fragment, want)
+				took := processCPUTime() - before
+				if got, err := Read(fragment); err != nil || !got.Equal(want) {
+					t.Fatalf("%s: %d blocks read back otherwise (%v)", test.name, blocks, err)
+				}
+				return took
+			})
+		})
+	}
+}
+
+// repeatedBlocks is the tree of unit written blocks times, read as a stored rendering is, which no
+// element limit stops.
+func repeatedBlocks(t *testing.T, unit string, blocks int) *Node {
+	t.Helper()
+	tree, err := ParseRendering(strings.Repeat(unit, blocks))
+	if err != nil {
+		t.Fatalf("parse %d of %q: %v", blocks, unit, err)
+	}
+	return tree
+}
+
+// writeUpdate writes tree into fragment in one transaction of doc.
+func writeUpdate(t *testing.T, doc *crdt.Doc, fragment *crdt.YXmlFragment, tree *Node) {
+	t.Helper()
+	if err := doc.TransactE(func(txn *crdt.Transaction) error { return Update(txn, fragment, tree) }); err != nil {
+		t.Fatalf("update: %v", err)
+	}
 }
 
 // growthAllowance is how many times faster than its input a parse's time may grow from one size

@@ -113,11 +113,20 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 			}
 			right++
 		default:
-			frag.Delete(txn, left, 1)
-			if err := insertPChild(txn, frag, left, leftP); err != nil {
+			// Neither end matches, so the left child is replaced, and so is every child after it
+			// that could not match either: the right end, which decided nothing here, is the same
+			// for each. The run is deleted and its replacements inserted in one call each, which
+			// writes what replacing them one at a time wrote - each replacement lands before the
+			// run's first deleted child - without walking the fragment once per child.
+			run := 1
+			for left+run < len(ychildren)-right && left+run < len(pchildren)-right && !pairCouldMatch(ychildren[left+run], pchildren[left+run]) {
+				run++
+			}
+			frag.Delete(txn, left, run)
+			if err := insertPChildren(txn, frag, left, pchildren[left:left+run]); err != nil {
 				return err
 			}
-			left++
+			left += run
 		}
 	}
 
@@ -131,12 +140,20 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 	if deleteCount > 0 {
 		frag.Delete(txn, left, deleteCount)
 	}
-	for index := left; index < len(pchildren)-right; index++ {
-		if err := insertPChild(txn, frag, index, pchildren[index]); err != nil {
-			return err
-		}
+	return insertPChildren(txn, frag, left, pchildren[left:len(pchildren)-right])
+}
+
+// pairCouldMatch reports whether updateChildren's loop could keep ychild for pchild: a text for
+// a text, or an element of the node's type.
+func pairCouldMatch(ychild any, pchild normalizedChild) bool {
+	switch y := ychild.(type) {
+	case *crdt.YXmlText:
+		return pchild.isText()
+	case *crdt.YXmlElement:
+		return !pchild.isText() && y.NodeName == pchild.element.Type
+	default:
+		return false
 	}
-	return nil
 }
 
 func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node) error {
@@ -201,20 +218,36 @@ func liveAttrs(node *Node) Attrs {
 	return attrs
 }
 
-func insertPChild(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, child normalizedChild) error {
-	if child.isText() {
-		text, err := createTypeFromTextNodes(txn, child.text)
+// insertPChildren creates the Yjs type of each of children and inserts them into frag at index in
+// one call. ygo's fragment insert walks the fragment's children to index (leftChildAt), and an
+// element no document holds yet copies the children it buffers on every insert, so inserting a
+// fragment's children one at a time took time quadratic in their number (LEGION-465). One call
+// walks once, and writes what one insert per child at consecutive indexes wrote: each child's
+// origin is the child before it, and its right origin the child that stood at index. It is how
+// y-prosemirror writes a fragment's new children (updateYFragment's tail insert, and
+// createTypeFromElementNode's).
+func insertPChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, children []normalizedChild) error {
+	if len(children) == 0 {
+		return nil
+	}
+	// ygo's node interface is unexported, so the slice is typed from one Children returns.
+	nodes := frag.Children()[:0:0]
+	for _, child := range children {
+		if child.isText() {
+			text, err := createTypeFromTextNodes(txn, child.text)
+			if err != nil {
+				return err
+			}
+			nodes = append(nodes, text)
+			continue
+		}
+		element, err := createTypeFromElementNode(txn, child.element)
 		if err != nil {
 			return err
 		}
-		frag.InsertText(txn, index, text)
-		return nil
+		nodes = append(nodes, element)
 	}
-	element, err := createTypeFromElementNode(txn, child.element)
-	if err != nil {
-		return err
-	}
-	frag.InsertElement(txn, index, element)
+	frag.Insert(txn, index, nodes...)
 	return nil
 }
 
@@ -245,10 +278,8 @@ func createTypeFromElementNode(txn *crdt.Transaction, node *Node) (*crdt.YXmlEle
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}
-	for index, child := range normalizePNodeContent(node.Children) {
-		if err := insertPChild(txn, &element.YXmlFragment, index, child); err != nil {
-			return nil, err
-		}
+	if err := insertPChildren(txn, &element.YXmlFragment, 0, normalizePNodeContent(node.Children)); err != nil {
+		return nil, err
 	}
 	return element, nil
 }
