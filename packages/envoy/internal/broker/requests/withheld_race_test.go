@@ -82,7 +82,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 				switch (w + r) % 5 {
 				case 0:
 					if req.GrantID != nil {
-						check("RevokeByApprover", m.RevokeByApprover(ctx, *req.GrantID, operator))
+						check("RevokeByApprover", m.RevokeByApprover(ctx, *req.GrantID, operator, record.HumanActor(operator)))
 					}
 				case 1:
 					if req.GrantID != nil {
@@ -102,7 +102,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 					listed, err := m.GrantsForApprover(ctx, operator)
 					check("GrantsForApprover", err)
 					for _, g := range listed {
-						check("RevokeByApprover(listed)", m.RevokeByApprover(ctx, g.GrantID, operator))
+						check("RevokeByApprover(listed)", m.RevokeByApprover(ctx, g.GrantID, operator, record.HumanActor(operator)))
 					}
 				}
 			}
@@ -140,7 +140,7 @@ func TestReverseLockOrderAgainstRevokeByApproverDeadlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- m.RevokeByApprover(ctx, *auto.GrantID, operator) }()
+	go func() { done <- m.RevokeByApprover(ctx, *auto.GrantID, operator, record.HumanActor(operator)) }()
 	storetest.AwaitLockWaiters(t, m.Store.Pool, tx, 1)
 	_, txErr := tx.Exec(ctx, `select 1 from enrollments where id=$1 for no key update`, enr)
 	if txErr != nil {
@@ -199,7 +199,7 @@ func TestRequestsRacingTheWithholdOnFreshSessions(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, record.HumanActor(operator)); err != nil {
 				mu.Lock()
 				failures = append(failures, fmt.Sprintf("session %d revoke: %v", s, err))
 				mu.Unlock()

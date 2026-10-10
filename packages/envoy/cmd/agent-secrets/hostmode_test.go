@@ -295,7 +295,7 @@ func TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled(t *testing.T) {
 	}
 }
 
-// TestRegisterFindsTheHelperOnItsDefaultSocket pins that register, like launcher login and every
+// TestRegisterFindsTheHelperOnItsDefaultSocket pins that register, like machine login and every
 // other helper-mode form, reaches a helper listening on its default socket
 // ($XDG_RUNTIME_DIR/agent-secrets/helper.sock) with AGENT_SECRETS_HELPER_SOCK unset: a machine set
 // up by starting the helper with no settings registers its sessions without exporting the variable.

@@ -20,12 +20,12 @@ import (
 	"time"
 )
 
-// Request is the client's one line. Op is register, sign, sign-request, unregister, sessions,
-// login, login-status, enroll-box or unenroll-box.
+// Request is the client's one line. Op is register, sign, sign-request, sign-launcher,
+// unregister, sessions, login, login-status, enroll-box or unenroll-box.
 type Request struct {
 	Op           string   `json:"op"`
-	Method       string   `json:"method,omitempty"`        // sign: the HTTP method of the broker call
-	URL          string   `json:"url,omitempty"`           // sign: its absolute URL
+	Method       string   `json:"method,omitempty"`        // sign, sign-launcher: the HTTP method of the broker call
+	URL          string   `json:"url,omitempty"`           // sign, sign-launcher: its absolute URL
 	Secrets      []string `json:"secrets,omitempty"`       // sign-request: the requested agent_secret names
 	Reason       string   `json:"reason,omitempty"`        // sign-request: why they're needed
 	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
@@ -54,8 +54,9 @@ type Response struct {
 	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it, or it reached the expiry the broker named), and no login has started or settled since
 	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused or dropExpired); a helper from before this field sends LoginRefused alone
 	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-box: RFC3339Nano
-	Proof               string        `json:"proof,omitempty"`
-	RequestObject       string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
+	Proof               string        `json:"proof,omitempty"`                 // sign: a session proof; sign-launcher: a launcher proof of the machine credential
+	CredentialID        string        `json:"credential_id,omitempty"`         // sign-launcher: the machine credential the proof names, so a machine revoke can tell this machine's own login
+	RequestObject       string        `json:"request_object,omitempty"`        // sign-request: the signed compact JWS
 	Sessions            []SessionInfo `json:"sessions,omitempty"`
 }
 
@@ -73,7 +74,7 @@ const (
 
 // NoCredentialReason says why a helper holds no launcher credential, from login-status's fields:
 // the most recent login's state, login_refused and credential_dropped. The helper logs it on every
-// enrollment it cannot attempt, and `agent-secrets launcher login-status` prints it, so the journal
+// enrollment it cannot attempt, and `agent-secrets machine login-status` prints it, so the journal
 // and the client say the same thing. It names no confirmation code: a pending login's code is for
 // the approver's screen, never the journal. A login still pending outranks a dropped credential,
 // since its approval is what replaces it. A helper from before credential_dropped sets
@@ -117,12 +118,21 @@ const (
 	// CodeNotEnrolled answers sign or sign-request for a registered session that is still
 	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
 	CodeNotEnrolled = "NOT_ENROLLED"
-	// CodeNoCredential answers sign or sign-request while the helper holds no launcher credential,
-	// from every restart until the operator logs the machine in: it enrolls no one, so the session
-	// has no broker identity. A register reply for such a session carries it too, beside OK.
+	// CodeNoCredential answers sign, sign-request or sign-launcher while the helper holds no
+	// launcher credential, from every restart until the operator logs the machine in: it enrolls no
+	// one, so a session has no broker identity, and the operator's shell has no machine login to
+	// act as. A register reply for such a session carries it too, beside OK.
 	CodeNoCredential = "NO_CREDENTIAL"
+	// CodeInSession answers sign-launcher from a process inside a registered session's process
+	// tree, or one whose ancestry the helper cannot follow to init (a parent it cannot read, a
+	// loop, or past 64 processes), so a session's own commands cannot act as its operator. A
+	// process that leaves its session's tree (a double fork or setsid, reparented to init or a
+	// subreaper) is not refused, and the operator's user can stop the helper anyway: it guards a
+	// session's own process tree, not a boundary against code running as that user.
+	CodeInSession = "IN_SESSION"
 	// CodeBadRequest answers a request that is not one JSON object per line, names an unknown op,
-	// or leaves out a field its op needs.
+	// leaves out a field its op needs, or asks sign-launcher for anything but one of the four
+	// operator routes under this helper's broker.
 	CodeBadRequest = "BAD_REQUEST"
 	// CodeUnidentified answers a caller the kernel could not identify, or one whose process exited
 	// or changed while the helper was identifying it.
@@ -139,8 +149,8 @@ const (
 	// CodeKeygen answers a register the helper could not make the new session's signing key for;
 	// the error says why.
 	CodeKeygen = "KEYGEN"
-	// CodeSign answers sign or sign-request when signing the proof or the request object failed;
-	// the error says why.
+	// CodeSign answers sign, sign-request or sign-launcher when signing the proof or the request
+	// object failed; the error says why.
 	CodeSign = "SIGN"
 )
 

@@ -61,6 +61,18 @@ func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
+// HumanActor is the audit actor of a change a person made in Dispatch: "human:" and their
+// canonical login, the person Dispatch's server vouches for from its own signed-in session.
+func HumanActor(login string) string {
+	return "human:" + CanonicalLogin(login)
+}
+
+// LauncherActor is the audit actor of a change a machine login's own launcher proof made:
+// "launcher:" and that launcher credential's id, whose own row names its operator.
+func LauncherActor(credentialID string) string {
+	return "launcher:" + credentialID
+}
+
 // AnyoneApprover is the approver of a record anyone signed in to Dispatch may decide: a request
 // for a shared human-tier secret. It is never a person's login, and no login is it.
 const AnyoneApprover = "anyone"

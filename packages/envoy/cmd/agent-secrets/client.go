@@ -10,13 +10,14 @@
 // reason inside that signed object rather than as plain top-level JSON fields; building it is
 // also a Signer responsibility (Signer.SignRequestObject), since a host session's key never
 // leaves agent-secrets-helper.
-// Enrollment issuance/revocation and launcher-credential issuance are Plan B/C helper-socket
-// operations now (see cmdEnrollHelper/cmdUnenrollHelper/cmdLauncher in main.go and
+// Enrollment issuance/revocation and launcher-credential issuance are helper-socket operations
+// (see cmdEnrollHelper/cmdUnenrollHelper in main.go, cmdMachineLogin in machine.go, and
 // internal/broker/helper): no route here ever carries a bearer launcher token, and POST/GET
-// /v1/launcher-credentials still carry no credential at all (a launcher has none yet). Every
-// method that a subcommand may need to print verbatim under --json (request, status, self)
-// returns both its decoded result and the exact raw response bytes, so main.go never re-marshals
-// a Go struct in place of the wire body.
+// /v1/launcher-credentials still carry no credential at all (a launcher has none yet). The
+// operator routes (/v1/operator/*) are signed with a launcher proof the helper's sign-launcher op
+// makes (launcherSigner). Every method that a subcommand may need to print verbatim under --json
+// (request, status, self, the operator lists) returns both its decoded result and the exact raw
+// response bytes, so no command re-marshals a Go struct in place of the wire body.
 package main
 
 import (
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -95,7 +97,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
-func (c *client) doProof(ctx context.Context, signer Signer, method, path string, body []byte) ([]byte, error) {
+func (c *client) doProof(ctx context.Context, signer proofSigner, method, path string, body []byte) ([]byte, error) {
 	url := c.baseURL + path
 	token, err := signer.Sign(method, url)
 	if err != nil {
@@ -310,4 +312,92 @@ func (c *client) RereadSecret(ctx context.Context, name string) (Reread, error) 
 		return Reread{}, fmt.Errorf("decode reread: %w", err)
 	}
 	return reread, nil
+}
+
+// --- GET /v1/operator/machines, POST /v1/operator/machines/{id}/revoke,
+// GET /v1/operator/grants, POST /v1/operator/grants/{id}/revoke (launcher proof) ---
+
+// OperatorMachine mirrors one machine login in GET /v1/operator/machines, the broker's
+// launcherCredentialResp.
+type OperatorMachine struct {
+	CredentialID string    `json:"credential_id"`
+	Host         string    `json:"host"`
+	Service      *string   `json:"service"`
+	ApprovedBy   string    `json:"approved_by"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Expired      bool      `json:"expired"`
+}
+
+// OperatorMachines is GET /v1/operator/machines's exact response shape.
+type OperatorMachines struct {
+	Credentials []OperatorMachine `json:"credentials"`
+}
+
+// OperatorMachines lists the calling machine login's operator's own machines' logins, as
+// Dispatch's machine-login page lists them but without any service's login, with the raw body
+// for --json.
+func (c *client) OperatorMachines(ctx context.Context, signer proofSigner) (OperatorMachines, []byte, error) {
+	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/operator/machines", nil)
+	if err != nil {
+		return OperatorMachines{}, nil, err
+	}
+	var out OperatorMachines
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return OperatorMachines{}, nil, fmt.Errorf("decode machine logins: %w", err)
+	}
+	return out, raw, nil
+}
+
+// RevokeOperatorMachine ends one of the calling machine login's operator's own machines' logins.
+// id goes into the path escaped, so whatever a person types names one path segment.
+func (c *client) RevokeOperatorMachine(ctx context.Context, signer proofSigner, id string) error {
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+url.PathEscape(id)+"/revoke", nil)
+	return err
+}
+
+// OperatorGrantEnrollment mirrors a grant's session, the broker's recordEnrollmentResp.
+type OperatorGrantEnrollment struct {
+	Kind      string  `json:"kind"`
+	RuntimeID string  `json:"runtime_id"`
+	Operator  string  `json:"operator"`
+	Slot      *string `json:"slot"`
+}
+
+// OperatorGrant mirrors one grant in GET /v1/operator/grants, the broker's approverGrantResp.
+type OperatorGrant struct {
+	GrantID    string                  `json:"grant_id"`
+	Granted    string                  `json:"granted"`
+	RecordID   *string                 `json:"record_id"`
+	Enrollment OperatorGrantEnrollment `json:"enrollment"`
+	Names      []string                `json:"names"`
+	Approver   *string                 `json:"approver"`
+	ExpiresAt  time.Time               `json:"expires_at"`
+	CreatedAt  time.Time               `json:"created_at"`
+}
+
+// OperatorGrants is GET /v1/operator/grants's exact response shape.
+type OperatorGrants struct {
+	Grants []OperatorGrant `json:"grants"`
+}
+
+// OperatorGrants lists the live grants of the calling machine login's operator's sessions and those
+// the operator approved, as Dispatch's Live grants page lists them, with the raw body for --json.
+func (c *client) OperatorGrants(ctx context.Context, signer proofSigner) (OperatorGrants, []byte, error) {
+	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/operator/grants", nil)
+	if err != nil {
+		return OperatorGrants{}, nil, err
+	}
+	var out OperatorGrants
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return OperatorGrants{}, nil, fmt.Errorf("decode grants: %w", err)
+	}
+	return out, raw, nil
+}
+
+// RevokeOperatorGrant ends grant id as the calling machine login's operator. id goes into the path
+// escaped, so whatever a person types names one path segment.
+func (c *client) RevokeOperatorGrant(ctx context.Context, signer proofSigner, id string) error {
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+url.PathEscape(id)+"/revoke", nil)
+	return err
 }

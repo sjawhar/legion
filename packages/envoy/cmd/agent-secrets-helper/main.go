@@ -99,7 +99,7 @@ func main() {
 
 // serve runs the daemon: it always listens and serves, whether or not a machine credential has
 // ever been installed. There is no startup gate on TokenFile/OperatorFile: the unit never exits
-// for want of a credential; a login is a separate ceremony (`agent-secrets launcher login`) run
+// for want of a credential; a login is a separate ceremony (`agent-secrets machine login`) run
 // against the already-listening socket, and a missing or empty OperatorFile only surfaces later,
 // informatively, the first time Login actually needs it for its login_hint. SIGINT or SIGTERM
 // stops it, from systemd or from anything else that signals it, and it exits 0, as a requested

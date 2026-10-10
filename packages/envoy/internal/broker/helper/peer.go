@@ -129,32 +129,42 @@ func StartTicks(pid int) (uint64, error) {
 	return strconv.ParseUint(f[19], 10, 64)
 }
 
-func parentOf(pid int) (int, bool) {
+// procParent is pid's parent as /proc/<pid>/stat names it.
+func procParent(pid int) (int, error) {
 	f, err := statFields(pid)
-	if err != nil || len(f) < 2 {
-		return 0, false
+	if err != nil {
+		return 0, err
 	}
-	ppid, err := strconv.Atoi(f[1])
-	return ppid, err == nil
+	if len(f) < 2 {
+		return 0, fmt.Errorf("/proc/%d/stat has %d fields", pid, len(f))
+	}
+	return strconv.Atoi(f[1])
 }
 
-// DescendsFrom reports whether pid is root or one of root's descendants: a parent walk over
-// /proc, at most maxAncestryHops long, with cycle detection, stopping at pid 1.
-func DescendsFrom(pid, root int) bool {
+// descendsFrom reports whether pid is root or one of root's descendants, reading each parent with
+// parent: a walk of at most maxAncestryHops processes, with cycle detection, that ends at root or
+// at pid 1 or 0 (init, or the parent the kernel reports above this pid namespace's tree). A walk
+// that ends anywhere else, at a parent it cannot read, a cycle or the hop limit, answers false
+// with an error saying which, since it has not shown that pid is outside root's tree.
+func descendsFrom(pid, root int, parent func(int) (int, error)) (bool, error) {
+	start := pid
 	seen := make(map[int]bool, 8)
-	for hops := 0; hops < maxAncestryHops; hops++ {
+	for range maxAncestryHops {
 		if pid == root {
-			return true
+			return true, nil
 		}
-		if pid <= 1 || seen[pid] {
-			return false
+		if pid <= 1 {
+			return false, nil
+		}
+		if seen[pid] {
+			return false, fmt.Errorf("pid %d's ancestry loops at pid %d", start, pid)
 		}
 		seen[pid] = true
-		parent, ok := parentOf(pid)
-		if !ok {
-			return false
+		next, err := parent(pid)
+		if err != nil {
+			return false, fmt.Errorf("reading the parent of pid %d: %w", pid, err)
 		}
-		pid = parent
+		pid = next
 	}
-	return false
+	return false, fmt.Errorf("pid %d's ancestry runs past %d processes", start, maxAncestryHops)
 }
