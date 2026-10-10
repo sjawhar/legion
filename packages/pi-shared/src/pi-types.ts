@@ -342,6 +342,25 @@ export type MessageRenderer = (
 
 export type { ExtensionAgentsApi };
 
+/**
+ * What `sendUserInput` did with its text: `prompt` and `skill` submitted a message carrying the
+ * caller's tag; `command` ran something locally (`output` is what a built-in printed, and
+ * `agentInvoked` says it started a turn without a message, as `/retry` does); `terminal-only` is a
+ * built-in only the interactive terminal runs (`/new`, `/resume`), and nothing ran; `unavailable`
+ * is a host mode that does not wire the method, or a guest in a shared session, and nothing ran.
+ */
+export interface UserInputResult {
+  readonly handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";
+  readonly output?: string;
+  readonly agentInvoked?: boolean;
+}
+
+export interface HostSlashCommand {
+  readonly name: string;
+  readonly description?: string;
+  readonly source: "extension" | "prompt" | "skill";
+}
+
 export interface PiApi {
   readonly zod: PiZod;
   readonly agents?: ExtensionAgentsApi;
@@ -365,6 +384,21 @@ export interface PiApi {
     content: string | readonly ContentBlock[],
     options?: { readonly deliverAs: "aside" }
   ) => void;
+  /**
+   * Runs text as if typed at the session's own terminal: a built-in its host can run headless, an
+   * extension or custom command, a file command or prompt template, and `/skill:<name>`; any other
+   * text goes to the model as a prompt. `tag` is recorded on the message the input submits and
+   * seen again on its `message_start`. Our Oh My Pi fork carries it (can1357/oh-my-pi#14323); a host
+   * without it has no such member. On an idle session it resolves only once the run it started
+   * ends, so a caller that must keep taking messages never awaits it in line.
+   */
+  readonly sendUserInput?: (
+    text: string,
+    options?: { readonly deliverAs?: "aside"; readonly tag?: string }
+  ) => Promise<UserInputResult>;
+  /** The session's extension, custom and skill slash commands (`skill:<name>`), never its
+   *  built-ins. */
+  readonly getCommands: () => readonly HostSlashCommand[];
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   /**
