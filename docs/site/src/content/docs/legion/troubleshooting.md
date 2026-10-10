@@ -374,7 +374,9 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   anyone signed in may approve it; pod enrollment is held until approved`.** With
   `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
   at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
-  pods are not enrolled until then.
+  pods are not enrolled until then. Denying the code does not stop new ones: while a pod needs
+  enrolling, the daemon asks again after its wait (30 s after the first denial, doubling to a cap of
+  one code every 5 minutes). To stop the codes, stop the daemon or remove its `agent_secrets` block.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
