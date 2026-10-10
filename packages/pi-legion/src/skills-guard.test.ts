@@ -93,8 +93,10 @@ test("the controller skill reads pull requests as the review App, and nothing sa
   expect(controllerSkill).toContain(
     "gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state"
   );
-  expect(controllerSkill).toContain("https://github.com/<owner>/<repo>/pull/<n>");
+  expect(controllerSkill).not.toContain("gh pr view <url>");
   expect(controllerSkill).toContain("not a pull-request URL");
+  expect(controllerSkill).toContain("--label '<each current label>'");
+  expect(controllerSkill).toContain("cannot be quoted");
   for (const token of ["OPEN", "MERGED", "CLOSED", "unreadable", '"phase":"controller"']) {
     expect(controllerSkill).toContain(token);
   }

@@ -270,10 +270,13 @@ A person who wants Legion on it anyway hands it over themselves: the label, then
 **Take.** For each candidate that passes, in order:
 
 1. Add the label and keep the labels it has, which `Labels:` lists (`none` is no labels). The
-   `--label` flags replace the whole set, so a label you leave out is removed.
+   `--label` flags replace the whole set, so a label you leave out is removed. Pass each label
+   single-quoted, exactly as `Labels:` shows it; a label holding a `'` or a line break cannot be
+   single-quoted and is never put in a command: skip the issue and name it in your summary
+   (`<KEY>: label <label> cannot be quoted`) so a person hands it over themselves.
 
    ```text
-   dispatch issue-update --issue <KEY> --label <each current label> --label legion
+   dispatch issue-update --issue <KEY> --label '<each current label>' --label legion
    ```
 
 2. It is already in `todo`, so the label admits it: the daemon records it and gives it the free
