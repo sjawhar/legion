@@ -99,4 +99,20 @@ package api
 // took 16, then 17; LEGION-578 landed at 16 and LEGION-588 at 17 first, pi-legion 8.4.1 and 8.6.0
 // declaring them without the token file, so a daemon at either would pass the gate against them.
 // Renumbered, as the collision note says.)
-const DaemonAPIVersion = 18
+//
+// 19: LEGION-663 -- every Legion session reports the six live capability rows with its ready, and
+// the daemon renders them from those reports. `claim.RegisterResponse` gains `promptAgents`, the
+// sorted names of the task agents the role's prompts dispatch, which the session's subagents check
+// measures against; `claim.ReadyRequest` gains an optional `capabilities` report (`measuredAt`,
+// `elapsedMs`, `rows[{name, ok, detail}]`), which the daemon normalises (capabilities.Normalize)
+// and never refuses: a session runs and reports, whatever it reports. `api.ClaimView` gains
+// `capabilities` (`measuredAt`, `incarnation`, `ok`, `open`), the claim's latest report as the
+// state shows it, and `api.CapabilityState.status` loses `live`: a live row is `present`, `open` or
+// `unchecked` from the sessions' reports, never a promise of a check to come. An 18 plugin's strict
+// reader refuses a state whose claim views carry `capabilities`, and a 19 plugin's `capabilities`
+// on `claims/ready` is an unknown field an 18 daemon's `readBody` refuses with 400, which exits the
+// plugin, so the boot gate and `legion probe-image` refuse the mixed pair. (This branch is based on
+// LEGION-631's 18 while main declares 17, so 19 is re-read against main at the retarget, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+const DaemonAPIVersion = 19
