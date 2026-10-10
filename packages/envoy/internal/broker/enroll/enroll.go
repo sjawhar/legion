@@ -34,6 +34,9 @@ var (
 	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
 	ErrNoCredential     = errors.New("no such machine login")
 	ErrNotApprover      = errors.New("only the person who approved a person's machine login may revoke it")
+	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
+	// the one that enrolled it (Revoke).
+	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
 )
 
 type Credential struct {
@@ -469,6 +472,18 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // enrollment is live, already revoked, or (were its id guessed rather than read back) merely
 // plausible-looking. A row that does not exist at all has no operator/kind to check ownership
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
+//
+// A pod enrollment carries no operator, so the operator cannot tell one service's pods from
+// another's: a pod enrollment is ended only by the launcher credential that created it
+// (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
+// credential of the same service. A Legion daemon that restarts holds a new credential, since its
+// key lives in memory and every machine login mints a new one, so it cannot end the enrollments
+// its earlier login made: each ends when its pod stops renewing, one lease
+// (BROKER_LEASE_SECONDS) after its renewer stops with the process it belongs to, or at once when
+// a person revokes that earlier login (RevokeCredential), and the pods its current login enrolled
+// it ends here as before. A box or host enrollment keeps the operator rule alone: a helper that
+// logs in again revokes the enrollments its earlier credential made for the same operator.
+//
 // Once ownership passes, Revoke returns ErrNotLive, changing nothing, when the enrollment is
 // already revoked — the guard that keeps the audit trail honest: without it a no-op call would
 // still write an "enrollment.revoked" audit row for an enrollment that never transitioned.
@@ -481,8 +496,10 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 
 	var operator *string
 	var kind string
+	var enrolledBy uuid.UUID
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `select operator, kind, revoked_at from enrollments where id=$1 for update`, id).Scan(&operator, &kind, &revokedAt)
+	err = tx.QueryRow(ctx, `select operator, kind, launcher_credential_id, revoked_at from enrollments where id=$1 for update`, id).
+		Scan(&operator, &kind, &enrolledBy, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
 	}
@@ -491,6 +508,9 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	}
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
+	}
+	if kind == "pod" && enrolledBy != cred.ID {
+		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {
 		return ErrNotLive

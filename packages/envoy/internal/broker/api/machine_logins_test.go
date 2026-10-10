@@ -259,6 +259,45 @@ func TestAnyoneRevokesAServiceLogin(t *testing.T) {
 	}
 }
 
+// TestOnlyTheLoginThatEnrolledAPodDeletesItsEnrollment: DELETE /v1/enrollments/{id} on a pod
+// enrollment by a second service login, approved by anyone signed in as every service login is, is
+// 403 NOT_ENROLLING_CREDENTIAL and ends nothing (the pod still renews); the login that enrolled the
+// pod ends it (204), and its renew is refused from then on.
+func TestOnlyTheLoginThatEnrolledAPodDeletesItsEnrollment(t *testing.T) {
+	ts := newTestServer(t)
+	enrolling, enrollingKey := ts.mintServiceLauncherCredential(t)
+	other, otherKey := ts.mintServiceLauncherCredential(t)
+	podUID := uuid.NewString()
+	key := newSigningKey(t)
+	status, body := ts.launcher(t, enrollingKey, enrolling, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "pod", "runtime_id": podUID, "slot": "implementer-g1", "thumbprint": thumbprintOf(t, key),
+		"pod_token": ts.podToken(t, workerAccount, podUID),
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("enroll the pod = %d %s, want 201", status, body)
+	}
+	id := decode[wireEnrolled](t, body).EnrollmentID
+	renew := func() int {
+		t.Helper()
+		status, _ := ts.session(t, key, id, http.MethodPost, "/v1/enrollments/"+id+"/renew", nil)
+		return status
+	}
+
+	status, body = ts.launcher(t, otherKey, other, http.MethodDelete, "/v1/enrollments/"+id, nil)
+	if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_ENROLLING_CREDENTIAL" {
+		t.Fatalf("DELETE by another service login = %d %s, want 403 NOT_ENROLLING_CREDENTIAL", status, body)
+	}
+	if status := renew(); status != http.StatusOK {
+		t.Fatalf("the pod's renew after the refused DELETE = %d, want 200", status)
+	}
+	if status, body := ts.launcher(t, enrollingKey, enrolling, http.MethodDelete, "/v1/enrollments/"+id, nil); status != http.StatusNoContent {
+		t.Fatalf("DELETE by the enrolling login = %d %s, want 204", status, body)
+	}
+	if status := renew(); status != http.StatusUnauthorized {
+		t.Fatalf("the pod's renew after its enrolling login's DELETE = %d, want 401", status)
+	}
+}
+
 // TestAServiceLoginWaitsInEveryonesPendingList: a pending service login, the Legion daemon's,
 // whatever person its login_hint names, is in every signed-in person's pending list, which is how
 // whoever reads its code finds it waiting; a person's pending machine login is in theirs alone.

@@ -76,7 +76,8 @@ func routes() []apiRoute {
 	return []apiRoute{
 		// Enroll a box's, host session's or pod's signing key under the caller's machine credential.
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
-		// Revoke an enrollment made under the caller's machine credential's operator.
+		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
+		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
 		// Start a machine login: answers the confirmation code a person types and a pending id.
 		{http.MethodPost, "/v1/launcher-credentials", public((*server).machineLogin)},

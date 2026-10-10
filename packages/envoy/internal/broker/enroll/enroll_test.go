@@ -365,10 +365,12 @@ func TestRevokeRefusesWrongOperator(t *testing.T) {
 	}
 }
 
-// TestRevokeAllowsServiceCredentialForAnyPodEnrollment mirrors Create's own trust boundary: a
-// service credential (no operator) may revoke any pod enrollment, since pod enrollments never
-// carry an operator to distinguish between service credentials.
-func TestRevokeAllowsServiceCredentialForAnyPodEnrollment(t *testing.T) {
+// TestOnlyTheCredentialThatEnrolledAPodEndsItsEnrollment: a pod enrollment carries no operator to
+// tell one service credential from another, so it is ended only by the launcher credential that
+// made it. Another service's credential, and a second credential of the same service (a restarted
+// Legion daemon, which logs in again with a fresh key), are refused and end nothing; the enrolling
+// credential ends it.
+func TestOnlyTheCredentialThatEnrolledAPodEndsItsEnrollment(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 	issuer, key := withPodVerifier(t, svc)
@@ -381,8 +383,20 @@ func TestRevokeAllowsServiceCredentialForAnyPodEnrollment(t *testing.T) {
 		t.Fatalf("Create(pod): %v", err)
 	}
 
+	for name, other := range map[string]Credential{
+		"another service's credential":       mintCredential(t, svc, nil, str("other-service"), "elsewhere"),
+		"a second credential of the service": mintCredential(t, svc, nil, str("legion-daemon"), "cluster"),
+	} {
+		if err := svc.Revoke(ctx, other, enr.ID.String(), "launcher:other"); !errors.Is(err, ErrNotEnrollingCredential) {
+			t.Fatalf("Revoke(%s, pod enrollment) = %v, want ErrNotEnrollingCredential", name, err)
+		}
+		if _, live, err := svc.Lookup(ctx, enr.ID.String()); err != nil || !live {
+			t.Fatalf("Lookup(after the refused revoke by %s) = live=%v err=%v, want live", name, live, err)
+		}
+	}
+
 	if err := svc.Revoke(ctx, cred, enr.ID.String(), "legion-daemon"); err != nil {
-		t.Fatalf("Revoke(service credential, pod enrollment) = %v, want nil", err)
+		t.Fatalf("Revoke(the enrolling credential, pod enrollment) = %v, want nil", err)
 	}
 	if _, live, err := svc.Lookup(ctx, enr.ID.String()); err != nil || live {
 		t.Fatalf("Lookup(after revoke) = live=%v err=%v, want live=false", live, err)

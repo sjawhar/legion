@@ -127,20 +127,24 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // design, so it never writes a spurious audit row for an enrollment that never transitioned);
 // DELETE's own idempotent semantics mean the caller doesn't need to know or care which happened.
 // Ownership is checked first: a launcher credential may only revoke an enrollment of its own
-// operator (or, for a service credential, any pod enrollment) — the same trust boundary
-// enroll.Service.Create enforces when creating one — so a mismatch is always 403
-// OPERATOR_MISMATCH, never a no-op 204, regardless of whether the target enrollment is live.
+// operator, and a pod enrollment, which carries no operator, only when it is the credential that
+// enrolled the pod (enroll.Service.Revoke says why, and what that leaves a restarted Legion daemon)
+// — so a mismatch is always 403 (OPERATOR_MISMATCH, or NOT_ENROLLING_CREDENTIAL for another
+// service credential's pod), never a no-op 204, regardless of whether the target enrollment is live.
 func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	id, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
 		return
 	}
 	err := s.deps.Enroll.Revoke(r.Context(), cred, id, record.LauncherActor(cred.ID.String()))
-	if errors.Is(err, enroll.ErrOperatorMismatch) {
+	switch {
+	case errors.Is(err, enroll.ErrOperatorMismatch):
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return
-	}
-	if err != nil && !errors.Is(err, enroll.ErrNotLive) {
+	case errors.Is(err, enroll.ErrNotEnrollingCredential):
+		writeError(w, http.StatusForbidden, "NOT_ENROLLING_CREDENTIAL", err.Error())
+		return
+	case err != nil && !errors.Is(err, enroll.ErrNotLive):
 		writeInternal(w, "revoke enrollment", err)
 		return
 	}
