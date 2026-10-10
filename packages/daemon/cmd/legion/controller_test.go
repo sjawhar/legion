@@ -1368,6 +1368,32 @@ func TestControllerStartWithNoGitHubAppWritesAnEmptyGhDirectory(t *testing.T) {
 	}
 }
 
+// The state directory outlives a run, so a gh directory an earlier start wrote against a daemon
+// that had a GitHub App can still hold that run's hosts.yml. A start against a daemon with no
+// GitHub App says the controller's gh acts as nobody, so it must leave no token for gh to act
+// with: the stale hosts.yml goes, and gh answers no token (LEGION-668, found by the tester).
+func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	ghDir := filepath.Join(c.defaultDir, "gh")
+	if _, err := ghconfig.Write(ghDir, ghconfig.Render("ghs_stale_from_an_earlier_run", "review", time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("seed the stale gh directory: %v", err)
+	}
+	code, _, errb := c.run()
+	if code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	if !strings.Contains(errb, "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody\n") {
+		t.Fatalf("stderr = %q; want the no-App line", errb)
+	}
+	if hosts, err := os.ReadFile(filepath.Join(ghDir, "hosts.yml")); !os.IsNotExist(err) {
+		t.Errorf("hosts.yml = %q, %v; want none: the command said gh acts as nobody, but gh would act as the stale token", hosts, err)
+	}
+	if got := modeOf(t, ghDir); got != 0o700 {
+		t.Errorf("gh directory mode = %o, want 0700", got)
+	}
+}
+
 // A failed GitHub credential fetch after the mint exits 1, naming the route and the daemon's
 // sentence; Oh My Pi never ran, and the secret file stays written.
 func TestControllerStartExitsWhenTheGitHubCredentialFetchFails(t *testing.T) {
