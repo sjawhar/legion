@@ -121,11 +121,13 @@ type Notice struct {
 	ResendOf int64 `json:"resend_of,omitempty"`
 	// CatchUp is a catch-up notice's account of the tree, and absent from every other kind.
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
-	// OpenCapabilities names the deployment capabilities with no decision
-	// (capabilities.Deployment.Open) when the daemon reports them; only a tick controller notice
-	// carries it (admit.Admission.ReportCapabilities), and a tick with no gap carries none. The
-	// controller reads each row's detail and the legion.yaml line that records a decision in
-	// `legion state`; a gap is the operator's to close or decide and never stops the walk.
+	// OpenCapabilities names every open row of the deployment's capability report
+	// (capabilities.Deployment.Open) when the daemon reports them: a deployment row with no
+	// decision, or a live row a live session's check failed (LEGION-663). Only a tick controller
+	// notice carries it (admit.Admission.ReportCapabilities), and a tick with no open row carries
+	// none. The controller reads each row's detail in `legion state`, and on a deployment row alone
+	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
+	// live row's the session's environment to fix, and neither stops the walk.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
 }
 
