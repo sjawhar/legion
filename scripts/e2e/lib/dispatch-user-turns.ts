@@ -12,6 +12,12 @@
 //     many times the thread shows each <body> as a message, {"<body>": n, ...}, and every user
 //     message in the replay the session's stream serves the page that pi-envoy tagged with the
 //     Dispatch message it delivered, [{"id","text"}].
+//   bun scripts/e2e/lib/dispatch-user-turns.ts complete <dispatch-url> <login> <session> <typed> <pick> <shot.png>
+//     opens the same page on Send, types <typed> (a `/` and part of a command's name), waits for
+//     the composer's slash-command list, picks the command named <pick> from it, presses Send, and
+//     waits until the thread shows it. Prints {"offered","terminalOnly","composed"}: every command
+//     the list offered for <typed> by name, those it marked terminal only, and what the pick wrote
+//     into the message.
 //   bun scripts/e2e/lib/dispatch-user-turns.ts envelope <nats-url> <session> <message-id> <seconds>
 //     prints the envelope Dispatch published on notifications.agent.<session> for Dispatch message
 //     <message-id>, as the notification stream holds it; exits 1 when it holds none.
@@ -50,6 +56,11 @@ interface LocatorLike {
   click(): Promise<void>;
   allTextContents(): Promise<string[]>;
   evaluate<T>(fn: (element: HTMLSelectElement) => T): Promise<T>;
+  getAttribute(name: string): Promise<string | null>;
+  all(): Promise<LocatorLike[]>;
+  press(key: string): Promise<void>;
+  pressSequentially(text: string): Promise<void>;
+  textContent(): Promise<string | null>;
 }
 
 async function withPage<T>(
@@ -117,6 +128,43 @@ async function send(): Promise<void> {
     }
     await page.screenshot({ fullPage: true, path: shot });
     return { initial, label: picked, options };
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+async function complete(): Promise<void> {
+  const [base, login, session, typed, pick, shot] = args;
+  if (!base || !login || !session || !typed || !pick || !shot) {
+    refuse("usage: complete <dispatch-url> <login> <session> <typed> <pick> <shot.png>");
+  }
+  const result = await withPage(base, login, session, async (page) => {
+    const picker = page.getByRole("combobox", { name: "Delivery mode" });
+    await picker.waitFor({ timeout: 30_000 });
+    await picker.selectOption("steer");
+    const input = page.getByTestId("agent-composer").locator("textarea");
+    // Typed key by key, as a person does, so the composer sees each keystroke's caret.
+    await input.pressSequentially(typed);
+    const list = page.getByRole("listbox", { name: "Slash commands" });
+    await list.waitFor({ timeout: 30_000 });
+    const offered: string[] = [];
+    const terminalOnly: string[] = [];
+    for (const option of await list.locator('[role="option"]').all()) {
+      const id = (await option.getAttribute("id")) ?? "";
+      const name = id.slice(id.indexOf("-option-") + "-option-".length);
+      offered.push(name);
+      if ((await option.textContent())?.includes("terminal only")) terminalOnly.push(name);
+    }
+    await list.locator(`[role="option"][id$="-option-${pick}"]`).click();
+    const composed = await input.inputValue();
+    await input.press("Enter");
+    const sent = composed.trimEnd();
+    const deadline = Date.now() + 30_000;
+    while (!(await threadMessages(page)).some((text) => text.includes(sent))) {
+      if (Date.now() > deadline) throw new Error(`the thread never showed "${sent}"`);
+      await page.waitForTimeout(500);
+    }
+    await page.screenshot({ fullPage: true, path: shot });
+    return { composed, offered, terminalOnly };
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
@@ -255,7 +303,8 @@ async function publish(): Promise<void> {
 }
 
 if (command === "send") await send();
+else if (command === "complete") await complete();
 else if (command === "count") await count();
 else if (command === "envelope") await envelope();
 else if (command === "publish") await publish();
-else refuse(`unknown command ${command ?? "(none)"}: send, count, envelope or publish`);
+else refuse(`unknown command ${command ?? "(none)"}: send, complete, count, envelope or publish`);

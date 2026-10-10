@@ -722,7 +722,9 @@ export default function envoyExtension(pi: PiApi): void {
   // Send that arrived as a card could become a turn on a later forged frame.
   const acceptedUserTurn = async (
     rendered: RenderInboundResult
-  ): Promise<AcceptedUserTurn | undefined> => {
+  ): Promise<
+    { readonly turn: AcceptedUserTurn; readonly delivery: DispatchDelivery } | undefined
+  > => {
     if (!isUserTurnCandidate(rendered)) return undefined;
     const { delivery } = rendered;
     const key = handledAttemptKey(delivery.id, delivery.attempt);
@@ -747,8 +749,9 @@ export default function envoyExtension(pi: PiApi): void {
           "envoy: Dispatch accepted a direct message without the stored body and mode to inject; it arrives as a card",
           { attempt: delivery.attempt, messageID: delivery.id }
         );
+        return undefined;
       }
-      return turn;
+      return { delivery, turn };
     } catch (error) {
       logger.warn(
         "envoy: Dispatch did not accept a direct message as this session's turn; it arrives as a card",
@@ -844,7 +847,7 @@ export default function envoyExtension(pi: PiApi): void {
             }
           }
         } else {
-          const turn = await acceptedUserTurn(rendered);
+          const accepted = await acceptedUserTurn(rendered);
           // The pictures the delivered text embeds reach the model beside it, read with this
           // session's own Dispatch bearer, each picture once in this session. They count as shown
           // only once the host took the send: one that throws releases the claim, and the delivery
@@ -852,7 +855,7 @@ export default function envoyExtension(pi: PiApi): void {
           // Fetched once for the delivery: the same set is read for what to name and, once the
           // host took the send, written with what it showed.
           const shown = shownPictures(sessionID);
-          if (turn === undefined) {
+          if (accepted === undefined) {
             const card = await withDeliveredPictures(
               rendered.content,
               rendered.pictures ?? [],
@@ -869,6 +872,7 @@ export default function envoyExtension(pi: PiApi): void {
             );
             markPicturesShown(shown, card.shown);
           } else {
+            const { turn } = accepted;
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
             // beside their text.
             const delivery = await withDeliveredPictures(
@@ -878,26 +882,25 @@ export default function envoyExtension(pi: PiApi): void {
               false,
               shown
             );
-            const accepted = rendered.delivery;
             const sendUserInput = pi.sendUserInput;
             const untyped =
               sendUserInput === undefined
                 ? typedInputReply(turn.body, { hostVersion: VERSION })
                 : undefined;
-            if (accepted !== undefined && untyped !== undefined) {
+            if (untyped !== undefined) {
               // A host that cannot run typed input would hand the command to the model as words.
-              await postDispatchReply(accepted, { body: untyped });
+              await postDispatchReply(accepted.delivery, { body: untyped });
             } else {
               // Noted right before the send, after the pictures load: a run that ends while they
               // load clears every note (endInjectedUserTurns), and this turn must still be found.
               noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
-              if (sendUserInput === undefined || accepted === undefined) {
+              if (sendUserInput === undefined) {
                 pi.sendUserMessage(
                   delivery.content,
                   turn.mode === "aside" ? { deliverAs: "aside" } : undefined
                 );
               } else {
-                runTypedInput(sendUserInput, accepted, turn, delivery.content);
+                runTypedInput(sendUserInput, accepted.delivery, turn, delivery.content);
               }
               markPicturesShown(shown, delivery.shown);
             }
