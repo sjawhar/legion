@@ -652,29 +652,9 @@ func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 		t.Fatalf("query at the limit: status=%d body=%s", atLimit.Code, atLimit.Body.String())
 	}
 
-	cases := map[string]struct {
-		q      string
-		length int
-	}{
-		"one character over": {strings.Repeat("a", contracts.SearchQueryMax+1), contracts.SearchQueryMax + 1},
-		// 501 characters outside the Basic Multilingual Plane are 1,002 UTF-16 units.
-		"counted in UTF-16 units": {strings.Repeat("😀", contracts.SearchQueryMax/2+1), contracts.SearchQueryMax + 2},
-	}
-	for name, test := range cases {
+	for name, test := range overCapCases(contracts.SearchQueryMax) {
 		t.Run(name, func(t *testing.T) {
-			response := search(test.q)
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-			}
-			body := decodeBody[struct {
-				Code  string `json:"code"`
-				Error string `json:"error"`
-			}](t, response)
-			want := fmt.Sprintf("q is %d characters over the %d-character limit (%d/%d); %s",
-				test.length-contracts.SearchQueryMax, contracts.SearchQueryMax, test.length, contracts.SearchQueryMax, contracts.SearchQueryHint)
-			if body.Code != "CAP_EXCEEDED" || body.Error != want {
-				t.Fatalf("refusal = %+v, want CAP_EXCEEDED %q", body, want)
-			}
+			assertCapExceeded(t, "search", search(test.text), "q", test.length, contracts.SearchQueryMax, contracts.SearchQueryHint)
 		})
 	}
 }

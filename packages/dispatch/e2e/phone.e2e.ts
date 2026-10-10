@@ -660,16 +660,18 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await page.setViewportSize({ height: 900, width: 1280 });
   }
   try {
-    // The project's Documents list: the name ends in an ellipsis, and its kind and time share
-    // one line rather than stacking in a second column.
+    // The project's Documents list: the name ends in an ellipsis, and its kind (with the latest
+    // version's size after it) and time share one line rather than stacking in a second column.
     await page.goto("/projects/CORE/documents");
     const row = page.getByRole("listitem", { name: longName });
     await expectEllipsis(row.getByRole("link", { name: longName }));
     const details = await row.evaluate((node) => {
       const time = node.querySelector("time");
-      const kind = [...node.querySelectorAll("span")].find((span) => span.textContent === "doc");
+      const kind = [...node.querySelectorAll("span")].find((span) =>
+        /^doc · \d/.test(span.textContent ?? "")
+      );
       if (time === null || kind === undefined) {
-        throw new Error("the row has no kind or time");
+        throw new Error("the row has no kind and size, or no time");
       }
       return { kind: kind.getBoundingClientRect().top, time: time.getBoundingClientRect().top };
     });
