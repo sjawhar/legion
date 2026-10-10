@@ -91,10 +91,8 @@ no mark names gets a new `mark(...)` in the recorder and a new take.
 
 ## Review
 
-This take was recorded on 2026-10-10 on the branch where the `launcher` form of `agent-secrets`
-became `machine`. The terminal now types `agent-secrets machine login` and
-`agent-secrets machine login-status`, where the take before it, of 2026-10-09, typed the
-`launcher` form of each. That shows in `login` and in `session`'s first command. Every section was
+This take was recorded on 2026-10-10. The terminal types `agent-secrets machine login` in `login`
+and `agent-secrets machine login-status` in `session`'s first command. Every section was
 recorded again in this one take: the sections show each other's ids, and footage from two takes
 would show ids that disagree across a cut. The person is `alice@example.com` everywhere:
 Dispatch's sidebar, the records' approver, the session's operator, the request's waiting line and
