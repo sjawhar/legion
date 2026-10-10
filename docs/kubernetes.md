@@ -1586,9 +1586,14 @@ issue's pod (every role container of it alike) and the image probe's.
   page, where anyone signed in may approve it; pod enrollment is held until approved`. The same code and the login's current status
   ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
-  person signed in to Dispatch approves the code there. On expiry or revocation the daemon starts a
-  fresh login and logs a new
-  code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
+  person signed in to Dispatch approves the code there. When a login ends without a credential
+  (the broker refused it or could not be reached, its code expired undecided, or someone denied
+  it), or the broker revokes or expires the credential, the next pod enrollment starts a fresh
+  login, with no restart. The new code is on `agentSecretsLogin` and in the supervisor's
+  `enrollment failed; retrying on the next observation` warning. After a login that ends without a
+  credential the daemon waits 30 s before the next, doubling each time to at most 5 minutes, and an
+  approved login resets the wait. It never starts a login while one is pending.
+  `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
   operator's middleman token. With the block, the worker container mounts that token read-only at
