@@ -4,13 +4,14 @@
 // computed here but the two lead-time cards' met/missed, which the prototype judges on the page as
 // this does, against the targets the response carries. Differences, each from LEGION-567's slice 3
 // plan or for the same reason as the measures panel's: Dispatch's sidebar replaces the
-// prototype's row of page links; the cards lay themselves out for the page's own width (one
-// column, then two, three and six as each card keeps 15rem), where the prototype's viewport grid
-// (one, two from md, six from xl) leaves a card too narrow for its figures beside the sidebar; a
-// pipeline whose settings name no staging end-to-end gate (or no staging deploy) omits that card;
-// the prototype's note on runs whose jobs are not fetched yet is gone, since Dispatch stores a
-// run's jobs with the run; the failing-jobs note names the roll-up job by its role, since the
-// job's name is a setting; and the colours are the theme's tokens.
+// prototype's row of page links; the cards take the prototype's column counts at the prototype's
+// content widths (one column, two from 46rem, six from 78rem: its `md:grid-cols-2
+// xl:grid-cols-6` less its `px-4` page padding) measured on the page's own width rather than the
+// viewport, since beside Dispatch's sidebar the viewport rule put six cards in too little room for
+// their figures; a pipeline whose settings name no staging end-to-end gate (or no staging deploy)
+// omits that card; the prototype's note on runs whose jobs are not fetched yet is gone, since
+// Dispatch stores a run's jobs with the run; the failing-jobs note names the roll-up job by its
+// role, since the job's name is a setting; and the colours are the theme's tokens.
 //
 // `?at=` is the test and screenshot hook: the page forwards it to the route, which then names the
 // seven days ending on at's day and looks back 24 hours from it, so a fixture dated in the past
@@ -124,7 +125,10 @@ export function PipelineView({
       </p>
 
       <div className="@container">
-        <div className="grid grid-cols-1 gap-3 @min-[31rem]:grid-cols-2 @min-[46.5rem]:grid-cols-3 @min-[94rem]:grid-cols-6">
+        <div
+          className="grid grid-cols-1 gap-3 @min-[46rem]:grid-cols-2 @min-[78rem]:grid-cols-6"
+          data-section="stage-cards"
+        >
           <TimingCard
             detail="PR Checks on a pull request, from run start to its last job"
             metric="pr_ci"
