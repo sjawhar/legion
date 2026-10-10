@@ -489,8 +489,14 @@ func (t *promptTerminal) raise(sig syscall.Signal) error {
 // go to the shell. From the background a flush would stop the job (tty_check_change), so it is
 // skipped there.
 func (t *promptTerminal) flushInput() {
-	if held, err := t.holdsTerminal(); err == nil && held {
-		_ = discardInput(t.fd)
+	held, err := t.holdsTerminal()
+	if err != nil || !held {
+		return
+	}
+	// A failed flush left unread value bytes for the shell; record it, as a stopBy failure is, so
+	// the refused entry says the discard failed. It has never failed on a held terminal in practice.
+	if err := discardInput(t.fd); err != nil && t.watch.stopErr == nil {
+		t.watch.stopErr = fmt.Errorf("discard the terminal's unread input: %w", err)
 	}
 }
 

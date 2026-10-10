@@ -18,8 +18,8 @@ const (
 
 // discardInput discards what the terminal holds unread (TIOCFLUSH with FREAD, 1 in XNU's
 // sys/fcntl.h; bsd/kern/tty.c), as the kernel's own signal handling would under ISIG. It has not
-// been exercised on a Darwin machine.
-func discardInput(fd int) error {
+// been exercised on a Darwin machine. A var so a test can make the flush fail.
+var discardInput = func(fd int) error {
 	return unix.IoctlSetPointerInt(fd, unix.TIOCFLUSH, 1)
 }
 

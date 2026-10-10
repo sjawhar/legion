@@ -509,3 +509,26 @@ func TestPromptQuitEndsTheProcessBySIGQUITWithNoCore(t *testing.T) {
 		t.Fatalf("echo is off after Ctrl-\\; the terminal showed %q", out)
 	}
 }
+
+// flushInput records a discardInput failure in the watcher's stopErr, so a refused entry says the
+// discard that keeps unread value bytes from the shell at Ctrl-Z failed. discardInput has never run
+// on a Mac, where a TIOCFLUSH that fails would otherwise go unnoticed.
+func TestFlushInputRecordsADiscardFailure(t *testing.T) {
+	_, terminal := openPTY(t)
+	restore := discardInput
+	t.Cleanup(func() { discardInput = restore })
+
+	discardInput = func(int) error { return errors.New("TIOCFLUSH failed") }
+	failed := &promptTerminal{fd: terminal, watch: &promptWatch{}}
+	failed.flushInput()
+	if failed.watch.stopErr == nil || !strings.Contains(failed.watch.stopErr.Error(), "discard") {
+		t.Fatalf("flushInput must record the discard failure, got %v", failed.watch.stopErr)
+	}
+
+	discardInput = func(int) error { return nil }
+	ok := &promptTerminal{fd: terminal, watch: &promptWatch{}}
+	ok.flushInput()
+	if ok.watch.stopErr != nil {
+		t.Fatalf("a successful discard records no error, got %v", ok.watch.stopErr)
+	}
+}

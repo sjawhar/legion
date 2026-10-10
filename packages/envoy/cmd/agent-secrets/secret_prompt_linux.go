@@ -21,8 +21,9 @@ const (
 )
 
 // discardInput discards what the terminal holds unread (TCFLSH TCIFLUSH, the kernel's
-// tty_ioctl.c), as the kernel's own signal handling would under ISIG.
-func discardInput(fd int) error {
+// tty_ioctl.c), as the kernel's own signal handling would under ISIG. A var so a test can make the
+// flush fail.
+var discardInput = func(fd int) error {
 	return unix.IoctlSetInt(fd, unix.TCFLSH, unix.TCIFLUSH)
 }
 
