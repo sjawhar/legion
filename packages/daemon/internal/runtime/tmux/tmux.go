@@ -70,9 +70,15 @@ type Options struct {
 	// without them, OMP's Dispatch client falls back to the operator's user-level configuration.
 	DispatchURL       string
 	DispatchTokenFile string
-	// Tools names the gh, git, and jj the daemon resolved at boot by the variable every pane
-	// carries them in (LEGION_GH_PATH, LEGION_GIT_PATH, LEGION_JJ_PATH).
-	Tools map[string]string
+	// GitHubCredential is the daemon's function for a tree role's gh files
+	// (runtime.GitHubCredential): hosts.yml and config.yml rendered from the role's App token. A
+	// launch calls it for the pane's claim and writes the two files under the claim's directory
+	// (runtime.GHConfigDir), the pane's GH_CONFIG_DIR, and the refresher started by Observe
+	// (refreshGitHubCredentials) calls it again for every tracked pane and rewrites hosts.yml when
+	// the render changed; never for the controller, which has no App. Nil is a daemon with no
+	// GitHub Apps (Stage 2's, which configures no workflow): its panes are told no GH_CONFIG_DIR,
+	// hold no gh files, and the refresher does nothing.
+	GitHubCredential runtime.GitHubCredential
 	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
 	OmpInvocation   string
@@ -108,30 +114,30 @@ type Options struct {
 
 // Runtime is the tmux runtime. Build one with New.
 type Runtime struct {
-	socket         string
-	stateDir       string
-	streamAddress  string
-	daemonURL      string
-	envoyURL       string
-	natsURLs       []string
-	dispatchURL    string
-	dispatchToken  string
-	tools          map[string]string
-	ompInvocation  string
-	ompPrefix      []string
-	stopGrace      time.Duration
-	probeInterval  time.Duration
-	adoptTimeout   time.Duration
-	commandTimeout time.Duration
-	conns          runtime.Conns
-	paneEnv        map[string]string
-	environ        []string
-	tmuxPath       string
-	legion         string
-	now            func() time.Time
-	log            *slog.Logger
-	providerEnvDir string
-	providerKeys   []string
+	socket           string
+	stateDir         string
+	streamAddress    string
+	daemonURL        string
+	envoyURL         string
+	natsURLs         []string
+	dispatchURL      string
+	dispatchToken    string
+	gitHubCredential runtime.GitHubCredential
+	ompInvocation    string
+	ompPrefix        []string
+	stopGrace        time.Duration
+	probeInterval    time.Duration
+	adoptTimeout     time.Duration
+	commandTimeout   time.Duration
+	conns            runtime.Conns
+	paneEnv          map[string]string
+	environ          []string
+	tmuxPath         string
+	legion           string
+	now              func() time.Time
+	log              *slog.Logger
+	providerEnvDir   string
+	providerKeys     []string
 
 	// run executes one tmux argv. A field so an in-package test can record every argv the
 	// runtime hands tmux; New sets it to runTmux.
@@ -207,31 +213,31 @@ func New(opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	r := &Runtime{
-		socket:         "legion-" + opts.Project,
-		stateDir:       opts.StateDir,
-		streamAddress:  opts.StreamAddress,
-		daemonURL:      opts.DaemonURL,
-		envoyURL:       opts.EnvoyURL,
-		natsURLs:       opts.NatsURLs,
-		dispatchURL:    opts.DispatchURL,
-		dispatchToken:  opts.DispatchTokenFile,
-		tools:          opts.Tools,
-		ompInvocation:  opts.OmpInvocation,
-		ompPrefix:      opts.OmpLaunchPrefix,
-		stopGrace:      opts.StopGrace,
-		probeInterval:  opts.ProbeInterval,
-		adoptTimeout:   opts.AdoptTimeout,
-		commandTimeout: opts.CommandTimeout,
-		conns:          opts.Conns,
-		paneEnv:        paneEnv,
-		tmuxPath:       tmuxPath,
-		legion:         legion,
-		now:            opts.Now,
-		log:            opts.Log,
-		providerEnvDir: opts.ProviderEnvDir,
-		providerKeys:   providerKeys,
-		readProc:       os.ReadFile,
-		tracked:        map[string]*trackedProcess{},
+		socket:           "legion-" + opts.Project,
+		stateDir:         opts.StateDir,
+		streamAddress:    opts.StreamAddress,
+		daemonURL:        opts.DaemonURL,
+		envoyURL:         opts.EnvoyURL,
+		natsURLs:         opts.NatsURLs,
+		dispatchURL:      opts.DispatchURL,
+		dispatchToken:    opts.DispatchTokenFile,
+		gitHubCredential: opts.GitHubCredential,
+		ompInvocation:    opts.OmpInvocation,
+		ompPrefix:        opts.OmpLaunchPrefix,
+		stopGrace:        opts.StopGrace,
+		probeInterval:    opts.ProbeInterval,
+		adoptTimeout:     opts.AdoptTimeout,
+		commandTimeout:   opts.CommandTimeout,
+		conns:            opts.Conns,
+		paneEnv:          paneEnv,
+		tmuxPath:         tmuxPath,
+		legion:           legion,
+		now:              opts.Now,
+		log:              opts.Log,
+		providerEnvDir:   opts.ProviderEnvDir,
+		providerKeys:     providerKeys,
+		readProc:         os.ReadFile,
+		tracked:          map[string]*trackedProcess{},
 	}
 	if r.commandTimeout == 0 {
 		r.commandTimeout = defaultCommandTimeout

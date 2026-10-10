@@ -2,10 +2,6 @@ package api
 
 import (
 	"bytes"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,17 +9,19 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 const realGitHubProofEnabled = "LEGION_REAL_GITHUB"
 
-// TestRealGitHubCredentialSurface keeps the Stage 3 credential proof beside the real API it
-// drives. It is intentionally gated: CI has no Legion App keys, whereas the devbox command is a
-// release gate and Task 3.14 reuses the same proof rather than rebuilding an ad-hoc rig.
+// TestRealGitHubCredentialSurface keeps the Stage 3 credential proof beside the real Apps it
+// drives: each role's App token reaches a plain gh and git as the gh files the daemon renders
+// (internal/ghconfig). It is intentionally gated: CI has no Legion App keys, whereas the devbox
+// command is a release gate and Task 3.14 reuses the same proof rather than rebuilding an ad-hoc
+// rig.
 func TestRealGitHubCredentialSurface(t *testing.T) {
 	if os.Getenv(realGitHubProofEnabled) != "1" {
 		t.Skip("set LEGION_REAL_GITHUB=1 to run the real GitHub App credential proof")
@@ -52,56 +50,38 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 		Pool:        h.store.Pool(),
 		Record:      record.NewStore(),
 	}).Handler
-	server := httptest.NewServer(h.handler)
-	defer server.Close()
+	gh := realGh(t)
 
-	binary := buildLegionForRealProof(t)
-	implementer := registerRealClaim(t, h, server.URL, claim.RoleImplementer)
-	reviewer := registerRealClaim(t, h, server.URL, claim.RoleReviewer)
-
-	implementerLogin := runRealGH(t, binary, server.URL, mintRealGrant(t, server.URL, implementer),
-		"api", "graphql", "-f", "query={viewer{login}}")
-	if !strings.Contains(implementerLogin.stdout, "legion-implementer[bot]") {
-		t.Fatalf("implementer viewer login = %q; stderr %q", implementerLogin.stdout, implementerLogin.stderr)
-	}
-	t.Logf("implementer GraphQL login: %s", strings.TrimSpace(implementerLogin.stdout))
-
-	reviewerLogin := runRealGH(t, binary, server.URL, mintRealGrant(t, server.URL, reviewer),
-		"api", "graphql", "-f", "query={viewer{login}}")
-	if !strings.Contains(reviewerLogin.stdout, "legion-reviewer[bot]") {
-		t.Fatalf("reviewer viewer login = %q; stderr %q", reviewerLogin.stdout, reviewerLogin.stderr)
-	}
-	t.Logf("reviewer GraphQL login: %s", strings.TrimSpace(reviewerLogin.stdout))
-
-	listed := runRealGH(t, binary, server.URL, mintRealGrant(t, server.URL, implementer),
-		"pr", "list", "--repo", "sjawhar/legion-smoke")
-	if listed.code != 0 {
-		t.Fatalf("implementer pr list exit %d: %s", listed.code, listed.stderr)
+	// Each App's lease, rendered as the role's gh files, is whose login the real gh reports.
+	dirs := map[appauth.AppRole]string{}
+	for _, role := range appauth.Roles {
+		lease, err := tokens.Token(h.ctx, role, "sjawhar")
+		if err != nil {
+			t.Fatalf("mint the %s App's lease: %v", role, err)
+		}
+		dirs[role] = writeRealGhFiles(t, lease.Token)
+		viewer := runRealGh(t, gh, dirs[role], "api", "graphql", "-f", "query={viewer{login}}", "--jq", ".data.viewer.login")
+		if viewer.code != 0 || strings.TrimSpace(viewer.stdout) != lease.Identity.Name {
+			t.Fatalf("%s App viewer login through gh = %q (exit %d, stderr %q), want %q", role, viewer.stdout, viewer.code, viewer.stderr, lease.Identity.Name)
+		}
+		t.Logf("%s App GraphQL login through gh: %s", role, strings.TrimSpace(viewer.stdout))
 	}
 
-	refused := runRealGH(t, binary, server.URL, "unused-refused-merge-grant",
-		"pr", "merge", "1", "--repo", "sjawhar/legion-smoke")
-	if refused.code == 0 || !strings.Contains(refused.stderr, "Legion never merges a pull request") {
-		t.Fatalf("merge refusal exit %d, stdout %q, stderr %q", refused.code, refused.stdout, refused.stderr)
+	// The negative control: a GH_CONFIG_DIR with no gh files authenticates nobody.
+	denied := runRealGh(t, gh, t.TempDir(), "api", "graphql", "-f", "query={viewer{login}}")
+	if denied.code == 0 {
+		t.Fatalf("gh with an empty GH_CONFIG_DIR exit 0, stdout %q; want it refused", denied.stdout)
 	}
-	t.Logf("refused merge: exit=%d %s", refused.code, strings.TrimSpace(refused.stderr))
+	t.Logf("gh with an empty GH_CONFIG_DIR: exit=%d %s", denied.code, strings.TrimSpace(denied.stderr))
 
-	cloneGrant := mintRealGrant(t, server.URL, implementer)
-	grantFile := writeRealGrant(t, cloneGrant)
-	clone := exec.Command("git", "-c", "credential.helper=", "-c", "credential.helper=!"+binary+" credential",
+	clone := exec.Command("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
 		"clone", "https://github.com/sjawhar/legion-smoke", filepath.Join(t.TempDir(), "legion-smoke"))
-	clone.Env = append(realCLIEnvironment(server.URL, grantFile), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	clone.Env = append(realCLIEnvironment(gh, dirs[appauth.Implement]), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
 	output, err := clone.CombinedOutput()
 	if err != nil {
-		t.Fatalf("clone through legion credential helper: %v: %s", err, strings.TrimSpace(string(output)))
+		t.Fatalf("clone through gh auth git-credential: %v: %s", err, strings.TrimSpace(string(output)))
 	}
-	t.Log("clone through legion credential helper: succeeded")
-}
-
-type realClaim struct {
-	session string
-	secret  string
-	issue   string
+	t.Log("clone through gh auth git-credential: succeeded")
 }
 
 func privateKeyCommand(key string) string {
@@ -111,67 +91,34 @@ func privateKeyCommand(key string) string {
 	return "secrets " + key + ` -- sh -c 'value=$(printf %s "${` + key + `}" | tr "_-" "/+"); case $((${#value} % 4)) in 1) value=${value%?};; esac; case $((${#value} % 4)) in 2) value="${value}==";; 3) value="${value}=";; esac; printf %s "$value" | base64 -d'`
 }
 
-func registerRealClaim(t *testing.T, h *harness, baseURL string, role claim.Role) realClaim {
-	t.Helper()
-	issue := "LEGION-208"
-	_, boot := h.launch(issue, role)
-	session := "real_" + string(role)
-	body, err := json.Marshal(claim.RegisterRequest{
-		BootToken: boot, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
-		AgentID: "agent-" + session, PluginContract: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := http.Post(baseURL+"/legion/v1/claims/register", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("register %s claim: %v", role, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(response.Body)
-		t.Fatalf("register %s claim = %d: %s", role, response.StatusCode, strings.TrimSpace(string(payload)))
-	}
-	var registered claim.RegisterResponse
-	if err := json.NewDecoder(response.Body).Decode(&registered); err != nil {
-		t.Fatalf("decode %s registration: %v", role, err)
-	}
-	return realClaim{session: session, secret: registered.Secret, issue: issue}
-}
-
-func mintRealGrant(t *testing.T, baseURL string, c realClaim) string {
-	t.Helper()
-	body, err := json.Marshal(GrantRequest{SessionID: c.session, Secret: c.secret, Tree: c.issue, Issue: c.issue})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := http.Post(baseURL+"/legion/v1/grants", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("mint grant: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(response.Body)
-		t.Fatalf("mint grant = %d: %s", response.StatusCode, strings.TrimSpace(string(payload)))
-	}
-	var grant GrantResponse
-	if err := json.NewDecoder(response.Body).Decode(&grant); err != nil || grant.GrantID == "" {
-		t.Fatalf("decode grant: %v", err)
-	}
-	return grant.GrantID
-}
-
 type realCommandResult struct {
 	stdout string
 	stderr string
 	code   int
 }
 
-func runRealGH(t *testing.T, binary, daemonURL, grant string, args ...string) realCommandResult {
+// realGh is the real GitHub CLI the proof runs: the gh on PATH, unless it is an older Legion pane's
+// shim (`<state_dir>/worker-bin/gh`), in which case the CLI it stood in front of at
+// /usr/local/bin/gh, as internal/ghconfig's own gh-backed test picks it.
+func realGh(t *testing.T) string {
 	t.Helper()
-	grantFile := writeRealGrant(t, grant)
-	command := exec.Command(binary, append([]string{"gh", "--"}, args...)...)
-	command.Env = realCLIEnvironment(daemonURL, grantFile)
+	path, err := exec.LookPath("gh")
+	if err == nil && filepath.Base(filepath.Dir(path)) != "worker-bin" {
+		return path
+	}
+	if path, err := exec.LookPath("/usr/local/bin/gh"); err == nil {
+		return path
+	}
+	t.Fatal("no real gh on this machine: the proof needs one to read the rendered files")
+	return ""
+}
+
+// runRealGh runs the real gh with the gh files under configDir as its GH_CONFIG_DIR and nothing in
+// the environment outranking them.
+func runRealGh(t *testing.T, gh, configDir string, args ...string) realCommandResult {
+	t.Helper()
+	command := exec.Command(gh, args...)
+	command.Env = realCLIEnvironment(gh, configDir)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
@@ -183,40 +130,38 @@ func runRealGH(t *testing.T, binary, daemonURL, grant string, args ...string) re
 		result.code = exit.ExitCode()
 		return result
 	}
-	t.Fatalf("run legion gh %s: %v", strings.Join(args, " "), err)
+	t.Fatalf("run gh %s: %v", strings.Join(args, " "), err)
 	return realCommandResult{}
 }
 
-func writeRealGrant(t *testing.T, grant string) string {
+// writeRealGhFiles writes a role's two gh files for token into a fresh directory, read-only as a
+// pod's Secret volume is, and returns the directory.
+func writeRealGhFiles(t *testing.T, token string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "grant")
-	if err := os.WriteFile(path, []byte(grant+"\n"), 0o600); err != nil {
-		t.Fatalf("write grant file: %v", err)
-	}
-	return path
-}
-
-func realCLIEnvironment(daemonURL, grantFile string) []string {
-	// legion gh runs the gh a daemon names on its panes; this proof names the one it would resolve.
-	gh := os.Getenv("LEGION_GH_PATH")
-	if gh == "" {
-		gh, _ = exec.LookPath("gh")
-	}
-	return append(os.Environ(), "LEGION_DAEMON_URL="+daemonURL, "LEGION_GRANT_FILE="+grantFile, "LEGION_GH_PATH="+gh,
-		"LEGION_STATE_DIR="+filepath.Dir(grantFile), "GH_CONFIG_DIR="+filepath.Join(filepath.Dir(grantFile), "gh"))
-}
-
-func buildLegionForRealProof(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
-	if err != nil {
+	dir := filepath.Join(t.TempDir(), "gh")
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(t.TempDir(), "legion")
-	command := exec.Command("go", "build", "-o", binary, "./cmd/legion")
-	command.Dir = filepath.Join(root, "packages", "daemon")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build legion binary: %v: %s", err, strings.TrimSpace(string(output)))
+	// TempDir's cleanup removes the directory, which it cannot do while it is read-only; cleanups
+	// run last-registered first, so this one runs before TempDir's.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	for name, content := range map[string]string{ghconfig.HostsFile: ghconfig.Hosts(token), ghconfig.ConfigFile: ghconfig.Config} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o400); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
-	return binary
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// realCLIEnvironment is a pane's environment as far as gh and git read it: the real gh's directory
+// first on PATH, so git's `gh auth git-credential` helper is that gh, the gh files configDir holds
+// as GH_CONFIG_DIR, and GH_TOKEN, GITHUB_TOKEN and GH_HOST empty so nothing inherited outranks the
+// files.
+func realCLIEnvironment(gh, configDir string) []string {
+	return append(os.Environ(),
+		"PATH="+filepath.Dir(gh)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GH_CONFIG_DIR="+configDir, "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=")
 }

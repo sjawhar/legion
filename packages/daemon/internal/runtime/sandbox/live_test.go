@@ -734,7 +734,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
 		Agent: stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
-		Tokens: r.tokens, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
+		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
 	}
 	if r.env.agentSecretsURL != "" {
 		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}

@@ -27,6 +27,10 @@ const winitWait = 30 * time.Second
 
 const winitRepo = "acme/widgets"
 
+// winitHelper is the credential helper every provisioned clone gets; a test function's local
+// `workspace` path shadows the package where the clone is checked.
+const winitHelper = workspace.GitHubCredentialHelper
+
 // fakeJJ is the jj first on the tree volume's PATH. It records every invocation as one line,
 // "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
 // pin — with WINIT_HOLD set, a clone of github.com/acme/widgets (which reaches the pod's feed)
@@ -161,7 +165,7 @@ func (v *treeVolume) fetchArgs() []string {
 }
 
 func (v *treeVolume) args(issue string) []string {
-	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", "!legion credential", "--feed", v.feed}
+	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", winitHelper, "--feed", v.feed}
 }
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
@@ -447,12 +451,13 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 
 // A fresh tree volume, provisioned from the feed `fetch` filled: the shared clone, its origin still
 // GitHub's, and the issue's jj workspace on its bookmark, the clone's credential helper the one
-// named, the gh shim first on a pod's PATH and no tmux pane's `legion` launcher (a pod's PATH names
-// the image's legion), the two directories the main container mounts, one log line naming the
-// workspace — and the repository lock free once it is done, so the next pod's init container
-// never waits on a finished one. The permanent guard on the pod path: a recording `codegraph`
-// stub is first on PATH throughout, and this container must never call it (#1647) — only a
-// synchronous warm-up regressing back onto the init container's launch path would.
+// named, no gh shim and no tmux pane's `legion` launcher on the volume (a pod's PATH names the
+// image's gh and legion, and its credential is the gh files its role Secret projects), the
+// sessions directory the main container mounts, one log line naming the workspace — and the
+// repository lock free once it is done, so the next pod's init container never waits on a finished
+// one. The permanent guard on the pod path: a recording `codegraph` stub is first on PATH
+// throughout, and this container must never call it (#1647) — only a synchronous warm-up regressing
+// back onto the init container's launch path would.
 func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
@@ -475,26 +480,17 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 		t.Fatalf("the clone's origin is %q, want GitHub's", origin)
 	}
 	helpers, err := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper").Output()
-	if err != nil || !strings.HasSuffix(string(helpers), "\n!legion credential\n") {
+	if err != nil || !strings.HasSuffix(string(helpers), "\n"+winitHelper+"\n") {
 		t.Fatalf("the clone's credential helpers are %q (%v), want the named helper last", helpers, err)
 	}
 
-	shim := filepath.Join(v.root, "worker-bin", "gh")
-	info, err := os.Stat(shim)
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("the gh shim: %v (%v), want a 0700 script", info, err)
-	}
-	if body, err := os.ReadFile(shim); err != nil || !strings.Contains(string(body), `exec legion gh -- "$@"`) ||
-		!strings.Contains(string(body), "'"+filepath.Join(v.root, "worker-bin")+":'") {
-		t.Fatalf("the gh shim is %q (%v), want it to strip its own directory and exec legion gh", body, err)
-	}
-	if _, err := os.Stat(filepath.Join(v.root, "bin")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the tree volume holds a legion launcher directory (%v), want only the gh shim", err)
-	}
-	for _, dir := range []string{"sessions", "gh"} {
-		if info, err := os.Stat(filepath.Join(v.root, dir)); err != nil || !info.IsDir() {
-			t.Fatalf("%s: %v (%v), want a directory", dir, info, err)
+	for _, dir := range []string{"worker-bin", "bin", "gh"} {
+		if _, err := os.Stat(filepath.Join(v.root, dir)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the tree volume holds %s (%v), want no shim, launcher or gh directory of the daemon's", dir, err)
 		}
+	}
+	if info, err := os.Stat(filepath.Join(v.root, "sessions")); err != nil || !info.IsDir() {
+		t.Fatalf("sessions: %v (%v), want a directory", info, err)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".legion", "LEGION-42", "workspace-recovered.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a recovery marker without LEGION_WORKSPACE_RECOVERED_FROM: %v", err)

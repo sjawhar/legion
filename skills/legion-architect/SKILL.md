@@ -16,8 +16,8 @@ separate coordinator to finish necessary work.
   (pattern `^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-41`).
 - The daemon starts every Legion role itself and sequences each issue's phases from its fixed
   workflow table: planner, implementer, tester, reviewer, retro (the implementer again), merger,
-  and, after a human merges, the implementer's production check. One role works an issue at a
-  time, and the handoff or event that ends its phase is what starts the next; you start,
+  and, after the pull request merges, the implementer's production check. One role works an
+  issue at a time, and the handoff or event that ends its phase is what starts the next; you start,
   re-assign and order no worker. Message a known phase worker with `envoy_publish` to
   `notifications.role.` followed by its encoded role token. Phase workers escalate lifecycle,
   product, scope, design, and cross-phase decisions the same way: `envoy_publish` to your own
@@ -46,7 +46,11 @@ the merge credential. They override this skill's defaults where they conflict.
 
 ## 1. Decompose or adopt
 
-Inspect the root issue, acceptance criteria, existing children, and current handoffs.
+Inspect the root issue, acceptance criteria, existing children, and current handoffs. Your issue
+record is the `legion` tool's `read_record`; a child's committed handoff is a plain file on its
+issue branch, read with `read` from that issue's workspace, `.legion/<child>/<phase>.json`, or
+from GitHub:
+`gh api repos/<owner>/<repo>/contents/.legion/<child>/<phase>.json?ref=legion/<child> --jq .content | base64 -d`.
 Decomposition is complete only when every child issue names the real surface its acceptance
 criteria are proven on and the repository skill that drives it; if the repository cannot
 exercise a criterion end to end, building that path is a child issue of this tree.
@@ -263,12 +267,18 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    <tip-sha> --summary`, quoted in READY) and sends the READY packet with its completion, which
    refuses a head that still carries `.legion/<issue>/`; the daemon posts
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the Dispatch
-   issue and publishes it to the project's merge queue role when one is set. Legion never merges; a human merges under the repository's
-   GitHub branch-protection and CODEOWNERS rules. If the merger reports a failed verification,
+   issue and publishes it to the project's merge queue role when one is set. The moment the daemon
+   accepts READY, the merger submits the pull request with
+   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` and tells you what
+   the command answered; the repository's required reviews and checks decide when it lands, and
+   Legion neither reads nor writes those rules. A READY the design gate refused is submitted later:
+   the merger submits nothing on a refusal, so once that spec version is approved and the daemon
+   posts the packet, tell the merger to submit it. If the merger reports a failed verification,
    treat it like `pr-blocked`: the merger holds the phase, so tell it to move the issue back with
    `request_backward_move`, naming what failed; never bypass. A READY refused because the head
    still carries `.legion/<issue>/` goes back to `retro`, so the implementer's retro removes it.
-5. a human merges; the daemon then starts the **implementer** once more, on the production check.
+5. the merge lands under the repository's rules; the daemon then starts the **implementer** once
+   more, on the production check.
    It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Sign off only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
@@ -286,12 +296,12 @@ with `request_backward_move`, and the daemon runs the phases from there: the imp
 the bookmark forward with the
 destination (the forward-merge procedure in `skill://legion-worker/references/conflicts-and-rewrites.md` — `jj new legion/<KEY> <destination>`,
 never a rebase, since a rebase rewrites every descendant of the chain's fork point, including
-another tree's branch stacked on it), pushes it with the ordinary push procedure (a genuine
-fast-forward), and posts the before/after fingerprints; the tester re-runs the bare gates only;
+another tree's branch stacked on it), pushes it as every role pushes (`jj git push`; a genuine
+fast-forward, and a code push, so no `skip-checks: true` line), and posts the before/after fingerprints; the tester re-runs the bare gates only;
 the reviewer confirms and approves the new head by SHA (or continues its round if it had not
 approved); the daemon carries the issue on through retro to the merger, whose new READY packet the daemon posts.
 This merge happens only when GitHub reports `CONFLICTING`
-(`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
+(`gh pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
 wake — `phase-finished`, `catch-up`, `checks-red`, `review-stuck` — because a `CONFLICTING`
 PR gets no CI and no wake announces it. The moment you see it, tell the worker holding the issue's
 phase (`envoy_publish` to its role topic) to move the issue back to `implementing` with
@@ -299,19 +309,14 @@ phase (`envoy_publish` to its role topic) to move the issue back to `implementin
 naming the conflict for the human who merges. Do not let the merger send a READY packet for an
 obsolete approval.
 
-If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
-to resolve, open a `dispatch ask` that names the thread's URL and GitHub's message for a human to
-resolve it by hand, with options for resolved / could not; the merger does not complete while it
-is open. That is the one review-thread step a human takes: the review App cannot resolve a thread
-on a pull request the implementer opened, and the implementer's and merger's runs of the command
-close every accepted one.
-
-If a reviewer reports that `legion threads resolve` exited 1 counting threads that hold the
-implement App's pending draft (the daemon counts them and never names them), tell the worker
-holding the issue's phase (`envoy_publish` to its role topic) to move the issue back to
-`implementing` with `request_backward_move`, naming the count, so the implementer submits or
-discards its pending review; its own run of the command names those threads `left open … an
-unsubmitted draft in a pending review`. Open no ask for it: the implementer clears it.
+If the implementer reports that GitHub refused to resolve a review thread — its own
+`resolveReviewThread`, on a thread it answered or one the reviewer named as accepted — open a
+`dispatch ask` that names the thread's id or URL and GitHub's message for a human to resolve it by
+hand, with options for resolved / could not; the merger does not complete while it is open. That
+is the one review-thread step a human takes: GitHub lets only the pull request author's App
+resolve a thread, so the implementer resolves every thread with plain `gh`, the ones it answers
+and the bot threads the reviewer accepted and named to it (an Envoy message to the implementer's
+role topic, or its review body); the reviewer resolves none.
 
 ## 7. Close
 

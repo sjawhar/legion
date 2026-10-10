@@ -9,7 +9,7 @@ tags:
   - idempotence
   - verification
 date: 2026-10-07
-status: active
+status: superseded by LEGION-631 — `legion gh` and `legion push` are gone; the same reads and retries are plain `gh` as the role's App and plain `jj git push --bookmark legion/<KEY>`, and the read-the-object-before-retrying rule stands
 module: legion gh, legion push
 applies_when:
   - A `legion gh -- api --method PATCH`, a `gh pr edit` or a GraphQL mutation answers `HTTP 500`, `Something went wrong`, or an empty body

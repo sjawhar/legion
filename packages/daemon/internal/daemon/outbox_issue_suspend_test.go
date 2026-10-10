@@ -168,7 +168,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 			StorageClass: "standard", TreeVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371",
 			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout: time.Second, BootIntervals: 2, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-			Tokens: issueProvisionTokens{}, Conns: fake.NewConns(), Log: quietLogger(),
+			Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: quietLogger(),
 		})
 		if err != nil {
 			t.Fatal(err)

@@ -22,7 +22,6 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -130,7 +129,7 @@ func runWorkspaceController(_ context.Context, args []string, stdout, stderr io.
 
 // workspaceController prepares the controller's volume: the sessions directory Oh My Pi's
 // sessions are mounted from, and nothing else — the controller works no repository and holds no
-// GitHub credential, so it gets no workspace and no gh shim. On a resume it holds the controller to
+// GitHub credential, so it gets no workspace and no gh files. On a resume it holds the controller to
 // the session it recorded, as workspace-init holds a tree agent: a session gone from the volume
 // means the volume was lost (the controller's volume holds nothing else to tell a lost volume from
 // a lost file), which the runtime reads from workspaceLostExitCode, so the daemon relaunches a
@@ -189,8 +188,8 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 
 // workspaceInit validates everything before it touches the volume, --repo first, and refuses to
 // run where the provisioning token is pointed at: this is the process that runs git and jj against what every
-// agent of the tree can write. Then it installs the gh shim, creates the directories the main
-// container mounts, holds a resume to the same agent, and provisions from the feed under the
+// agent of the tree can write. Then it creates the directories the main container mounts, holds a
+// resume to the same agent, and provisions from the feed under the
 // repository lock, which it holds until it returns.
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
@@ -247,13 +246,8 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 			}
 		}
 	}
-	if err := workerbin.InstallGh(root); err != nil {
-		return err
-	}
-	for _, dir := range []string{"sessions", "gh"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", filepath.Join(root, dir), err)
-		}
+	if err := os.MkdirAll(filepath.Join(root, "sessions"), 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Join(root, "sessions"), err)
 	}
 
 	release, err := lockRepository(ctx, cloneDir+".lock", repository, lockWait, stdout)
@@ -496,7 +490,7 @@ func workspaceInitLockWait() (int64, error) {
 }
 
 // provisioningTools resolves the named tools a provisioning step runs from PATH — in an init
-// container the image's, with no worker-bin shim or operator rc ahead of them — where the
+// container the image's, with no operator rc ahead of them — where the
 // TypeScript runner found them (processEnvRunner, workspace-init.ts).
 func provisioningTools(names ...string) (map[string]string, error) {
 	tools := map[string]string{}

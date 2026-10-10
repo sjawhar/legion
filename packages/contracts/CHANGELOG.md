@@ -81,13 +81,6 @@
 
 ### Added
 
-- `LegionThreadsResolveRequest` and `LegionThreadsResolveResponse`, the body and the answer of the
-  Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer pane's `legion threads
-  resolve` calls: the grant and the pull request it names, then each unresolved review thread's
-  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), `withheld`, the
-  count of threads whose newest comment is a draft in the implement App's pending review, which the
-  answer never names, and `refused`, the thread GitHub refused to resolve and its message, when one
-  stopped the run (LEGION-544).
 - `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
   removed, the head it wrote, the validation error the history failed with, and `source_version`,
   the version the rebuilt document holds (its latest saved version, or the version supplied
@@ -146,7 +139,6 @@
 - Added `PROJECT_KEY_PATTERN`, a whole project key as the Dispatch server creates them; `dispatch_search`'s `project` must now be empty or match it (`project must be a project key such as CORE`), where any other value was sent and answered with no results.
 - Added `maxHint` to `SchemaApi.string`'s options: text appended to the over-cap message, saying what to send instead.
 - Added `LegionGoChildRequest`, the body of the Go daemon's `POST /legion/v1/children/park` and `/rerun` (an architect's `park_child` and `rerun_child`), whose answers are `LegionGoEmptyResponse`.
-- Added optional `legionAppLogins` to `LegionGoGitHubTokenResponse` and to `LegionDaemonApi.GitHubToken`'s response: each Legion role App's login keyed by its App role (`{implement, review}`), on `/legion/v1/gh-token`, which `legion threads resolve` keeps out of its bot-thread rule and whose `review` login's `Accepted:` closes a bot's thread (LEGION-208).
 - Added optional `Message.broadcast_id`, the broadcast a message is one recipient's copy of: null
   for every other message, absent from a Dispatch older than the field. Added optional
   `AgentStreamMessage.dispatchMessageId`, the Dispatch message a streamed user message delivered,
@@ -171,13 +163,26 @@
 
 - The `dispatch_issues` description says Dispatch pages the listing and the answer names how many
   issues match, where it said the rows were paged after the server returned the full response.
+- `LegionHandoffCompleteRequest` keeps `commit`, now the pushed commit carrying the phase's handoff
+  (`.legion/<issue>/<phase>.json`), which the `legion` tool's `handoff_complete` finds in the pane
+  with its jj before posting, as `legion handoff complete` did; `LegionHandoffCompleteResponse`
+  gains `note`, what READY's checks say when READY was published without reading the pull
+  request's head (already merged, or a base requiring no check). The daemon reads no handoff file
+  and no branch head; READY's checks (`READY_HEAD_CARRIES_HANDOFFS`, `READY_CHECKS_NOT_GREEN`) run
+  in the daemon (LEGION-631).
 
 ### Removed
 
+- Removed `LegionGitHubTokenResponse`, `LegionGitCredentialResponse`, `LegionGrantRequest.push` and
+  `LegionGrantCredentialRequest`, with the `github-token.json`, `git-credential.json` and
+  `provisioning-credential.json` fixtures: the Legion daemon's `POST /legion/v1/gh-token`,
+  `/git-credential` and `/provisioning-credential` routes and the push grant lifetime are deleted,
+  since each role's GitHub App token is now a file its plain `gh` and `git` read (LEGION-631).
 - Removed `HandoffMessage`, `validateHandoffMessage`, and `MESSAGES_DIR_NAME`: the `legion handoff message|messages` commands they served are gone, and nothing else read `.legion/messages/`.
 - Removed `legionNoticeSubject`: the Go daemon publishes no notice on an issue's topic any more, and its one caller, `legionControllerNoticeSubject`, now builds the controller topic itself.
 - Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
   `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
   `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
-  `PLAN_REVIEW_VERDICTS`. The Go `legion handoff write` holds each phase's handoff to the same
-  rules and names every field at fault; `HANDOFF_PHASES`, the `legion` tool's phase words, stays.
+  `PLAN_REVIEW_VERDICTS`, and `HANDOFF_PHASES` with the `legion` tool's `handoff_write`/`handoff_read`
+  that took one (LEGION-631). Nothing holds a handoff to a shape any more: each role's prompt spells
+  the fields its handoff carries, and the worker writes the file itself.

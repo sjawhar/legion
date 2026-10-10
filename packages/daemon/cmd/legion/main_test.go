@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 	// test-created repository ever registers a root with the operator's long-running watchman.
 	// watchman drops a root once its directory is deleted, so without this, the roots that pile
 	// up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
-	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, treeVolume's
-	// isolated one) still wins: os.Environ() is read fresh by every exec.Command.
+	// that sets its own JJ_CONFIG afterward (treeVolume's isolated one) still wins: os.Environ() is
+	// read fresh by every exec.Command.
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -331,10 +331,8 @@ func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
 		table   map[string]command
 	}{
 		{"claims", claimsCommands},
-		{"handoff", handoffCommands},
 		{"workspace-init", workspaceInitCommands},
 		{"controller", controllerCommands},
-		{"threads", threadsCommands},
 	} {
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)
@@ -592,6 +590,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
 		{extra: "nats_nkey_seed_file: ./nats-seed\nprovider_keys: {NATS_NKEY_SEED: NATS_NKEY_SEED_TESTS}\n", says: "provider_keys names NATS_NKEY_SEED, the launch secret every launch carries"},
+		{extra: "provider_keys: {GH_TOKEN: GH_TOKEN_TESTS}\n", says: "provider_keys names GH_TOKEN, which the daemon sets on every pane and pod"},
 	} {
 		config, marker := workflowConfig(t, 13370, variant.extra)
 		if variant.drop != "" {
@@ -619,9 +618,8 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 
 // --check-config makes every refusal boot makes from the configuration, the environment and the
 // files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
-// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation,
-// and the host's gh, git and jj. Each is refused in boot's words, no App key command runs, and no
-// state directory is made.
+// operator bearer's file, the Dispatch bearer's file, the instructions file and the OMP invocation.
+// Each is refused in boot's words, no App key command runs, and no state directory is made.
 func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct {
@@ -651,10 +649,6 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
 			func(string) string {
 				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
-			}},
-		{"a relative LEGION_GIT_PATH", "", func(t *testing.T, _ string) { t.Setenv("LEGION_GIT_PATH", "bin/git") },
-			func(string) string {
-				return `legion start: LEGION_GIT_PATH is not an absolute executable path: "bin/git"` + "\n"
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import {
   brokenRelativeLinks,
@@ -65,4 +65,22 @@ test("every legion-worker reference is linked from a skill or a prompt", () => {
     .map((file) => path.relative(workerRoot, file))
     .filter((reference) => !linked.has(reference));
   expect(unlinked).toEqual([]);
+});
+
+// The merger submits the merge itself once READY is accepted (LEGION-631), and Legion enforces no
+// GitHub restriction the repository itself does not: the worker skill names the command, and no
+// skill a Legion pane loads, and no daemon prompt, says Legion never merges.
+test("the worker skill names the merger's merge command, and no skill or prompt says Legion never merges", () => {
+  const command = "`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`";
+  for (const file of ["legion-worker/references/merge-gate.md", "legion-worker/SKILL.md"]) {
+    expect(readFileSync(path.join(staged, file), "utf8")).toContain(command);
+  }
+  const saying = [staged, promptsRoot]
+    .flatMap(files)
+    .filter(
+      (file) =>
+        file.endsWith(".md") && /never merges|merges? nothing/i.test(readFileSync(file, "utf8"))
+    )
+    .map((file) => path.relative(REPO_ROOT, file));
+  expect(saying).toEqual([]);
 });

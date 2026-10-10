@@ -338,8 +338,8 @@ branch requires`); the daemon reads again every two minutes.
 ## A status change did not stick
 
 The daemon owns a running tree's status. A status an agent session writes on a running root is set
-back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, or
-`legion status` from the controller or an operator's shell, is what takes a tree out.
+back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
+controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
 
 When the daemon's own status writes to Dispatch are failing, `legion state` says so on its third
 line:

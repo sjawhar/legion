@@ -342,76 +342,32 @@ export const LegionOperatorClaimsResponse = z.strictObject({
   claims: z.array(LegionOperatorClaimResponse),
 });
 
-/** Credential grant, GitHub token, and git-helper bodies from `internal/api/credentials.go`. */
+/** The credential grant body from `internal/api/credentials.go`. */
 export const LegionGrantResponse = z.strictObject({
   grantId: nonEmptyString,
   expiresAt: timestamp,
 });
 export type LegionGrant = z.output<typeof LegionGrantResponse>;
-/** A GitHub App's git identity, `<slug>[bot]`, with a slug. */
-const appLogin = z.string().regex(/^[^[\]]+\[bot\]$/);
-export const LegionGitHubTokenResponse = z.strictObject({
-  token: nonEmptyString,
-  appLogin: z.string().endsWith("[bot]"),
-  /** `api.GitHubTokenResponse.LegionAppLogins`: each Legion role App's login, keyed by its App role,
-   * on gh-token alone; absent when the daemon could not read every one. */
-  legionAppLogins: z.strictObject({ implement: appLogin, review: appLogin }).optional(),
-});
-export const LegionGitCredentialResponse = z.strictObject({
-  username: z.literal("x-access-token"),
-  password: nonEmptyString,
-});
-
-/** `api.ThreadsResolveRequest`, the reviewer pane's `legion threads resolve`: its grant, and the
- * pull request it names, which must be its issue's. */
-export const LegionThreadsResolveRequest = z.strictObject({
-  grantId: nonEmptyString,
-  repo: nonEmptyString,
-  number: z.number().int().positive(),
-});
-/** `reviewthreads.Outcome`: an unresolved review thread the daemon resolved for the reviewer, on
- * whose acceptance (`resolved`), or left open and why (`leftOpen`) — exactly one of the two — with
- * its newest comment's author. */
-const LegionThreadOutcome = z.union([
-  z.strictObject({
-    url: nonEmptyString,
-    resolved: nonEmptyString,
-    newestBy: nonEmptyString.optional(),
-  }),
-  z.strictObject({
-    url: nonEmptyString,
-    leftOpen: nonEmptyString,
-    newestBy: nonEmptyString.optional(),
-  }),
-]);
-/** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each unresolved
- * thread's outcome, in GitHub's order, but for the threads whose newest comment is a draft in the
- * implement App's pending review, which `withheld` counts without naming; and, when GitHub refused
- * to resolve a thread, that thread and GitHub's message (`refused`), the outcomes and the count
- * before it being all that ran. */
-export const LegionThreadsResolveResponse = z.strictObject({
-  threads: z.array(LegionThreadOutcome),
-  withheld: z.number().int().nonnegative(),
-  refused: z.strictObject({ url: nonEmptyString, error: nonEmptyString }).optional(),
-});
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
+/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
+ * without reading the head's checks (the pull request already merged, or its base requiring none);
+ * every other completion answers none. */
+export const LegionHandoffCompleteResponse = z.strictObject({
+  note: nonEmptyString.optional(),
+});
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
 });
 
 /** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every
- * redemption for sixty seconds while its claim holds the registration that minted it — or, when
- * `push` is true (the extension judged the bash command to run `legion push`), for the daemon's
- * longer push grant lifetime, since jj's own working-copy snapshot before the network push can
- * outrun sixty seconds on a near-full tree volume (dispatch://LEGION-583). */
+ * redemption for sixty seconds while its claim holds the registration that minted it. */
 export const LegionGrantRequest = z.strictObject({
   sessionId: nonEmptyString,
   secret: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
-  push: z.boolean().optional(),
 });
 
 /** `api.GrantRequest`, the controller-session form: the session registered with the current
@@ -421,12 +377,11 @@ export const LegionControllerGrantRequest = z.strictObject({
   secret: nonEmptyString,
 });
 
-/** `api.GrantCredentialRequest`, shared by the three grant-redemption routes. */
-export const LegionGrantCredentialRequest = z.strictObject({
-  grantId: nonEmptyString,
-});
-
-/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. */
+/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. `commit` is
+ * the pushed commit carrying the phase's handoff, `.legion/<issue>/<phase>.json`, which the
+ * `legion` tool's `handoff_complete` finds in the pane with its jj before posting (as
+ * `legion handoff complete` did); a phase that writes no handoff reports the commit the workspace
+ * stands on. The daemon reads no handoff file and no branch head. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
