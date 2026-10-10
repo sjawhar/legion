@@ -270,41 +270,18 @@ cd packages/envoy
 ./scripts/dev-postgres.sh
 ```
 
-It prints the `DATABASE_URL` to use for development and tests. The database
-retains the migrated schema; tests only truncate rows they create.
+It prints the `DATABASE_URL` to use for development and tests. Run again, it starts or reuses the
+same `dispatch-pg` container. It refuses a `dispatch-pg` on any image but its pinned pgvector one,
+whose `vector` extension the migrations need, and prints the commands that move that container's
+data volume onto the pinned image. The database retains the migrated schema; tests only truncate
+rows they create.
 
 
 ## Running locally
 
-`DISPATCH_DEFAULT_PROJECT` must already exist in Postgres — running the
-command below against a fresh database applies migrations, then exits with
-`DISPATCH_DEFAULT_PROJECT "LOCAL" does not exist`. Create the project once:
-
-```sh
-docker exec dispatch-pg psql -U postgres -d dispatch \
-  -c "insert into projects (key, name) values ('LOCAL', 'Local project')"
-```
-
-Then run (or re-run) the server. `DISPATCH_NATS_DISABLED=1` keeps this run off
-the bus entirely; drop it and set `NATS_URLS` to a NATS of your own to exercise
-the publish path. Neither line is optional decoration: without one of them the
-server reads `natsUrls` from your `~/.config/opencode/envoy.json`, which on an
-agent machine names the shared production server, and it would reconcile that
-server's `ENVOY_NOTIFICATIONS` stream on the way in. It refuses to start against
-a NATS that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the
-run means it.
-
-```sh
-cd packages/envoy
-DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
-DISPATCH_AGENT_TOKEN=local-agent-token \
-DISPATCH_IDENTITY='header:X-Dispatch-User' \
-DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-DISPATCH_INSECURE_COOKIE=1 \
-DISPATCH_DEFAULT_PROJECT=LOCAL \
-DISPATCH_NATS_DISABLED=1 \
-go run ./cmd/dispatch
-```
+Run `bun run dispatch:local` at the repository root. It builds this server from the tree, runs it
+in cookie identity with the dev sign-in route, on a seeded database, and prints the URL that opens
+the dashboard signed in; `packages/dispatch/README.md` ("Local instance") documents it.
 
 The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 `DISPATCH_PORT` to change it; `DISPATCH_LISTEN_HOST` may be an IPv6 literal
