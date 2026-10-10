@@ -5,7 +5,8 @@
     "bunx biome check . -\u003e exit 0 (20 pre-existing warnings, none in changed files); packages contracts/pi-shared/pi-legion/envoy-client: bun run lint, typecheck, test, build -\u003e green (pi-legion 214 pass, 7 skip without LEGION_TEST_OMP; contracts 186 pass; envoy-client's 2 failures are the pod's ENVOY_TOKEN_FILE leaking into transport.test.ts, green with it unset)",
     "LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts -\u003e 7 pass on the real omp 18.8.3 with the production host active (run by the extension task's worker)",
     "PATH=\u003cgojq as jq\u003e:$PATH bun test scripts/e2e/lib -\u003e 204 pass (the pod has no jq; gojq stood in)",
-    "bash -n scripts/e2e/stage4b-sandbox-tree.sh -\u003e clean; bash .github/scripts/check-private-names.sh -\u003e clean; check-plugin-names, check-zod-version, check-bun-workspace-manifests -\u003e clean"
+    "bash -n scripts/e2e/stage4b-sandbox-tree.sh -\u003e clean; bash .github/scripts/check-private-names.sh -\u003e clean; check-plugin-names, check-zod-version, check-bun-workspace-manifests -\u003e clean",
+    "round 2: cd packages/pi-legion \u0026\u0026 bun test src/capability-report.test.ts -t \"installation token\" -\u003e 1 pass (the tester's red test, unmodified: no hunk of the round touches it); bun test -\u003e 216 pass, 7 skip (omp tests without LEGION_TEST_OMP); bunx tsc --noEmit, bunx biome check extensions/ src/, bun run build -\u003e clean; bunx biome check . -\u003e exit 0 (20 pre-existing warnings); packages/contracts bun test 186 pass; packages/pi-shared tsc clean; check-private-names clean; grep -rn \"gh api user\" packages/pi-legion docs skills -\u003e none"
   ],
   "commits": [
     "a86735c17ad6 feat(daemon): the capability table renders a live row from the sessions' reports",
@@ -16,9 +17,10 @@
     "a2881e08733e docs: how the six live capability rows are proved by each session's report, and what an open live row means to the controller",
     "1add78134de3 test(e2e): stage 4b proves the live capability rows: full-agent on tree 2 and full-agent-negative on tree 3",
     "891d3b643c20 test(e2e): the cleanup harnesses seed full-agent-negative's globals",
-    "563cd6a81268 refactor: the simplify pass over the capability report"
+    "563cd6a81268 refactor: the simplify pass over the capability report",
+    "93527e6ec21e fix(pi-legion): the github check reads the role's App login through GraphQL viewer, never REST GET /user"
   ],
-  "completed": "2026-10-10T05:20:11.295902389Z",
+  "completed": "2026-10-10T06:38:43.898594699Z",
   "filesChanged": [
     "packages/daemon: internal/capabilities/{capabilities,deployment,image}.go (+tests)",
     "packages/daemon: internal/claim/wire.go",
@@ -75,19 +77,27 @@
       "negativeControl": "The fixture's previous shape (sh -c 'touch marker \u0026\u0026 sleep 600', no MCP protocol) is what the plan replaces because Oh My Pi's client never reaches 'connected' on it; and in the proof above a server configured but not answering reads through the same probe as a status other than 'connected' with the error discoverMCPServers records — the capability-report unit tests pin that row as 'not connected: \u003cname\u003e (\u003cerror\u003e)'",
       "observed": "PROBE_MCP={\"configs\":[\"fixture-omp-mcp\",\"fixture-root-mcp\"],\"statuses\":{\"fixture-omp-mcp\":\"connected\",\"fixture-root-mcp\":\"connected\"},\"errors\":[],\"mcpMs\":382,\"mcpTools\":[\"mcp__fixture_omp_mcp_fixture_echo\",\"mcp__fixture_root_mcp_fixture_echo\"]}; both markers mcp-omp and mcp-root existed afterwards (run against the working copy that became this commit; the heredoc is byte-identical at the code head 563cd6a812683dfe0d041d598eb5bac3965a2552)",
       "surface": "The .omp/mcp-fixture.ts heredoc extracted from scripts/e2e/stage4b-sandbox-tree.sh into a scratch workspace configured under both fixture names, driven by Oh My Pi 18.8.3's own MCP client (discoverMCPServers) from a probe extension in omp --mode rpc"
+    },
+    {
+      "command": "REAL_DAEMON_URL=$LEGION_DAEMON_URL bun /tmp/legion-663-proof/standin.ts \u0026 env -u ENVOY_NATS_URL LEGION_DAEMON_URL=http://127.0.0.1:18663 ENVOY_URL=http://127.0.0.1:18663 LEGION_TREE=LEGION-663 LEGION_ISSUE=LEGION-663 LEGION_ROLE=tester LEGION_PROJECT=legion LEGION_GENERATION=1 LEGION_BOOT_TOKEN=scratch-boot LEGION_STATE_DIR=/tmp/legion-663-proof/state LEGION_WORKSPACE=$LEGION_WORKSPACE omp --mode rpc --no-ui --no-title --session-dir /tmp/legion-663-proof/sessions3 -e /opt/legion/pi-envoy -e $LEGION_WORKSPACE/packages/pi-legion --cwd $LEGION_WORKSPACE \u003c/dev/null; read the recorded claims/ready body",
+      "criterion": "The github row proves the session's GitHub identity under the role's own credential: `gh api graphql -f query='{ viewer { login } }'` answers the role's App login (spec v4 bullet 1), so the six rows read present in a pod",
+      "headSha": "93527e6ec21eb8a7342f8b439f1a7ad804e57455",
+      "negativeControl": "The same session with a credential-less gh first on PATH (a wrapper running /usr/local/bin/gh under an empty GH_CONFIG_DIR with GH_TOKEN, GITHUB_TOKEN and LEGION_GRANT_FILE unset): the github row read ok:false 'gh viewer login failed: gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.' while the other five rows passed (elapsedMs 1094), and the session still reached ready",
+      "observed": "The ready body's capabilities: measuredAt 2026-10-10T06:37:16.334Z, elapsedMs 802, all six rows ok — subagents 'task resolves 11 agents, every one the prompts dispatch'; web-search 'web_search registered; provider parallel answered in 800 ms'; mcp 'no MCP server configured'; repository-extensions 'the repository carries no .omp/extensions, .omp/skills or .claude/skills'; dispatch-envoy-tools 'ten Envoy tools registered; dispatch read LEGION-663 answered from /opt/legion/pi-envoy/bin/dispatch'; github 'gh viewer login: legion-implementer[bot]' (the stand-in log shows the pane's gh-token redemption proxied to the real daemon answering 200)",
+      "surface": "A scratch Oh My Pi 18.8.3 session (omp --mode rpc) in the issue workspace with /opt/legion/pi-envoy and the built packages/pi-legion as explicit extensions, this pod's real profile, search provider, Dispatch and gh (the daemon's worker-bin shim), against the bun stand-in (/tmp/legion-663-proof/standin.ts) serving claims/register, claims/ready (recording its body) and the listener, and proxying POST /legion/v1/gh-token to the pod's own daemon so the pane's gh redeemed the implementer App's real installation token"
     }
   ],
   "pullRequest": {
     "base": "legion/LEGION-631",
     "baseHead": "5707759137292b0fea32092d24bccda2286d7a7e",
-    "codeHead": "563cd6a812683dfe0d041d598eb5bac3965a2552",
+    "codeHead": "93527e6ec21eb8a7342f8b439f1a7ad804e57455",
     "number": 1874,
     "url": "https://github.com/sjawhar/legion/pull/1874"
   },
   "schemaVersion": 1,
-  "summary": "Every root architect's and phase worker's session measures the six live capability rows inside Oh My Pi as it boots (after claims/register, beside the jj attribution and the Envoy role claim) and sends the report with claims/ready; the daemon normalises it (never a refusal), keeps the latest report per claim in memory and in claim_capabilities (migration 0036), logs 'capabilities: session reported' and one 'capability \u003cname\u003e is open: \u003cdetail\u003e' warning per failing row at report time, renders each live row present/open/unchecked from the sessions whose claim is ready/working/idle at the report's incarnation, shows each claim's report on its view, and names open live rows on the controller's tick. Daemon API contract 18 -\u003e 19 (register promptAgents, ready capabilities, claim view capabilities, no live status). Stage 4b gains a bun stdio MCP fixture and the full-agent and full-agent-negative checkpoints.",
+  "summary": "Every root architect's and phase worker's session measures the six live capability rows inside Oh My Pi as it boots (after claims/register, beside the jj attribution and the Envoy role claim) and sends the report with claims/ready; the daemon normalises it (never a refusal), keeps the latest report per claim in memory and in claim_capabilities (migration 0036), logs 'capabilities: session reported' and one 'capability \u003cname\u003e is open: \u003cdetail\u003e' warning per failing row at report time, renders each live row present/open/unchecked from the sessions whose claim is ready/working/idle at the report's incarnation, shows each claim's report on its view, and names open live rows on the controller's tick. Daemon API contract 18 -\u003e 19 (register promptAgents, ready capabilities, claim view capabilities, no live status). Stage 4b gains a bun stdio MCP fixture and the full-agent and full-agent-negative checkpoints. Round 2 (the tester's fail): the github check reads the role's App login through GraphQL {viewer{login}} instead of REST GET /user, which an App installation token cannot call (403 Resource not accessible by integration); the row's detail names the login it read; the docs, AGENTS and CHANGELOG wording moved with it; the tester's red test (8a113f75) passes unmodified.",
   "unresolved": [
-    "The github row's positive proof needs a pod on this branch's image (plain gh under GH_CONFIG_DIR, #1843); it is the Stage 4b run's.",
-    "The 'present' deployment row judged over every live session means one tree whose repository disables a tool (as full-agent-negative does deliberately) opens the row deployment-wide until that process relaunches; the plan lists this as a concern for the architect."
+    "The 'present' deployment row judged over every live session means one tree whose repository disables a tool (as full-agent-negative does deliberately) opens the row deployment-wide until that process relaunches; the plan lists this as a concern for the architect.",
+    "The pod-side proof of the github row ran against the implementer App's token redeemed through today's deployment (the grant shim); under #1843 the same gh reads the token file in GH_CONFIG_DIR — the Stage 4b run at the retargeted head proves that path."
   ]
 }
