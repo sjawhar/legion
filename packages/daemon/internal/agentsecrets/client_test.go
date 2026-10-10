@@ -700,27 +700,63 @@ func TestALoginThatExpiredOrWasDeniedIsRetriedByTheNextEnrollment(t *testing.T) 
 // opened with why, and no login yet. Each stays non-permanent, so the supervisor keeps retrying.
 func TestNoCredentialErrorNamesTheLoginsState(t *testing.T) {
 	for _, tc := range []struct {
-		state   LoginState
-		failure string
-		want    string
+		state LoginState
+		want  string
 	}{
-		{LoginState{State: "pending", Code: "CODE-9"}, "", "machine login pending; code CODE-9"},
-		{LoginState{State: "expired", Code: "CODE-9"}, "", "machine login expired; code CODE-9"},
-		{LoginState{State: "denied", Code: "CODE-9"}, "", "machine login denied; code CODE-9"},
-		{LoginState{State: "none"}, "broker answered 429 RATE_LIMITED: too many", "machine login failed: broker answered 429 RATE_LIMITED: too many"},
-		{LoginState{State: "expired", Code: "CODE-9"}, "broker answered 500 INTERNAL: down", "machine login failed: broker answered 500 INTERNAL: down"},
-		{LoginState{State: "none"}, "", "no machine login yet"},
+		{LoginState{State: "pending", Code: "CODE-9"}, "machine login pending; code CODE-9"},
+		{LoginState{State: "expired", Code: "CODE-9"}, "machine login expired; code CODE-9"},
+		{LoginState{State: "denied", Code: "CODE-9"}, "machine login denied; code CODE-9"},
+		{LoginState{State: "failed", reason: "broker answered 429 RATE_LIMITED: too many"}, "machine login failed: broker answered 429 RATE_LIMITED: too many"},
+		{LoginState{State: "none"}, "no machine login yet"},
 	} {
 		c := &Client{URL: "http://127.0.0.1:1"}
 		c.login.Store(&tc.state)
-		if tc.failure != "" {
-			c.failure.Store(&tc.failure)
-		}
 		err := c.noCredentialError()
 		var api *APIError
 		if !errors.As(err, &api) || api.Code != "NO_MACHINE_CREDENTIAL" || api.Message != tc.want || IsPermanent(err) {
-			t.Errorf("state %+v, failure %q: noCredentialError = %v, want non-permanent NO_MACHINE_CREDENTIAL %q", tc.state, tc.failure, err, tc.want)
+			t.Errorf("state %+v: noCredentialError = %v, want non-permanent NO_MACHINE_CREDENTIAL %q", tc.state, err, tc.want)
 		}
+	}
+}
+
+// TestALoginTheBrokerNeverOpenedReadsFailedUntilTheNextOne: a login the broker refused reads
+// "failed" on LoginStatus, never "none", and the no-credential refusal names why. The next login
+// the broker opens replaces it, so neither that login's pending code nor how it ends reads as the
+// earlier refusal.
+func TestALoginTheBrokerNeverOpenedReadsFailedUntilTheNextOne(t *testing.T) {
+	withFastPolling(t)
+	broker, server := newFakeBroker(t)
+	broker.refuseLogins = []enrollAnswer{{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"too many"}`}}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
+	if _, err := c.Login(context.Background()); err == nil {
+		t.Fatal("Login succeeded, want the broker's 429")
+	}
+	if got := c.LoginStatus(); got.State != "failed" || got.Code != "" {
+		t.Fatalf("LoginStatus after a refused login = %+v, want failed with no code", got)
+	}
+	wantNoCredential(t, c, "machine login failed: broker answered 429 RATE_LIMITED: too many")
+
+	code, err := c.Login(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.LoginStatus(); got.State != "pending" || got.Code != code {
+		t.Fatalf("LoginStatus after the next login opened = %+v, want pending with code %q", got, code)
+	}
+	wantNoCredential(t, c, "machine login pending; code "+code)
+	broker.setPending(1, "denied", "")
+	eventually(t, func() bool { return c.LoginStatus().State == "denied" }, "the login to end denied")
+	wantNoCredential(t, c, "machine login denied; code "+code)
+}
+
+// wantNoCredential checks the refusal Enroll and Revoke return with no credential: non-permanent
+// NO_MACHINE_CREDENTIAL, its message exactly want.
+func wantNoCredential(t *testing.T, c *Client, want string) {
+	t.Helper()
+	err := c.noCredentialError()
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "NO_MACHINE_CREDENTIAL" || api.Message != want || IsPermanent(err) {
+		t.Fatalf("noCredentialError = %v, want non-permanent NO_MACHINE_CREDENTIAL %q", err, want)
 	}
 }
 

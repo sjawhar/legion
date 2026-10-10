@@ -373,7 +373,8 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
 - **`agent-secrets machine login failed; a pod enrollment retries it`.** The broker refused the
   daemon's boot login or could not be reached: a broker too old to accept a service's login with no
   named approver, a `429` from the bucket every service's login shares, or a network fault.
-  Nothing needs restarting. Fix the broker, and the next pod enrollment starts a fresh login whose
-  code is on `.agentSecretsLogin` and in the
-  supervisor's `enrollment failed; retrying on the next observation` warning. The daemon waits
-  30 s after a failed login before the next, doubling to at most 5 minutes.
+  `.agentSecretsLogin` reads `"state": "failed"` until the next login opens. Nothing needs
+  restarting. Fix the broker, and the next pod enrollment starts a fresh login whose code is on
+  `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
+  observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
+  most 5 minutes.

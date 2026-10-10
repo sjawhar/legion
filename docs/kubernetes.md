@@ -1584,7 +1584,8 @@ issue's pod (every role container of it alike) and the image probe's.
   step. The daemon runs its own login at boot, on a background context, and logs the confirmation
   code exactly once: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential
   page, where anyone signed in may approve it; pod enrollment is held until approved`. The same code and the login's current status
-  ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
+  ("none", "pending", "issued", "denied", "expired", or "failed" when the broker never opened the
+  login) are on `GET /legion/v1/state`'s
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
   person signed in to Dispatch approves the code there. When a login ends without a credential
   (the broker refused it or could not be reached, its code expired undecided, or someone denied
