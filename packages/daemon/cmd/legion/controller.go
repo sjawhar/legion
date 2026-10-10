@@ -179,7 +179,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
-	stopGitHubRefresh, err := controllerStartGitHubCredential(ctx, cfg.DaemonURL, secret, filepath.Join(stateDir, "gh"), stateDir, stderr)
+	stopGitHubRefresh, err := controllerStartGitHubCredential(ctx, cfg.DaemonURL, secret, stateDir, stderr)
 	if err != nil {
 		return 0, err
 	}
@@ -264,7 +264,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile str
 		// puts that pane's legion ahead of this one.
 		{"PATH", workerbin.Path(os.Getenv("PATH"), stateDir)},
 		{"PI_SHELL_PREFIX", shellprefix.For(bin)},
-		{"GH_CONFIG_DIR", filepath.Join(stateDir, "gh")},
+		{"GH_CONFIG_DIR", controllerGHDir(stateDir)},
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},

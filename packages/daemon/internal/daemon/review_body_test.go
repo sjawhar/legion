@@ -25,7 +25,8 @@ func TestReviewBodyRestoresATruncatedReviewAppReview(t *testing.T) {
 	}))
 	defer server.Close()
 
-	w := reviewPermissionRuntime(nil, server.URL, quietLogger())
+	pool := reviewPermissionPool(t)
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
 	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, ID: 7, Author: "legion-reviewer[bot]",
 		Body: "a capped body", BodyTruncated: true}
 
@@ -54,7 +55,8 @@ func TestReviewBodyLeavesAnotherAuthorsReviewUnchanged(t *testing.T) {
 	}))
 	defer server.Close()
 
-	w := reviewPermissionRuntime(nil, server.URL, quietLogger())
+	pool := reviewPermissionPool(t)
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
 	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, ID: 7, Author: "a-human",
 		Body: "a capped body", BodyTruncated: true}
 
@@ -70,6 +72,59 @@ func TestReviewBodyLeavesAnotherAuthorsReviewUnchanged(t *testing.T) {
 	}
 }
 
+// A review-App review on a pull request the daemon does not record is dropped unread, as the
+// workflow drops it: its capped body is returned unchanged with no GitHub call made.
+func TestReviewBodyLeavesAnUnrecordedPullRequestsReviewUnchanged(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"body":"should never be read"}`))
+	}))
+	defer server.Close()
+
+	pool := reviewPermissionPool(t)
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 43, ID: 7, Author: "legion-reviewer[bot]",
+		Body: "a capped body", BodyTruncated: true}
+
+	got, err := w.reviewBody(context.Background(), review)
+	if err != nil {
+		t.Fatalf("resolve an unrecorded pull request's review body: %v", err)
+	}
+	if got != "a capped body" {
+		t.Fatalf("reviewBody = %q, want the review's own body unchanged", got)
+	}
+	if calls != 0 {
+		t.Fatalf("GitHub was asked %d times, want none", calls)
+	}
+}
+
+// While GitHub's rate limit stands, a review's body is answered with the wait left and no call is
+// made, as reviewerCanWrite's permission read is.
+func TestReviewBodyWithRateLimitHeldMakesNoRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"body":"should never be read"}`))
+	}))
+	defer server.Close()
+
+	pool := reviewPermissionPool(t)
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+	w.holdRateLimit(2 * time.Minute)
+	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, ID: 7, Author: "legion-reviewer[bot]",
+		Body: "a capped body", BodyTruncated: true}
+
+	_, err := w.reviewBody(context.Background(), review)
+	var later *intake.RetryLater
+	if !errors.As(err, &later) {
+		t.Fatalf("a rate-limited read = %v; want an intake.RetryLater", err)
+	}
+	if calls != 0 {
+		t.Fatalf("GitHub was asked %d times, want none", calls)
+	}
+}
+
 // A rate-limited read is returned as an intake.RetryLater naming GitHub's wait, so intake waits it
 // out before the review's delivery is tried again, the same as a rate-limited permission read.
 func TestReviewBodyRateLimitedReadRetriesLater(t *testing.T) {
@@ -79,7 +134,8 @@ func TestReviewBodyRateLimitedReadRetriesLater(t *testing.T) {
 	}))
 	defer server.Close()
 
-	w := reviewPermissionRuntime(nil, server.URL, quietLogger())
+	pool := reviewPermissionPool(t)
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
 	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, ID: 7, Author: "legion-reviewer[bot]",
 		Body: "a capped body", BodyTruncated: true}
 

@@ -254,9 +254,11 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		return intake.Result{}, err
 	}
 	// reviewerSession is the session recorded on the reviewer's claim, "" when the row has no claim,
-	// the claim has no row, or its session is empty: byReviewer then decides by the login only.
+	// the claim has no row, or its session is empty, in which case byReviewer decides by the login
+	// alone. It is read only for a review the review App submitted: no other author's review ever
+	// reaches the compare.
 	var reviewerSession string
-	if reviewer.Claim != "" {
+	if e.byReviewApp(fact.Author) && reviewer.Claim != "" {
 		reviewerSession, err = e.store.ClaimSession(ctx, tx, reviewer.Claim)
 		if err != nil {
 			return intake.Result{}, err

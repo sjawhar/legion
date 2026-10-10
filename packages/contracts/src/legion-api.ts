@@ -288,12 +288,6 @@ export const LegionControllerSecretResponse = z.strictObject({
   designGate: z.enum(["root-issues", "off"]),
 });
 
-/** `api.ControllerCredentialRequest`, the body of `POST /legion/v1/controller/github-credential`:
- * the current controller capability, the same secret `LegionControllerSecretResponse` carried. */
-export const LegionControllerCredentialRequest = z.strictObject({
-  secret: nonEmptyString,
-});
-
 /** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:
  * the two files `ghconfig.Rendered` renders for the review App's token, which `legion controller
  * start` writes under `<state_dir>/gh` and refreshes every minute. The plugin never reads it. */

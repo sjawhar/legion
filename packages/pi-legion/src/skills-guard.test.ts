@@ -111,12 +111,14 @@ test("the controller skill reads pull requests as the review App, and nothing sa
   const candidates = roots.flatMap((root) => (statSync(root).isDirectory() ? files(root) : [root]));
   const offending = candidates
     .filter((file) => extensions.has(path.extname(file)) && !skipDirs.test(file))
-    .flatMap((file) =>
-      readFileSync(file, "utf8")
+    .flatMap((file) => {
+      const text = readFileSync(file, "utf8");
+      if (!forbidden.test(text)) return [];
+      return text
         .split("\n")
         .map((line, index) => ({ line, number: index + 1 }))
         .filter(({ line }) => forbidden.test(line))
-        .map(({ number }) => `${path.relative(REPO_ROOT, file)}:${number}`)
-    );
+        .map(({ number }) => `${path.relative(REPO_ROOT, file)}:${number}`);
+    });
   expect(offending).toEqual([]);
 });

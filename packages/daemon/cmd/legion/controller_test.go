@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const (
@@ -298,38 +299,6 @@ while [ "$i" -lt 1200 ] && [ ! -e %q ]; do
   sleep 0.1
 done
 `, file)
-}
-
-// awaitFile polls until file exists, failing the test after timeout.
-func awaitFile(t *testing.T, file string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if _, err := os.Stat(file); err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s was never written", file)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// awaitFileContaining polls until file holds want, failing the test after timeout with what it
-// held last.
-func awaitFileContaining(t *testing.T, file, want string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		body, err := os.ReadFile(file)
-		if err == nil && strings.Contains(string(body), want) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s never held %q; last read %q (%v)", file, want, body, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion manifest
@@ -1286,9 +1255,15 @@ func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T
 	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
 	// The first write holds the first token; only then does the daemon's lease change, so the
 	// loop, not the first fetch, is what carries the second token into the file.
-	awaitFileContaining(t, hostsFile, "ghs_first", 30*time.Second)
+	testwait.Eventually(t, hostsFile+" to hold ghs_first", func() bool {
+		body, err := os.ReadFile(hostsFile)
+		return err == nil && strings.Contains(string(body), "ghs_first")
+	})
 	tokens.set("ghs_second")
-	awaitFileContaining(t, hostsFile, "ghs_second", 30*time.Second)
+	testwait.Eventually(t, hostsFile+" to hold ghs_second", func() bool {
+		body, err := os.ReadFile(hostsFile)
+		return err == nil && strings.Contains(string(body), "ghs_second")
+	})
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1332,7 +1307,10 @@ func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *test
 		close(done)
 	}()
 	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
-	awaitFile(t, hostsFile, 30*time.Second)
+	testwait.Eventually(t, hostsFile+" to exist", func() bool {
+		_, err := os.Stat(hostsFile)
+		return err == nil
+	})
 	// Mint a second capability, which supersedes the one this controller holds.
 	status, _, err := (operator{base: d.url, bearer: controllerOperatorToken}).do(context.Background(), http.MethodPost,
 		"/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion})
@@ -1340,7 +1318,10 @@ func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *test
 		t.Fatalf("mint a second capability: status %d, err %v", status, err)
 	}
 	logFile := filepath.Join(c.defaultDir, "github-credential.log")
-	awaitFileContaining(t, logFile, "github credential refresh stopped", 30*time.Second)
+	testwait.Eventually(t, logFile+" to hold \"github credential refresh stopped\"", func() bool {
+		body, err := os.ReadFile(logFile)
+		return err == nil && strings.Contains(string(body), "github credential refresh stopped")
+	})
 	before := requestsTo(d, "/legion/v1/controller/github-credential")
 	time.Sleep(10 * controllerGitHubRefreshInterval)
 	if after := requestsTo(d, "/legion/v1/controller/github-credential"); after != before {

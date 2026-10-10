@@ -83,15 +83,20 @@ func fetchControllerCredential(ctx context.Context, daemonURL, secret string) (g
 	return ghconfig.Rendered{Hosts: answer.Hosts, Config: answer.Config, App: answer.App, ExpiresAt: expiresAt}, nil
 }
 
+// controllerGHDir is the directory the controller's gh files live under, within stateDir.
+func controllerGHDir(stateDir string) string { return filepath.Join(stateDir, "gh") }
+
 // controllerStartGitHubCredential is the first fetch controllerStart makes after it writes the
-// secret file: success writes the controller's gh files under ghDir and starts the refresh loop,
-// logging to stateDir/github-credential.log; a daemon with no GitHub App for this project
-// (GITHUB_TOKEN_SOURCE_UNAVAILABLE or GITHUB_OWNER_UNCONFIGURED) is not a refusal, since nothing
-// is wrong — it just has nothing to act as — so an empty 0700 gh directory is enough and no loop
-// runs; any other failure is this function's error, which controllerStart treats as every other
-// post-mint failure (exit 1, Oh My Pi never started, the secret file left as it is). It answers a
-// function that stops the loop — a no-op when none started — for controllerStart to defer.
-func controllerStartGitHubCredential(ctx context.Context, daemonURL, secret, ghDir, stateDir string, stderr io.Writer) (func(), error) {
+// secret file: success writes the controller's gh files under controllerGHDir(stateDir) and
+// starts the refresh loop, logging to stateDir/github-credential.log; a daemon with no GitHub App
+// for this project (GITHUB_TOKEN_SOURCE_UNAVAILABLE or GITHUB_OWNER_UNCONFIGURED) is not a
+// refusal, since nothing is wrong — it just has nothing to act as — so an empty 0700 gh directory
+// is enough and no loop runs; any other failure is this function's error, which controllerStart
+// treats as every other post-mint failure (exit 1, Oh My Pi never started, the secret file left
+// as it is). It answers a function that stops the loop — a no-op when none started — for
+// controllerStart to defer.
+func controllerStartGitHubCredential(ctx context.Context, daemonURL, secret, stateDir string, stderr io.Writer) (func(), error) {
+	ghDir := controllerGHDir(stateDir)
 	noop := func() {}
 	rendered, err := fetchControllerCredential(ctx, daemonURL, secret)
 	if err != nil {

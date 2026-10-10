@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -179,18 +180,19 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 // agentEnv tells each agent its tree, issue and workspace, where its gh reads its credential, and
 // uv's directories on the tree volume.
 func (issuePod) agentEnv(l launch) []corev1.EnvVar {
-	env := []corev1.EnvVar{
-		{Name: "LEGION_TREE", Value: l.spec.Tree},
-		{Name: "LEGION_ISSUE", Value: l.spec.Issue},
-		{Name: "LEGION_WORKSPACE", Value: l.workspace},
-	}
-	env = append(env, ghAgentEnv()...)
-	env = append(env,
-		corev1.EnvVar{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},
-		corev1.EnvVar{Name: "UV_CACHE_DIR", Value: uvCacheDir},
-		corev1.EnvVar{Name: "UV_LINK_MODE", Value: uvLinkMode},
+	return slices.Concat(
+		[]corev1.EnvVar{
+			{Name: "LEGION_TREE", Value: l.spec.Tree},
+			{Name: "LEGION_ISSUE", Value: l.spec.Issue},
+			{Name: "LEGION_WORKSPACE", Value: l.workspace},
+		},
+		ghAgentEnv(),
+		[]corev1.EnvVar{
+			{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},
+			{Name: "UV_CACHE_DIR", Value: uvCacheDir},
+			{Name: "UV_LINK_MODE", Value: uvLinkMode},
+		},
 	)
-	return env
 }
 
 // ghAgentEnv is the four variables that point an agent's gh at its own gh volume (GHConfigDir), so

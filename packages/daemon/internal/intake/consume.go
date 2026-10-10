@@ -211,28 +211,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	}
 	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
 	if err != nil {
-		delay := spec.NakDelay
-		var later *RetryLater
-		if errors.As(err, &later) && later.After > delay {
-			delay = later.After
-		}
-		logMessage(spec.Logger, slog.LevelWarn, "restore the review's truncated body", message, "event_id", decoded.EventID, "retry_in", delay, "error", err)
-		if nakErr := message.NakWithDelay(delay); nakErr != nil {
-			logMessage(spec.Logger, slog.LevelError, "nak the review body restore", message, "event_id", decoded.EventID, "error", nakErr)
-		}
+		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
 		return
 	}
 	fact, err := resolveReviewPermission(ctx, spec, withBody)
 	if err != nil {
-		delay := spec.NakDelay
-		var later *RetryLater
-		if errors.As(err, &later) && later.After > delay {
-			delay = later.After
-		}
-		logMessage(spec.Logger, slog.LevelWarn, "read the reviewer's repository permission", message, "event_id", decoded.EventID, "retry_in", delay, "error", err)
-		if nakErr := message.NakWithDelay(delay); nakErr != nil {
-			logMessage(spec.Logger, slog.LevelError, "nak the reviewer's permission read", message, "event_id", decoded.EventID, "error", nakErr)
-		}
+		nakResolve(spec, message, decoded.EventID, "read the reviewer's repository permission", "nak the reviewer's permission read", err)
 		return
 	}
 	decoded.Fact = fact
@@ -297,6 +281,21 @@ func resolveReviewBody(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact,
 	review.Body = body
 	review.BodyTruncated = false
 	return review, nil
+}
+
+// nakResolve widens message's nak delay to a RetryLater's wait when it names one longer than
+// spec.NakDelay, logs what failed and the delay at warn, then naks the message with that delay,
+// logging nakWhat at error if the nak itself fails.
+func nakResolve(spec ConsumerSpec, message jetstream.Msg, eventID, what, nakWhat string, err error) {
+	delay := spec.NakDelay
+	var later *RetryLater
+	if errors.As(err, &later) && later.After > delay {
+		delay = later.After
+	}
+	logMessage(spec.Logger, slog.LevelWarn, what, message, "event_id", eventID, "retry_in", delay, "error", err)
+	if nakErr := message.NakWithDelay(delay); nakErr != nil {
+		logMessage(spec.Logger, slog.LevelError, nakWhat, message, "event_id", eventID, "error", nakErr)
+	}
 }
 
 func ackMessage(logger *slog.Logger, message jetstream.Msg) {

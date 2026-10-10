@@ -99,22 +99,31 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 	return canWrite, nil
 }
 
-// readPermission reads login's permission on repository from GitHub, as reviewerCanWrite says. A
-// mint that fails as GitHub's trouble rather than an answer (appauth.TransientError) is returned as
-// an intake.RetryLater naming a minute's wait, the same hold a rate-limited permission read sets
-// (reviewerCanWrite's errors.As), since minting on through the App's own rate limit risks the same
-// ban GitHub warns a repeated call does. A mint that fails for any other reason is returned as is.
-func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.Repository, login string) (bool, error) {
+// reviewAppClient mints the review App's installation token for repository and returns a
+// githubrest.Client using it, as reviewerCanWrite and reviewBody both need: a mint that fails as
+// GitHub's trouble rather than an answer (appauth.TransientError) is returned as an
+// intake.RetryLater naming a minute's wait, since minting on through the App's own rate limit
+// risks the same ban GitHub warns a repeated call does. A mint that fails for any other reason is
+// returned as is.
+func (w *workflowRuntime) reviewAppClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, appauth.Lease, error) {
 	lease, err := w.tokens.Token(ctx, appauth.Review, repository.Owner())
 	if err != nil {
 		var transient *appauth.TransientError
 		if errors.As(err, &transient) {
-			return false, &intake.RetryLater{After: time.Minute,
+			return githubrest.Client{}, appauth.Lease{}, &intake.RetryLater{After: time.Minute,
 				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", repository.Owner(), time.Minute, err)}
 		}
-		return false, fmt.Errorf("mint the review App token for %s: %w", repository.Owner(), err)
+		return githubrest.Client{}, appauth.Lease{}, fmt.Errorf("mint the review App token for %s: %w", repository.Owner(), err)
 	}
-	client := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}
+	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}, lease, nil
+}
+
+// readPermission reads login's permission on repository from GitHub, as reviewerCanWrite says.
+func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.Repository, login string) (bool, error) {
+	client, lease, err := w.reviewAppClient(ctx, repository)
+	if err != nil {
+		return false, err
+	}
 	var answer struct {
 		Permission string `json:"permission"`
 		User       struct {
