@@ -1569,7 +1569,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.events.Publish(event)
 	}
 	// A copy of an ask this settlement retracted opens its own ask at its next settlement, which
-	// its pending row (nameVersion) also leaves to the resumption should this process stop first.
+	// its pending row (reconcileAskBlocks, owedCopiesOf) also leaves to the resumption should this
+	// process stop first.
 	for _, copy := range reconciliation.owedCopies {
 		s.scheduleSettle(copy)
 	}

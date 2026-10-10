@@ -1553,7 +1553,7 @@ the source, its document and its state from those attributes, reading no ask. A 
 source as of its own last settlement, and settles again when its own content changes, when a
 restart resumes a settlement it owed, when its source is answered or resolved, and when settlement
 retracts its source: the answer and resolve routes (`SettleCopiesOf`) and a retracting settlement
-(`nameVersion`) mark owed, in one `doc_settlements_pending` upsert (`markSettlementPending`), and
+(`reconcileAskBlocks`) mark owed, in one `doc_settlements_pending` upsert (`markSettlementPending`), and
 arm once they commit, the settlement of every other document of the owner whose latest version
 holds the block with no ask of its own under that id (`owedCopiesOf`). After a retraction the first
 of those to settle opens the block's own ask, credited to the author who wrote the block into it,
@@ -1563,12 +1563,20 @@ waits in one place, and a block pasted elsewhere and then cut, in either order, 
 place. That needs the owner's copies to settle one at a time: an issue's documents do, under their
 issue's row (`lockArtifactOwner`), but a project document's owner row is the document itself, so a
 project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
-takes a transaction advisory lock keyed on the project (`lockProjectCopies`,
-`hashtext('copied-asks:' || project)`), as `lockProjectRankAllocation` does, so nothing that locks
-the project's row waits on it; two projects whose keys collide only serialise their copy
-bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before the events'
-commit-order lock, and a settlement deletes its own pending row before it appends its first event,
-since a route marking that document owed holds the row while it waits for the commit-order lock. A
+takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
+the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
+hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other
+advisory lock here takes (a document's room, a project's rank allocation, the events' commit
+order), so it never waits on one of those; two projects whose hashes collide only take turns on
+their copy bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before
+the events' commit-order lock (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check
+of every Dispatch function's calls in statement order), and a settlement deletes its own pending
+row before it appends its first event, since a route marking that document owed holds the row
+while it waits for the commit-order lock. Every other writer of a document's own pending row takes
+it before it appends an event too: an upload's or a seed's document write marks it
+(`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of
+the edit source touches a row the transaction already holds
+(`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
 copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
 (LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0087), an
 issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'

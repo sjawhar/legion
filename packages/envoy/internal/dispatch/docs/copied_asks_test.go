@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -610,51 +611,15 @@ func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t
 	})
 	generation := roomGeneration(t, service, copied)
 
-	alice := model.Actor{Kind: "user", ID: "alice"}
-	tx, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the answer: %v", err)
-	}
-	defer tx.Rollback(context.Background())
-	answering, ledger := service.Join(ctx, tx)
-	defer ledger.Discard()
-	if _, err := tx.Exec(ctx, `select 1 from artifacts where id = $1 for no key update`, original); err != nil {
-		t.Fatalf("lock the source's owner row: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `select 1 from asks where id = $1 for no key update`, source.ID); err != nil {
-		t.Fatalf("lock the source ask: %v", err)
-	}
-	if err := service.SettleCopiesOf(answering, source); err != nil {
-		t.Fatalf("mark the copies owed: %v", err)
-	}
-
 	settled := make(chan error, 1)
-	go func() {
-		service.settleRoom(copied, generation)
-		settled <- nil
-	}()
-	waitForLockWait(t, ctx, service.store, "%delete from doc_settlements_pending%", settled)
-
-	region := "eu-west-1"
-	answer := model.AskAnswer{User: alice.ID, Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
-	if err := service.SetBlockAttributes(answering, original, "shared", map[string]any{
-		"state": "answered", "answered_by": alice.ID, "answered_at": answer.At.Format(time.RFC3339Nano),
-		"selected": answer.Selected, "answer": region,
-	}, alice); err != nil {
-		t.Fatalf("write the answer into the source's block: %v", err)
-	}
-	encoded, _ := json.Marshal(answer)
-	if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
-		t.Fatalf("answer the source ask: %v", err)
-	}
-	source.State, source.Answer = "answered", &answer
-	if _, err := service.events.Append(ctx, tx, model.Event{
-		ArtifactID: &original, Type: "ask.answered", Actor: alice, Payload: model.NewAskEventPayload(source, model.ReferenceChanges{}),
+	if err := answerSource(ctx, service, original, source, func() {
+		go func() {
+			service.settleRoom(copied, generation)
+			settled <- nil
+		}()
+		waitForLockWait(t, ctx, service.store, "%delete from doc_settlements_pending%", settled)
 	}); err != nil {
-		t.Fatalf("append the answer's event: %v", err)
-	}
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit the answer: %v", err)
+		t.Fatal(err)
 	}
 	select {
 	case <-settled:
@@ -677,6 +642,183 @@ func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t
 	if strings.Contains(text, "#shared") {
 		t.Fatalf("the copy's settlement did not version its text without the block:\n%s", text)
 	}
+}
+
+// answerSource answers source, the ask of the block shared on original, in the answer route's order
+// (closeAskTx, answerTransition's WriteBlock): the source's owner row and ask row, then
+// SettleCopiesOf, which takes the project's copy lock and marks the copies owed, then the source's
+// block, the ask row and the ask.answered event, and commits. between runs right after
+// SettleCopiesOf, while the answer holds the copy lock and the copies' pending rows. It returns its
+// error rather than failing the test, so it can run off the test's goroutine.
+func answerSource(ctx context.Context, service *Service, original string, source model.Ask, between func()) error {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin the answer: %w", err)
+	}
+	defer tx.Rollback(context.Background())
+	answering, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := tx.Exec(ctx, `select 1 from artifacts where id = $1 for no key update`, original); err != nil {
+		return fmt.Errorf("lock the source's owner row: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `select 1 from asks where id = $1 for no key update`, source.ID); err != nil {
+		return fmt.Errorf("lock the source ask: %w", err)
+	}
+	if err := service.SettleCopiesOf(answering, source); err != nil {
+		return fmt.Errorf("mark the copies owed: %w", err)
+	}
+	if between != nil {
+		between()
+	}
+	region := "eu-west-1"
+	answer := model.AskAnswer{User: alice.ID, Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
+	if err := service.SetBlockAttributes(answering, original, "shared", map[string]any{
+		"state": "answered", "answered_by": alice.ID, "answered_at": answer.At.Format(time.RFC3339Nano),
+		"selected": answer.Selected, "answer": region,
+	}, alice); err != nil {
+		return fmt.Errorf("write the answer into the source's block: %w", err)
+	}
+	encoded, _ := json.Marshal(answer)
+	if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
+		return fmt.Errorf("answer the source ask: %w", err)
+	}
+	source.State, source.Answer = "answered", &answer
+	if _, err := service.events.Append(ctx, tx, model.Event{
+		ArtifactID: &original, Type: "ask.answered", Actor: alice, Payload: model.NewAskEventPayload(source, model.ReferenceChanges{}),
+	}); err != nil {
+		return fmt.Errorf("append the answer's event: %w", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		return fmt.Errorf("commit the answer: %w", err)
+	}
+	return nil
+}
+
+// A copy settling while its source is answered, with the copy's block still in it, so both take the
+// project's copy lock (the copy's settlement to read its source, the answer to mark the copy owed),
+// in either order. Whichever takes it first finishes holding nothing the other holds while it waits
+// there: the answer holds the source's owner and ask rows, which settlement only reads, and the
+// settlement holds the copy's owner row, which the answer's mark of the copy's pending row reaches
+// only through a foreign key's `for key share`. Both finish, the copy shows the answer once the
+// settlement after the answer has run, and nothing is owed after that.
+func TestACopyAndItsSourcesAnswerTakingTheCopyLockInEitherOrderBothFinish(t *testing.T) {
+	for _, order := range []string{"answer first", "settlement first"} {
+		t.Run(order, func(t *testing.T) {
+			service, _ := newTestService(t)
+			service.settle = time.Hour
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			shared := ":::ask{#shared urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+			original := createProjectDocument(t, service.store, "# Original")
+			seedServiceText(t, service, original, "Context\n\n"+shared)
+			settleCurrentGeneration(t, service, original)
+			source, err := ScanAsk(service.store.Pool.QueryRow(ctx, `select `+AskColumns+` from asks a where a.block_artifact_id = $1`, original))
+			if err != nil {
+				t.Fatalf("read the source ask: %v", err)
+			}
+			copied := createProjectDocument(t, service.store, "# Copy")
+			seedServiceText(t, service, copied, "Kept\n\n"+shared)
+			settleCurrentGeneration(t, service, copied)
+			requireCopiedStates(t, service, copied, `state="open" `+copiedFrom(t, service, source.ID, original))
+			// The copy owes a settlement and still holds the block, so that settlement reads its source
+			// under the copy lock.
+			editLiveTree(t, service, copied, replaceRun("Kept", "Kept again"))
+			generation := roomGeneration(t, service, copied)
+
+			settled := make(chan error, 1)
+			settle := func() {
+				service.settleRoom(copied, generation)
+				settled <- nil
+			}
+			switch order {
+			case "answer first":
+				// The answer holds the copy lock and the copy's pending row while the copy's settlement
+				// waits on the lock, then appends its event and commits.
+				if err := answerSource(ctx, service, original, source, func() {
+					go settle()
+					waitForLockWait(t, ctx, service.store, copyLockWait, settled)
+				}); err != nil {
+					t.Fatal(err)
+				}
+				awaitDone(t, ctx, "the copy's settlement", settled)
+			case "settlement first":
+				// The copy's settlement holds the copy lock, reconciled, while the answer waits on it.
+				reconciled, proceed := make(chan struct{}), make(chan struct{})
+				service.afterSettleReconcile = func(room string) {
+					if room == copied {
+						close(reconciled)
+						<-proceed
+					}
+				}
+				go settle()
+				select {
+				case <-reconciled:
+				case <-ctx.Done():
+					t.Fatal("the copy's settlement never reconciled")
+				}
+				answered := make(chan error, 1)
+				go func() { answered <- answerSource(ctx, service, original, source, nil) }()
+				waitForLockWait(t, ctx, service.store, copyLockWait, answered)
+				close(proceed)
+				awaitDone(t, ctx, "the copy's settlement", settled)
+				service.afterSettleReconcile = nil
+				awaitDone(t, ctx, "the answer", answered)
+				// The settlement read the source before the answer, so the copy shows it open and owes
+				// the settlement the answer marked.
+				requireCopiedStates(t, service, copied, `state="open" `+copiedFrom(t, service, source.ID, original))
+				if owed := copyOwed(t, service, copied); owed != 1 {
+					t.Fatalf("the copy owes %d settlements after the answer, want the one it marked", owed)
+				}
+				settleCurrentGeneration(t, service, copied)
+			}
+			state := service.room(copied)
+			state.mu.Lock()
+			failures := state.settleFailures
+			state.mu.Unlock()
+			if failures != 0 {
+				t.Fatalf("the copy's settlement failed %d time(s) beside the answer, want none", failures)
+			}
+			var markdown string
+			if err := service.store.Pool.QueryRow(ctx, `
+				select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
+			`, copied).Scan(&markdown); err != nil {
+				t.Fatalf("read the copy's latest version: %v", err)
+			}
+			if !strings.Contains(markdown, `state="answered" answered_by="alice"`) || !strings.Contains(markdown, `copied_from="`+source.ID+`"`) {
+				t.Fatalf("the copy's latest version does not show its source's answer:\n%s", markdown)
+			}
+			if count, owed := asksOn(t, service, copied), copyOwed(t, service, copied); count != 0 || owed != 0 {
+				t.Fatalf("the copy holds %d asks and owes %d settlements, want none of either", count, owed)
+			}
+		})
+	}
+}
+
+// awaitDone waits for what, which sends its result on done, failing the test on an error or when
+// ctx ends first.
+func awaitDone(t *testing.T, ctx context.Context, what string, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("%s never finished", what)
+	}
+}
+
+// copyOwed is how many pending settlements document owes: 0 or 1.
+func copyOwed(t *testing.T, service *Service, document string) int {
+	t.Helper()
+	var owed int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from doc_settlements_pending where artifact_id = $1
+	`, document).Scan(&owed); err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
+	return owed
 }
 
 // The earliest asked match is the source whichever wording it matched on: ask A asks a question
