@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -82,6 +83,9 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 		Title:             response.Title,
 		Status:            response.Status,
 		Parent:            response.Parent,
+		Rank:              response.Rank,
+		Labels:            response.Labels,
+		HandedOver:        CarriesLegionLabel(response.Labels),
 		PrimaryArtifactID: response.PrimaryArtifactID,
 		LastSeq:           response.LastSeq,
 	}, nil
@@ -92,6 +96,18 @@ func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) error {
 	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(key), daemonWrite{
 		Status: status,
 		Actor:  daemonActor(key),
+	}, nil)
+}
+
+// HandOver sets issue's status and puts LegionLabel on it, in one PATCH, so the one event the write
+// makes carries both. The labels written are the ones issue carried when it was read, with
+// LegionLabel added: Dispatch replaces an issue's whole label list, and has no write that adds one.
+func (c *HTTPClient) HandOver(ctx context.Context, issue Issue, status string) error {
+	labels := append(slices.Clip(issue.Labels), LegionLabel)
+	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(issue.Key), daemonWrite{
+		Status: status,
+		Labels: labels,
+		Actor:  daemonActor(issue.Key),
 	}, nil)
 }
 
@@ -278,13 +294,15 @@ type issueSummaryResponse struct {
 }
 
 type issueResponse struct {
-	Key               string  `json:"key"`
-	Project           string  `json:"project"`
-	Title             string  `json:"title"`
-	Status            string  `json:"status"`
-	Parent            *string `json:"parent"`
-	PrimaryArtifactID string  `json:"primary_artifact_id"`
-	LastSeq           int64   `json:"last_seq"`
+	Key               string   `json:"key"`
+	Project           string   `json:"project"`
+	Title             string   `json:"title"`
+	Status            string   `json:"status"`
+	Parent            *string  `json:"parent"`
+	Rank              string   `json:"rank"`
+	Labels            []string `json:"labels"`
+	PrimaryArtifactID string   `json:"primary_artifact_id"`
+	LastSeq           int64    `json:"last_seq"`
 }
 
 type issueEventResponse struct {
@@ -312,7 +330,8 @@ type actor struct {
 }
 
 type daemonWrite struct {
-	Status string `json:"status,omitempty"`
-	Body   string `json:"body,omitempty"`
-	Actor  actor  `json:"actor"`
+	Status string   `json:"status,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+	Body   string   `json:"body,omitempty"`
+	Actor  actor    `json:"actor"`
 }

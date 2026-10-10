@@ -96,6 +96,10 @@ func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) erro
 	return nil
 }
 
+func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("the architect routes hand nothing over")
+}
+
 func (r *statusRecorder) PostMessage(context.Context, string, string) error { return nil }
 func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil

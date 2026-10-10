@@ -292,7 +292,8 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
 		return nil
 	}
-	if issue.Status == payload.Status {
+	label := payload.HandOver && !issue.HandedOver
+	if issue.Status == payload.Status && !label {
 		return nil
 	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
@@ -301,6 +302,12 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
 			return err
 		}
+	}
+	if label {
+		if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
+			return fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
+		}
+		return nil
 	}
 	if err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)

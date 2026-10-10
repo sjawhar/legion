@@ -161,12 +161,16 @@ The controller hands over work itself: whenever an admission slot is free, it la
 the highest-priority `todo` leaf issue (one with no children) nobody else is working
 (`skills/legion-controller/SKILL.md`, "Keeping the slots full", which names when it walks).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
-the controller. A child needs none: it runs under its tree's architect once its root is admitted. A
-child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as
-any root does. Taking the label off a waiting root drops it from the waiting line, as a status that
-leaves `todo` does; taking it off a root already admitted does not stop its tree. The mark is a
-label rather than the issue's `route` because Dispatch publishes every event of a routed issue to
-the route's topic, where a label only marks the issue; it carries no workflow state.
+the controller. A child needs none: it runs under its tree's architect once its root is admitted,
+and its architect's `release_children` records it in the tree even when Dispatch already showed it
+`todo`. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
+label as any root does. A root that goes `done` while a child of its tree is mid-run (past its
+first phase's start, not finished, not parked) hands that child over itself: the daemon sets it
+`todo` with the label in one Dispatch write, and the write's event admits it as an orphan with an
+architect of its own. Taking the label off a waiting root drops it from the waiting line, as a
+status that leaves `todo` does; taking it off a root already admitted does not stop its tree. The
+mark is a label rather than the issue's `route` because Dispatch publishes every event of a routed
+issue to the route's topic, where a label only marks the issue; it carries no workflow state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's

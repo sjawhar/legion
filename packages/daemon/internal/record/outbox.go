@@ -44,6 +44,10 @@ type StatusWrite struct {
 	// writes the status, since Dispatch refuses a message on a closed issue. Empty for a write
 	// with no reason to record.
 	Reason string `json:"reason,omitempty"`
+	// HandOver also puts dispatch.LegionLabel on the issue, in the same Dispatch write: the write
+	// hands the issue to Legion, and the runner writes it while the label is missing even where
+	// Dispatch already shows Status.
+	HandOver bool `json:"handOver,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }

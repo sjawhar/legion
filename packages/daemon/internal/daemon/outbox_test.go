@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -71,6 +72,7 @@ func TestOutboxFinishesMessageAlreadyPostedBeforeCrash(t *testing.T) {
 type outboxDispatch struct {
 	issue          dispatch.Issue
 	statuses       []string
+	handOvers      []string
 	bodies         []string
 	messages       []string
 	getErr         error
@@ -89,6 +91,10 @@ func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, erro
 }
 func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	d.statuses = append(d.statuses, status)
+	return d.statusErr
+}
+func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
+	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
 	return d.statusErr
 }
 func (d *outboxDispatch) PostMessage(_ context.Context, _ string, body string) error {
@@ -116,6 +122,38 @@ func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	client.getErr = errors.New("Dispatch unavailable")
 	if err := (&outbox{dispatch: client}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "Dispatch unavailable") {
 		t.Fatalf("status write failure = %v, want Dispatch read failure", err)
+	}
+}
+
+// A hand-over writes its status and the legion label together, in one Dispatch write that keeps
+// the labels the issue carries, and still writes the label where Dispatch already shows the status.
+// An issue that already carries the label takes the plain status write, and one a person moved
+// since the write was queued takes none.
+func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true}, time.Now())
+	for _, tc := range []struct {
+		name                string
+		shown               dispatch.Issue
+		statuses, handOvers []string
+	}{
+		{name: "unlabelled, mid-run", shown: dispatch.Issue{Key: row.Issue, Status: "in_progress", Labels: []string{"repo:x"}},
+			handOvers: []string{"LEGION-208 todo [repo:x]"}},
+		{name: "unlabelled, already todo", shown: dispatch.Issue{Key: row.Issue, Status: "todo"},
+			handOvers: []string{"LEGION-208 todo []"}},
+		{name: "labelled, mid-run", shown: dispatch.Issue{Key: row.Issue, Status: "in_progress", Labels: []string{"Legion"}, HandedOver: true},
+			statuses: []string{"todo"}},
+		{name: "labelled, already todo", shown: dispatch.Issue{Key: row.Issue, Status: "todo", Labels: []string{"legion"}, HandedOver: true}},
+		{name: "moved by a person", shown: dispatch.Issue{Key: row.Issue, Status: "backlog"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &outboxDispatch{issue: tc.shown}
+			if err := (&outbox{dispatch: client}).execute(context.Background(), row); err != nil {
+				t.Fatalf("execute the hand-over: %v", err)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) || !slices.Equal(client.handOvers, tc.handOvers) {
+				t.Fatalf("status writes %v and hand-overs %v, want %v and %v", client.statuses, client.handOvers, tc.statuses, tc.handOvers)
+			}
+		})
 	}
 }
 

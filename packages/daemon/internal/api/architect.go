@@ -249,13 +249,13 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 // membership over its mirrored issue graph. An issue already in the workflow is refused, since
 // writing todo would move an in-progress child back.
 //
-// A child already todo is neither: todo is what this call writes, so it is one an earlier attempt
-// of this same wave released before Dispatch failed it part way through. It is accepted and needs
-// no write, which is what makes the architect's retry of the whole wave finish it.
-func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string, read issueReader) (write bool, ok bool) {
+// A child already todo is neither: todo is what this call writes, so it needs no write. It is
+// accepted, which is what makes the architect's retry of a wave Dispatch failed part way through
+// finish it, and waveRelease records it if nothing has (enterTodoChild).
+func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string, read issueReader) (child dispatch.Issue, write bool, ok bool) {
 	child, found := read(w, r, key)
 	if !found {
-		return false, false
+		return dispatch.Issue{}, false, false
 	}
 	write = true
 	switch child.Status {
@@ -264,22 +264,54 @@ func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, k
 		write = false
 	default:
 		writeFailure(w, http.StatusConflict, "ISSUE_ALREADY_RELEASED", fmt.Sprintf("%s is %s; release_children releases only a triage, backlog, or icebox child", key, child.Status))
-		return false, false
+		return dispatch.Issue{}, false, false
 	}
 	seen := map[string]bool{key: true}
 	for parent := child.Parent; parent != nil && !seen[*parent]; {
 		if *parent == tree {
-			return write, true
+			return child, write, true
 		}
 		seen[*parent] = true
 		ancestor, found := read(w, r, *parent)
 		if !found {
-			return false, false
+			return dispatch.Issue{}, false, false
 		}
 		parent = ancestor.Parent
 	}
 	writeFailure(w, http.StatusForbidden, "ISSUE_OUTSIDE_TREE", fmt.Sprintf("%s is outside the architect tree %s", key, tree))
-	return false, false
+	return dispatch.Issue{}, false, false
+}
+
+// enterTodoChild records a released child Dispatch already shows todo that the daemon has no
+// record of. The workflow records a child from an observation of it in todo while its tree is live
+// (workflow's recordChildUnderLiveTree), and a child set todo before its tree was live, by a person
+// or another session, has none: the release writes it nothing, and Dispatch would make no event for
+// a status the issue already has. So the release applies Dispatch's view of the child, as just read,
+// as that observation, at the child's own Dispatch sequence: the child takes the path its todo event
+// would, recorded under the live tree and started once its gate is open, and a live event of it
+// from before the read stops at the sequence fence. A child already recorded, which the earlier
+// attempt of a wave this call retries released, has had that observation.
+func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, child dispatch.Issue) bool {
+	recorded, err := s.recordedIssue(r.Context(), child.Key)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", child.Key))
+		return false
+	}
+	if recorded != nil {
+		return true
+	}
+	parent := ""
+	if child.Parent != nil {
+		parent = *child.Parent
+	}
+	observed := intake.DispatchIssue{
+		Key: child.Key, Seq: child.LastSeq, Status: child.Status, Title: child.Title, Parent: parent, Rank: child.Rank, HandedOver: child.HandedOver,
+	}
+	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", fmt.Sprintf("release:%s:%d", child.Key, child.LastSeq), observed, s.handlers...); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("could not record %s", child.Key))
+		return false
+	}
+	return true
 }
 
 // issueReader reads one issue for a request, answering its own failures.
@@ -336,17 +368,20 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	// per child: the reads are cached for the life of this request.
 	read := s.cachedIssueReader()
 	unreleased := make([]string, 0, len(req.Issues))
+	var todo []dispatch.Issue
 	for _, issue := range req.Issues {
 		if !claim.IsIssueKey(issue) {
 			writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issues must contain issue keys")
 			return
 		}
-		write, ok := s.releasableChild(w, r, grant.Tree, issue, read)
+		child, write, ok := s.releasableChild(w, r, grant.Tree, issue, read)
 		if !ok {
 			return
 		}
 		if write {
 			unreleased = append(unreleased, issue)
+		} else {
+			todo = append(todo, child)
 		}
 	}
 	for _, issue := range unreleased {
@@ -357,6 +392,11 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", "Dispatch status update failed")
+			return
+		}
+	}
+	for _, child := range todo {
+		if !s.enterTodoChild(w, r, child) {
 			return
 		}
 	}

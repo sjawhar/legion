@@ -31,6 +31,7 @@ type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
 	SetStatus(ctx context.Context, key, status string) error
+	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
@@ -70,13 +71,18 @@ type IssueSummary struct {
 	LastSeq int64
 }
 
-// Issue is the workflow data from Dispatch's issue-detail route.
+// Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
+// the client boundary, as IssueSummary's is; Labels is the raw list it was resolved from, which a
+// hand-over writes back with LegionLabel added, since Dispatch replaces an issue's whole label list.
 type Issue struct {
 	Key               string
 	Project           string
 	Title             string
 	Status            string
 	Parent            *string
+	Rank              string
+	Labels            []string
+	HandedOver        bool
 	PrimaryArtifactID string
 	LastSeq           int64
 }

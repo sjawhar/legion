@@ -60,6 +60,7 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 			"title":               "Ship Dispatch client",
 			"status":              "in_progress",
 			"rank":                "opaque-rank",
+			"labels":              []string{"repo:x", "LEGION"},
 			"parent":              "LEGION-1",
 			"primary_artifact_id": "artifact-8",
 			"last_seq":            47,
@@ -71,11 +72,42 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if issue.Key != "LEGION-8" || issue.Project != "LEGION" || issue.Title != "Ship Dispatch client" || issue.Status != "in_progress" || issue.PrimaryArtifactID != "artifact-8" || issue.LastSeq != 47 {
+	if issue.Key != "LEGION-8" || issue.Project != "LEGION" || issue.Title != "Ship Dispatch client" || issue.Status != "in_progress" || issue.PrimaryArtifactID != "artifact-8" || issue.LastSeq != 47 ||
+		issue.Rank != "opaque-rank" || !issue.HandedOver || len(issue.Labels) != 2 || issue.Labels[0] != "repo:x" || issue.Labels[1] != "LEGION" {
 		t.Fatalf("issue = %#v, want workflow fields from Dispatch", issue)
 	}
 	if issue.Parent == nil || *issue.Parent != "LEGION-1" {
 		t.Fatalf("issue parent = %v, want LEGION-1", issue.Parent)
+	}
+}
+
+// A hand-over is one PATCH carrying the status and the issue's labels with the legion label added,
+// under the daemon's actor, so the one event it makes carries both.
+func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/issues/LEGION-4" {
+			t.Fatalf("request = %s %s, want PATCH /api/v1/issues/LEGION-4", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		var body struct {
+			Status string   `json:"status"`
+			Labels []string `json:"labels"`
+			Actor  struct {
+				Kind string `json:"kind"`
+				ID   string `json:"id"`
+			} `json:"actor"`
+		}
+		decodeJSON(t, r, &body)
+		if body.Status != "todo" || len(body.Labels) != 2 || body.Labels[0] != "repo:x" || body.Labels[1] != LegionLabel ||
+			body.Actor.Kind != "session" || body.Actor.ID != "legion-daemon:LEGION" {
+			t.Fatalf("hand-over request = %#v, want todo with repo:x and legion from legion-daemon:LEGION", body)
+		}
+		writeJSON(t, w, map[string]string{"status": "todo"})
+	}))
+	defer server.Close()
+
+	if err := New(server.URL, dispatchToken).HandOver(context.Background(), Issue{Key: "LEGION-4", Status: "in_progress", Labels: []string{"repo:x"}}, "todo"); err != nil {
+		t.Fatalf("hand over: %v", err)
 	}
 }
 
