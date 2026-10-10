@@ -89,7 +89,11 @@ Sign in, then open **Settings**:
   model. Saving checks that the GitHub App can read it.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
   workflows, the job whose success is a production deploy, and whose merged pull requests count.
-  Saving checks that the GitHub App can read the repository. Until it is set, the
+  Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) page:
+  the deploy workflow's staging end-to-end job and staging deploy job (each left empty when the
+  pipeline has no such step, and the page then omits its card), and the PR-checks workflow's
+  roll-up job, which only reports the other jobs' result and which the failing-jobs table leaves
+  out. Saving checks that the GitHub App can read the repository. Until it is set, the
   [Delivery](/legion/dispatch/delivery/) page shows the same form.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.

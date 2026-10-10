@@ -2764,8 +2764,9 @@ export interface DeliveryMeasuresResponse {
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
  * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
  * Which repository deploys, its deploy and PR-checks workflow paths, the deploy workflow's job
- * whose success is a production deploy, and whose merged pull requests count. The last three
- * timestamps and the error are the reconcile's own, cleared by every write.
+ * whose success is a production deploy, whose merged pull requests count, and the three optional
+ * job names the Pipeline page follows besides the production job. The last three timestamps and
+ * the error are the reconcile's own, cleared by every write.
  */
 export interface DeliverySettings {
   /** `owner/repo`, lowercased as the server stores it. */
@@ -2776,6 +2777,14 @@ export interface DeliverySettings {
   /** GitHub logins as GitHub's REST API spells them, compared exactly: an App's ends in `[bot]`. */
   readonly population_authors: readonly string[];
   readonly excluded_repos: readonly string[];
+  /** The deploy workflow's staging end-to-end job, as a run lists it; null when the pipeline has
+   *  none, and the Pipeline page omits its card. */
+  readonly staging_e2e_job_name: string | null;
+  /** The deploy workflow's staging deploy job; null when the pipeline has none. */
+  readonly staging_apply_job_name: string | null;
+  /** The PR-checks workflow's roll-up job, which only reports the other jobs' result and which the
+   *  failing-jobs table leaves out; null leaves nothing out. */
+  readonly pr_checks_rollup_job_name: string | null;
   readonly last_event_at: string | null;
   readonly last_reconcile_at: string | null;
   readonly last_error: string | null;
@@ -2783,7 +2792,8 @@ export interface DeliverySettings {
   readonly updated_at: string;
 }
 
-/** `PUT /api/v1/settings/delivery`'s body, which replaces the whole record (human callers only). */
+/** `PUT /api/v1/settings/delivery`'s body, which replaces the whole record. The three job names
+ *  are optional: absent, null or blank each stores null. */
 export interface DeliverySettingsInput {
   readonly deploy_repo: string;
   readonly deploy_workflow_path: string;
@@ -2791,4 +2801,7 @@ export interface DeliverySettingsInput {
   readonly pr_checks_workflow_path: string;
   readonly population_authors: readonly string[];
   readonly excluded_repos: readonly string[];
+  readonly staging_e2e_job_name?: string | null;
+  readonly staging_apply_job_name?: string | null;
+  readonly pr_checks_rollup_job_name?: string | null;
 }
