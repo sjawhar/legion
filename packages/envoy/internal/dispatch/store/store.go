@@ -6,8 +6,10 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
@@ -54,6 +56,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("parse Postgres URL: %w", err)
 	}
 	config.MaxConns = sharedPoolSize
+	config.ConnConfig.OnNotice = logNotice
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
@@ -63,6 +66,20 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("ping Postgres: %w", err)
 	}
 	return &Store{Pool: NewPool(pool)}, nil
+}
+
+// logNotice logs a notice a Postgres connection receives, which pgx otherwise drops. A WARNING is
+// logged at WARN: search_vector raises one when it cuts a text to fit (0090), and that cut is
+// otherwise silent. Anything milder - a `create table if not exists` that finds its table, which
+// every boot's migration runner meets - is logged at INFO. The rooms and health pools copy this
+// configuration (Pool.separate), so their connections log the same way.
+func logNotice(_ *pgconn.PgConn, notice *pgconn.Notice) {
+	level := slog.LevelInfo
+	if notice.SeverityUnlocalized == "WARNING" {
+		level = slog.LevelWarn
+	}
+	slog.Log(context.Background(), level, "dispatch: postgres notice",
+		"severity", notice.SeverityUnlocalized, "code", notice.Code, "message", notice.Message)
 }
 
 // declaresPoolSize reports whether databaseURL carries poolSizeParam. It asks pgx.ParseConfig
