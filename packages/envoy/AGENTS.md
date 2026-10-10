@@ -2189,8 +2189,8 @@ when a cluster moves to an RDS CA it does not hold, as its header says: download
 header names, replace everything below the header, update the date and the SHA-256 line, and check
 that the body below the header hashes to that line. A broker on a cluster whose CA the bundle lacks
 fails the TLS handshake of every sign-in, its first (`store.Open`'s ping) included, so it refuses to
-start; `internal/smoke`'s `TestRDSBundle` checks only where the bundle sits in the image, not
-whether it is current.
+start; `internal/smoke`'s `TestRDSBundle` checks that the image ships the vendored bytes outside the
+system trust store, not whether they are current.
 
 The docs site's broker reference pages are generated at site build from this source by
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
