@@ -1,0 +1,155 @@
+{
+  "baseBranch": "legion/LEGION-631 (sjawhar/legion#1843, open, head 57077591); the daemon created legion/LEGION-663 at main's tip bff9f310 (#1869), so the planner's chain is a conflict-free merge commit of both (9121e30e) carrying this handoff; the pull request opens with --base legion/LEGION-631 and is retargeted to main by a forward merge when #1843 merges, where the contract number is re-checked against main",
+  "completed": "2026-10-10T02:18:02.429914872Z",
+  "concerns": [
+    "A deployment row judged by any failing live session: one tree whose repository disables a tool opens the row deployment-wide until that process relaunches; the per-claim view and the row detail name the culprit (spec wording; architect may prefer per-claim only)",
+    "The MCP check opens a second short-lived client per configured server at every session boot (a stdio server is spawned once more for ~0.5 s); a single-client server reads open with its error",
+    "End-to-end rows (github, dispatch-envoy-tools, web-search) report a service outage as a gap for the sessions that booted during it; it heals at that claim's next boot",
+    "promptAgents is the union over every role's prompts, so every pod is held to every role's agents",
+    "The retarget to main after #1843 squash-merges will conflict in legion.ts, claim-session.ts, daemon-client.ts, legion-api.ts, version.go, claims.go, the state fixtures and docs/kubernetes.md; the branch's version is the resolution, and contract 19 may need renumbering if main took it first",
+    "The merger must not publish READY while the pull request's base is legion/LEGION-631; it reports to the architect instead",
+    "Stage 4b's negative control writes .omp/config.yml into tree 2's workspace (tree 2 never opens a pull request); the checkpoint removes it and its cleanup trap removes it on abort"
+  ],
+  "designSummary": "Every workflow session (pod container or tmux pane) measures the six live capabilities inside Oh My Pi at boot, after claims/register and before claims/ready, with the in-process API the boot gate's load probe already uses (discoverAgents, runSearchQuery, discoverMCPServers + waitForPendingConnections, discoverExtensionPaths + loadSkills, getActiveTools for the ten envoy_* tools plus a real `dispatch read`, `gh api user`); each check 8 s, the report 10 s, failures become ok:false with the fact. ReadyRequest gains `capabilities` {measuredAt, elapsedMs, rows[{name, ok, detail}]}, RegisterResponse gains `promptAgents` (the union of the role prompts' task agents), contract 18 -\u003e 19, `live` leaves CapabilityState (an unreported live row is `unchecked` with its ruling; the four rows without one get dispatch://LEGION-663). The daemon never refuses a report (drops unknown rows, truncates, marks missing rows open), persists it in claim_capabilities (migration 0036) and keeps the latest per claim in supervision memory; a live row is judged over claims that are ready/working/idle whose report incarnation equals the claim's current one: open when any fails (naming pod/pane, role, issue, fact), present when none fails and one proved it; open live rows reach the log at report time, Open()/openCapabilities, and legion state, with no capabilities.decided line. ClaimView gains a compact `capabilities` view. Stage 4b gets real bun stdio MCP servers in the fixture, a `full-agent` checkpoint and a `full-agent-negative` one (a workspace .omp/config.yml turning web_search off plus a planner relaunch).",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "answer": "Measured: at the cut-off Oh My Pi logs 'handler timed out' and stops waiting while the handler's promise keeps running (claims/ready and the legion tool registration still complete). The measurement runs concurrently with the jj attribution and the Envoy role claim after register, each check 8 s, the whole report 10 s, boot today 1-3 s, so the handler stays far inside 30 s; the report stays on ready as the spec says.",
+        "finding": "The report sits on the boot's critical path inside a 30 s session_start handler whose cut-off behaviour is unstated"
+      },
+      {
+        "answer": "Measured in an rpc session with pi-envoy loaded first: all ten envoy_* names are in getActiveTools() (and getAllTools()), and /opt/legion/pi-envoy/bin is on PATH; the ten names are pinned by a test against envoy-client's envoyToolSpecs.",
+        "finding": "dispatch-envoy-tools reads getActiveTools(), but extension tools may only be in getAllTools()"
+      },
+      {
+        "answer": "Measured in this pod with the operator overlay present: a workspace .omp/config.yml with web_search: {enabled: false} removes web_search from getActiveTools() and getAllTools(); the workspace survives a container restart (a container-local file would not); tree 2 never opens a pull request and the checkpoint removes the file (cleanup trap on abort).",
+        "finding": "AC2's negative control rests on a workspace .omp/config.yml never measured in a pod"
+      },
+      {
+        "answer": "The daemon never refuses a ready for its report: unknown row names are dropped and logged, missing rows render open ('not reported by this session'), details are truncated to 1024 bytes; only an undecodable body is 400 as today. Handler tests cover an unknown name, a missing row and an over-long detail.",
+        "finding": "A 400 on a malformed report crash-loops the pod, against 'run and report'"
+      },
+      {
+        "answer": "A stored report counts only while the claim is ready/working/idle and the report's incarnation equals the claim's current Locator.Incarnation; a relaunching claim contributes nothing until its new process reports. The e2e waits on claim.capabilities.incarnation == locator.incarnation.",
+        "finding": "What a row reads while its only reporter relaunches; whether an old generation's report still rules"
+      },
+      {
+        "answer": "The four rows gain Ruling dispatch://LEGION-663 (Capability.Ruling's documented meaning for a live row: the issue whose check proves it); a unit test pins every live row's ruling; recorded as spec departure 2.",
+        "finding": "'each row carries its ruling' cannot hold: four live rows have no ruling"
+      },
+      {
+        "answer": "The existing gate is the daemon's boot gate and legion probe-image over the plugin manifest (bootgate.go:388-411); bumping DaemonAPIVersion and legion.daemonApiVersion to 19 together satisfies it, proved by the goldens, daemon-api-version.test.ts and stage 2's gate-refuses-another-contract row; no plugin-side gate is added, and an 18-daemon never runs a 19-image because the image probe refuses it before a claim runs.",
+        "finding": "AC3 names a plugin-side gate that does not exist for worker claims"
+      },
+      {
+        "answer": "Every workflow claim reports under either runtime (a pane's gh reads \u003cstate_dir\u003e/secrets/\u003cclaim\u003e-gh, its dispatch is the plugin's); the controller session (operator's machine or daemon-launched pod) sends none; subagent sessions already skip the boot. Stage 2 asserts nothing about capabilities; its rig would show open rows in the log, harmlessly.",
+        "finding": "Which sessions report: tmux panes, the daemon-launched controller pod, subagents"
+      },
+      {
+        "answer": "The controller reads the session and the fact from read_state's row detail and reports it in the day's report, taking no other action; no capabilities.decided line exists for a live row (config.go keeps refusing it); SKILL.md, outbox.go's comment and docs/kubernetes.md change together. Named to the architect as a concern.",
+        "finding": "A live open row changes what openCapabilities means to the controller"
+      },
+      {
+        "answer": "Kept as the spec words it (open when one does), bounded by liveness: a stuck row retires when that process relaunches or its claim leaves ready/working/idle; the per-claim view and the detail name the culprit. Listed under concerns for the architect.",
+        "finding": "A deployment-wide row judged by any failing pod has no bound and no owner"
+      },
+      {
+        "answer": "The latest reports live in supervision memory (loaded once at boot, written by the ready handler's hook, persisted alongside); deployment() stays a pure memory read, so neither the tick nor the state route touches the store.",
+        "finding": "openCapabilities() would read the store inside the tick's open transaction with no ctx"
+      },
+      {
+        "answer": "ClaimView.capabilities carries {measuredAt, incarnation, ok: [names], open: [{name, detail}]}: prose only for failing rows; the full details go to the daemon's info log line, which the e2e reads for tree 2's planner.",
+        "finding": "Per-claim capability rows bloat the controller's read_state"
+      },
+      {
+        "answer": "The checkpoint keeps the markers and gains the sentence that the MCP markers may come from the session's own connection or the probe's; the planner's mcp report (both fixture servers connected) is the MCP evidence. The second-client tradeoff is documented in docs/kubernetes.md and pi-legion's CHANGELOG; a server refusing a second client reads open with its error.",
+        "finding": "The MCP probe's connection writes the marker the repository-configuration checkpoint reads"
+      },
+      {
+        "answer": "The rows are end to end by their words; an outage reads open for sessions that booted during it and heals at the next boot (a concern for the architect). The Envoy half is the ten tools' registration; reach is proved by the boot's role claim, whose failure exits the process as today.",
+        "finding": "Two checks measure a remote service; the Envoy half can never fail"
+      },
+      {
+        "answer": "Deliberate: every pod runs the one image, so a pod that cannot resolve any prompt agent is a gap wherever it sits; the detail names the unresolved agents. Listed as a concern.",
+        "finding": "promptAgents is the union of every role's prompts"
+      },
+      {
+        "answer": "The summary becomes 'reaches Dispatch through the dispatch command and Envoy through the pi-envoy tools'; the row name stays; spec departure 1.",
+        "finding": "The dispatch-envoy-tools row's summary still says 'tools' for Dispatch"
+      },
+      {
+        "answer": "Base legion/LEGION-631; the active role forward-merges main and retargets when #1843 merges, resolving conflicts to the branch's version and re-checking that main has not taken contract 19; the merger refuses READY while the base is not main.",
+        "finding": "The PR's base branch, who retargets, and the contract collision"
+      },
+      {
+        "answer": "The plan's acceptance table gives each a surface and a jq/log/assistant_said predicate: stage 1 for 'unchecked with ruling', full-agent for present, full-agent-negative for open/log/tick/keeps working.",
+        "finding": "Three acceptance lines name no command"
+      },
+      {
+        "answer": "present detail: 'proved by N live session(s); latest pod \u003csandbox\u003e/\u003ccontainer\u003e (\u003crole\u003e, \u003cissue\u003e) measured \u003cmeasuredAt\u003e: \u003cfact\u003e'; open detail lists each failing session (first three, +N more); the e2e asserts the per-claim view for tree 2's planner and that every row names a pod.",
+        "finding": "'each naming the pod that proved it' is undefined with several pods"
+      },
+      {
+        "answer": "The detail renders the report's measuredAt, never the write time; the regain re-ready re-sends the same report.",
+        "finding": "A re-ready on role regain restamps an old measurement as fresh"
+      },
+      {
+        "answer": "Corrected: the open-line mirror is docs/site/src/content/docs/legion/troubleshooting.md:34; nothing is created under docs/troubleshooting.md.",
+        "finding": "The docs census names docs/troubleshooting.md, which does not exist"
+      }
+    ]
+  },
+  "independentTasks": 2,
+  "issue": "LEGION-663",
+  "phase": "plan",
+  "plan": "dispatch://LEGION-663/artifact/plan-md (version 1)",
+  "planReview": {
+    "rounds": 1,
+    "verdict": "approved"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — the handoff, push and PR-body procedures (references/pr-body.md for the E2E (implementer) line and its negative control; references/conflicts-and-rewrites.md 'After a retarget' for the forward merge of main when #1843 merges); packages/pi-legion/AGENTS.md and packages/contracts/AGENTS.md for the contract bump (DaemonAPIVersion, legion.daemonApiVersion and the goldens move in one commit); the measurements in local://legion-663-plan-notes.md are reproduced in the plan's design section",
+      "ce-simplify-code — once, after the suites are green, over the new capability-report module and the daemon's live-row rendering"
+    ],
+    "review": [
+      "legion-worker — references/merge-gate.md (approve the head only after the tester's evidence; refuse READY-bound approval while the base is legion/LEGION-631) and references/review-threads.md; read the plan's three spec departures beside the spec and check the contract census (version.go entry 19, package.json, version.json, legion-api.ts without `live`, CHANGELOGs, docs/kubernetes.md)"
+    ],
+    "test": [
+      "legion-worker — references/pr-body.md (what the tester verifies, the E2E (tester) line); scripts/e2e/README.md for stage 4b's checkpoint conventions, since the tester's evidence is the STAGE4B_UNTIL=full-agent-negative run at the head's image (queued through the architect) and the predicates the plan lists for full-agent and full-agent-negative"
+    ]
+  },
+  "routingHints": {
+    "complexity": "large",
+    "estimatedImplementers": 1
+  },
+  "schemaVersion": 1,
+  "specDepartures": [
+    {
+      "evidence": "Contract 17 moved Dispatch off native tools onto a bash command (packages/pi-legion/CHANGELOG.md; packages/envoy-client/src/tool-contract.ts names ten envoy_* tools and no dispatch_* tool; packages/pi-envoy/extensions/envoy.ts:371-372 prepends the plugin's bin to PATH). Measured in an rpc session: all ten envoy_* names in getActiveTools().",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The row measures the ten envoy_* tools' registration in the session and a real `dispatch read --issue \u003cLEGION_ISSUE\u003e` through the `dispatch` command pi-envoy bundles and puts first on PATH; the row's summary becomes 'reaches Dispatch through the dispatch command and Envoy through the pi-envoy tools'. The row name does not change.",
+      "spec": "'the Dispatch and Envoy tools are registered' is one of the six measurements, and the row's summary reads 'reaches Dispatch and Envoy through the pi-envoy tools'."
+    },
+    {
+      "evidence": "packages/daemon/internal/capabilities/capabilities.go:73,79,81,83 carry Ruling \"\"; only repository-extensions (:82, LEGION-629) and github (:84, LEGION-631) have one; Capability.Ruling's comment (:57-58) defines a live row's ruling as the issue whose live check proves it.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The four live rows without a ruling (subagents, web-search, mcp, dispatch-envoy-tools) get Ruling dispatch://LEGION-663 in capabilities.Table, so an unreported live row renders `unchecked` with 'no session has reported yet (\u003cruling\u003e): \u003csummary\u003e' for every one of the six.",
+      "spec": "Acceptance 1: 'before any pod reports, each row carries its ruling and no present'."
+    },
+    {
+      "evidence": "packages/pi-legion/src/claim-session.ts:68-90 and :159-166: a 4xx on claims/ready is not retried and exits the process so the daemon relaunches it, which would loop forever on a shape disagreement; Sami's decision on LEGION-578 'The check' (2026-10-08): run, and report.",
+      "outcome": {
+        "kind": "unchanged"
+      },
+      "plan": "The daemon never refuses a ready for its report: unknown row names are dropped and logged, a missing row renders open with 'not reported by this session', details are truncated to 1024 bytes; only an undecodable body is a 400 as today.",
+      "spec": "The report rides the readiness report; the spec does not say what the daemon does with a report it cannot read."
+    }
+  ],
+  "taskCount": 8,
+  "workflowRecommendation": "One implementer, tasks 0-7 in the plan's order: capabilities table and rendering first (Go, pure), then wire types and the ready/register handlers, then store + supervision, then the contract renumber with regenerated goldens (go test ./internal/api/ -update and ./internal/projection/ -update), then the extension (measurement module, claim-session, daemon-client, host typings), then docs/skills, then Stage 4b (fixture MCP server, full-agent, full-agent-negative, README). The four suite commands once at the end. A pod has no Postgres, cluster or tmux: the api/store tests run in CI, and the Stage 4b run at the head's image (STAGE4B_UNTIL=full-agent-negative) is queued by the architect through the coordinator session; the implementer's own proof is a scratch omp --mode rpc session with the built plugin against a stand-in daemon, as the plan's proof paragraph says."
+}
