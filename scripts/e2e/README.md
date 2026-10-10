@@ -533,6 +533,7 @@ and the providers Secret read; neither is printed.
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
+| `LEGION_E2E_WORKER_STREAM_PORT` | `13373` | the port the harness binds for the worker stream on the devbox's private address; the same name and default Stage 4b reads for its own worker-stream port, so two runs — two Stage 4a's, or a Stage 4a and a Stage 4b — collide on it by default and need distinct values to run at once |
 | `LEGION_E2E_SESSION_DB_PORT` | required | a port on the devbox's private address that the devbox's security group admits from the Legion nodes, as it admits the worker-stream port, where the scratch session database listens; refused when it is not a number, is the worker stream's port, or is taken |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-launcher`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
@@ -563,8 +564,9 @@ namespace list. Every evidence line names which one observed it (`[runtime]`, `[
 `[harness]` for the listener and its resolver).
 
 The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata, never `0.0.0.0`) and port 13373 — the rigs' worker-stream port, which the devbox's
-security group admits from Legion nodes beside the production daemon's 13370/13371 — and refuses
+metadata, never `0.0.0.0`) and port `LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — the rigs'
+worker-stream port, which the devbox's security group admits from Legion nodes beside the
+production daemon's 13370/13371 — and refuses
 to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
@@ -658,6 +660,8 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
+LEGION_E2E_PROJECT=S4B2 LEGION_E2E_DAEMON_PORT=13370 LEGION_E2E_WORKER_STREAM_PORT=13371 \
+  bash scripts/e2e/stage4b-sandbox-tree.sh        # a second lane beside a default-identity run; S4B2 must already exist as a Dispatch project
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -770,18 +774,59 @@ Three roots are set todo under `admission_cap: 2`:
 - Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
   is outstanding, and is taken out the same way.
 
-**One run at a time.** The project, the durable consumer names, ports 13372 and 13373 (the rigs'
-pair; the production daemon keeps 13370 and 13371; the daemon's API takes 13372 and its worker
-stream 13373 until `address-moved-stream-new-pod` swaps them) and the namespace label
-`legion.dev/project=legsmoke` are shared.
-- The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
-- It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
-  `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
+**One run at a time per identity.** `LEGION_E2E_PROJECT` (default `LEGSMOKE`, a Dispatch project
+key: `[A-Z][A-Z0-9]{1,9}`, exactly Dispatch's own `projectKeyPattern`
+(`packages/envoy/internal/dispatch/api/server.go`), checked in `prerequisites`) names a run's
+identity; everything else derives from it. `run_label`, the `legion.dev/project` label every
+object in the namespace carries, is the daemon's own `ProjectToken(project)`
+(`packages/daemon/internal/claim/token.go`) — exactly `project` lowercased, since the validated
+shape holds no character `ProjectToken` would drop. The lock is today's single fixed path when
+`run_label` is the default `legsmoke`, else a path named for `run_label`, so a non-default
+project never shares today's lock, its leftover checks, or its durable consumers with a default
+run. `LEGION_E2E_DAEMON_PORT` (default `13372`) and `LEGION_E2E_WORKER_STREAM_PORT` (default
+`13373`, the same name Stage 4a reads for its one port) are the only other inputs — the
+production daemon keeps its own 13370/13371 beside them, and the run's daemon may swap which of
+its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a
+third. Left at their defaults, a run collides with another default run exactly as it always has;
+set all three to distinct values and two runs proceed at once, on the same devbox, against the
+same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project:
+production Dispatch has no auto-create, and only a signed-in human may create one
+(`createProject` refuses a bearer actor, `HUMAN_ONLY`).
+- The run takes its own lock, derived from the project (above).
+- It owns its identity's shared objects only after four checks pass: that lock, both its ports
+  free, no leftover `run_label` object in the namespace, and no `legion-go-<project>-` consumer on
+  the stream.
 - A run refused at any of the four removes nothing.
-- Each daemon start checks both ports again, since another process can take one after the
+- Each daemon start checks both its ports again, since another process can take one after the
   prerequisites; once the daemon answers `/healthz`, both ports must be held by that daemon's
   process, or the boot fails naming the holder. A `/healthz` answer alone could come from another
   daemon on the same address.
+
+**Two lanes need separate checkouts, not just distinct identities above.** The controller
+checkpoint packs this checkout's `@sjawhar/pi-legion-envoy`
+([`lib/pack-plugin.sh`](#libpack-pluginsh)), which rewrites `packages/pi-envoy/package.json` in
+place for the few seconds the pack takes, under its own flock on that file. That flock serializes
+two lanes' *packs* against each other (whichever holds it waits its turn, as `release.yaml` and
+every other branch-built install already rely on); it does not protect a lane's own
+[`lib/built-from.sh`](#libbuilt-fromsh) — called in `prerequisites` and again before the build —
+whose `jj diff`/`jj log` read the shared working copy directly, with no lock of their own. A
+second lane's pack landing mid-read reads as this lane's own tree having changed, failing
+`prerequisites` or the build's own revision check for a reason that has nothing to do with the
+change under test. Run concurrent lanes from separate checkouts (`jj workspace add`, or separate
+clones) of the same commit.
+
+**Two lanes can race the legion pool's own capacity preflight, and that is a finding, not a bug
+to fix here.** `prerequisites` reads the legion NodePool's current room (`pool_pod_room`) before
+either lane has placed a pod, and refuses, BLOCKED, only if that one read already can't fit
+`run_pods_at_once` pods (4: the cap's two roots and tree 1's two children). Two lanes starting
+close together can each read room enough for itself alone — the read is not a reservation — so a
+true shortfall surfaces only once both are actually scheduling. That is never silent: every
+pod-placement wait is wrapped (`on_tree`/`on_issue`), so a wait stalled on the pool's own limits
+ends its checkpoint `BLOCKED: capacity: …`, naming the pod the scheduler could not place, rather
+than failing or hanging — the same outcome a single lane gets today when the pool is simply full.
+Running two lanes at once therefore needs either enough spare legion-pool capacity for both (8
+pods' worth of reservations between them) or tolerance for the slower lane landing `BLOCKED` on
+capacity; widening the pool is infrastructure, not this change.
 
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
 the run that owns it. A signal to the whole process group does not stop the removal:
@@ -805,7 +850,7 @@ the run that owns it. A signal to the whole process group does not stop the remo
   `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
   - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
   - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
-  - A SIGKILLed driver runs no trap, and the next run's preflight names what it left.
+  - A SIGKILLed driver runs no trap, and the next run of the same identity's preflight names what it left; a different identity's run never sees it.
 - **Production Dispatch, project LEGSMOKE**: three root issues per run. The preflight moves stale
   todo roots to backlog. The proof human's writes use the agents' bearer and name the session
   `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no

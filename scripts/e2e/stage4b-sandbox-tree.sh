@@ -51,6 +51,26 @@
 #   document websocket require.
 # - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
 #   listener's API token. The repository carries neither credential.
+# - LEGION_E2E_PROJECT (default LEGSMOKE, a Dispatch project key: [A-Z][A-Z0-9]{1,9}, exactly
+#   Dispatch's own projectKeyPattern, checked in prerequisites) names a run's identity;
+#   everything else derives from it, so a second lane sets only this and the two ports below.
+#   run_label, the namespace label every object in the
+#   namespace carries, is the project lowercased (claim.ProjectToken,
+#   packages/daemon/internal/claim/token.go) — exactly $project in lowercase, since the validated
+#   shape holds no character ProjectToken would drop. The lock is today's single path when
+#   run_label is the default legsmoke, else a path named for run_label, so a non-default project
+#   never shares today's lock with a default run. LEGION_E2E_DAEMON_PORT (default 13372) and
+#   LEGION_E2E_WORKER_STREAM_PORT (default 13373, the same name Stage 4a reads for its one port)
+#   are the only other inputs: left at their defaults, a run collides with another default run
+#   exactly as before; set all three to distinct values and two runs proceed at once on the same
+#   devbox against the same production cluster. A lane's two ports must be ones the devbox's
+#   security group admits from the Legion nodes — today TCP 13370-13375 only, six ports beside
+#   the production daemon's own 13370/13371 and this proof's default 13372/13373; widening that
+#   range is a change to the deployment repository's infrastructure, not this one. That leaves
+#   room for one extra Stage 4b lane at its defaults (or one Stage 4a lane beside a default Stage
+#   4b), never more, until the range is widened. LEGION_E2E_PROJECT must already exist as a
+#   Dispatch project: production Dispatch has no auto-create, and only a signed-in human may
+#   create one (createProject refuses a bearer actor, HUMAN_ONLY).
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -67,9 +87,10 @@
 # The production bearers are copied, the Dispatch one from its file and the Envoy one read from
 # Secrets Manager with the devbox admin role, into 0600 files under the run's scratch directory.
 # They are never printed, never in an argv (curl reads them from header files), and never in the
-# evidence. One run at a time: the project, the NATS durable consumer names, ports 13372/13373 and
-# the namespace label are shared, so the run takes a lock and refuses to start while another holds
-# it, or while LEGSMOKE has pods, Sandboxes or claims it did not create.
+# evidence. One run at a time per identity (above): the NATS durable consumer names and the lock
+# path both derive from LEGION_E2E_PROJECT, so the run takes its own lock and refuses to start
+# while another run of the same identity holds it, or while that identity's project has pods,
+# Sandboxes or claims it did not create.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -101,10 +122,15 @@ envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 design_gate=${STAGE4B_DESIGN_GATE:-}
-# The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
-project=LEGSMOKE
-run_label=legsmoke
-label_exact=legsmoke
+# The Dispatch project key (the workflow's). Overridable so two runs can proceed at once (see
+# Inputs, above); defaults to today's single fixed value. run_label, the pods'/claims' token and
+# the namespace's legion.dev/project label, is the daemon's own ProjectToken(project) — project
+# lowercased, exact because prerequisites holds project to [A-Z][A-Z0-9]{1,9}. Never set run_label
+# independently: the daemon computes it from project on its own, and a mismatch would make every
+# -l legion.dev/project=$run_label selector below miss the daemon's own objects.
+project=${LEGION_E2E_PROJECT:-LEGSMOKE}
+run_label=${project,,}
+label_exact=$run_label
 repo=sjawhar/legion-smoke
 dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 # The proof human writes with the agents' bearer, so it names a session of its own: one that holds
@@ -138,8 +164,8 @@ opchild="S4BOP-${$}1"
 # address ($host, read in prerequisites). address-moved-stream-new-pod swaps the two, moving the
 # worker stream within the pair the devbox admits.
 bind=0.0.0.0
-port_daemon=13372
-port_worker_stream=13373
+port_daemon=${LEGION_E2E_DAEMON_PORT:-13372}
+port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 stream=ENVOY_NOTIFICATIONS
 # Roots the run's daemon runs at once. Trees 3 and 4 each take the slot the tree before them leaves,
 # so the run's roots never exceed the cap.
@@ -202,8 +228,12 @@ lost_detail="the issue's volume was lost: "
 # model-backed plan checks, the gap analyst and up to three plan-review rounds (each a subagent
 # call), so planning takes a whole loop of its own (wait_for_phase).
 plan_seconds=2700
-# One path for every run on the devbox, whatever its environment names as its state directory.
+# One path for every run on the devbox holding this identity: today's single fixed path for the
+# default identity, so a default run collides with another default run exactly as before, and a
+# path named for run_label otherwise, so a non-default project never shares that lock, its
+# leftover checks or its durable consumers with a default run.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
+[ "$run_label" = legsmoke ] || lock=$HOME/.local/state/legion/e2e/stage4b.$run_label.lock
 record=$work/sandboxes
 pg_container=legion-e2e4b-pg-$$
 profile=legion-e2e4b-$$-$(date +%s)
@@ -2073,14 +2103,16 @@ start_interests_sampler() {
 # topic of the run names LEGSMOKE, the project's own subject space (notifications.legion.legsmoke.),
 # its repository's GitHub subjects (notifications.github.sjawhar.legion-smoke., where an agent
 # follows its own pull request), operator-close's tree ($optree), a legion-legsmoke- role, or the
-# session itself.
+# session itself. $project and $optree match as whole tokens, bounded by non-alphanumeric
+# characters: a bare contains() would read another lane's LEGSMOKE2 as ours when we are LEGSMOKE,
+# or its S4BOP-1234 as ours when we are S4BOP-123 — the exact leak this audit exists to catch.
 interests_outside() {
   jq -s -c --arg p "$project" --arg t "legion-$run_label-" --arg space "notifications.legion.$run_label." --arg repo "notifications.github.${repo/\//.}." --arg op "$optree" '[.[] | .session_id as $s | .topics[]?
-    | select((contains($p) or contains($t) or startswith($space) or startswith($repo) or contains($op) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
+    | select((test("\\b" + $p + "\\b") or contains($t) or startswith($space) or startswith($repo) or test("\\b" + $op + "\\b") or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
 # audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
-audit_failure() { echo "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"; }
+audit_failure() { echo "the run wrote outside $project or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"; }
 
 # ==== checkpoints ===================================================================================
 
@@ -2089,6 +2121,8 @@ for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets s
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
+[[ $project =~ ^[A-Z][A-Z0-9]{1,9}$ ]] ||
+  fail "LEGION_E2E_PROJECT must be a Dispatch project key ([A-Z][A-Z0-9]{1,9}, projectKeyPattern in packages/envoy/internal/dispatch/api/server.go), not '$project'"
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
 fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
@@ -2219,7 +2253,7 @@ for key in $stale; do
   set_status "$key" backlog
   note "moved stale todo root $key to backlog"
 done
-[ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
+[ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "$project still holds todo issues"
 # The configured stream carries both halves of the workflow's intake. Dispatch publishes every
 # project's issue events under subjects that name the issue, so any project's shows the Dispatch
 # half (LEGSMOKE's own age out between runs; admission is where the run's are seen); the GitHub
@@ -2314,7 +2348,7 @@ mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
 # Stage 4b proof instructions
 
-This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
+This is a throwaway workflow proof on the disposable __LEGION_E2E_PROJECT__ project. A tree's root architect
 starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
 issue's own primary document and registers the gate, then waits. Apart from that, do not act until
 a targeted human Dispatch message gives the next exact proof operation. A phase worker's first
@@ -2326,7 +2360,7 @@ handoffs, and do not create work outside the issue's smoke branch.
 ## Scope of this proof
 
 The controller hands Legion no issue itself: this proof admits only the issues its driver sets to
-`todo`. LEGSMOKE holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
+`todo`. __LEGION_E2E_PROJECT__ holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
 admits next.
 
 ## A tree's children in this proof
@@ -2337,6 +2371,7 @@ parks another in `backlog`; each child's planner holds for the driver like every
 re-run, park or close nothing for it, write nothing about it, and keep waiting for the next
 targeted message.
 EOF
+sed -i "s/__LEGION_E2E_PROJECT__/$project/g" "$work/instructions.md"
 # The daily report is the one controller action that waits for no targeted message (daily-report).
 report_title="Legion daily report ($work)"
 cat >>"$work/instructions.md" <<EOF
