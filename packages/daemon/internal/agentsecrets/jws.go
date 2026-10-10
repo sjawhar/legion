@@ -70,11 +70,11 @@ func thumbprint(pub *ecdsa.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
-// signRequestObject signs a machine-login credential-request object naming host (and, for a
-// service credential, service) as the launcher_credential the daemon asks to hold. It names no
-// approver: a service's login is decided by anyone signed in to Dispatch. Byte-compatible with
-// envoy's record.Sign.
-func signRequestObject(key *ecdsa.PrivateKey, audience, host, service string, now time.Time) (string, error) {
+// signRequestObject signs a machine-login credential-request object naming host as the
+// launcher_credential the daemon asks to hold, for the service launcherService: the daemon only
+// ever logs in as a service, and it names no approver, since anyone signed in to Dispatch decides a
+// service's login. Byte-compatible with envoy's record.Sign.
+func signRequestObject(key *ecdsa.PrivateKey, audience, host string, now time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,
 		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: requestTyp},
@@ -94,7 +94,7 @@ func signRequestObject(key *ecdsa.PrivateKey, audience, host, service string, no
 		IssuedAt: iat,
 		Expires:  iat + requestLifetimeSeconds,
 		AuthorizationDetails: []authorizationDetail{
-			{Type: "launcher_credential", Identifier: host, Service: service},
+			{Type: "launcher_credential", Identifier: host, Service: launcherService},
 		},
 	})
 	if err != nil {

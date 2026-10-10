@@ -135,7 +135,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets login: hostname: %w", err)
 	}
-	request, err := signRequestObject(key, c.URL, host, launcherService, time.Now())
+	request, err := signRequestObject(key, c.URL, host, time.Now())
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets login: sign request object: %w", err)
 	}

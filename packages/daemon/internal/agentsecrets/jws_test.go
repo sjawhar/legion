@@ -98,7 +98,7 @@ func thumbprintOfJWKForTest(m map[string]any) (string, error) {
 func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 	key := mustTestKey(t)
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "legion-daemon", now)
+	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,27 +159,11 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 	}
 }
 
-// TestSignRequestObjectWithNoServiceOmitsIt pins that an empty service (an operator machine
-// credential rather than a service one) never puts an empty string on the wire.
-func TestSignRequestObjectWithNoServiceOmitsIt(t *testing.T) {
-	key := mustTestKey(t)
-	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, payload := decodeCompactJWS(t, compact)
-	details := payload["authorization_details"].([]any)
-	detail := details[0].(map[string]any)
-	if _, present := detail["service"]; present {
-		t.Fatalf("detail = %+v, want no service key when service is empty", detail)
-	}
-}
-
 // TestSignRequestObjectIssuerIsTheKeysThumbprint pins that iss is exactly the embedded key's
 // RFC 7638 thumbprint (the value a broker recomputes and compares), not an arbitrary identifier.
 func TestSignRequestObjectIssuerIsTheKeysThumbprint(t *testing.T) {
 	key := mustTestKey(t)
-	compact, err := signRequestObject(key, "https://secrets.test", "host", "legion-daemon", time.Now())
+	compact, err := signRequestObject(key, "https://secrets.test", "host", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
