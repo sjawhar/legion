@@ -186,6 +186,20 @@ export interface ContextEventResult {
   readonly messages?: readonly unknown[];
 }
 
+/** Text about to run as typed input: typed at the terminal, an RPC prompt, or `sendUserInput`. */
+export interface InputEvent {
+  readonly text: string;
+  readonly images?: readonly ImageContent[];
+  readonly source: "interactive" | "rpc" | "extension";
+}
+
+/** A handler may consume the text, or replace its text or images for every later step. */
+export interface InputEventResult {
+  readonly handled?: boolean;
+  readonly text?: string;
+  readonly images?: readonly ImageContent[];
+}
+
 /**
  * Payload and result type of every host event these extensions subscribe to.
  * OMP declares `on` as one overload per event name; mirroring that here keeps a
@@ -214,6 +228,8 @@ export interface PiEventContract {
   readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
+  /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
+  readonly input: { readonly event: InputEvent; readonly result: InputEventResult };
   readonly session_stop: {
     readonly event: SessionStopEvent;
     readonly result: SessionStopEventResult;

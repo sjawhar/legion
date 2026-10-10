@@ -1,4 +1,6 @@
+import { DISPATCH_BODY_MAX } from "@legion/contracts";
 import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery";
+import type { UserInputResult } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
 
 /**
@@ -91,4 +93,36 @@ export function handledAttempts(entries: readonly unknown[]): Set<string> {
     handled.add(handledAttemptKey(data.message_id, data.attempt));
   }
   return handled;
+}
+
+/** What became of a person's text sent to `pi.sendUserInput`: the host's answer, the error it
+ *  failed with, or, on a host without the method, that host's version. */
+export type TypedInputOutcome =
+  | UserInputResult
+  | { readonly error: string }
+  | { readonly hostVersion: string };
+
+/**
+ * What the session answers on Dispatch for a person's text, capped to a Dispatch body, or
+ * undefined when there is nothing to say: a prompt or skill the model now works on, a command that
+ * printed nothing, and, on a host without `pi.sendUserInput`, text that is not a command, which the
+ * caller sends as before. The attempt is already the session's user turn, so the answer is a reply
+ * rather than an error, and the conversation shows it.
+ */
+export function typedInputReply(text: string, outcome: TypedInputOutcome): string | undefined {
+  const typed = /^\/\S+/.exec(text)?.[0];
+  const command = typed ?? "This message";
+  let reply: string | undefined;
+  if ("error" in outcome) reply = `${command} was not run: ${outcome.error}`;
+  else if ("hostVersion" in outcome) {
+    if (typed !== undefined) {
+      reply = `${typed} was not run: this session's Oh My Pi ${outcome.hostVersion} cannot run commands sent from Dispatch; nothing was sent.`;
+    }
+  } else if (outcome.handled === "terminal-only") {
+    reply = `${command} runs only in the session's own terminal; nothing was sent.`;
+  } else if (outcome.handled === "unavailable") {
+    reply = `${command} was not run: this session's host cannot run typed input from Dispatch; nothing was sent.`;
+  } else if (outcome.handled === "command" && outcome.output?.trim()) reply = outcome.output;
+  if (reply === undefined || reply.length <= DISPATCH_BODY_MAX) return reply;
+  return `${reply.slice(0, DISPATCH_BODY_MAX - 1)}…`;
 }
