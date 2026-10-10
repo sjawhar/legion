@@ -676,8 +676,7 @@ func TestPromptJobPasteAfterTheLineDrainsThroughItsEnd(t *testing.T) {
 // A bracketed paste that begins in the same read as the line's end is read on through its closing
 // mark, not given back to the shell after the line: the prompt keeps the terminal, so the paste's
 // rest, arriving after the quiet window would have ended, is discarded rather than run by the shell.
-// The entry is refused as more than one line. At f7e1c781 feed returned at the line's end and never
-// saw the paste, so the prompt gave the terminal back after the quiet window and the rest ran.
+// The entry is refused as more than one line.
 func TestPromptJobPasteInTheLineEndReadDrainsThroughItsEnd(t *testing.T) {
 	for _, key := range []string{"\x03", "\x1c", "\x1a", ""} {
 		name := fmt.Sprintf("%x", key)
@@ -707,9 +706,8 @@ func TestPromptJobPasteInTheLineEndReadDrainsThroughItsEnd(t *testing.T) {
 // A paste-start mark split so that only its first bytes arrive in the read that ends the line is
 // held as pending and completed from the next read: the paste opens, so a Ctrl-C after its content
 // is pasted text, not a keypress, and the entry is refused as more than one line rather than its
-// content run by the shell. At f7e1c781 the split mark was dropped at the line's end, so the
-// completion was plain text and the Ctrl-C a signal that killed the prompt. The helper shortens the
-// paste bound so the refusal does not wait the full bound for a close mark that never comes.
+// content run by the shell. The helper shortens the paste bound so the refusal does not wait the
+// full bound for a close mark that never comes.
 func TestPromptJobSplitPasteMarkAfterTheLineIsRead(t *testing.T) {
 	s := newPromptShell(t)
 	s.env = "AGENT_SECRETS_JOB_HOLD_QUIET=1 AGENT_SECRETS_JOB_PASTE_BOUND=1s "
@@ -746,8 +744,6 @@ func TestPromptJobSplitPasteMarkRestAfterTheQuietWindowIsRead(t *testing.T) {
 // A second bracketed paste that begins in the same read that closes a pasted line opens like any
 // other: the prompt keeps reading, so its rest, arriving after the quiet window would have ended,
 // is discarded rather than run by the shell, and the pasted line is refused as more than one line.
-// At f7e1c781 feed returned at the first paste's close and never saw the second, and the drain was
-// skipped after a pasted line, so the first paste was stored and the rest ran in the shell.
 func TestPromptJobSecondPasteInThePastedLinesCloseIsRead(t *testing.T) {
 	s := newPromptShell(t)
 	s.start(false, false)
@@ -778,9 +774,8 @@ func TestPromptJobPasteThatNeverEndsIsGivenUp(t *testing.T) {
 
 // A paste that keeps arriving past the bound is read on, not given up: the bound counts the quiet
 // since the last input, restarted at each read, so a slow paste is drained however long it takes and
-// its lines never reach the shell. At f7e1c781 the bound ran from the paste's first byte, so a paste
-// still arriving when it elapsed was given up and its later lines ran in the shell. The helper
-// shortens the bound; the lines arrive well inside it but for longer than it in all.
+// its lines never reach the shell. The helper shortens the bound; the lines arrive well inside it but
+// for longer than it in all.
 func TestPromptJobLongPasteDrainsWhileInputKeepsArriving(t *testing.T) {
 	s := newPromptShell(t)
 	s.env = "AGENT_SECRETS_JOB_PASTE_BOUND=1s "
