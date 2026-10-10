@@ -90,7 +90,11 @@ test("the worker skill names the merger's merge command, and no skill or prompt 
 // (or any role) cannot read GitHub.
 test("the controller skill reads pull requests as the review App, and nothing says the controller holds no GitHub credential", () => {
   const controllerSkill = readFileSync(path.join(staged, "legion-controller/SKILL.md"), "utf8");
-  expect(controllerSkill).toContain("gh pr view <url> --json state -q .state");
+  expect(controllerSkill).toContain(
+    "gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state"
+  );
+  expect(controllerSkill).toContain("https://github.com/<owner>/<repo>/pull/<n>");
+  expect(controllerSkill).toContain("not a pull-request URL");
   for (const token of ["OPEN", "MERGED", "CLOSED", "unreadable", '"phase":"controller"']) {
     expect(controllerSkill).toContain(token);
   }
