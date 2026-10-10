@@ -1,0 +1,54 @@
+{
+  "codeHead": "533cc8f3149b764337ede9d76d4d22088a69306e",
+  "completed": "2026-10-10T06:39:16.878030667Z",
+  "critical": 0,
+  "fastFollow": "LEGION-668 shape cleanup, one sweep: controllerStartGitHubCredential as three branches (controllerCredentialNoApp predicate, ghconfig.Clear); resolveReviewBody clearing BodyTruncated only when restored; hoist byApp in review(); split review_session_test.go and controller_credential_test.go; one background-run helper for the two refresh-loop tests. For the architect: a follow-up issue to carry the footer's session from Envoy's normalizer (normalize.go:729 scans the uncapped body) so the GitHub read, ReviewBody, BodyTruncated and the rate-limit entanglement can go.",
+  "forgeFacts": "PR #1878 base legion/LEGION-631, head 90ca0d9c (the tester's handoff with skip-checks: true above the implementer's 1c2d93c5 on code head 533cc8f3), MERGEABLE/CLEAN. Required checks lint, typecheck, test, pr-title all success at 1c2d93c5 (Tests 38028885925, PR Title 38028885927); Legion Envoy and Contracts 38028885923 had dispatch, dispatch-memory and envoy-go-race still in_progress (not required). read_record: checksVerdict green at 90ca0d9c. reviewThreads: none. Both E2E lines present with surface, command, observation, head and negative control; the implementer's proof is the stand-in rig (A, B, C, F) and the tester re-ran A-D, F and drove E. Contract 19: version.go, pi-legion package.json, contracts fixture agree; main@origin 17, legion/LEGION-631@origin 18.",
+  "important": 3,
+  "issue": "LEGION-668",
+  "keyFindings": [
+    {
+      "description": "A rate-limited review-body read returns the RetryLater without w.holdRateLimit(refused.RetryAfter); reviewerCanWrite holds it (review_permission.go:88-95) and this function's doc (:28-30) claims it does. Proven at 90ca0d9c with an overlay test (/tmp/l668-review/overlay): rateLimitLeft() negative after the read, 2 GitHub calls across two reads inside the window. Fix: hold before returning (or one shared prelude with reviewerCanWrite), and make TestReviewBodyRateLimitedReadRetriesLater assert the hold and that a second read makes no call.",
+      "file": "packages/daemon/internal/daemon/review_body.go:66-73",
+      "severity": "important"
+    },
+    {
+      "description": "The review-stuck reason still says any review-App APPROVE ends the round; after D1 the new common stall is a review-App APPROVE set aside for its footer, which publishes no notice of its own (settleRound's stuckAs(before), :537). The architect prompt and the troubleshooting page state the same superseded rule and quote only the old log string. Name the new cause in all three; consider Warn for the set-aside log line at :281.",
+      "file": "packages/daemon/internal/workflow/review.go:460 (and prompts/go/architect-common.md:12, docs/site/src/content/docs/legion/troubleshooting.md:287-295)",
+      "severity": "important"
+    },
+    {
+      "description": "Security[untrusted-input]: the controller runs `gh pr view \u003curl\u003e` from bash on issue-supplied text (External links, or a comment among Events) in a session holding the review App's full token, with no shape or quoting rule. Give the row the shape https://github.com/\u003cowner\u003e/\u003crepo\u003e/pull/\u003cn\u003e, quote it, treat anything else as the unreadable case; pin in skills-guard.test.ts. ASVS v5.0.0-2.3.2, OWASP LLM01/LLM06.",
+      "file": "skills/legion-controller/SKILL.md:244,248-262",
+      "severity": "important"
+    },
+    {
+      "description": "holdsGitHubCredential is constant-true for both pod kinds (the implementer asked for the reviewer's call): delete it, its six unconditional consumers (manifest.go:437,495; relaunch.go:396,412; ghcredential.go:54; the interface method) and the five comments (podkind.go:44-49, names.go:92-95, manifest.go:104-106, relaunch.go:382-386, types.go:150-155), plus the stale 'in an issue pod, its gh volume' at manifest.go:478. Behaviour-neutral, goldens unchanged.",
+      "file": "packages/daemon/internal/runtime/sandbox/podkind.go:217,395",
+      "severity": "minor"
+    },
+    {
+      "description": "No `## Contract change census`, required: refusals added (the route's 403/409/400/500/502; controller start exit 1 post-mint; controller pod launch failing on a failed mint; the set-aside of a review-App review whose footer does not name the reviewer's session, an immediate refusal naming the vulnerability it closes), package-boundary signatures (tmux.WriteGHConfig -\u003e ghconfig.Write; record.Store.ClaimSession; intake.ConsumerSpec.ReviewBody; PullRequestReview.BodyTruncated/LegionSession; AppRoleFor(RoleController); api.ControllerCredentialRequest/Response; DaemonAPIVersion 18 -\u003e 19), the controller pod's GH_* variables. Each with its search command, every hit's disposition, a rollout line; the reviewer re-runs the searches at the next head.",
+      "file": "PR body",
+      "severity": "minor"
+    },
+    {
+      "description": "Change bullet 5 says stage 4b proves both controllers' gh live; the diff adds the two checks and both E2E lines record them UNREACHED. Size says 63 files / +2181; the issue's diff at 90ca0d9c is 65 / +2312 (the two handoff files).",
+      "file": "PR body",
+      "severity": "minor"
+    }
+  ],
+  "minor": 3,
+  "notProven": [
+    "Written into the PR body's Not proven / risk: acceptance 1's two live stage 4b checks UNREACHED at every head (the architect's decision, Envoy f55c2b203d224f416a1ad0ecf430b2ad); the reviewer's findings 1 and 2 at 90ca0d9c; the tester's no-per-request-deadline risk on the refresh loop's fetch; plan D1's accepted stall of a round whose reviewer footer is missing or names another session."
+  ],
+  "phase": "review",
+  "previousRounds": [],
+  "reviewedHead": "90ca0d9c950757ec2788f07c3ddad82ee8fe1ee6",
+  "round": 1,
+  "schemaVersion": 1,
+  "securityLine": "Security: authz - POST /legion/v1/controller/github-credential (api/server.go:214) only for the holder of the current controller capability, constant-time compare under controllerMu (api/controller.go:183-191), 409 under controller: daemon before the body is read (:141-146), 403 INVALID_CONTROLLER_CAPABILITY (:160-164), 400 MISSING_FIELD (:151-153). secret - the review App's full token now reachable over the daemon API by the controller capability alone (api/controller.go:166-178), \u003c=1 h, refreshed every minute, two new readers: the controller pod's role Secret read-only 0440 at GHConfigDir in the controller container alone (sandbox/manifest.go:437-439,495-504) and \u003cstate_dir\u003e/gh/hosts.yml 0600 on the operator's machine (cmd/legion/controller_credential.go:118-128); no log carries the token (api/controller.go:172, controller_credential.go:187-199). untrusted-input - the footer parse yields one string and never re-enters a command (intake/facts.go:181-198), restore before parse before apply (intake/consume.go:212-224); the controller skill's \u003curl\u003e is not neutralized (finding 3, ASVS v5.0.0-2.3.2). prompt/agent-def - the diff edits the controller skill and its guard; steers no reviewer; undelimited untrusted region (finding 3). sandbox - the controller container mounts a credential it had none of (podkind.go:395), scoped to that container (manifest.go:437-439). transport - nothing changed; one new unbounded read through githubrest.call's io.ReadAll bounded by GitHub's 65,536-char cap (ASVS v5.0.0-11.2.1, hardening). No supply-chain row.",
+  "thermonuclear": "Pair ran at 90ca0d9c. deep-review: Medium x3 (findings 1-3), Low x2 (troubleshooting.md; the stale comment at manifest.go:478), two PR-body claims off (Change bullet 5, Size); no finding on the D1 predicate, the route, the loop, ghconfig.Write's move, the sandbox manifest, AppRoleFor's callers, contract 19, the public-repository rule, stage 4b wiring. code-quality: approve with required cleanup - delete the constant-true holdsGitHubCredential (B1) and extract the prelude reviewBody copies from reviewerCanWrite, the copy that dropped holdRateLimit (B2); fast-follow S1-S6. Reviewer's own re-runs on a scratch Postgres 16.4 (127.0.0.1:54331): workflow attribution, api controller route and golden, record ClaimSession, daemon ReviewBody tests pass; the overlay test for finding 1 fails as described.",
+  "threads": "None open at 90ca0d9c; this round opens four (review_body.go:69, review.go:281, SKILL.md:248, podkind.go:395).",
+  "verdict": "changes_requested"
+}
