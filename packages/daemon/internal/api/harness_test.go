@@ -185,8 +185,11 @@ type harness struct {
 	handler    http.Handler
 	// readied is each claim ClaimReady was told of, in order.
 	readied *[]supervise.Claim
-	// reported is each capability report CapabilityReported was told of, in order.
-	reported *[]capabilities.Report
+	// reported is each capability report CapabilityReported was told of, in order, and
+	// reportedContextErr the Err of the context each was told on, so a test can see whether that
+	// context was the agent's request's or one that outlives its connection.
+	reported           *[]capabilities.Report
+	reportedContextErr *[]error
 }
 
 func newHarness(t *testing.T) *harness {
@@ -223,19 +226,20 @@ func newHarness(t *testing.T) *harness {
 		prompts:  map[claim.Token]string{},
 	}
 	readied := &[]supervise.Claim{}
-	reported := &[]capabilities.Report{}
+	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st,
 		ClaimReady:   func(c supervise.Claim) { *readied = append(*readied, c) },
 		PromptAgents: testPromptAgents,
-		CapabilityReported: func(_ context.Context, _ supervise.Claim, report capabilities.Report) {
+		CapabilityReported: func(ctx context.Context, _ supervise.Claim, report capabilities.Report) {
 			*reported = append(*reported, report)
+			*reportedContextErr = append(*reportedContextErr, ctx.Err())
 		},
 	})
 	return &harness{
 		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler,
-		readied: readied, reported: reported,
+		readied: readied, reported: reported, reportedContextErr: reportedContextErr,
 	}
 }
 

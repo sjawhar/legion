@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -306,6 +308,43 @@ func TestReadyWithACapabilityReportTellsTheDaemonTheNormalisedReport(t *testing.
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("told of %+v, want %+v", got, want)
+	}
+}
+
+// The report is handed to the daemon on the handler's decision context, which outlives the agent's
+// connection (server.go, decision), never on the request's: a ready whose client hung up before
+// the route answered — the plugin's retry after a timeout, a pod dying mid-boot — still has its
+// report kept and persisted, where a request-scoped context would cancel the store write and
+// leave the session unreported after a restart (LEGION-663, review round 1).
+func TestReadyHandsTheCapabilityReportAContextTheAgentsDisconnectDoesNotCancel(t *testing.T) {
+	h := newHarness(t)
+	token, boot := h.launch("LEGION-208", claim.RoleImplementer)
+	registered := h.registered(boot, "ses_implementer")
+	encoded, err := json.Marshal(claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_implementer", Secret: registered.Secret, Generation: registered.Generation,
+		Capabilities: &claim.CapabilityReport{
+			MeasuredAt: time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC), ElapsedMs: 700,
+			Rows: []claim.CapabilityRow{{Name: "github", OK: true, Detail: "gh viewer login: legion-implementer[bot]"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/legion/v1/claims/ready", bytes.NewReader(encoded))
+	// The agent's connection is gone before the handler runs: its request context is already done.
+	hungUp, hangUp := context.WithCancel(context.Background())
+	hangUp()
+	recorder := httptest.NewRecorder()
+	h.handler.ServeHTTP(recorder, req.WithContext(hungUp))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("ready = %d %q, want 204", recorder.Code, recorder.Body)
+	}
+	if got := *h.reported; len(got) != 1 || got[0].Claim != token {
+		t.Fatalf("told of %+v, want the one report of %s", got, token)
+	}
+	if got := (*h.reportedContextErr)[0]; got != nil {
+		t.Fatalf("the report was handed over on a context that is already done (%v); it must outlive the agent's connection", got)
 	}
 }
 
