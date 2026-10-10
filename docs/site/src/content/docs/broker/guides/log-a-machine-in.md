@@ -42,7 +42,7 @@ to use another socket, and then in the helper's environment and every agent's al
 ## 2. Start the login on the machine
 
 ```console
-$ agent-secrets launcher login
+$ agent-secrets machine login
 machine login code: EAGD-7372
 enter it at https://dispatch.example.com/credentials/machine — approve only if the code matches this terminal
 ```
@@ -61,7 +61,8 @@ As the operator the login names, open Dispatch's **Enter machine login code** pa
 terminal shows. A machine login can only be selected by its code: no link approves one, and only
 the person the login names may approve a person's machine. Once you approve it, the machine is
 listed under **Machine logins** on the same page, where you can
-[revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login).
+[revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login); from your own
+shell on a logged-in machine, `agent-secrets machine list` lists the same logins.
 
 A Legion daemon's login names its service, so anyone signed in to Dispatch may approve it: it waits
 in every signed-in person's Inbox, and whoever has the code from the daemon's log types it in. The
@@ -75,15 +76,15 @@ service's login only if the code matches the one its service printed. The login 
 **Machine logins** as `legion-daemon on <host>` for everyone signed in, with who approved it, and
 anyone's revoke ends every pod it enrolled.
 
-Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
+Back on the machine, `agent-secrets machine login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval
 minted, which the helper now enrolls sessions with. Check it at any time; it also says when the
 credential expires, since the broker has no renewal:
 
 ```console
-$ agent-secrets launcher login-status
+$ agent-secrets machine login-status
 issued
-agent-secrets launcher login-status: the launcher credential expires at 2026-10-10T03:21:40Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then
+agent-secrets machine login-status: the launcher credential expires at 2026-10-10T03:21:40Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then
 ```
 
 ## 4. Start agents as sessions
@@ -113,12 +114,12 @@ The credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (the
 [configuration reference](/legion/broker/reference/config/) gives its default), and the helper keeps
 it only in memory, so log in again after it expires, after the helper restarts, or after you revoke
 the machine's login.
-`agent-secrets launcher login-status` exits 1 and says why when the machine needs it:
+`agent-secrets machine login-status` exits 1 and says why when the machine needs it:
 
 ```console
-$ agent-secrets launcher login-status
+$ agent-secrets machine login-status
 none
-agent-secrets launcher login-status: no machine login since the helper started; a restart discards the launcher credential; run: agent-secrets launcher login
+agent-secrets machine login-status: no machine login since the helper started; a restart discards the launcher credential; run: agent-secrets machine login
 ```
 
 A login nobody approves [expires](/legion/broker/concepts/#machine-login); start a new one. When

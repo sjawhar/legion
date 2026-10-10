@@ -61,10 +61,10 @@ Start the helper in the background, with its log in the workdir, and log it in:
 
 ```sh
 agent-secrets-helper serve 2>"$DEV_BROKER_DIR/helper.log" &
-agent-secrets launcher login
+agent-secrets machine login
 ```
 
-`launcher login` prints a code and waits. In a third shell with the same exports, approve it as
+`machine login` prints a code and waits. In a third shell with the same exports, approve it as
 Dispatch would:
 
 ```console
@@ -72,7 +72,7 @@ $ agent-secrets-devrelay machine-approve --code YE9L-5FM5
 {"credential_id":"3bc28cd1-d04b-4481-92a8-ff10350fe795","grant_id":null,"state":"approved"}
 ```
 
-and `launcher login` exits 0. The helper's log, `$DEV_BROKER_DIR/helper.log`, says
+and `machine login` exits 0. The helper's log, `$DEV_BROKER_DIR/helper.log`, says
 `machine login issued; the helper holds a launcher credential`.
 
 ## Use secrets from a session
@@ -103,6 +103,25 @@ deploying with a 18-character key
 A request has two ids: the request id `agent-secrets` prints, and the record id the approver's list
 shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both, and
 `agent-secrets-devrelay deny --record <record id>` denies a request.
+
+## List and revoke from your own shell
+
+In the third shell, which is outside every session, list the machine logins and the live grants as
+Dispatch's pages would, under the helper's machine login
+([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#revoke-a-grant-from-your-shell)):
+
+```console
+$ agent-secrets machine list
+CREDENTIAL_ID                         HOST                 SERVICE  APPROVED_BY      ISSUED                EXPIRES               STATE
+9ffca551-ef22-4dcc-bc8d-2ebcf2e314f4  example-host-devbox  -        ada@example.com  2026-10-10T07:10:01Z  2026-10-17T07:10:01Z  ok
+$ agent-secrets grant list
+GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                    OPERATOR         EXPIRES
+332314f5-b04f-4353-8def-3b8d9b394176  DEMO_READ_TOKEN  automatic  -         host/example-host-devbox:3942590:32566634  ada@example.com  2026-10-10T08:10:09Z
+```
+
+`agent-secrets grant revoke <grant id>` ends a grant there, and `agent-secrets machine revoke
+<credential id>` a login. Run in the session's shell, they are refused `IN_SESSION`: a session
+acts on itself alone.
 
 ## Write a secret and see it served
 

@@ -247,7 +247,7 @@ rig: ready.
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   logs        $work/logs
 
-  On the agent machine: agent-secrets launcher login, type its code at $dispatch_url/credentials/machine,
+  On the agent machine: agent-secrets machine login, type its code at $dispatch_url/credentials/machine,
   then agent-secrets register --wait 10 --exec -- bash, then
   agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh
 EOF

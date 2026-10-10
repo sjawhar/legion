@@ -55,7 +55,8 @@ as a person; it records the service account the pod's projected token proved ins
 A launcher (a machine's helper, or the Legion daemon) cannot enroll anything until a person has
 approved a **machine login** for it. The login works like a device code:
 
-1. The machine generates a fresh key and asks the broker to log in. A person's machine names the
+1. The machine generates a fresh key and asks the broker to log in (`agent-secrets machine login`
+   asks the helper to). A person's machine names the
    person who should approve it (the helper reads that person's Dispatch login from
    `AGENT_SECRETS_OPERATOR_FILE`); a service's login, such as the Legion daemon's, names its service
    instead.
@@ -74,7 +75,8 @@ its code, not for one named person. The broker reads the service from the machin
 so a login the daemon starts while still naming a person in it is anyone's to decide too.
 
 A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from Dispatch's
-machine-login page, or from any of a person's own machines under its machine login, before or after
+machine-login page, or from any of a person's own machines under its machine login
+(`agent-secrets machine revoke`), before or after
 it expires, which also ends every session it enrolled
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)): a person's
 machine login by the person who approved it and no one else, a service's by anyone signed in. Its
@@ -219,7 +221,8 @@ what its environment holds (`printenv NAME` prints it). A session holding a gran
 the value: approve a secret only for a session you would trust with the value itself.
 
 A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
-approver or its enrollment's operator revokes it in Dispatch or from one of their machines, or when
+approver or its enrollment's operator revokes it in Dispatch or from one of their machines
+(`agent-secrets grant revoke`), or when
 its enrollment ends. A grant the session got without asking is revoked like any other, and when its
 operator revokes it the session asks for approval before it gets the same secrets again (the operator
 [withholds](#owner-and-tier-who-may-have-which-secret) them, even when the grant had already

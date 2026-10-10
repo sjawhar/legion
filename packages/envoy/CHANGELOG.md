@@ -4,6 +4,21 @@
 
 ### Added
 
+- A person lists and ends their machine logins and live grants from their own shell, as Dispatch's
+  machine-login and Live grants pages do. `agent-secrets machine list` and `machine revoke ID`, and
+  `agent-secrets grant list` and `grant revoke ID`, call four new broker routes,
+  `GET /v1/operator/machines`, `POST /v1/operator/machines/{id}/revoke`, `GET /v1/operator/grants`
+  and `POST /v1/operator/grants/{id}/revoke`, which take the machine's own login (a launcher proof)
+  rather than Dispatch's UI token, answer the body each page reads and apply its rule: the operator
+  is the person who approved the login, a revoke of a grant their own session got without asking
+  withholds it, and a service's login, which has no operator, is refused `403 SERVICE_CREDENTIAL`.
+  The helper signs these calls with the machine's credential through a new `sign-launcher` op,
+  which it refuses `IN_SESSION` to a process inside a registered session, since a session acts on
+  itself alone. A revoke made this way records `launcher:<credential id>` as its actor on every row
+  it writes; a revoke from Dispatch still records `human:<email>`. `machine list` prints the
+  credential, host, service, approver, issue and expiry times and state, `grant list` the grant,
+  secrets, how it was granted, approver, session, operator and expiry, and `--json` prints the
+  broker's body verbatim. `machine revoke` warns on stderr when it ends this machine's own login.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
@@ -129,6 +144,11 @@
   carried no advice, now carries `advice` holding the count alone (LEGION-470).
 
 ### Changed
+
+- `agent-secrets launcher login` and `launcher login-status` are now `agent-secrets machine login`
+  and `machine login-status`, beside `machine list` and `machine revoke`; `launcher` is no longer a
+  form, so a script that still calls it gets the usage and exit 2. Every message that said to run
+  `agent-secrets launcher login`, from the CLI and from the helper, now names `machine login`.
 
 - Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
   only the person its request names: the broker reads the service from the signed request, opens
