@@ -3321,45 +3321,66 @@ begin github-credential-refresh
 # Secret, and the kubelet rewrites the projected hosts.yml in the architect's container in place,
 # so the file read at issue-independence and the file now differ, in the same pod, with nothing sent
 # to the agent between the reads; the old token stops working at its own expiry while the new one
-# answers. The daemon log gives the first lease's expiry (its `written` line) and the refresh.
+# answers. Every assertion on the daemon's timing is a property of the log's own pairs: each
+# `refreshed` line is judged against the line before it in the architect's lease chain (`written`,
+# then `refreshed`…), never against a remembered first expiry — by the time this checkpoint runs,
+# any number of cycles may have elapsed, and the first live run compared the second refresh against
+# the first lease and failed on a daemon that had obeyed the rule twice.
 gh_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
 [ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod ($(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')) is not the one whose hosts.yml was read at issue-independence ($gh_before_uid), so its file is a new pod's first, not a refresh"
-written=$(gh_log_line written "$gh_pod" architect) || fail "the daemon log has no 'github credential written' line for the architect of $gh_pod"
-first_expiry=$(jq -r .expiresAt <<<"$written")
-first_expiry_s=$(date -d "$first_expiry" +%s) || fail "the written line's expiresAt is not a time: $written"
-note "the architect's first lease (app $(jq -r .app <<<"$written")) expires at $first_expiry"
-# The read at issue-independence must precede the refresh it is compared with. Planning that ran past
-# the first lease's refresh (some forty minutes after boot) leaves that read already on the second
-# lease: then the second lease is the one whose boundary is observed, read now, and its own
-# refresh is awaited, which can be most of an hour away.
-if early=$(gh_log_line refreshed "$gh_pod" architect) && [ "$(date -d "$(jq -r .time <<<"$early")" +%s)" -gt "$(date -d "$gh_before_at" +%s)" ]; then
-  :
-elif [ -n "${early:-}" ]; then
-  note "the architect's credential was already refreshed at $(jq -r .time <<<"$early"), before the read at $gh_before_at; observing the next boundary from the file as it is now"
-  first_expiry=$(jq -r .expiresAt <<<"$early")
-  first_expiry_s=$(date -d "$first_expiry" +%s) || fail "the refreshed line's expiresAt is not a time: $early"
-  gh_before_hash=$(gh_hosts_hash "$gh_pod" architect) || fail "could not hash the architect's hosts.yml in $gh_pod"
-  gh_before_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's hosts.yml in $gh_pod"
-  gh_before_at=$(date -u +%FT%TZ)
-fi
+# gh_lease_lines prints the architect's lease chain as the daemon log has it: every `written` and
+# `refreshed` line for this pod and role, time-ordered, one JSON object per line.
+gh_lease_lines() {
+  jq -R -s -c --arg sandbox "$gh_pod" --arg role architect \
+    '[split("\n")[] | fromjson? | select((.msg == "sandbox runtime: github credential written" or .msg == "sandbox runtime: github credential refreshed") and .sandbox == $sandbox and .role == $role)] | sort_by(.time) | .[]' "$daemon_log"
+}
+lease_lines=$(gh_lease_lines)
+[ -n "$lease_lines" ] || fail "the daemon log has no 'github credential written' or 'refreshed' line for the architect of $gh_pod"
+[ "$(sed -n 1p <<<"$lease_lines" | jq -r .msg)" = "sandbox runtime: github credential written" ] ||
+  fail "the architect's lease chain in the daemon log does not start with a 'written' line: $(sed -n 1p <<<"$lease_lines")"
+note "the architect's first lease (app $(sed -n 1p <<<"$lease_lines" | jq -r .app)) was written at $(sed -n 1p <<<"$lease_lines" | jq -r .time) and expires at $(sed -n 1p <<<"$lease_lines" | jq -r .expiresAt); $(grep -c refreshed <<<"$lease_lines") refresh(es) logged so far"
+# The lease the file read at issue-independence belonged to: the newest line at or before that read
+# (a file lagging the log by the kubelet's sync names an older token, which expires no later).
+before_s=$(date -d "$gh_before_at" +%s)
+before_expiry=
+while IFS= read -r line; do
+  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -le "$before_s" ] || break
+  before_expiry=$(jq -r .expiresAt <<<"$line")
+done <<<"$lease_lines"
+[ -n "$before_expiry" ] || fail "no lease line of the architect's precedes the read at $gh_before_at: $(tr '\n' ' ' <<<"$lease_lines")"
+before_expiry_s=$(date -d "$before_expiry" +%s) || fail "a lease line's expiresAt is not a time: $before_expiry"
+# A refresh after that read is what the file-change and token checks below observe; the daemon's
+# period is forty minutes, so one lands within the bound whenever the read fell in a cycle.
 refreshed_after_read() {
   local line
   line=$(gh_log_line refreshed "$gh_pod" architect) || return 1
-  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -gt "$(date -d "$gh_before_at" +%s)" ]
+  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -gt "$before_s" ]
 }
 on_tree "$tree1" until_true 2700 "the daemon to refresh the architect's github credential" refreshed_after_read
-refreshed=$(gh_log_line refreshed "$gh_pod" architect)
-refreshed_at=$(jq -r .time <<<"$refreshed")
-[ "$(jq -r .app <<<"$refreshed")" = review ] || fail "the architect's credential was refreshed with app $(jq -r .app <<<"$refreshed"), want review"
-[ "$(date -d "$(jq -r .expiresAt <<<"$refreshed")" +%s)" -gt "$first_expiry_s" ] || fail "the refreshed lease expires no later than the first: $refreshed"
-refreshed_s=$(date -d "$refreshed_at" +%s) || fail "the refreshed line's time is not a time: $refreshed"
-# The daemon re-mints once fewer than twenty minutes of the lease remain (appauth refreshWindow),
-# so its write lands at least fifteen minutes before the first lease expires, whenever this check
-# happens to read it.
-[ "$refreshed_s" -le $((first_expiry_s - 900)) ] || fail "the daemon refreshed the architect's credential at $refreshed_at, fewer than fifteen minutes before the first lease's expiry $first_expiry"
+lease_lines=$(gh_lease_lines)
+# Every refresh against its own antecedent: made with the review App, at least fifteen minutes
+# before the lease it replaces expires (the daemon re-mints once fewer than twenty remain, appauth
+# refreshWindow, and its write follows within the minute), for a lease that expires later.
+previous=
+refreshed_at=
+while IFS= read -r line; do
+  if [ -n "$previous" ]; then
+    [ "$(jq -r .msg <<<"$line")" = "sandbox runtime: github credential refreshed" ] || fail "the architect's lease chain carries a second 'written' line after the first; the pod's Secret was written anew: $line"
+    [ "$(jq -r .app <<<"$line")" = review ] || fail "the architect's credential was refreshed with app $(jq -r .app <<<"$line"), want review: $line"
+    line_s=$(date -d "$(jq -r .time <<<"$line")" +%s) || fail "a refreshed line's time is not a time: $line"
+    antecedent_expiry=$(jq -r .expiresAt <<<"$previous")
+    antecedent_expiry_s=$(date -d "$antecedent_expiry" +%s) || fail "a lease line's expiresAt is not a time: $previous"
+    [ "$line_s" -le $((antecedent_expiry_s - 900)) ] || fail "the daemon refreshed the architect's credential at $(jq -r .time <<<"$line"), fewer than fifteen minutes before the expiry $antecedent_expiry of the lease it replaced: $line"
+    [ "$(date -d "$(jq -r .expiresAt <<<"$line")" +%s)" -gt "$antecedent_expiry_s" ] || fail "the refreshed lease expires no later than the one it replaced ($antecedent_expiry): $line"
+    if [ -z "$refreshed_at" ] && [ "$line_s" -gt "$before_s" ]; then refreshed_at=$(jq -r .time <<<"$line"); refreshed_s=$line_s; fi
+  fi
+  previous=$line
+done <<<"$lease_lines"
+[ -n "$refreshed_at" ] || fail "no refresh of the architect's credential follows the read at $gh_before_at in the daemon log: $(tr '\n' ' ' <<<"$lease_lines")"
+note "the architect's lease chain holds $(grep -c refreshed <<<"$lease_lines") refresh(es), each at least fifteen minutes before the expiry of the lease it replaced; the first after the read at $gh_before_at was at $refreshed_at"
 # The kubelet's projection: the file in the container changes within its sync period.
 hosts_changed() { [ "$(gh_hosts_hash "$gh_pod" architect)" != "$gh_before_hash" ]; }
-until_true 300 "the architect container's hosts.yml to carry the refreshed token" hosts_changed
+until_true 300 "the architect container's hosts.yml to carry a refreshed token" hosts_changed
 propagated_at=$(date -u +%FT%TZ)
 [ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod was replaced while the refresh was awaited"
 propagation=$(( $(date -d "$propagated_at" +%s) - refreshed_s ))
@@ -3372,16 +3393,16 @@ note "the daemon refreshed the architect's credential at $refreshed_at; the cont
 # lets a gh that started on it finish. Both calls run from this shell; the tokens are its variables
 # alone and reach no file.
 now_s=$(date +%s)
-if [ "$now_s" -lt $((first_expiry_s + 60)) ]; then
-  note "waiting $((first_expiry_s + 60 - now_s)) s for the first lease to expire"
-  sleep $((first_expiry_s + 60 - now_s))
+if [ "$now_s" -lt $((before_expiry_s + 60)) ]; then
+  note "waiting $((before_expiry_s + 60 - now_s)) s for the lease read at issue-independence to expire"
+  sleep $((before_expiry_s + 60 - now_s))
 fi
-old_answer=$(GH_TOKEN="$gh_before_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's first token still answers GitHub after its expiry: $old_answer"
-grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's first token was refused for another reason than its expiry: $old_answer"
+old_answer=$(GH_TOKEN="$gh_before_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
+grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's token read at issue-independence was refused for another reason than its expiry: $old_answer"
 new_answer=$(GH_TOKEN="$gh_after_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
 [ "$new_answer" = "legion-reviewer[bot]" ] || fail "the architect's refreshed token answers as $new_answer, want legion-reviewer[bot]"
 unset gh_before_token gh_after_token
-note "after $first_expiry the first token answers 401 and the refreshed one legion-reviewer[bot]"
+note "after $before_expiry the token read at issue-independence answers 401 and the refreshed one legion-reviewer[bot]"
 pass
 
 begin idle-resident
