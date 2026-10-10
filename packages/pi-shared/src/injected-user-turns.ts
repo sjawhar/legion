@@ -1,12 +1,16 @@
 import { envoyPluginInterface } from "./interface";
 
 /**
- * The user turns this process sent into one session and the user messages found for them. The
- * host links a sent prompt to nothing it records, so a sent turn is found by its text: the first
- * user message that equals it, until the session's run ends. A message found is remembered under
- * its host timestamp, so every handler that asks about it gets the same answer whichever asks
- * first: envoy.ts's stream recorder tags its frames, and Legion's phase-stall check
- * (`extensions/legion.ts`) counts it as an inbound event rather than the daemon's assignment.
+ * The user turns this process sent into one session and the user messages found for them. A turn
+ * sent through `pi.sendUserInput` carries its Dispatch message id as the host's `tag`, which the
+ * user message it submits keeps, so that message is found by its tag even when the host rewrote
+ * its text (a prompt template, a file command). A turn sent through `pi.sendUserMessage`, on a
+ * host without `sendUserInput`, is linked to nothing the host records, so it is found by its
+ * text: the first user message that equals it, until the session's run ends. A message found is
+ * remembered under its host timestamp, so every handler that asks about it gets the same answer
+ * whichever asks first: envoy.ts's stream recorder tags its frames, and Legion's phase-stall
+ * check (`extensions/legion.ts`) counts it as an inbound event rather than the daemon's
+ * assignment.
  *
  * The record is the `injectedUserTurns` member of the versioned interface (`interface.ts`):
  * envoy.ts writes what legion.ts reads, and each plugin bundles its own copy of this module.
@@ -41,8 +45,9 @@ export function noteInjectedUserTurn(sessionID: string, body: string, messageId:
 
 /**
  * The Dispatch message a user message `sessionID` records delivered, if it is a turn this process
- * sent in: the first unfound sent turn with its text is consumed, so the same words arriving again
- * are someone else's, and the answer is remembered for that message.
+ * sent in: the sent turn its tag names, else the first unfound sent turn with its text, which is
+ * consumed, so the same words arriving again are someone else's; the answer is remembered for that
+ * message.
  */
 export function matchInjectedUserTurn(sessionID: string, message: unknown): string | undefined {
   if (typeof message !== "object" || message === null) return undefined;
@@ -52,8 +57,10 @@ export function matchInjectedUserTurn(sessionID: string, message: unknown): stri
   if (session === undefined) return undefined;
   const known = session.found.get(message.timestamp);
   if (known !== undefined) return known;
+  const tag = "tag" in message && typeof message.tag === "string" ? message.tag : undefined;
   const text = userMessageText("content" in message ? message.content : undefined);
-  const index = session.sent.findIndex((sent) => sent.body === text);
+  const tagged = tag === undefined ? -1 : session.sent.findIndex((sent) => sent.messageId === tag);
+  const index = tagged === -1 ? session.sent.findIndex((sent) => sent.body === text) : tagged;
   const sent = session.sent[index];
   if (sent === undefined) return undefined;
   session.sent.splice(index, 1);

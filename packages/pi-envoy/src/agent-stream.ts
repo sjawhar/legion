@@ -2,6 +2,7 @@ import {
   AGENT_STREAM_LIMITS,
   AGENT_STREAM_PROTOCOL,
   AGENT_STREAM_WATCH_TTL_MS,
+  type AgentStreamCommand,
   type AgentStreamFrame,
   type AgentStreamPart,
   type AgentStreamReplay,
@@ -248,6 +249,10 @@ export class AgentStreamPublisher {
   readonly #publishedAt = new Map<string, number>();
   #seq = 0;
   #watchedUntil = 0;
+  /** The slash commands the session takes from Dispatch, as last published; undefined for a
+   *  session whose host cannot run typed input, which publishes none. */
+  #commands: readonly AgentStreamCommand[] | undefined;
+  #commandsSeq = 0;
 
   constructor(deps: AgentStreamPublisherDeps) {
     this.#deps = deps;
@@ -272,6 +277,44 @@ export class AgentStreamPublisher {
     this.#settled.clear();
     this.#publishedAt.clear();
     this.#watchedUntil = 0;
+    this.#commands = undefined;
+  }
+
+  /**
+   * The session's slash commands: kept for every replay, whose last frame they are, and published
+   * at once when they differ from the list last kept while a viewer is attached. Each name is
+   * capped and kept once, empty names and names with whitespace dropped, since a person types a
+   * command as one token.
+   */
+  setCommands(subject: string, commands: readonly AgentStreamCommand[]): void {
+    const seen = new Set<string>();
+    const kept: AgentStreamCommand[] = [];
+    for (const command of commands) {
+      if (kept.length >= AGENT_STREAM_LIMITS.commands) break;
+      const name = command.name.slice(0, AGENT_STREAM_LIMITS.commandNameChars);
+      if (name === "" || /\s/.test(name) || seen.has(name)) continue;
+      seen.add(name);
+      kept.push({
+        name,
+        source: command.source,
+        ...(command.description !== undefined && {
+          description: capAgentStreamText(
+            command.description,
+            AGENT_STREAM_LIMITS.commandDescriptionChars
+          ),
+        }),
+        ...(command.terminalOnly === true && { terminalOnly: true as const }),
+      });
+    }
+    if (JSON.stringify(kept) === JSON.stringify(this.#commands)) return;
+    this.#commands = kept;
+    this.#seq += 1;
+    this.#commandsSeq = this.#seq;
+    if (this.watched) this.#deps.publish(subject, JSON.stringify(this.#commandsFrame(kept)));
+  }
+
+  #commandsFrame(commands: readonly AgentStreamCommand[]): AgentStreamFrame {
+    return { commands, kind: "commands", seq: this.#commandsSeq, v: AGENT_STREAM_PROTOCOL };
   }
 
   /**
@@ -338,7 +381,11 @@ export class AgentStreamPublisher {
     const ordered = [...this.#history.values()].sort((left, right) =>
       left.at === right.at ? left.seq - right.seq : left.at - right.at
     );
-    let budget = AGENT_STREAM_LIMITS.historyBytes;
+    // The command list rides last and is paid for first, so a full history never crowds it out.
+    const commands = this.#commands === undefined ? undefined : this.#commandsFrame(this.#commands);
+    let budget =
+      AGENT_STREAM_LIMITS.historyBytes -
+      (commands === undefined ? 0 : encoder.encode(JSON.stringify(commands)).length);
     const kept: AgentStreamFrame[] = [];
     for (let index = ordered.length - 1; index >= 0; index -= 1) {
       const entry = ordered[index];
@@ -348,6 +395,7 @@ export class AgentStreamPublisher {
       if (budget < 0) break;
       kept.unshift(frame);
     }
+    if (commands !== undefined) kept.push(commands);
     return { frames: kept, session_id: sessionID, v: AGENT_STREAM_PROTOCOL };
   }
 }

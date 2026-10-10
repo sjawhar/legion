@@ -178,8 +178,8 @@ describe("AgentStreamPublisher", () => {
     expect(bytes).toBeLessThanOrEqual(AGENT_STREAM_LIMITS.historyBytes);
     expect(replay.frames.length).toBeGreaterThan(0);
     expect(replay.frames.length).toBeLessThan(60);
-    const times = replay.frames.map((frame) =>
-      frame.kind === "message" ? frame.message.at : frame.result.at
+    const times = replay.frames.flatMap((frame) =>
+      frame.kind === "message" ? [frame.message.at] : frame.kind === "tool-result" ? [frame.result.at] : []
     );
     expect(times).toEqual([...times].sort((left, right) => left - right));
     expect(times.at(-1)).toBe(60);

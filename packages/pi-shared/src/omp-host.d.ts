@@ -29,3 +29,14 @@ declare module "@oh-my-pi/pi-coding-agent" {
     prompt(agentId: string, content: string): Promise<void>;
   }
 }
+
+/** Our fork's typed-input module (can1357/oh-my-pi#14323); a host without it fails the import. */
+declare module "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler" {
+  export interface HostBuiltinCommand {
+    readonly name: string;
+    readonly description: string;
+    /** True when only the interactive terminal runs it, so `sendUserInput` answers `terminal-only`. */
+    readonly terminalOnly: boolean;
+  }
+  export function listUserInputBuiltinCommands(): HostBuiltinCommand[];
+}

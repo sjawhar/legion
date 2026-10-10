@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type AgentStreamCommand,
   type AgentStreamControlMessage,
   agentStreamControlSubject,
   agentStreamFramesSubject,
@@ -68,6 +69,8 @@ import {
 } from "@legion/pi-shared/injected-user-turns";
 import { LOCAL_ENVOY_NOTICE, publishEnvoyPluginInterface } from "@legion/pi-shared/interface";
 import type {
+  ContentBlock,
+  ImageContent,
   PiApi,
   SessionContext,
   SessionSwitchReason,
@@ -87,7 +90,8 @@ import {
   subagentSessionCheck,
 } from "@legion/pi-shared/subagent-session";
 import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
-import { logger, procmgr } from "@oh-my-pi/pi-utils";
+import type { HostBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
+import { logger, procmgr, VERSION } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
@@ -100,12 +104,25 @@ import {
   handledAttempts,
   isUserTurnCandidate,
   turnFromAccept,
+  typedInputReply,
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
+
+// The host's built-in slash commands, each marked when only its terminal runs it, which our fork
+// exports beside `sendUserInput` (can1357/oh-my-pi#14323). Loaded once and never awaited, through
+// a dynamic import because a static one would fail the whole extension's load on a host without
+// the module; such a host lists no built-ins.
+let hostBuiltinCommands: (() => readonly HostBuiltinCommand[]) | undefined;
+void import("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler").then(
+  (module) => {
+    hostBuiltinCommands = module.listUserInputBuiltinCommands;
+  },
+  () => undefined
+);
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
@@ -641,6 +658,55 @@ export default function envoyExtension(pi: PiApi): void {
     await postDeliveryReply(currentDispatchConfig(), sessionID, delivery, result);
   };
 
+  // The pictures a person's typed input carries, by its text, until the host's input handlers ask
+  // for them: `sendUserInput` takes text alone and gets its images from an `input` handler, as
+  // typed input at the terminal does.
+  const pendingInputImages = new Map<string, ImageContent[]>();
+  pi.on("input", async (event) => {
+    if (event.source !== "extension") return undefined;
+    const images = pendingInputImages.get(event.text);
+    if (images === undefined) return undefined;
+    pendingInputImages.delete(event.text);
+    return { images: [...(event.images ?? []), ...images] };
+  });
+
+  // Runs a person's accepted Send or Aside as if typed at the terminal (`pi.sendUserInput`): a
+  // command, a skill, a template, or a prompt. Never awaited here: on an idle session the host
+  // answers only once the run it starts ends, and the pump that called `deliver` must keep taking
+  // frames meanwhile, the person's next Send included. What a command printed, or why it did not
+  // run, is the session's reply on Dispatch, which the conversation shows.
+  const runTypedInput = (
+    sendUserInput: NonNullable<PiApi["sendUserInput"]>,
+    delivery: DispatchDelivery,
+    turn: AcceptedUserTurn,
+    content: string | readonly ContentBlock[]
+  ): void => {
+    const images =
+      typeof content === "string"
+        ? []
+        : content.filter((block): block is ImageContent => block.type === "image");
+    if (images.length > 0) pendingInputImages.set(turn.body, images);
+    void sendUserInput(turn.body, {
+      ...(turn.mode === "aside" && { deliverAs: "aside" as const }),
+      tag: turn.messageId,
+    })
+      .then(
+        (result) => typedInputReply(turn.body, result),
+        (error: unknown) => typedInputReply(turn.body, { error: messageFor(error) })
+      )
+      .then(async (reply) => {
+        pendingInputImages.delete(turn.body);
+        if (reply !== undefined) await postDispatchReply(delivery, { body: reply });
+      })
+      .catch((error: unknown) => {
+        logger.warn("envoy: the reply to a person's typed input did not reach Dispatch", {
+          attempt: delivery.attempt,
+          error: messageFor(error),
+          messageID: delivery.id,
+        });
+      });
+  };
+
   // The user turn a person's direct Send or Aside becomes (`src/dispatch-user-turn.ts`): only one
   // whose acceptance by this session Dispatch records, as the body and mode Dispatch answers. The
   // attempt is recorded as handled before Dispatch is asked, so whatever this frame becomes - a
@@ -812,14 +878,29 @@ export default function envoyExtension(pi: PiApi): void {
               false,
               shown
             );
-            // Noted right before the send, after the pictures load: a run that ends while they
-            // load clears every note (endInjectedUserTurns), and this turn must still be found.
-            noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
-            pi.sendUserMessage(
-              delivery.content,
-              turn.mode === "aside" ? { deliverAs: "aside" } : undefined
-            );
-            markPicturesShown(shown, delivery.shown);
+            const accepted = rendered.delivery;
+            const sendUserInput = pi.sendUserInput;
+            const untyped =
+              sendUserInput === undefined
+                ? typedInputReply(turn.body, { hostVersion: VERSION })
+                : undefined;
+            if (accepted !== undefined && untyped !== undefined) {
+              // A host that cannot run typed input would hand the command to the model as words.
+              await postDispatchReply(accepted, { body: untyped });
+            } else {
+              // Noted right before the send, after the pictures load: a run that ends while they
+              // load clears every note (endInjectedUserTurns), and this turn must still be found.
+              noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
+              if (sendUserInput === undefined || accepted === undefined) {
+                pi.sendUserMessage(
+                  delivery.content,
+                  turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+                );
+              } else {
+                runTypedInput(sendUserInput, accepted, turn, delivery.content);
+              }
+              markPicturesShown(shown, delivery.shown);
+            }
           }
         }
       } catch (error) {
@@ -939,6 +1020,27 @@ export default function envoyExtension(pi: PiApi): void {
   let agentStreamControl: Subscription | undefined;
   let agentStreamControlSession = "";
 
+  // The slash commands a viewer can send this session: its extension, custom and skill commands
+  // (`pi.getCommands`) and the host's built-ins, each built-in marked when only the terminal runs
+  // it. Only a host that can run typed input from an extension offers any; one that cannot sends
+  // no list, and its viewer offers no completion.
+  const refreshAgentStreamCommands = (session: string): void => {
+    if (typeof pi.sendUserInput !== "function") return;
+    const commands: AgentStreamCommand[] = [];
+    for (const builtin of hostBuiltinCommands?.() ?? []) {
+      commands.push({
+        description: builtin.description,
+        name: builtin.name,
+        source: "builtin",
+        ...(builtin.terminalOnly && { terminalOnly: true as const }),
+      });
+    }
+    for (const command of pi.getCommands()) {
+      commands.push({ description: command.description, name: command.name, source: command.source });
+    }
+    agentStream.setCommands(agentStreamFramesSubject(session), commands);
+  };
+
   const pumpAgentStreamControl = async (
     subscription: Subscription,
     session: string
@@ -955,6 +1057,9 @@ export default function envoyExtension(pi: PiApi): void {
           if (typeof parsed !== "object" || parsed === null) continue;
           const request = parsed as AgentStreamControlMessage;
           if (request.type !== "replay" && request.type !== "watch") continue;
+          // Read on every watch ping (each 10 s while a viewer is open), so a skill or command the
+          // session gains mid-conversation reaches the composer without a reopen.
+          refreshAgentStreamCommands(session);
           // The answer is taken before this message arms anything, so a bare replay request
           // from a client that never attached a viewer gets an empty history, not the ring.
           const reply = message.reply;
