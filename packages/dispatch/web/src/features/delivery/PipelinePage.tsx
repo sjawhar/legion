@@ -1,18 +1,20 @@
-// The prototype's web/src/pages/Pipeline.tsx, ported as it is: the header line, six cards in the
-// prototype's own responsive grid (one column, two from md, six from xl), the slowest-jobs table
-// and the failed-in-24-hours table, each with the prototype's data-* attributes. Every number,
-// every target and every day comes from GET /api/v1/delivery/pipeline; nothing is computed here
-// but the two lead-time cards' met/missed, which the prototype judges on the page as this does,
-// against the targets the response carries. Differences, each from LEGION-567's slice 3 plan:
-// Dispatch's sidebar replaces the prototype's row of page links; a pipeline whose settings name no
-// staging end-to-end gate (or no staging deploy) omits that card; the prototype's note on runs
-// whose jobs are not fetched yet is gone, since Dispatch stores a run's jobs with the run; the
-// failing-jobs note names the roll-up job by its role, since the job's name is a setting; and the
-// colours are the theme's tokens.
+// The prototype's web/src/pages/Pipeline.tsx, ported as it is: the header line, six cards, the
+// slowest-jobs table and the failed-in-24-hours table, each with the prototype's data-* attributes.
+// Every number, every target and every day comes from GET /api/v1/delivery/pipeline; nothing is
+// computed here but the two lead-time cards' met/missed, which the prototype judges on the page as
+// this does, against the targets the response carries. Differences, each from LEGION-567's slice 3
+// plan or for the same reason as the measures panel's: Dispatch's sidebar replaces the
+// prototype's row of page links; the cards lay themselves out for the page's own width (one
+// column, then two, three and six as each card keeps 15rem), where the prototype's viewport grid
+// (one, two from md, six from xl) leaves a card too narrow for its figures beside the sidebar; a
+// pipeline whose settings name no staging end-to-end gate (or no staging deploy) omits that card;
+// the prototype's note on runs whose jobs are not fetched yet is gone, since Dispatch stores a
+// run's jobs with the run; the failing-jobs note names the roll-up job by its role, since the
+// job's name is a setting; and the colours are the theme's tokens.
 //
 // `?at=` is the test and screenshot hook: the page forwards it to the route, which then names the
 // seven days ending on at's day and looks back 24 hours from it, so a fixture dated in the past
-// renders as "today". The page never writes it.
+// renders as "today", and a failure's age is measured from it. The page never writes it.
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -56,6 +58,9 @@ export function PipelinePage(): ReactNode {
   const [params] = useSearchParams();
   const at = params.get("at");
   const query = useQuery(deliveryPipelineQuery(at === null ? {} : { at }));
+  // The page's "now": a pinned at, else the clock, so a failure's age is from the moment the
+  // failing-jobs table looked back from.
+  const nowMs = at === null ? Date.now() : Date.parse(at);
   // When the answer on screen was read, kept across a refetch, as the Delivery page keeps it.
   const answeredAtRef = useRef(0);
   if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
@@ -86,19 +91,22 @@ export function PipelinePage(): ReactNode {
         />
       ) : null}
       {query.data === undefined ? null : (
-        <PipelineView pipeline={query.data} readAtMs={answeredAtRef.current} />
+        <PipelineView nowMs={nowMs} pipeline={query.data} readAtMs={answeredAtRef.current} />
       )}
     </section>
   );
 }
 
-/** The page's body for one answer of the route; `readAtMs` is when that answer was read. */
+/** The page's body for one answer of the route; `readAtMs` is when that answer was read, and
+ *  `nowMs` the moment a failure's age is measured from. */
 export function PipelineView({
   pipeline,
   readAtMs,
+  nowMs,
 }: {
   pipeline: DeliveryPipelineResponse;
   readAtMs: number;
+  nowMs: number;
 }): ReactNode {
   const first = pipeline.days[0];
   const last = pipeline.days[pipeline.days.length - 1];
@@ -115,51 +123,53 @@ export function PipelineView({
         are counted beside it, not in it.
       </p>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
-        <TimingCard
-          detail="PR Checks on a pull request, from run start to its last job"
-          metric="pr_ci"
-          timing={checks.run}
-          title="PR CI"
-        />
-        {pipeline.staging_e2e === null ? null : (
+      <div className="@container">
+        <div className="grid grid-cols-1 gap-3 @min-[31rem]:grid-cols-2 @min-[46.5rem]:grid-cols-3 @min-[94rem]:grid-cols-6">
           <TimingCard
-            detail={pipeline.staging_e2e.job}
-            metric="staging_e2e"
-            timing={pipeline.staging_e2e}
-            title="Staging end-to-end gate"
+            detail="PR Checks on a pull request, from run start to its last job"
+            metric="pr_ci"
+            timing={checks.run}
+            title="PR CI"
           />
-        )}
-        {pipeline.staging_apply === null ? null : (
+          {pipeline.staging_e2e === null ? null : (
+            <TimingCard
+              detail={pipeline.staging_e2e.job}
+              metric="staging_e2e"
+              timing={pipeline.staging_e2e}
+              title="Staging end-to-end gate"
+            />
+          )}
+          {pipeline.staging_apply === null ? null : (
+            <TimingCard
+              detail={pipeline.staging_apply.job}
+              metric="staging_apply"
+              timing={pipeline.staging_apply}
+              title="Deploy to staging"
+            />
+          )}
           <TimingCard
-            detail={pipeline.staging_apply.job}
-            metric="staging_apply"
-            timing={pipeline.staging_apply}
-            title="Deploy to staging"
+            detail={pipeline.production_apply.job}
+            metric="production_apply"
+            timing={pipeline.production_apply}
+            title="Deploy to production"
           />
-        )}
-        <TimingCard
-          detail={pipeline.production_apply.job}
-          metric="production_apply"
-          timing={pipeline.production_apply}
-          title="Deploy to production"
-        />
-        <LeadTimeCard
-          detail="DORA lead time, PRs by the day they merged"
-          judged="longest"
-          metric="merge_to_production"
-          target={pipeline.targets.merge_to_production_minutes}
-          timing={pipeline.merge_to_production}
-          title="Merge to production"
-        />
-        <LeadTimeCard
-          detail="Opened to merged, every merged PR, by the day it merged"
-          judged="median"
-          metric="opened_to_merge"
-          target={pipeline.targets.opened_to_merge_median_minutes}
-          timing={pipeline.opened_to_merge}
-          title="PR open to merge"
-        />
+          <LeadTimeCard
+            detail="DORA lead time, PRs by the day they merged"
+            judged="longest"
+            metric="merge_to_production"
+            target={pipeline.targets.merge_to_production_minutes}
+            timing={pipeline.merge_to_production}
+            title="Merge to production"
+          />
+          <LeadTimeCard
+            detail="Opened to merged, every merged PR, by the day it merged"
+            judged="median"
+            metric="opened_to_merge"
+            target={pipeline.targets.opened_to_merge_median_minutes}
+            timing={pipeline.opened_to_merge}
+            title="PR open to merge"
+          />
+        </div>
       </div>
 
       <section aria-label="PR CI slowest jobs" className="mt-1" data-section="slowest-jobs">
@@ -260,9 +270,7 @@ export function PipelineView({
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {formatAge(
-                          Math.max(0, (Date.now() - Date.parse(job.last_failed_at)) / 1000)
-                        )}
+                        {formatAge(Math.max(0, (nowMs - Date.parse(job.last_failed_at)) / 1000))}
                       </a>
                     </td>
                   </tr>

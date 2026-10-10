@@ -1,4 +1,4 @@
-import { afterEach, expect, setSystemTime, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -14,7 +14,6 @@ import { PipelinePage, PipelineView } from "./PipelinePage";
 
 afterEach(() => {
   cleanup();
-  setSystemTime();
 });
 
 // The prototype's web/src/lib/pipeline.fixture.ts, its cells as the server answers them, with the
@@ -221,8 +220,8 @@ const PIPELINE: DeliveryPipelineResponse = {
 };
 
 function view(pipeline: DeliveryPipelineResponse = PIPELINE): HTMLElement {
-  setSystemTime(new Date("2026-10-02T12:00:00Z"));
-  render(<PipelineView pipeline={pipeline} readAtMs={Date.parse("2026-10-02T12:00:00Z")} />);
+  const at = Date.parse("2026-10-02T12:00:00Z");
+  render(<PipelineView nowMs={at} pipeline={pipeline} readAtMs={at} />);
   return document.body;
 }
 
@@ -378,6 +377,10 @@ test("the page reads the pipeline, forwarding a pinned at from its URL, and titl
     expect(await screen.findByRole("heading", { level: 1, name: "Pipeline" })).toBeDefined();
     await screen.findByText("PR CI");
     expect(getDeliveryPipeline).toHaveBeenCalledWith({ at: "2026-10-02T12:00:00Z" });
+    // A failure's age is measured from the pinned at (11:40 against 12:00), not the clock.
+    expect(document.querySelector('[data-failing-job="build / unit"] a')?.textContent).toBe(
+      "20 min ago"
+    );
     expect(document.title).toBe("Pipeline · Dispatch");
   } finally {
     getDeliveryPipeline.mockRestore();
