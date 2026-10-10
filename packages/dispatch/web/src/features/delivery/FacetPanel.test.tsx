@@ -30,7 +30,7 @@ const emptyCounts = {
   deployed: {},
 };
 
-const data: DeliveryTimelineResponse = {
+const data: Omit<DeliveryTimelineResponse, "measures"> = {
   color_counts: { repo: {}, author: {}, priority: {}, component: {}, parent_agent: {} },
   components: {
     "ACME/platform": { parent: null, title: "The platform" },

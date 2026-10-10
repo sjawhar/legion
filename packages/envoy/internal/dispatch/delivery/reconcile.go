@@ -124,6 +124,13 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now))
 	}
+	// The runs backfill logs and resumes its own failures and never reaches record(): a rate limit
+	// it meets must not hold last_reconcile_at or set last_error while every regular step
+	// succeeded. It walks at most backfillWindowsPerPass hours a pass.
+	r.backfillRuns(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now)
+	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
+		r.backfillRuns(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now)
+	}
 	// The attribution backfill runs last, within its own call budget: it is the one step whose
 	// work can wait a pass, so the timeline's own facts take the rate limit first.
 	record("read attribution inputs of stored pull requests", r.reconcileAttributionInputs(ctx))
@@ -589,6 +596,18 @@ func runsStep(kind DeliveryRunKind) string {
 	return "runs/" + string(kind)
 }
 
+// completedRunIDs is the ids of runs that have concluded: the only runs whose jobs a pass lists,
+// so the only ones its skip-set queries need to ask about.
+func completedRunIDs(runs []FetchedRun) []int64 {
+	ids := make([]int64, 0, len(runs))
+	for _, run := range runs {
+		if run.CompletedAt != nil {
+			ids = append(ids, run.RunID)
+		}
+	}
+	return ids
+}
+
 // reconcileWorkflow walks kind's workflow runs created since this step's own recorded progress,
 // in windows, and upserts each run plus (for a concluded run) its jobs. Each completed window
 // records the step's progress, but only while every window before it in this pass succeeded: a
@@ -615,13 +634,7 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 	blocked := false
 
 	visit := func(windowUntil time.Time, runs []FetchedRun) error {
-		completedRunIDs := make([]int64, 0, len(runs))
-		for _, run := range runs {
-			if run.CompletedAt != nil {
-				completedRunIDs = append(completedRunIDs, run.RunID)
-			}
-		}
-		jobsUnfetchable, err := ListUnfetchableRunIDs(ctx, r.pool, repoFull, completedRunIDs)
+		jobsUnfetchable, err := ListUnfetchableRunIDs(ctx, r.pool, repoFull, completedRunIDs(runs))
 		if err != nil {
 			blocked = true
 			return fmt.Errorf("list unfetchable %s run jobs: %w", kind, err)
@@ -683,6 +696,7 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 		Repo: repoFull, RunID: run.RunID, Kind: kind, PRNumber: run.PRNumber, HeadSHA: run.HeadSHA,
 		HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
 		Conclusion: mapRunConclusionPtr(run.Conclusion), URL: run.URL,
+		HeadBranch: run.HeadBranch, Event: run.Event,
 	}); err != nil {
 		return fmt.Errorf("upsert run: %w", err)
 	}

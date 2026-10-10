@@ -1,4 +1,10 @@
 import { expect, type Page, test } from "@playwright/test";
+import { mintAgentToken } from "./api";
+import {
+  FIXTURE_WINDOW as MEASURES_WINDOW,
+  seedDeliveryFixture,
+  seedMeasuresFixture,
+} from "./delivery-seed";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
@@ -76,47 +82,6 @@ async function clickShape(page: Page, shape: { series: string; x: number; at: st
 test.beforeEach(async () => {
   await resetDatabase();
 });
-
-/** Seeds one delivery_settings row, two population pull requests (#1 shipped by deploy run 500
- * and attributed to ACME-1, a P0 issue; #2 waiting, a rework, with no issue), the deploy run with
- * its jobs, and a failed run (501) -- directly in Postgres: the delivery timeline's GET routes
- * read only stored facts, so this is the same shape intake/reconcile would have written, without
- * needing a live GitHub App for this page-level e2e. acme/widgets-shaped placeholders throughout,
- * per AGENTS.md ("This repository is public"). */
-async function seedDeliveryFixture(): Promise<void> {
-  await sql(
-    `INSERT INTO delivery_settings (
-       singleton, deploy_repo, deploy_workflow_path, production_job_name,
-       pr_checks_workflow_path, population_authors, excluded_repos, updated_by
-     ) VALUES (
-       true, 'acme/widgets', '.github/workflows/deploy.yml', 'widgets-release / widgets-release',
-       '.github/workflows/pr-checks.yml', ARRAY['octocat'], ARRAY[]::text[], '{"kind":"system","id":"e2e-seed"}'
-     )`,
-    `INSERT INTO projects (key, name) VALUES ('ACME', 'Acme') ON CONFLICT DO NOTHING`,
-    `INSERT INTO issues (key, project_key, number, title, status, priority, created_by, rank)
-     VALUES ('ACME-1', 'ACME', 1, 'Ship the widgets', 'todo', 0, '{"kind":"system","id":"e2e-seed"}', 'U')`,
-    `INSERT INTO delivery_pull_requests (
-       repo, number, title, url, author, created_at, merged_at, additions, deletions, rework, issue_key, sessions, partial
-     ) VALUES
-       ('acme/widgets', 1, 'feat: a shipped widget', 'https://github.com/acme/widgets/pull/1', 'octocat',
-        '2024-06-01T00:00:00Z', '2024-06-01T01:00:00Z', 12, 3, false, 'ACME-1', ARRAY[]::text[], false),
-       ('acme/widgets', 2, 'fix: a waiting widget', 'https://github.com/acme/widgets/pull/2', 'octocat',
-        '2024-06-01T02:00:00Z', '2024-06-01T03:00:00Z', 4, 1, true, null, ARRAY[]::text[], false)`,
-    `INSERT INTO delivery_runs (
-       repo, run_id, kind, head_sha, head_commit_at, started_at, completed_at, conclusion, url
-     ) VALUES
-       ('acme/widgets', 500, 'deploy', 'deadbeef', '2024-06-01T01:00:00Z',
-        '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/500'),
-       ('acme/widgets', 501, 'deploy', 'cafef00d', '2024-06-01T03:00:00Z',
-        '2024-06-01T12:00:00Z', '2024-06-01T12:20:00Z', 'failure', 'https://github.com/acme/widgets/actions/runs/501')`,
-    `INSERT INTO delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion) VALUES
-       ('acme/widgets', 500, 'build', '2024-06-01T01:30:00Z', '2024-06-01T01:32:00Z', 'success'),
-       ('acme/widgets', 500, 'widgets-release / widgets-release', '2024-06-01T01:32:00Z', '2024-06-01T01:40:00Z', 'success'),
-       ('acme/widgets', 501, 'build', '2024-06-01T12:00:00Z', '2024-06-01T12:05:00Z', 'success'),
-       ('acme/widgets', 501, 'integration tests', '2024-06-01T12:05:00Z', '2024-06-01T12:20:00Z', 'failure'),
-       ('acme/widgets', 501, 'widgets-release / widgets-release', null, null, 'skipped')`
-  );
-}
 
 test("the Delivery sidebar nav entry opens the delivery timeline", async ({ browser }) => {
   await seedDeliveryFixture();
@@ -556,4 +521,82 @@ test("an unconfigured Delivery page sets itself up from its form and then shows 
   } finally {
     await context.close();
   }
+});
+
+const MEASURES_QUERY = `from=${encodeURIComponent(MEASURES_WINDOW.from)}&to=${encodeURIComponent(MEASURES_WINDOW.to)}`;
+
+test("the measures panel shows the four measures for the window and follows a facet", async ({
+  browser,
+}) => {
+  await seedMeasuresFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.goto(`/delivery?mode=list&${MEASURES_QUERY}`);
+
+  const kpis = page.getByLabel("KPI targets");
+  await expect(kpis).toBeVisible();
+  await expect(kpis.locator('[data-kpi="Deploys a day"]')).toContainText("5 deploys");
+  // The stored-path median: 510 minutes, each PR's deploy derived from the stored runs.
+  await expect(kpis.locator('[data-kpi="Merge → production"]')).toContainText("8.5h");
+  const p0 = kpis.locator('[data-kpi="P0 issues with no owner"]').getByRole("link", {
+    name: "ACME-103",
+  });
+  await expect(p0).toHaveAttribute("href", /\/issues\/ACME-103$/);
+  const strip = page.getByTestId("measures-strip");
+  await expect(strip).toContainText("28.6%");
+
+  // The Repository facet narrows the measures: acme/gadgets#20 drops out, 4 rework of 13.
+  await page.getByRole("button", { name: /^Repository/ }).click();
+  await page.getByRole("option", { name: /^acme\/widgets/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(strip).toContainText("30.8%");
+  await context.close();
+});
+
+test("the measures API gives an agent the numbers the panel shows", async ({ browser }) => {
+  await seedMeasuresFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const token = await mintAgentToken("measures-e2e", "alice");
+  const response = await page.request.get(`/api/v1/delivery/measures?${MEASURES_QUERY}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  expect(response.status()).toBe(200);
+  const body = await response.json();
+  expect(body.measures.deploy_frequency.successful_deploys).toBe(5);
+  expect(body.status.unowned_p0).toBe(false);
+  await context.close();
+});
+
+test("a brush window narrows the measures to it", async ({ browser }) => {
+  await seedMeasuresFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  // The prototype's own computeDora over the brush window 2026-09-05..2026-09-12 (PRs #101-#107,
+  // each deploy derived by its containment): 3 deploys, merge → production median 1140 minutes
+  // (`bun /tmp/measures567a/dump-dora-stored-window.ts 2026-09-05T00:00:00Z 2026-09-12T00:00:00Z`
+  // from the prototype's web/).
+  const brush = `ws=${encodeURIComponent("2026-09-05T00:00:00.000Z")}&we=${encodeURIComponent("2026-09-12T00:00:00.000Z")}`;
+  await page.goto(`/delivery?mode=list&${MEASURES_QUERY}&${brush}`);
+  const kpis = page.getByLabel("KPI targets");
+  await expect(kpis.locator('[data-kpi="Deploys a day"]')).toContainText("3 deploys");
+  await expect(kpis.locator('[data-kpi="Merge → production"]')).toContainText("19.0h");
+
+  await page.getByRole("button", { name: "clear brush window" }).click();
+  await expect(kpis.locator('[data-kpi="Deploys a day"]')).toContainText("5 deploys");
+  await context.close();
+});
+
+test("the definitions fold opens to the per-day table", async ({ browser }, testInfo) => {
+  await seedMeasuresFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.goto(`/delivery?mode=list&${MEASURES_QUERY}`);
+  await expect(page.getByLabel("KPI targets")).toBeVisible();
+
+  await page.getByRole("button", { name: "Definitions & alternatives" }).click();
+  const table = page.getByRole("table").filter({ hasText: "Reached production" });
+  await expect(table.locator("tbody tr").first()).toHaveText(/^2026-09-27 \(partial\)/);
+  await page.screenshot({ path: testInfo.outputPath("delivery-measures.png"), fullPage: true });
+  await context.close();
 });
