@@ -2268,10 +2268,8 @@ machine with no helper has no machine login to act as, so the commands refuse wi
 the socket they looked for.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
-`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
-`${BROKER_DATABASE_PASSWORD}` placeholder is substituted, URL-escaped, from
-`BROKER_DATABASE_PASSWORD` — naming the placeholder without the variable, or the variable without
-the placeholder, is refused naming both; a URL naming a user and no password whose host ends in
+`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only
+database variable: nothing is substituted into it; a URL naming a user and no password whose host ends in
 `.rds.amazonaws.com`, for which `pgconn.ParseConfig` finds no password (none in the URL, `PGPASSWORD`
 or a passfile), sets `Config.DatabaseIAM` and must read as that one host with `sslmode=verify-full`
 and an `sslrootcert` file's pool (not `sslrootcert=system`), or `Load` refuses naming the host and
@@ -2312,7 +2310,10 @@ an unset value. `config.Load` refuses to start naming a stale removal still set 
 environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
-checks no WebAuthn origin), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
+checks no WebAuthn origin), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token,
+and any other database's password goes in the URL itself; a `BROKER_DATABASE_URL` still naming its
+`${BROKER_DATABASE_PASSWORD}` placeholder is refused for the same reason, rather than tried as a
+literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
@@ -2321,9 +2322,20 @@ holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alia
 elsewhere, and a bare key id names no account); exactly one of
 `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
-same check as out of range). `cmd/broker/main.go` reads one thing `config.Load` does not:
+same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
+opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
+else `method=password`), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
+
+`docker/rds-global-bundle.pem`, the RDS CA bundle an IAM-form URL's `sslrootcert` names (the image
+ships it at `/etc/ssl/rds/global-bundle.pem`), is a dated snapshot of AWS's global bundle. Refresh it
+when a cluster moves to an RDS CA it does not hold, as its header says: download the source URL the
+header names, replace everything below the header, update the date and the SHA-256 line, and check
+that the body below the header hashes to that line. A broker on a cluster whose CA the bundle lacks
+fails the TLS handshake of every sign-in, its first (`store.Open`'s ping) included, so it refuses to
+start; `internal/smoke`'s `TestRDSBundle` checks that the image ships the vendored bytes outside the
+system trust store, not whether they are current.
 
 The docs site's broker reference pages are generated at site build from this source by
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
