@@ -771,9 +771,9 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 // A boot reconciliation retried after boot reads the claims as they are at the retry, never as
 // the boot read them. Under the sandbox runtime the sweep deletes every Sandbox no known claim
 // owns, with no grace at boot, so a retry told the boot's snapshot would delete the Sandbox — and
-// with a root's, the tree volume — of a claim launched and suspended since. The attempt that
-// succeeds must know that claim; whether it saw the claim before or after the suspension committed
-// is scheduling, and either keeps its Sandbox.
+// with it the issue's volume — of a claim launched and suspended since. The attempt that succeeds
+// must know that claim; whether it saw the claim before or after the suspension committed is
+// scheduling, and either keeps its Sandbox.
 func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
@@ -950,7 +950,7 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 // The orphan sweep is told of every claim that is not retired, each with its locator or none. A
 // suspended claim, a tree's root whose agent exited, and a failed claim keep their tokens in the
 // known set with no locator; a retired claim leaves it. A runtime that deletes what no known claim owns — a sandbox's
-// Sandboxes, a root's tree volume — therefore never deletes a claim that can still resume.
+// Sandboxes, each issue's volume with them — therefore never deletes a claim that can still resume.
 func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.LaunchFailureLimit = 1
@@ -1180,22 +1180,25 @@ func secretFiles(t *testing.T, dir string) []string {
 }
 
 // The workspace-loss reaction end to end, through the daemon's own specs, store, and supervisor: a
-// resumed root whose workspace-init found the tree volume lost relaunches once as a fresh session
-// recovering legion/<issue>, and a suspended worker of the same tree drops the session that volume
-// held, so its resume is a fresh launch recovering its own issue's branch rather than a resume that
-// would fail until its budget ran out.
-func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *testing.T) {
+// resumed root whose workspace-init found its issue's volume lost relaunches once as a fresh session
+// recovering legion/<issue>, and a suspended worker of the same issue drops the session that volume
+// held, so its resume is a fresh launch recovering the issue's branch rather than a resume that
+// would fail until its budget ran out. A worker of another issue of the tree keeps its session: its
+// issue's volume is its own, and the loss was not its.
+func TestRunRelaunchesAFreshSessionWhenTheIssueVolumeIsLostAndTellsTheIssue(t *testing.T) {
 	cfg := testConfig(t)
 	rt := fake.NewRuntime()
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 	root := d.spawn(architect())
 	readyClaim(t, d, rt, root)
-	worker := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
-	readyClaim(t, d, rt, worker)
+	sibling := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt, sibling)
+	child := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt, child)
 	for _, step := range []struct {
 		token  claim.Token
 		action string
-	}{{worker, "suspend"}, {root, "suspend"}, {root, "resume"}} {
+	}{{sibling, "suspend"}, {child, "suspend"}, {root, "suspend"}, {root, "resume"}} {
 		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(step.token)+"/"+step.action, nil, true); status != http.StatusOK {
 			t.Fatalf("%s %s = %d; body %s", step.action, step.token, status, body)
 		}
@@ -1204,11 +1207,11 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 
 	rt.Emit(runtime.Observation{Locator: *resumed, Kind: runtime.Gone,
 		WorkspaceLost: true,
-		Detail:        "the tree volume was lost: pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
+		Detail:        "the issue's volume was lost: pod legion-legion-1 Failed: init container workspace-init terminated (Error, exit code 3)"})
 
-	testwait.Eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
-		r, w := d.claim(root), d.claim(worker)
-		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Locator != nil && r.Session == "" && w.Session == ""
+	testwait.Eventually(t, "the root's fresh relaunch and its sibling's dropped session", func() bool {
+		r, s := d.claim(root), d.claim(sibling)
+		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Locator != nil && r.Session == "" && s.Session == ""
 	})
 	if fresh := lastLaunch(t, rt, root); fresh.ResumeSessionFile != "" || fresh.WorkspaceRecoveredFrom != "legion/LEGION-1" {
 		t.Errorf("the root relaunched with %+v, want a fresh session recovering legion/LEGION-1", fresh)
@@ -1216,11 +1219,19 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 	if c := d.claim(root); c.Budgets.LaunchFailures != 0 {
 		t.Errorf("the root's lost volume was charged: %+v", c.Budgets)
 	}
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(worker)+"/resume", nil, true); status != http.StatusOK {
-		t.Fatalf("resume the worker = %d; body %s", status, body)
+	if c := d.claim(child); c.Session != "ses_"+string(child) {
+		t.Errorf("the other issue's worker is %+v, want its session kept: the lost volume was not its issue's", c)
 	}
-	if relaunched := lastLaunch(t, rt, worker); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-2" {
-		t.Errorf("the worker relaunched with %+v, want a fresh session recovering legion/LEGION-2", relaunched)
+	for _, worker := range []claim.Token{sibling, child} {
+		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(worker)+"/resume", nil, true); status != http.StatusOK {
+			t.Fatalf("resume %s = %d; body %s", worker, status, body)
+		}
+	}
+	if relaunched := lastLaunch(t, rt, sibling); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-1" {
+		t.Errorf("the sibling relaunched with %+v, want a fresh session recovering legion/LEGION-1", relaunched)
+	}
+	if relaunched := lastLaunch(t, rt, child); relaunched.ResumeSessionFile != "/sessions/"+string(child)+".jsonl" || relaunched.WorkspaceRecoveredFrom != "" {
+		t.Errorf("the other issue's worker relaunched with %+v, want its recorded session resumed", relaunched)
 	}
 }
 

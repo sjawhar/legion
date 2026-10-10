@@ -274,7 +274,7 @@ type built struct {
 // real stream listener, store, and machines, with nothing launched for real.
 func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
 			record.conns, record.address, record.apps, record.store = listener, address, apps, st

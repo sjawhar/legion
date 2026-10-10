@@ -153,17 +153,16 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 // while its roles' claims, suspended by the old tree's close, still name the old tree. The old
 // tree's cleanup does not wait on those claims, which run nothing and are no longer its, and the
 // orphan's start re-points its claim to the orphan's own tree before it starts it, so the claim
-// binds the new tree's lifecycle rather than the old tree's confirmed one. Under tmux the kept
-// session is on the host and resumes, and so does one kept in the Sandbox runtime's session
-// database (session_store postgres), which every tree's pods read. Under a runtime that keeps
-// sessions on the tree's volume the session stayed on the old tree's volume, which the new tree's
-// pods never mount: the claim drops it and starts fresh, recreating its workspace, rather than
-// resuming a session the launcher refuses until the launch budget runs out.
+// binds the new tree's lifecycle rather than the old tree's confirmed one. The claim keeps its
+// session and resumes it under every runtime: under tmux it is on the host; under a runtime that
+// provisions each issue's workspace in a pod it is on the issue's own volume, which the issue's
+// Sandbox keeps across the move, or in the Sandbox runtime's session database (session_store
+// postgres), which every tree's pods read.
 func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 	for _, tc := range []struct {
-		name                  string
-		inPod, volumeSessions bool
-	}{{"tmux", false, false}, {"a runtime that keeps sessions on the tree volume", true, true}, {"a runtime that keeps sessions in a database", true, false}} {
+		name  string
+		inPod bool
+	}{{"tmux", false}, {"a runtime that provisions each issue's workspace in its pod", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			pool := isolatedOutboxPool(t)
@@ -177,7 +176,7 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 			putOutboxIssue(t, pool, records, child)
 
 			rt := fake.NewRuntime()
-			rt.InPod, rt.VolumeSessions = tc.inPod, tc.volumeSessions
+			rt.InPod = tc.inPod
 			sup := newSupervisor(ctx, st, "legion", t.TempDir(), quietLogger())
 			sup.deps = supervise.Deps{
 				Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
@@ -224,14 +223,11 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 				t.Fatalf("orphan's planner = tree %s epoch %d %s, want tree %s epoch 1 launching", got.Tree, got.TreeEpoch, got.State, child.Key)
 			}
 			resumes, spawns := rt.CallsOf("Resume"), rt.CallsOf("Spawn")
-			if tc.volumeSessions {
-				if len(resumes) != 0 || len(spawns) != 1 || spawns[0].Spec.Tree != child.Key || got.SessionFile != "" || !got.WorkspaceLost {
-					t.Fatalf("resumes %+v, spawns %+v, claim %+v; want one fresh spawn in tree %s, the old volume's session dropped", resumes, spawns, got, child.Key)
-				}
-				return
+			if len(spawns) != 0 || len(resumes) != 1 || resumes[0].Spec.Tree != child.Key || resumes[0].Spec.ResumeSessionFile != "/legion/sessions/planner.jsonl" {
+				t.Fatalf("resumes = %+v, spawns = %+v; want the kept session resumed once in tree %s and no fresh spawn", resumes, spawns, child.Key)
 			}
-			if len(resumes) != 1 || resumes[0].Spec.Tree != child.Key || resumes[0].Spec.ResumeSessionFile != "/legion/sessions/planner.jsonl" {
-				t.Fatalf("resumes = %+v, want the kept session resumed once in tree %s", resumes, child.Key)
+			if got.SessionFile != "/legion/sessions/planner.jsonl" || got.WorkspaceLost {
+				t.Fatalf("orphan's planner = %+v, want its session kept and its workspace not lost", got)
 			}
 		})
 	}

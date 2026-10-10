@@ -89,6 +89,10 @@ func checkExitCodes(root string, codes []docConst) error {
 		}
 	}
 	var problems []string
+	callbacks, err := secretFormExitCalls(src, exitFuncs)
+	if err != nil {
+		return err
+	}
 	allowed := func(e ast.Expr) {
 		switch v := e.(type) {
 		case *ast.BasicLit:
@@ -101,6 +105,9 @@ func checkExitCodes(root string, codes []docConst) error {
 			}
 		case *ast.CallExpr:
 			if fun, ok := v.Fun.(*ast.Ident); ok && exitFuncs[fun.Name] {
+				return
+			}
+			if callbacks[v] {
 				return
 			}
 		}
@@ -151,6 +158,97 @@ func checkExitCodes(root string, codes []docConst) error {
 		})
 	}
 	return refusedAt(problems)
+}
+
+// secretFormExitCalls follows the CLI's secret-form table rather than accepting
+// arbitrary callback results as exit codes. Every registered handler must be one
+// of the local functions whose returns checkExitCodes checks.
+func secretFormExitCalls(src *source, exitFuncs map[string]bool) (map[*ast.CallExpr]bool, error) {
+	calls := map[*ast.CallExpr]bool{}
+	var table *ast.CompositeLit
+	var problems []string
+	for _, file := range src.files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range assign.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name != "secretForms" {
+					continue
+				}
+				if len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+					problems = append(problems, src.at(assign)+": secretForms must have one literal table")
+					continue
+				}
+				lit, ok := assign.Rhs[0].(*ast.CompositeLit)
+				if !ok || table != nil {
+					problems = append(problems, src.at(assign)+": secretForms must have one literal table")
+					continue
+				}
+				table = lit
+			}
+			return true
+		})
+	}
+	if table == nil {
+		return calls, refusedAt(problems)
+	}
+	array, ok := table.Type.(*ast.ArrayType)
+	if !ok {
+		return nil, fmt.Errorf("%s: secretForms must be a slice of secretForm", src.at(table))
+	}
+	element, ok := array.Elt.(*ast.Ident)
+	if !ok || element.Name != "secretForm" || array.Len != nil {
+		return nil, fmt.Errorf("%s: secretForms must be a slice of secretForm", src.at(table))
+	}
+	for _, item := range table.Elts {
+		row, ok := item.(*ast.CompositeLit)
+		if !ok || len(row.Elts) != 2 {
+			problems = append(problems, src.at(item)+": a secret form needs help and an exit-code handler")
+			continue
+		}
+		handler, ok := row.Elts[1].(*ast.Ident)
+		if !ok || !exitFuncs[handler.Name] {
+			problems = append(problems, src.at(row)+": a secret form's handler must be a checked local exit-code function")
+		}
+	}
+	for _, file := range src.files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			loop, ok := n.(*ast.RangeStmt)
+			if !ok {
+				return true
+			}
+			tableName, ok := loop.X.(*ast.Ident)
+			row, rowOK := loop.Value.(*ast.Ident)
+			if !ok || tableName.Name != "secretForms" || !rowOK {
+				return true
+			}
+			ast.Inspect(loop.Body, func(n ast.Node) bool {
+				if assign, ok := n.(*ast.AssignStmt); ok {
+					for _, lhs := range assign.Lhs {
+						ast.Inspect(lhs, func(n ast.Node) bool {
+							if id, ok := n.(*ast.Ident); ok && id.Obj == row.Obj {
+								problems = append(problems, src.at(lhs)+": a secret form's registered handler cannot be reassigned")
+							}
+							return true
+						})
+					}
+				}
+				if call, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "run" {
+						if id, ok := sel.X.(*ast.Ident); ok && id.Obj == row.Obj {
+							calls[call] = true
+						}
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+	return calls, refusedAt(problems)
 }
 
 // refusedAt is one error listing every problem, or nil when there is none.

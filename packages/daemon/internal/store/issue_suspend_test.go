@@ -18,6 +18,7 @@ func TestIssueSuspensionFencesReadmissionAndWaitsForAllStoredRoles(t *testing.T)
 		change   string
 		state    supervise.ClaimState
 		start    int64
+		release  bool
 		wantAct  bool
 		wantWait string
 	}{
@@ -29,7 +30,15 @@ func TestIssueSuspensionFencesReadmissionAndWaitsForAllStoredRoles(t *testing.T)
 		{name: "newer start already ran", state: supervise.StateWorking, start: 11},
 		{name: "newer start still queued", state: supervise.StateSuspended, change: `insert into outbox (id,kind,issue,payload,attempts,next_at,last_error) values (11,'supervise','LEGION-208','{"op":"start","tree":"LEGION-208","role":"architect","generation":1}',0,now(),'')`},
 		{name: "role stop still pending", state: supervise.StateSuspended, change: `insert into outbox (id,kind,issue,payload,attempts,next_at,last_error) values (9,'supervise','LEGION-208','{"op":"suspend","tree":"LEGION-208","role":"architect","generation":1}',0,now(),'')`, wantWait: "role stop effects"},
+		{name: "issue close still pending", state: supervise.StateRetired, release: true, change: `insert into outbox (id,kind,issue,payload,attempts,next_at,last_error) values (9,'supervise','LEGION-208','{"op":"issue_close","tree":"LEGION-208","role":"architect","generation":1}',0,now(),'')`, wantWait: "role stop effects"},
 		{name: "tree cleanup already reserved", state: supervise.StateSuspended, change: `update tree_lifecycles set cleanup_started = true where tree = 'LEGION-208'`},
+		// A releasing close deletes the volume the stored sessions live on, so a claim its stops have
+		// not retired — suspended with its session, or failed — holds the release; one every claim has
+		// retired goes ahead, while a keeping close goes ahead over a suspended claim.
+		{name: "release waits for a suspended claim to retire", state: supervise.StateSuspended, release: true, wantWait: "release waits for stored claim legion-legion-legion-208-architect:suspended"},
+		{name: "release waits for a failed claim to retire", state: supervise.StateFailed, release: true, wantWait: "release waits for stored claim legion-legion-legion-208-architect:failed"},
+		{name: "release once every claim retired", state: supervise.StateRetired, release: true, wantAct: true},
+		{name: "release superseded by a newer start", state: supervise.StateRetired, release: true, start: 11},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := migratedStore(t)
@@ -46,7 +55,7 @@ func TestIssueSuspensionFencesReadmissionAndWaitsForAllStoredRoles(t *testing.T)
 				}
 			}
 			reservedBefore := cleanupStarted(t, st)
-			act, err := st.IssueSuspension(ctx, "legion", IssueClose{Issue: rootIssue, Tree: rootIssue, IssueGeneration: 1, TreeGeneration: 1, Row: 10}, record.OutOfWorkflow)
+			act, err := st.IssueSuspension(ctx, "legion", IssueClose{Issue: rootIssue, Tree: rootIssue, IssueGeneration: 1, TreeGeneration: 1, Row: 10, Release: tc.release}, record.OutOfWorkflow)
 			if tc.wantWait != "" {
 				if !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), tc.wantWait) || act {
 					t.Fatalf("suspension = %t, %v; want the wait %q", act, err, tc.wantWait)

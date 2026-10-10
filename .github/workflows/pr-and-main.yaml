@@ -110,8 +110,11 @@ jobs:
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
       # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
       # them). Writing them here for each of those builds fails the pull request that brings in a
-      # module whose license cannot be determined, before a release does.
-      - name: Check every Go release archive's third-party notices can be written
+      # module whose license cannot be determined, before a release does. The darwin agent-secrets
+      # client is also compiled here, since writing notices loads its packages without type-checking
+      # them and no other pull-request job builds it for darwin: a darwin-only compile error fails
+      # the pull request rather than the release after the merge.
+      - name: Check every Go release archive's third-party notices can be written and the darwin client compiles
         run: |
           notices="$RUNNER_TEMP/notices"
           mkdir -p "$notices"
@@ -125,6 +128,13 @@ jobs:
             (cd packages/envoy && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
               ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
               ./cmd/agent-secrets ./cmd/agent-secrets-helper)
+          done
+          for target in $(jq -r '.["agent-secrets-client"][]' .github/agent-secrets-client-targets.json); do
+            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              go build -buildvcs=false -o /dev/null ./cmd/agent-secrets)
+            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
+              ./cmd/agent-secrets)
           done
           wc -l "$notices"/*
 
@@ -153,7 +163,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -170,6 +180,10 @@ jobs:
       LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
+      # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
+      # pull a test could fail on.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

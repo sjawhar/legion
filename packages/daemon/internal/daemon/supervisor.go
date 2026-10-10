@@ -48,11 +48,11 @@ type supervisor struct {
 	all atomic.Pointer[[]*supervise.Machine]
 }
 
-// member is one claim's machine, the queue its events wait in, and the tree the claim is of.
+// member is one claim's machine, the queue its events wait in, and the issue the claim is of.
 type member struct {
 	machine *supervise.Machine
 	inbox   *inbox
-	tree    string
+	issue   string
 }
 
 func newSupervisor(ctx context.Context, st *store.Store, project, stateDir string, log *slog.Logger) *supervisor {
@@ -160,7 +160,7 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 	m.OnTerminal(s.terminal)
 	queue := newInbox()
-	s.machines[token] = &member{machine: m, inbox: queue, tree: m.Claim().Tree}
+	s.machines[token] = &member{machine: m, inbox: queue, issue: m.Claim().Issue}
 	all := append(slices.Clip(s.supervised()), m)
 	s.all.Store(&all)
 	s.feeding.Add(1)
@@ -222,24 +222,10 @@ func (s *supervisor) post(token claim.Token, ev supervise.Event) {
 	m.inbox.put(ev)
 }
 
-// retree re-points m's claim to tree (supervise.Machine.Retree) and then the tree kept beside it,
-// which volumeLost reads. The machine is asked first, under its own lock alone: a machine calls
-// volumeLost under its lock, so taking mu around the machine's lock would invert that order.
-func (s *supervisor) retree(ctx context.Context, token claim.Token, m *supervise.Machine, tree string) error {
-	if err := m.Retree(ctx, tree); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if member, ok := s.machines[token]; ok {
-		member.tree = tree
-	}
-	return nil
-}
-
-// volumeLost tells every other claim of c's tree that the tree volume was lost (TreeVolumeLost):
-// the sessions they recorded were on it. It is the machines' VolumeLost, called by c's machine
-// under its own lock, so it reads no machine — the tree of each is kept beside it — and only queues.
+// volumeLost tells every other claim of c's issue that the issue's volume was lost
+// (IssueVolumeLost): the sessions they recorded were on it. It is the machines' VolumeLost, called by
+// c's machine under its own lock, so it reads no machine — the issue of each is kept beside it — and
+// only queues.
 func (s *supervisor) volumeLost(c supervise.Claim) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -247,8 +233,8 @@ func (s *supervisor) volumeLost(c supervise.Claim) {
 		return
 	}
 	for token, m := range s.machines {
-		if token != c.Token && m.tree == c.Tree {
-			m.inbox.put(supervise.TreeVolumeLost{Claim: token})
+		if token != c.Token && m.issue == c.Issue {
+			m.inbox.put(supervise.IssueVolumeLost{Claim: token})
 		}
 	}
 }

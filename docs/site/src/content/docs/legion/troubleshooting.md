@@ -31,7 +31,7 @@ legion start --config legion.yaml --check-config
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
-| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay. Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -240,25 +240,37 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 ## A pod does not come up
 
-- **`Pending`.** Usually scheduling: a tree's pods must share one node, and different trees never
-  share a node, so a pool without a free node of the right size leaves the tree's next pod
-  unscheduled. `kubectl -n legion describe pod <pod>` names the reason. Keep `admission_cap` within
-  what the pool can hold ([The cluster](/legion/legion/running-legion/#the-cluster)).
-- **The `workspace-init` container fails.** It provisions the issue's workspace on the tree volume,
-  and its refusals name what to do, sometimes a `jj` command to run against the tree's shared clone
-  (a local bookmark deleted and never pushed, or a conflicted one). Read it with
+- **`Pending`.** Usually scheduling: a pod reserves its roles' cpu and memory (3 CPU and 19 GiB for
+  an issue pod at the defaults) and lands wherever the pool has room, so a pool at its limits leaves
+  the next pod unscheduled until the daemon reads it dead past `worker_boot_timeout_seconds` and,
+  once its launch failures run out, fails the claim. `kubectl -n legion describe pod <pod>` names the
+  reason. Keep `admission_cap`, and the children a tree runs at once, within what the pool's limits
+  can place ([The cluster](/legion/legion/running-legion/#the-cluster)). A pod relaunched onto
+  another node first waits for its volume to detach from the old one (`FailedAttachVolume` or
+  `Multi-Attach` events, transient). The image probe pod, `legion-probe-<project>-<digest prefix>`,
+  Pending Unschedulable at boot is the one pod the daemon waits on instead: it logs `boot probe is
+  waiting on capacity; running it again` with the scheduler's reason and creates the pod again every
+  5 minutes, serving nothing until one is placed and passes, and then reports the `pool-capacity`
+  capability open with the count and the reason. Make room in the pool, or raise its limits; the
+  probe pod itself needs only 250m and 1Gi.
+- **The `workspace-init` container fails.** It provisions the issue's workspace on the issue's own
+  volume, and its refusals name what to do, sometimes a `jj` command to run against the issue's
+  clone (a local bookmark deleted and never pushed, or a conflicted one). Read it with
 
   ```sh
   kubectl -n legion logs <pod> -c workspace-init
   ```
 
   Nothing is registered before a refusal, so every later attempt refuses the same way until the
-  repository is fixed. Run the commands it names from a shell in one of the tree's running pods
-  (`kubectl -n legion exec -it <pod> -c architect -- sh`).
-- **The tree volume was lost.** The daemon logs
-  `supervise: the tree volume was lost with the session; relaunching a fresh session`. The agent
-  comes back as a new session in a new workspace, which holds `.legion/<issue>/workspace-recovered.json`
-  naming the issue's branch to reconcile from.
+  repository is fixed. Run the commands it names from a shell in the issue's running pod
+  (`kubectl -n legion exec -it <pod> -c architect -- sh`), or, when none runs, in a pod of your own
+  that mounts the issue's volume (`docs/kubernetes.md` in the repository, "A shell on an issue's
+  volume").
+- **The issue's volume was lost.** The daemon logs
+  `supervise: the issue's volume was lost with the session; relaunching a fresh session`. The loss
+  is one issue's: its other roles drop the sessions they kept on that volume, and no other issue of
+  the tree is touched. The agent comes back as a new session in a new workspace, which holds
+  `.legion/<issue>/workspace-recovered.json` naming the issue's branch to reconcile from.
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.
   Nothing to do.

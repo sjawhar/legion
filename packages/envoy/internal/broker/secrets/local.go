@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -18,9 +19,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
 
-// Local stands in, in memory, for the AWS calls the broker makes: Secrets Manager's ListSecrets,
-// DescribeSecret and GetSecretValue, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for
-// local development (LocalFromFile), and tests build one with NewLocal.
+// Local stands in, in memory, for the AWS calls the broker and the agent-secrets CLI make: Secrets
+// Manager's ListSecrets, DescribeSecret and GetSecretValue, which the broker reads with, its
+// CreateSecret, PutSecretValue, TagResource, DeleteSecret and RestoreSecret, which the CLI writes
+// with, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for local development
+// (LocalFromFile), and tests build one with NewLocal.
 type Local struct {
 	mu      sync.Mutex
 	secrets map[string]LocalSecret
@@ -29,6 +32,8 @@ type Local struct {
 	// read from; empty for a NewLocal one.
 	path string
 	file []byte
+	// now is the clock DeleteSecret dates a deletion by.
+	now func() time.Time
 }
 
 // LocalSecret is one secret a Local holds.
@@ -44,8 +49,10 @@ type LocalSecret struct {
 	// Manager, it is listed with no version and reading it answers ResourceNotFoundException; one
 	// holding a value is listed with a version labelled AWSCURRENT.
 	Value string `json:"value"`
-	// DeletedAt, when set, is when the secret is scheduled to be deleted: as in Secrets Manager,
-	// ListSecrets leaves it out and DescribeSecret answers it with that DeletedDate.
+	// DeletedAt, when set, is when the secret was deleted with a recovery window: as in Secrets
+	// Manager, it is then scheduled for deletion, ListSecrets lists it only when asked for planned
+	// deletions, DescribeSecret answers DeletedAt as its DeletedDate, and every other call but
+	// RestoreSecret is refused.
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
@@ -61,7 +68,11 @@ func LocalARN(name string) string {
 
 // NewLocal holds secrets.
 func NewLocal(secrets ...LocalSecret) *Local {
-	l := &Local{secrets: map[string]LocalSecret{}, aliases: map[string][]string{}}
+	l := &Local{
+		secrets: map[string]LocalSecret{},
+		aliases: map[string][]string{},
+		now:     func() time.Time { return time.Now().UTC() },
+	}
 	for _, s := range secrets {
 		l.secrets[s.Name] = s
 	}
@@ -69,11 +80,12 @@ func NewLocal(secrets ...LocalSecret) *Local {
 }
 
 // LocalFromFile reads path, a local-development-only JSON file {"secrets": [LocalSecret, ...]},
-// into a Local that follows it: each ListSecrets, DescribeSecret and GetSecretValue reads the file
-// again and, when its bytes have changed, answers from it, so an edit to the file is a write as
-// Secrets Manager sees one. A value Put directly stands until the file next changes. An error names
-// path and, for a file that does not parse, only the byte offset and field it failed at, never the
-// file's content: no secret value reaches an error message, local development included.
+// into a Local that follows it: each call reads the file again and, when its bytes have changed,
+// answers from it, so an edit to the file is a write as Secrets Manager sees one. A secret Put
+// directly, or written with one of Local's write calls, stands until the file next changes. An
+// error names path and, for a file that does not parse, only the byte offset and field it failed
+// at, never the file's content: no secret value reaches an error message, local development
+// included.
 func LocalFromFile(path string) (*Local, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -165,7 +177,8 @@ func (l *Local) Alias(keyARN, alias string) {
 // ListSecrets answers every secret in one page, filtered as Secrets Manager filters by name: each
 // name filter value matches a name it prefixes, case-sensitively. A secret holding a value is
 // listed with one version labelled AWSCURRENT, and one with no value with none. A secret scheduled
-// for deletion is left out, as Secrets Manager leaves it out by default.
+// for deletion is left out unless IncludePlannedDeletion asks for it, and then listed with its
+// DeletedDate, as in Secrets Manager.
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -174,12 +187,12 @@ func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInp
 	}
 	out := &secretsmanager.ListSecretsOutput{}
 	for _, s := range l.secrets {
-		if s.DeletedAt != nil || !matchesNameFilters(s.Name, in.Filters) {
+		if (s.DeletedAt != nil && !aws.ToBool(in.IncludePlannedDeletion)) || !matchesNameFilters(s.Name, in.Filters) {
 			continue
 		}
 		out.SecretList = append(out.SecretList, types.SecretListEntry{
 			Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), KmsKeyId: s.kmsKeyID(),
-			Tags: s.awsTags(), SecretVersionsToStages: s.versionsToStages(),
+			Tags: s.awsTags(), SecretVersionsToStages: s.versionsToStages(), DeletedDate: s.DeletedAt,
 		})
 	}
 	return out, nil
@@ -191,17 +204,40 @@ func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInp
 func (l *Local) DescribeSecret(_ context.Context, in *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.follow(); err != nil {
+	s, err := l.held(in.SecretId)
+	if err != nil {
 		return nil, err
-	}
-	s, ok := l.secrets[strings.TrimPrefix(aws.ToString(in.SecretId), LocalARN(""))]
-	if !ok {
-		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
 	}
 	return &secretsmanager.DescribeSecretOutput{
 		Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), KmsKeyId: s.kmsKeyID(),
 		Tags: s.awsTags(), VersionIdsToStages: s.versionsToStages(), DeletedDate: s.DeletedAt,
 	}, nil
+}
+
+// held follows the file and answers the secret id names, by name or by LocalARN;
+// ResourceNotFoundException for one Local does not hold. The caller holds l.mu.
+func (l *Local) held(id *string) (LocalSecret, error) {
+	if err := l.follow(); err != nil {
+		return LocalSecret{}, err
+	}
+	s, ok := l.secrets[strings.TrimPrefix(aws.ToString(id), LocalARN(""))]
+	if !ok {
+		return LocalSecret{}, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
+	}
+	return s, nil
+}
+
+// changeable is held, and InvalidRequestException for a secret scheduled for deletion, which
+// Secrets Manager refuses to read or change until it is restored. The caller holds l.mu.
+func (l *Local) changeable(id *string) (LocalSecret, error) {
+	s, err := l.held(id)
+	if err != nil {
+		return LocalSecret{}, err
+	}
+	if s.DeletedAt != nil {
+		return LocalSecret{}, &types.InvalidRequestException{Message: aws.String("You can't perform this operation on the secret because it was marked for deletion.")}
+	}
+	return s, nil
 }
 
 // kmsKeyID is s's KmsKeyId as Secrets Manager reports it: absent for the AWS-managed key.
@@ -220,12 +256,15 @@ func (s LocalSecret) awsTags() []types.Tag {
 	return tags
 }
 
+// localVersion is the version id of the one version a secret holding a value has.
+const localVersion = "local-current"
+
 // versionsToStages is one version labelled AWSCURRENT for a secret holding a value, none otherwise.
 func (s LocalSecret) versionsToStages() map[string][]string {
 	if s.Value == "" {
 		return nil
 	}
-	return map[string][]string{"local-current": {"AWSCURRENT"}}
+	return map[string][]string{localVersion: {"AWSCURRENT"}}
 }
 
 func matchesNameFilters(name string, filters []types.Filter) bool {
@@ -250,21 +289,155 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.follow(); err != nil {
+	s, err := l.changeable(in.SecretId)
+	if err != nil {
 		return nil, err
-	}
-	id := aws.ToString(in.SecretId)
-	s, ok := l.secrets[strings.TrimPrefix(id, LocalARN(""))]
-	if !ok {
-		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
-	}
-	if s.DeletedAt != nil {
-		return nil, &types.InvalidRequestException{Message: aws.String("You can't perform this operation on the secret because it was marked for deletion.")}
 	}
 	if s.Value == "" {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret value for staging label: AWSCURRENT")}
 	}
 	return &secretsmanager.GetSecretValueOutput{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), SecretString: aws.String(s.Value)}, nil
+}
+
+// CreateSecret holds a new secret named Name with KmsKeyId, Tags and SecretString as its value,
+// answering its ARN and, when it was given a value, the version holding it; one created with no
+// SecretString has no version, as in Secrets Manager. A name Local holds is
+// ResourceExistsException, or InvalidRequestException while its secret is scheduled for deletion,
+// as Secrets Manager answers both. Local holds a name, a key, tags and a non-empty string value in
+// one version it names itself: a request naming no secret, an empty or binary value, a client
+// request token, a description, replica regions or a type is refused.
+func (l *Local) CreateSecret(_ context.Context, in *secretsmanager.CreateSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error) {
+	name := aws.ToString(in.Name)
+	switch {
+	case name == "":
+		return nil, refuse("CreateSecret names no secret")
+	case in.SecretString != nil && *in.SecretString == "":
+		return nil, refuse("an empty SecretString is no value Local can hold; leave it out to create a secret with no value")
+	case in.SecretBinary != nil || in.ClientRequestToken != nil || in.Description != nil || len(in.AddReplicaRegions) > 0 || in.Type != nil:
+		return nil, refuse("CreateSecret holds a name, a key, tags and a string value only, in one version Local names itself")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
+	if s, ok := l.secrets[name]; ok {
+		if s.DeletedAt != nil {
+			return nil, &types.InvalidRequestException{Message: aws.String("You can't create this secret because a secret with this name is already scheduled for deletion.")}
+		}
+		return nil, &types.ResourceExistsException{Message: aws.String("The operation failed because the secret " + name + " already exists.")}
+	}
+	s := LocalSecret{Name: name, KmsKeyID: aws.ToString(in.KmsKeyId), Tags: withTags(nil, in.Tags), Value: aws.ToString(in.SecretString)}
+	l.secrets[name] = s
+	out := &secretsmanager.CreateSecretOutput{Name: aws.String(name), ARN: aws.String(LocalARN(name))}
+	if s.Value != "" {
+		out.VersionId = aws.String(localVersion)
+	}
+	return out, nil
+}
+
+// PutSecretValue makes SecretString the AWSCURRENT value of the secret SecretId names, by name or
+// by LocalARN; ResourceNotFoundException for one Local does not hold and InvalidRequestException
+// for one scheduled for deletion, as in Secrets Manager. Local holds one string value, labelled
+// AWSCURRENT, in one version it names itself: an empty or binary value, a client request token, a
+// rotation token or another version stage is refused.
+func (l *Local) PutSecretValue(_ context.Context, in *secretsmanager.PutSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error) {
+	if aws.ToString(in.SecretString) == "" || in.SecretBinary != nil || in.ClientRequestToken != nil || in.RotationToken != nil {
+		return nil, refuse("PutSecretValue takes a non-empty SecretString only, into one version Local names itself")
+	}
+	for _, stage := range in.VersionStages {
+		if stage != "AWSCURRENT" {
+			return nil, refuse("a secret's one version is labelled AWSCURRENT, not " + stage)
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, err := l.changeable(in.SecretId)
+	if err != nil {
+		return nil, err
+	}
+	s.Value = *in.SecretString
+	l.secrets[s.Name] = s
+	return &secretsmanager.PutSecretValueOutput{
+		Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), VersionId: aws.String(localVersion), VersionStages: []string{"AWSCURRENT"},
+	}, nil
+}
+
+// TagResource sets Tags on the secret SecretId names, keeping the tags it does not name, as Secrets
+// Manager appends tags; refused as PutSecretValue is for a secret Local does not hold or one
+// scheduled for deletion.
+func (l *Local) TagResource(_ context.Context, in *secretsmanager.TagResourceInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.TagResourceOutput, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, err := l.changeable(in.SecretId)
+	if err != nil {
+		return nil, err
+	}
+	s.Tags = withTags(s.Tags, in.Tags)
+	l.secrets[s.Name] = s
+	return &secretsmanager.TagResourceOutput{}, nil
+}
+
+// withTags is a copy of held with tags set over it, so no map a caller handed Local changes.
+func withTags(held map[string]string, tags []types.Tag) map[string]string {
+	merged := make(map[string]string, len(held)+len(tags))
+	maps.Copy(merged, held)
+	for _, t := range tags {
+		merged[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return merged
+}
+
+// DeleteSecret schedules the secret SecretId names for deletion: its DeletedAt becomes now, and it
+// answers DeletionDate, the end of the recovery window of RecoveryWindowInDays (30 when unset),
+// until which RestoreSecret brings it back. A window outside 7 to 30 days is
+// InvalidParameterException, and a secret Local does not hold or one already scheduled for
+// deletion is refused as PutSecretValue refuses it, as in Secrets Manager. ForceDeleteWithoutRecovery
+// is refused: Local schedules every deletion.
+func (l *Local) DeleteSecret(_ context.Context, in *secretsmanager.DeleteSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error) {
+	if aws.ToBool(in.ForceDeleteWithoutRecovery) {
+		return nil, refuse("DeleteSecret schedules a deletion with a recovery window; ForceDeleteWithoutRecovery is not modelled")
+	}
+	days := int64(30)
+	if in.RecoveryWindowInDays != nil {
+		days = *in.RecoveryWindowInDays
+		if days < 7 || days > 30 {
+			return nil, &types.InvalidParameterException{Message: aws.String("The RecoveryWindowInDays value must be between 7 and 30 days (inclusive).")}
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, err := l.changeable(in.SecretId)
+	if err != nil {
+		return nil, err
+	}
+	deletedAt := l.now()
+	s.DeletedAt = &deletedAt
+	l.secrets[s.Name] = s
+	return &secretsmanager.DeleteSecretOutput{
+		Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), DeletionDate: aws.Time(deletedAt.Add(time.Duration(days) * 24 * time.Hour)),
+	}, nil
+}
+
+// RestoreSecret cancels the scheduled deletion of the secret SecretId names, so it is listed and
+// read again; ResourceNotFoundException for one Local does not hold. A secret not scheduled for
+// deletion is left as it is.
+func (l *Local) RestoreSecret(_ context.Context, in *secretsmanager.RestoreSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.RestoreSecretOutput, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, err := l.held(in.SecretId)
+	if err != nil {
+		return nil, err
+	}
+	s.DeletedAt = nil
+	l.secrets[s.Name] = s
+	return &secretsmanager.RestoreSecretOutput{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name))}, nil
+}
+
+// refuse is Local's refusal of a request it cannot answer as Secrets Manager would, named as
+// Local's so it never reads as Secrets Manager's own answer.
+func refuse(why string) error {
+	return errors.New("secrets.Local: " + why)
 }
 
 // ListAliases answers, in one page, the aliases Alias pointed at the key KeyId names by its ARN.

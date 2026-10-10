@@ -124,7 +124,7 @@ rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_g
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
 printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
-docker run --name "$nats_container" -d -p "${nats_port}:4222" nats:2.10-alpine -js >/dev/null
+docker run --name "$nats_container" -d -p "${nats_port}:4222" mirror.gcr.io/library/nats:2.10-alpine -js >/dev/null
 nats_started=1
 
 printf 'building listener\n'

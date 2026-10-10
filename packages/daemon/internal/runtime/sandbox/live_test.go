@@ -9,7 +9,7 @@
 // Each check prints what it observed, each line naming the identity that observed it, and then
 // `CHECK <name>: PASS`. The first check that does not hold prints `CHECK <name>: FAIL: <why>` and
 // ends the run. The agent every pod runs is a stub (decision 7): the Go shim bridges it as it would
-// Oh My Pi, and it appends its own role, pod uid and generation to a marker file on the tree volume
+// Oh My Pi, and it appends its own role, pod uid and generation to a marker file on the issue's volume
 // — the session file a resume names — and sleeps. The marker is the issue pod's: SandboxName (see
 // names.go) is shared by all six of an issue's role claims, so one issue pod's resident roles each
 // append their own launches to the same file, and a check reads only its own claim's lines back out
@@ -75,11 +75,12 @@ var liveChecks = []liveCheck{
 	{"image-probe-capability-negative", (*liveRig).checkImageProbeCapabilityRefusal, nil},
 	{"root-ready", (*liveRig).checkRootReady, nil},
 	{"gvisor", (*liveRig).checkGVisor, nil},
+	{"resources", (*liveRig).checkResources, nil},
 	{"operator-token", (*liveRig).checkOperatorToken, nil},
 	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
-	{"worker-colocated", (*liveRig).checkWorkerColocated, nil},
+	{"worker-shares-issue-pod", (*liveRig).checkWorkerSharesIssuePod, nil},
 	{"secrets-two-roles-enrolled", (*liveRig).checkSecretsTwoRolesEnrolled, secretsBlocked},
 	{"secrets-automatic-grant", (*liveRig).checkSecretsAutomaticGrant, secretsBlocked},
 	{"secrets-cross-pod-negative", (*liveRig).checkSecretsCrossPodNegative, secretsBlocked},
@@ -94,7 +95,7 @@ var liveChecks = []liveCheck{
 	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
-	{"concurrent-provision", (*liveRig).checkConcurrentProvision, nil},
+	{"independent-provision", (*liveRig).checkIndependentProvision, nil},
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
 	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
@@ -105,7 +106,6 @@ var liveChecks = []liveCheck{
 // worker image's pull, which is what a first pod on an empty pool waits for.
 const (
 	liveBootTimeout   = 5 * time.Minute
-	liveBootIntervals = 3
 	liveGrace         = 15 * time.Second
 	liveProbeInterval = 10 * time.Second
 	liveAdoptTimeout  = time.Minute
@@ -117,12 +117,72 @@ const (
 	liveSettle = 2*liveProbeInterval + 5*time.Second
 )
 
-// liveTreeVolume is the tree volume's size, the daemon configuration's default. The run sets no
-// scheduling beyond the Legion pool the runtime selects: every pod of a tree requires the node of
-// the tree's first scheduled pod (the tree volume attaches to one node), and the `legion`
-// NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (set in the deployment repository), is what makes that
-// node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
-var liveTreeVolume = resource.MustParse("20Gi")
+// liveIssueVolume is the issue volume's size, the daemon configuration's default. The run sets no
+// scheduling beyond the Legion pool the runtime selects: no pod asks for another pod's node or
+// keeps off one (every issue pod owns its volume, LEGION-632), and every pod reserves what
+// liveResources gives its roles, so the scheduler, and Karpenter under the `legion` NodePool's
+// floor (karpenter.k8s.aws/instance-cpu Gt 3, set in the deployment repository), place it where
+// the pool has room.
+var liveIssueVolume = resource.MustParse("20Gi")
+
+// liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
+// `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
+// and memory, the tester's ephemeral-storage limit beside them, the reviewer's memory alone (its
+// cpu stays the default). The architect, planner and merger keep config.DefaultResources(), so the
+// root's pod carries a reservation from each path — an override, a default, and one with a field
+// of each — and the `resources` check tells them apart, the disk bound's two paths included. The
+// stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and 19 GiB to
+// 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod are then checked against.
+var liveOverrides = map[claim.Role]config.RoleResources{
+	claim.RoleImplementer: {CPU: "500m", Memory: "1Gi"},
+	claim.RoleTester:      {CPU: "500m", Memory: "1Gi", EphemeralStorage: "30Gi"},
+	claim.RoleReviewer:    {Memory: "1Gi"},
+}
+
+// liveResources are the reservations the rig hands the runtime (Options.Resources): the daemon's
+// defaults as it translates them (reservations, manifest_test.go) with liveOverrides applied field
+// by field, as resolveKubernetes settles a file's `resources` block. Cpu and memory are each the
+// request and the limit alike; the ephemeral-storage limit and request are set apart, as the file
+// sets them. The image probe carries none of these: its own fixed reservation (probeReservation,
+// manifest_test.go), as the daemon hands it.
+func liveResources() map[claim.Role]corev1.ResourceRequirements {
+	resources := reservations()
+	for role, override := range liveOverrides {
+		requirements := resources[role]
+		for name, value := range map[corev1.ResourceName]string{corev1.ResourceCPU: override.CPU, corev1.ResourceMemory: override.Memory} {
+			if value == "" {
+				continue
+			}
+			quantity := resource.MustParse(value)
+			requirements.Requests[name] = quantity
+			requirements.Limits[name] = quantity.DeepCopy()
+		}
+		if override.EphemeralStorage != "" {
+			requirements.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorage)
+		}
+		if override.EphemeralStorageRequest != "" {
+			requirements.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorageRequest)
+		}
+		resources[role] = requirements
+	}
+	return resources
+}
+
+// overridden reports whether role's reservation field name comes from liveOverrides rather than
+// the defaults: for ephemeral-storage, whether either side of the bound does.
+func overridden(role claim.Role, name corev1.ResourceName) bool {
+	override, ok := liveOverrides[role]
+	if !ok {
+		return false
+	}
+	switch name {
+	case corev1.ResourceCPU:
+		return override.CPU != ""
+	case corev1.ResourceEphemeralStorage:
+		return override.EphemeralStorage != "" || override.EphemeralStorageRequest != ""
+	}
+	return override.Memory != ""
+}
 
 // The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers
 // Secret (ProvidersSecretName) the script creates for the run, holding a value no model route reads.
@@ -520,7 +580,7 @@ type liveRig struct {
 	log  *slog.Logger
 	// trees is the durable state every runtime of the run reads (Options.Store): every tree live
 	// until a check records its cleanup confirmed.
-	trees *treeStore
+	trees *fakeStore
 
 	// The current runtime instance and its listener; stop ends both.
 	rt      *Runtime
@@ -600,7 +660,7 @@ func note(who, format string, args ...any) {
 func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &liveRig{
-		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newTreeStore(),
+		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newFakeStore(),
 		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
 	}
 	fail := func(format string, args ...any) {
@@ -678,15 +738,14 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"second", "S4A-1", "S4A-1", claim.RoleTester},
 		{"fresh", "S4A-1", "S4A-1", claim.RoleReviewer},
 		// orphan is a separate issue pod: its unrecorded Sandbox can be swept or deleted without
-		// taking the root issue's resident roles with it. Its role is its own tree's architect,
-		// not a worker role: a brand-new tree's Sandbox carries the tree volume claim template
-		// only when its first launch is the architect (ownsVolume, manifest.go sandboxManifest); any
-		// other role launched first for a tree with no prior claim would reference a tree
-		// PersistentVolumeClaim nothing ever created, and its pod would never schedule.
+		// taking the root issue's resident roles with it. Its role is its own tree's architect, the
+		// claim a tree's first launch is in the daemon.
 		{"orphan", "S4A-4", "S4A-4", claim.RoleArchitect},
 		// sessions is postgres-resume's own tree, launched once the runtime keeps sessions in the
 		// scratch database: its pod is the only one created under session_store postgres.
 		{"sessions", "S4A-5", "S4A-5", claim.RoleArchitect},
+		// root2 and child2 are two issues of one tree, each in a Sandbox and on a volume of its own
+		// (independent-provision).
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
 		{"child2", "S4A-2", "S4A-3", claim.RolePlanner},
 	} {
@@ -723,7 +782,8 @@ func sameLocator(a, b runtime.Locator) bool {
 // address, through ln.
 func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 	opts := Options{
-		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
+		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", IssueVolume: liveIssueVolume,
+		Resources: liveResources(),
 		StreamURL: address,
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
@@ -733,7 +793,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
 		Store: r.trees,
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
-		Agent: stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		Agent: stubAgent, BootTimeout: liveBootTimeout,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
 	}
@@ -848,11 +908,27 @@ func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// issuePVCs are the run's PersistentVolumeClaims labelled with issue, as the operator reads them:
+// `<name> <phase>` each, in name order, none when the issue has no volume. An issue's volume is
+// selected by the issue label its Sandbox's claim template put on it, never by the tree's: the
+// restricted runtime identity has no PVC verb, so this is an operator step.
+func (r *liveRig) issuePVCs(issue string) ([]string, error) {
+	out, err := r.kubectl("get", "pvc", "-l", labelProject+"="+r.env.project+","+labelIssue+"="+labelValue(issue),
+		"-o", `jsonpath={range .items[*]}{.metadata.name} {.status.phase}{"\n"}{end}`)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	lines = slices.DeleteFunc(lines, func(line string) bool { return line == "" })
+	slices.Sort(lines)
+	return lines, nil
+}
+
 // markerLines reads the marker with `test ! -e || cat`, not a bare `cat`: a marker a poll reads
 // before the stub agent has written to it does not exist yet, and a bare `cat`'s non-zero exit
 // would reach the caller as an error — a poll returns on the first error, never retrying — rather
 // than "not yet" (awaitRunning's own poll, the first launch of an issue: root at root-ready, root2
-// and child2 at concurrent-provision, an orphan's first launch).
+// and child2 at independent-provision, an orphan's first launch).
 func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
 	out, err := r.exec(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", c.marker)
 	if err != nil {

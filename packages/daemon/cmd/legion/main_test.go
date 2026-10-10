@@ -36,7 +36,7 @@ func TestMain(m *testing.M) {
 	// test-created repository ever registers a root with the operator's long-running watchman.
 	// watchman drops a root once its directory is deleted, so without this, the roots that pile
 	// up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
-	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, treeVolume's
+	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, issueVolume's
 	// isolated one) still wins: os.Environ() is read fresh by every exec.Command.
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
@@ -945,33 +945,33 @@ current-context: legion-daemon
 }
 
 // After Config OK, --check-config prints one line per deployment capability the file alone leaves
-// open (daemon.Deployment: secrets with no broker configured, resource-limits with a role lacking
-// CPU and memory requests and limits), each in the words boot logs it with and naming the
-// legion.yaml line that records a decision — and exits 0, because a gap is reported, never
-// refused. A decision quiets its row, every role reserved closes the resource-limits row, and a
-// configured broker's secrets row is boot's to measure, so the check says nothing of it. Model
-// fallback is the probe's and never printed here.
+// open (daemon.Deployment: secrets with no broker configured), each in the words boot logs it with
+// and naming the legion.yaml line that records a decision — and exits 0, because a gap is reported,
+// never refused. A decision quiets its row, and a configured broker's secrets row is boot's to
+// measure, so the check says nothing of it. The resource-limits row is never open on a Kubernetes
+// file: the loader fills every role's reservation from the daemon's defaults, with or without a
+// `resources` block and whatever fields it sets (config.RoleResources.Reserved); the tmux cases
+// (tmuxCapabilityGaps) are where it is open. Model fallback is the probe's, and pool capacity the
+// probe's run's, and neither is printed here.
 func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 	legionState(t)
 	const everyRole = `    resources:
-      architect: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
-      planner: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
-      implementer: {requests: {cpu: "1", memory: 2Gi}, limits: {cpu: "4", memory: 6Gi}}
-      tester: {requests: {cpu: "2", memory: 4Gi}, limits: {cpu: "4", memory: 12Gi}}
-      reviewer: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
-      merger: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
+      architect: {cpu: 500m, memory: 1Gi}
+      planner: {cpu: 500m, memory: 1Gi}
+      implementer: {cpu: "1", memory: 2Gi}
+      tester: {cpu: "2", memory: 4Gi}
+      reviewer: {cpu: 500m, memory: 1Gi}
+      merger: {cpu: 500m, memory: 1Gi}
 `
 	const secretsGap = "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
 	for _, tc := range []struct{ name, extra, want string }{
-		{"nothing reserved, no broker", "", secretsGap +
-			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: architect, planner, implementer, tester, reviewer, merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
-		{"a role with limits alone", "    resources: {tester: {limits: {cpu: \"4\", memory: 12Gi}}}\n", secretsGap +
-			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: architect, planner, implementer, tester, reviewer, merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
-		{"every role reserved", everyRole, secretsGap},
-		{"the controller's pod unreserved under controller: daemon", everyRole + "controller: daemon\n", secretsGap +
-			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: controller; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
+		{"no resources block, no broker: every role at the defaults", "", secretsGap},
+		{"a role with one field set, the other the default", "    resources: {tester: {memory: 12Gi}}\n", secretsGap},
+		{"a role's disk bound set, its request the default", "    resources: {tester: {ephemeral_storage: 40Gi}}\n", secretsGap},
+		{"every role set", everyRole, secretsGap},
+		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
 		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example}\n", ""},
-		{"both decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n    resource-limits: one tree per node\n", ""},
+		{"secrets decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -987,12 +987,12 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 }
 
 // A decision may name only a capability the daemon measures from the deployment: anything else is
-// refused as an unknown key naming the three, and a blank reason records nothing, so it is refused
+// refused as an unknown key naming the four, and a blank reason records nothing, so it is refused
 // too — each with exit 1 and no Config OK.
 func TestStartCheckConfigRefusesAnUnknownCapabilityDecision(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct{ name, extra, want string }{
-		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits\n"},
+		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback, resource-limits or pool-capacity\n"},
 		{"a blank reason", "capabilities: {decided: {secrets: \"\"}}\n", "legion start: capabilities.decided.secrets must not be empty\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

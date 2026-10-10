@@ -30,20 +30,20 @@ import (
 type Config struct {
 	// BROKER_LISTEN_ADDR: the host:port the broker listens on.
 	ListenAddr string
-	// BROKER_DATABASE_URL, BROKER_DATABASE_PASSWORD: the Postgres connection URL. Required. The
-	// broker applies its own migrations at startup. A literal ${BROKER_DATABASE_PASSWORD} in the
-	// URL is replaced with BROKER_DATABASE_PASSWORD, URL-escaped; setting either without the
-	// other is refused. A URL that names a user and no password (neither in the URL nor from
-	// PGPASSWORD or a passfile) and whose host is an Amazon RDS endpoint (one ending in
-	// .rds.amazonaws.com) signs in by RDS IAM authentication: each new connection signs in with an
-	// auth token the broker mints for that user and host from the AWS SDK's default credentials,
-	// in the region AWS_REGION, AWS_DEFAULT_REGION or the shared AWS config names, which need
-	// rds-db:connect on the database user. Such a URL must name that one host, with
-	// sslmode=verify-full and an sslrootcert file (the broker image ships the RDS CA bundle at
-	// /etc/ssl/rds/global-bundle.pem), or the broker refuses to start, since a token is a password
-	// to the database for 15 minutes; sslrootcert=system is refused too, since the system trust
-	// store holds no RDS CA. Any other passwordless URL, such as a local Postgres's trust sign-in,
-	// connects as given.
+	// BROKER_DATABASE_URL: the Postgres connection URL, the one variable that says which database
+	// the broker uses and how it signs in. Required. The broker applies its own migrations at
+	// startup. A URL that names a user and no password (neither in the URL nor from PGPASSWORD or a
+	// passfile) and whose host is an Amazon RDS endpoint (one ending in .rds.amazonaws.com) signs in
+	// by RDS IAM authentication: each new connection signs in with an auth token the broker mints
+	// for that user and host from the AWS SDK's default credentials, in the region AWS_REGION,
+	// AWS_DEFAULT_REGION or the shared AWS config names, which need rds-db:connect on the database
+	// user. Such a URL must name that one host, with sslmode=verify-full and an sslrootcert file (the
+	// broker image ships the RDS CA bundle at /etc/ssl/rds/global-bundle.pem), or the broker refuses
+	// to start, since a token is a password to the database for 15 minutes; sslrootcert=system is
+	// refused too, since the system trust store holds no RDS CA. Any other URL, one carrying its own
+	// password or a passwordless one to a local Postgres that trusts its clients, connects as given.
+	// Nothing is substituted into it: a URL naming the removed ${BROKER_DATABASE_PASSWORD}
+	// placeholder is refused, as BROKER_DATABASE_PASSWORD itself is.
 	DatabaseURL string
 	// DatabaseIAM is whether the broker signs in to DatabaseURL with RDS IAM auth tokens: the URL
 	// names a user and an RDS endpoint host, pgx finds no password for it, and it verifies that
@@ -117,6 +117,10 @@ type Config struct {
 // in Dispatch.
 const noDispatchCredential = "the broker holds no Dispatch credential"
 
+// noDatabasePassword is why BROKER_DATABASE_PASSWORD and its placeholder are gone: BROKER_DATABASE_URL
+// alone says how the broker signs in.
+const noDatabasePassword = "the broker substitutes no password into BROKER_DATABASE_URL: on Amazon RDS it signs in by IAM token (https://sjawhar.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token), and any other database's password goes in the URL itself"
+
 // noRulesFile is why the rules file's variables are gone: each secret's own tags say who owns it
 // and its tier.
 const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
@@ -131,6 +135,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
 	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
+	{"BROKER_DATABASE_PASSWORD", noDatabasePassword},
 	{"BROKER_RULES_FILE", noRulesFile},
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
@@ -141,28 +146,10 @@ var removedVars = []struct{ name, reason string }{
 // subdomain.
 var serviceAccountPattern = regexp.MustCompile(`^system:serviceaccount:[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?:[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?$`)
 
-// databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of
-// BROKER_DATABASE_PASSWORD, so the password itself never has to be pre-escaped by whoever sets the
-// URL. Naming the placeholder without the variable, or the variable without the placeholder, is
-// refused naming both: a silently-unsubstituted placeholder would try to connect to a literal
-// "${BROKER_DATABASE_PASSWORD}" password, and a silently-unused password is a stale, ignored
-// configuration entry.
+// databasePasswordPlaceholder is the removed BROKER_DATABASE_PASSWORD's placeholder. Load refuses a
+// BROKER_DATABASE_URL that names it, as it refuses the variable, rather than sign in with it as a
+// literal password.
 const databasePasswordPlaceholder = "${BROKER_DATABASE_PASSWORD}"
-
-func substituteDatabasePassword(rawURL string, getenv func(string) string) (string, error) {
-	password := getenv("BROKER_DATABASE_PASSWORD")
-	hasPlaceholder := strings.Contains(rawURL, databasePasswordPlaceholder)
-	switch {
-	case hasPlaceholder && password == "":
-		return "", fmt.Errorf("BROKER_DATABASE_URL names %s but BROKER_DATABASE_PASSWORD is not set", databasePasswordPlaceholder)
-	case !hasPlaceholder && password != "":
-		return "", fmt.Errorf("BROKER_DATABASE_PASSWORD is set but BROKER_DATABASE_URL does not name %s", databasePasswordPlaceholder)
-	case hasPlaceholder:
-		return strings.ReplaceAll(rawURL, databasePasswordPlaceholder, url.QueryEscape(password)), nil
-	default:
-		return rawURL, nil
-	}
-}
 
 // rdsHostSuffix ends every Amazon RDS endpoint's host name, the hosts RDS IAM auth tokens sign in
 // to.
@@ -257,13 +244,12 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("%s is removed; %s", removed.name, removed.reason)
 		}
 	}
-	databaseURL, err := substituteDatabasePassword(getenv("BROKER_DATABASE_URL"), getenv)
-	if err != nil {
-		return Config{}, err
+	if strings.Contains(getenv("BROKER_DATABASE_URL"), databasePasswordPlaceholder) {
+		return Config{}, fmt.Errorf("BROKER_DATABASE_URL names the removed %s placeholder; %s", databasePasswordPlaceholder, noDatabasePassword)
 	}
 	cfg := Config{
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
-		DatabaseURL:        databaseURL,
+		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		SecretsKMSKeyARN:   getenv("BROKER_SECRETS_KMS_KEY_ARN"),
@@ -280,6 +266,7 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("%s is required", req.name)
 		}
 	}
+	var err error
 	if cfg.DatabaseIAM, err = databaseIAM(cfg.DatabaseURL); err != nil {
 		return Config{}, err
 	}
