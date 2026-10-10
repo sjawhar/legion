@@ -131,7 +131,7 @@ var liveIssueVolume = resource.MustParse("20Gi")
 // cpu stays the default). The architect, planner and merger keep config.DefaultResources(), so the
 // root's pod carries a reservation from each path — an override, a default, and one with a field
 // of each — and the `resources` check tells them apart, the disk bound's two paths included. The
-// stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and 15 GiB to
+// stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and 19 GiB to
 // 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod are then checked against.
 var liveOverrides = map[claim.Role]config.RoleResources{
 	claim.RoleImplementer: {CPU: "500m", Memory: "1Gi"},

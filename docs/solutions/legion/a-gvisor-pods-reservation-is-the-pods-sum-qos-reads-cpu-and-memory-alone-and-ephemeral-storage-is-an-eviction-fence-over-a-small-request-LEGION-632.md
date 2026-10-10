@@ -58,8 +58,11 @@ related_issues:
 LEGION-632 (#1842) gave every role container a reservation and measured the defaults in the issue's
 own pod (2026-10-09, `GOMAXPROCS=3`): `go test ./...` of `packages/daemon` 1.45 GiB summed RSS,
 cold `go build` 0.97 GiB, `bun test` of a plugin 1.2 GiB, the agent's own `omp` about 1 GiB after
-half an hour, a headless Chromium's largest process 0.45 GiB — so a lane-running role's 4Gi holds
-its agent, one lane and a browser, and a six-role pod sums to 3 CPU and 15 GiB. The reviewer's
+half an hour, a headless Chromium's largest process 0.45 GiB — so a lane-running role's Go test
+lane, agent and browser sum to about 3.9 GiB, which ran at the limit of the 4Gi first given the
+implementer and tester; since a `Guaranteed` pod OOM-killed mid-turn stalls its tree, those two
+defaults were raised to 6Gi (the reviewer keeps 4Gi), and a six-role pod sums to 3 CPU and 19 GiB,
+still two per 8-vCPU floor node by cpu (7.9 / 3; 60.8 / 19 would place three). The reviewer's
 node-disk finding (no bound on a role's root filesystem once trees share nodes) reinstated
 ephemeral storage, which rounds 1–7 had refused as "the workspace lives on the volume": the
 architect ruled it a per-role limit (20Gi implementer/tester, 10Gi others) over a 1Gi request, and

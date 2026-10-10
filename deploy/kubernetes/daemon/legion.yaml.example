@@ -64,11 +64,11 @@ runtime:
     #   implementer: { ephemeral_storage_request: 8Gi }   # filesystem: $HOME, the state home, build caches) over
     #   controller: { cpu: 2, memory: 8Gi }  # ephemeral_storage_request, what the scheduler reserves of it (at most
     #                                  # the limit). A field or role left out takes the daemon's default: implementer,
-    #                                  # tester, reviewer 750m and 4Gi; architect, planner, merger 250m and 1Gi;
-    #                                  # controller 1 and 4Gi (controller: daemon only, else refused); ephemeral_storage
-    #                                  # 20Gi for implementer and tester, 10Gi for the rest, over a 1Gi
+    #                                  # tester 750m and 6Gi; reviewer 750m and 4Gi; architect, planner, merger 250m and
+    #                                  # 1Gi; controller 1 and 4Gi (controller: daemon only, else refused);
+    #                                  # ephemeral_storage 20Gi for implementer and tester, 10Gi for the rest, over a 1Gi
     #                                  # ephemeral_storage_request for every role. A six-role issue pod sums to 3 CPU
-    #                                  # and 15Gi at the defaults, its disk limits to 80Gi over 6Gi of requests
+    #                                  # and 19Gi at the defaults, its disk limits to 80Gi over 6Gi of requests
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml

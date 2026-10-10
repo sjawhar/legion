@@ -286,7 +286,7 @@ describe("the pod shape's reservation rule", () => {
       merger: { ...defaults.merger, cpu: "200m" },
     };
     expect(reservationProblems(pod(), { resources: overrides })).toEqual([
-      "the tester container reserves cpu 750m, memory 4Gi, ephemeral-storage 1Gi of 20Gi, not the run's cpu 1, memory 5Gi, ephemeral-storage 1Gi of 30Gi for its role",
+      "the tester container reserves cpu 750m, memory 6Gi, ephemeral-storage 1Gi of 20Gi, not the run's cpu 1, memory 5Gi, ephemeral-storage 1Gi of 30Gi for its role",
       "the merger container reserves cpu 250m, memory 1Gi, ephemeral-storage 1Gi of 10Gi, not the run's cpu 200m, memory 1Gi, ephemeral-storage 1Gi of 10Gi for its role",
     ]);
     const overridden = reserving("tester", reservation("1000m", "5120Mi", "30720Mi", "1024Mi"));
@@ -316,18 +316,18 @@ describe("the pod shape's reservation rule", () => {
     // The disk bound is a request under a limit, not one value as both: a request past the limit
     // is what the API server refuses, and a request below it at the run's values passes.
     expect(
-      reservationProblems(reserving("implementer", reservation("750m", "4Gi", "20Gi", "21Gi")))
+      reservationProblems(reserving("implementer", reservation("750m", "6Gi", "20Gi", "21Gi")))
     ).toEqual([
       "container implementer requests ephemeral-storage 21Gi past its limit 20Gi; the request may not exceed the limit",
     ]);
     expect(
-      reservationProblems(reserving("implementer", reservation("750m", "4Gi", "20Gi", "1Gi")))
+      reservationProblems(reserving("implementer", reservation("750m", "6Gi", "20Gi", "1Gi")))
     ).toEqual([]);
     // A request under the limit at other than the run's values is held to the run's.
     expect(
-      reservationProblems(reserving("implementer", reservation("750m", "4Gi", "20Gi", "2Gi")))
+      reservationProblems(reserving("implementer", reservation("750m", "6Gi", "20Gi", "2Gi")))
     ).toEqual([
-      "the implementer container reserves cpu 750m, memory 4Gi, ephemeral-storage 2Gi of 20Gi, not the run's cpu 750m, memory 4Gi, ephemeral-storage 1Gi of 20Gi for its role",
+      "the implementer container reserves cpu 750m, memory 6Gi, ephemeral-storage 2Gi of 20Gi, not the run's cpu 750m, memory 6Gi, ephemeral-storage 1Gi of 20Gi for its role",
     ]);
   });
 
@@ -358,16 +358,16 @@ describe("the pod shape's reservation rule", () => {
     // The golden pod's init containers carry the architect's, the launching role's; a child's pod,
     // created by its planner's launch, carries the planner's, and one created by a relaunch of the
     // tester the tester's. A reservation no role of the pod has departs, the disk bound included.
-    expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "4Gi")))).toEqual(
+    expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "6Gi")))).toEqual(
       []
     );
     expect(reservationProblems(reserving("workspace-fetch", reservation("2", "1Gi")))).toEqual([
       "init container workspace-fetch reserves cpu 2, memory 1Gi, ephemeral-storage 1Gi of 20Gi, the reservation of no role of the pod",
     ]);
     expect(
-      reservationProblems(reserving("workspace-fetch", reservation("750m", "4Gi", "30Gi")))
+      reservationProblems(reserving("workspace-fetch", reservation("750m", "6Gi", "30Gi")))
     ).toEqual([
-      "init container workspace-fetch reserves cpu 750m, memory 4Gi, ephemeral-storage 1Gi of 30Gi, the reservation of no role of the pod",
+      "init container workspace-fetch reserves cpu 750m, memory 6Gi, ephemeral-storage 1Gi of 30Gi, the reservation of no role of the pod",
     ]);
   });
 

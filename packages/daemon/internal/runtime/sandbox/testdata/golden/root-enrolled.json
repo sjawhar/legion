@@ -241,12 +241,12 @@
               "limits": {
                 "cpu": "750m",
                 "ephemeral-storage": "20Gi",
-                "memory": "4Gi"
+                "memory": "6Gi"
               },
               "requests": {
                 "cpu": "750m",
                 "ephemeral-storage": "1Gi",
-                "memory": "4Gi"
+                "memory": "6Gi"
               }
             },
             "securityContext": {
@@ -332,12 +332,12 @@
               "limits": {
                 "cpu": "750m",
                 "ephemeral-storage": "20Gi",
-                "memory": "4Gi"
+                "memory": "6Gi"
               },
               "requests": {
                 "cpu": "750m",
                 "ephemeral-storage": "1Gi",
-                "memory": "4Gi"
+                "memory": "6Gi"
               }
             },
             "securityContext": {

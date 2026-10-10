@@ -1,6 +1,6 @@
 // The daemon's default reservations, transcribed from config.DefaultResources()
 // (packages/daemon/internal/config/kubernetes.go): each role's cpu and memory when the run
-// overrides none, summing to 3 CPU and 15 GiB an issue pod, and its ephemeral-storage limit
+// overrides none, summing to 3 CPU and 19 GiB an issue pod, and its ephemeral-storage limit
 // (`ephemeral_storage`, the role's bound on the node's disk: 20Gi for the two roles that build,
 // 10Gi for the rest) over its request (`ephemeral_storage_request`, 1Gi for every role). Spread it
 // to override a role; never mutate it.
@@ -25,13 +25,13 @@ export const defaults: Record<string, Reservation> = {
   },
   implementer: {
     cpu: "750m",
-    memory: "4Gi",
+    memory: "6Gi",
     ephemeral_storage: "20Gi",
     ephemeral_storage_request: "1Gi",
   },
   tester: {
     cpu: "750m",
-    memory: "4Gi",
+    memory: "6Gi",
     ephemeral_storage: "20Gi",
     ephemeral_storage_request: "1Gi",
   },

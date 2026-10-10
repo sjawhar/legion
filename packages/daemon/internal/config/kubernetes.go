@@ -45,7 +45,7 @@ type Kubernetes struct {
 	// present with every field filled: the file's value where runtime.kubernetes.resources.<role>
 	// sets one, the daemon's default (DefaultResources) otherwise, field by field. CPU and Memory
 	// are each both the container's request and its limit, so every Legion pod is Guaranteed and
-	// bursts past nothing; at the defaults a six-role issue pod sums to 3 CPU and 15 GiB.
+	// bursts past nothing; at the defaults a six-role issue pod sums to 3 CPU and 19 GiB.
 	// EphemeralStorage bounds what the container writes to the node's disk — its root filesystem,
 	// which no volume backs: the role's $HOME, Oh My Pi's state home with its Chromium profiles and
 	// logs, the Go and Bun caches — since pods of unrelated trees share a node and one role filling
@@ -92,10 +92,13 @@ func (r RoleResources) Reserved() bool {
 }
 
 // defaultResources is each role's reservation when the file sets none: the roles that build and
-// test a change get the most, the roles that read and write get less, and the controller, which
-// runs alone in its pod, gets a pod of its own size. The image probe pod takes none of these: its
-// own fixed 250m and 1Gi (internal/daemon/kubernetes.go, probeReservation), since it starts one Oh
-// My Pi at a time and runs no lane, and a probe sized as a role could not boot on a full pool.
+// test a change get the most (6Gi: a lane-running role's Go test lane, its agent and a headless
+// browser measured about 3.9 GiB of summed RSS against the earlier 4Gi, and a Guaranteed pod the
+// kernel OOM-kills mid-turn stalls its tree), the roles that read and write get less, and the
+// controller, which runs alone in its pod, gets a pod of its own size. The image probe pod takes
+// none of these: its own fixed 250m and 1Gi (internal/daemon/kubernetes.go, probeReservation),
+// since it starts one Oh My Pi at a time and runs no lane, and a probe sized as a role could not
+// boot on a full pool.
 // The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
 // filesystem: $HOME, the state home, the Go and Bun caches a build fills), 20Gi for the two roles
 // that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it to
@@ -105,8 +108,8 @@ func (r RoleResources) Reserved() bool {
 var defaultResources = map[claim.Role]RoleResources{
 	claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 	claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
-	claim.RoleImplementer: {CPU: "750m", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
-	claim.RoleTester:      {CPU: "750m", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleImplementer: {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleTester:      {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
 	claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 	claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 	claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},

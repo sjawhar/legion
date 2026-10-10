@@ -885,7 +885,7 @@ file leaves out, a field or a whole role, takes the daemon's default (`config.De
 
 | role | cpu | memory | ephemeral-storage (limit / request) |
 | :--- | :--- | :--- | :--- |
-| `implementer`, `tester` | 750m | 4Gi | 20Gi / 1Gi |
+| `implementer`, `tester` | 750m | 6Gi | 20Gi / 1Gi |
 | `reviewer` | 750m | 4Gi | 10Gi / 1Gi |
 | `architect`, `planner`, `merger` | 250m | 1Gi | 10Gi / 1Gi |
 | `controller` (`controller: daemon`) | 1 | 4Gi | 10Gi / 1Gi |
@@ -898,7 +898,7 @@ anything is served — a probe that reserved a role's share, as it did the contr
 until LEGION-632, could leave the daemon unable to boot on a pool with no room for a pod that
 large ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The bound").
 
-At the defaults a six-role issue pod sums to 3 CPU and 15 GiB, its ephemeral-storage limits to 80Gi
+At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, its ephemeral-storage limits to 80Gi
 and its requests to 6Gi. `issue_volume` sizes each issue's own volume, the clone, the workspace,
 uv's Pythons and packages, and the roles' sessions on it; the controller's pod owns one of the same
 size, holding its sessions alone. Ephemeral storage is what a role container writes outside every
@@ -1502,7 +1502,7 @@ fixed 250m / 1Gi (`probeReservation`, [Configuration](#configuration)), no role'
 Legion pod is `Guaranteed` — the kubelet's QoS reads cpu and memory alone, so the
 disk bound's request under its limit changes no pod's class — and the pod bursts past its summed
 reservation nowhere; inside it, under gVisor, one role may use what its idle siblings reserved
-(below). At the defaults a six-role issue pod sums to 3 CPU and 15 GiB, the init containers adding
+(below). At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, the init containers adding
 nothing: a pod's effective request is the larger of its containers' sum and its largest init
 container, and no one role's reservation exceeds the sum of the six. Every role reserved is what
 the `resource-limits` row of
@@ -1513,16 +1513,19 @@ The defaults were sized from an issue pod on the production cluster (measured 20
 `GOMAXPROCS=3`): `go test ./...` of `packages/daemon` peaks at about 1.45 GiB of summed RSS, a cold
 `go build ./...` at about 0.97 GiB, `bun test` of a plugin package at about 1.2 GiB, Biome and
 `bun install` at about 0.8 GiB each and `tsc` at about 0.75 GiB; a role's Oh My Pi process is about
-1 GiB after half an hour of work, and a headless Chromium's largest process about 0.45 GiB. So a
-lane-running role's 4Gi holds its agent, one lane and a browser, and the pod's 15 GiB holds six
+1 GiB after half an hour of work, and a headless Chromium's largest process about 0.45 GiB. A
+lane-running role's Go test lane, its agent and a browser sum to about 3.9 GiB, at the limit of the
+4Gi they were first given, and a `Guaranteed` pod OOM-killed mid-turn stalls its tree; so the
+implementer's and tester's 6Gi holds its agent, one lane and a browser with room over that sum,
+the reviewer's 4Gi holds its agent, a browser and its review pair, and the pod's 19 GiB holds six
 agents beside them.
 
 No pod carries an affinity: each owns its volume and shares nothing with another pod, so the
 scheduler bin-packs it wherever the `legion` pool has room for its reservation, and Karpenter adds a
 node under the pool's limits when none has, of the smallest type the pool's requirements allow. In
 production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
-floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 15 GiB
-issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 15 would place four), cpu the binding
+floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 19 GiB
+issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 19 would place three), cpu the binding
 dimension. A pod relaunched onto another node waits for its `ReadWriteOnce` volume to detach from
 the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach` events until the old
 pod is gone; then it runs on.
@@ -1536,7 +1539,7 @@ container's own request and limit are what the API shows and the scheduler count
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum: at the defaults, two pods fit a floor node and
 `limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), and
-`limits.memory` divided by 15 GiB bounds them too when that is the smaller — where the
+`limits.memory` divided by 19 GiB bounds them too when that is the smaller — where the
 tree-volume layout ran one tree per node, each pinned to a node of its own. `admission_cap` bounds
 roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods. A
 pod the pool cannot place stays `Pending`, unscheduled; once it has been for longer than

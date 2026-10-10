@@ -64,7 +64,7 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer: {cpu: 1500m, memory: 6Gi, ephemeral_storage: 40Gi, ephemeral_storage_request: 2Gi}
+      implementer: {cpu: 1500m, memory: 8Gi, ephemeral_storage: 40Gi, ephemeral_storage_request: 2Gi}
       tester: {cpu: 2}
       merger: {}
     pod:
@@ -95,8 +95,8 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 
 	resources := DefaultResources()
-	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
-	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
+	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", Memory: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
 	want := Runtime{Name: "kubernetes", Kubernetes: &Kubernetes{
 		Namespace:    "legion",
 		Image:        workerImage,
@@ -156,7 +156,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 
 // What a block that sets only its required members settles to: the issue volume at 20Gi, every
 // role's reservation at the daemon's default (the six workflow roles and the controller, each with
-// a cpu and a memory, summing to 3 CPU and 15 GiB over an issue pod's six, and each with its
+// a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
 // ephemeral-storage limit, 20Gi for the implementer and tester and 10Gi for the rest, over a 1Gi
 // request), no scheduling beyond the Legion pool the runtime selects, in-cluster credentials, and
 // nothing of the operator's in any pod.
@@ -177,8 +177,8 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"resources", block.Resources, map[claim.Role]RoleResources{
 			claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleImplementer: {CPU: "750m", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleTester:      {CPU: "750m", Memory: "4Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleImplementer: {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleTester:      {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
@@ -203,8 +203,8 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		cpu.Add(resource.MustParse(block.Resources[role].CPU))
 		memory.Add(resource.MustParse(block.Resources[role].Memory))
 	}
-	if cpu.Cmp(resource.MustParse("3")) != 0 || memory.Cmp(resource.MustParse("15Gi")) != 0 {
-		t.Errorf("an issue pod's six roles sum to %s CPU and %s, want 3 and 15Gi", cpu.String(), memory.String())
+	if cpu.Cmp(resource.MustParse("3")) != 0 || memory.Cmp(resource.MustParse("19Gi")) != 0 {
+		t.Errorf("an issue pod's six roles sum to %s CPU and %s, want 3 and 19Gi", cpu.String(), memory.String())
 	}
 }
 
@@ -239,7 +239,7 @@ func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 	resources := cfg.Runtime.Kubernetes.Resources
-	if got, want := resources[claim.RoleTester], (RoleResources{CPU: "750m", Memory: "4Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+	if got, want := resources[claim.RoleTester], (RoleResources{CPU: "750m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "1Gi"}); got != want {
 		t.Errorf("tester = %+v, want %+v: the file's limit over the default request", got, want)
 	}
 	if got, want := resources[claim.RoleMerger], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "2Gi"}); got != want {
