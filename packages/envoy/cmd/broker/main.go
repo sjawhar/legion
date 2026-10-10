@@ -71,6 +71,16 @@ func main() {
 	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
+	// How the broker signs in to its database, logged before anything reaches for AWS or the
+	// database, so an operator reads it from the log rather than the task's environment: rds-iam
+	// when each connection signs in with an RDS IAM token the broker mints, and password when it
+	// signs in as BROKER_DATABASE_URL and libpq's defaults say (a password in the URL, PGPASSWORD or
+	// a passfile, or none for a server that trusts the client).
+	signIn := "password"
+	if cfg.DatabaseIAM {
+		signIn = "rds-iam"
+	}
+	slog.Info("database sign-in", "method", signIn)
 	// The AWS config, loaded once when anything needs it: an IAM-form BROKER_DATABASE_URL, whose
 	// connections sign in with RDS IAM tokens minted from it (so it is loaded before the database
 	// is opened), and the Secrets Manager and KMS clients, unless the fake secrets file stands in.
