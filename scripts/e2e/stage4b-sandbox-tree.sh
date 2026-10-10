@@ -53,7 +53,9 @@
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
-#   takes tree 3 out, so a checkpoint after it runs while the controller's own defect is unfixed.
+#   takes tree 3 out, so a checkpoint after it runs while the controller's own defect is unfixed; it
+#   also skips both controllers' GitHub credential checks (operator-launched in `controller`,
+#   daemon-launched in `daemon-controller-liveness`), so a run with it proves neither controller's gh.
 # - STAGE4B_DESIGN_GATE=root-issues, in a development run that stops at spec-posted or before it,
 #   arms the design gate (`gates.design: root-issues`) and runs tree 1 alone: its root architect
 #   settles its spec's decision blocks with a human, requests approval with a summary and registers
@@ -571,6 +573,13 @@ gh_hosts_token() { pod_exec "$1" "$2" sh -c "sed -n 's/^    oauth_token: //p' $g
 # prints the GitHub login the token answers for; DIR other than the role's directory is a control.
 pod_viewer() {
   pod_exec "$1" "$2" sh -c "GH_CONFIG_DIR=${3:-$gh_config_dir} GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login"
+}
+# operator_gh DIR args… runs the devbox's own gh with the same three variables pod_viewer empties,
+# against the controller's gh config directory rather than a pod's.
+operator_gh() {
+  local dir=$1
+  shift
+  env GH_CONFIG_DIR="$dir" GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh "$@"
 }
 # gh_log_line MSG POD ROLE prints the daemon's newest credential log line with MSG (`written` or
 # `refreshed`) for the role's Secret, as the daemon logs it (sandbox runtime: github credential …).
@@ -3416,6 +3425,24 @@ tmux -L "legion-e2e4b-$$" new-session -d -s controller -x 200 -y 50 \
 until_true 300 "controllerLocator in the state" sh -c "'$work/legion' state --json --config '$work/legion.yaml' | jq -e '.controllerLocator.sessionId != null' >/dev/null"
 controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
+# The operator-launched controller's own gh, from $work/controller-state/gh: it answers tree 1's
+# pull request's state and the review App's viewer, a directory elsewhere answers neither, the
+# stderr names the review App, and the daemon's credential refresh log exists.
+[ -n "$pr_number" ] || fail "the controller's GitHub credential check needs tree 1's pull request, but pr_number is empty"
+state=$(operator_gh "$work/controller-state/gh" pr view "$pr_number" -R "$repo" --json state -q .state 2>&1) || fail "the operator-launched controller's gh could not read $repo#$pr_number: $(scrub <<<"$state")"
+case "$state" in
+  OPEN | MERGED | CLOSED) ;;
+  *) fail "the operator-launched controller's gh answered pull request state '$state' for $repo#$pr_number, want OPEN, MERGED or CLOSED" ;;
+esac
+viewer=$(operator_gh "$work/controller-state/gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1) || fail "the operator-launched controller's gh answered no viewer: $(scrub <<<"$viewer")"
+[ "$viewer" = "legion-reviewer[bot]" ] || fail "the operator-launched controller's gh answered viewer $viewer, want legion-reviewer[bot]"
+if out=$(operator_gh /nonexistent pr view "$pr_number" -R "$repo" --json state -q .state 2>&1); then
+  fail "gh with GH_CONFIG_DIR=/nonexistent unexpectedly answered pull request state: $(scrub <<<"$out")"
+fi
+grep -qF "[legion] the controller's gh acts as the review App from $work/controller-state/gh" "$evidence/logs/controller.stderr" ||
+  fail "controller.stderr does not name the review App and $work/controller-state/gh: $(cat "$evidence/logs/controller.stderr")"
+[ -f "$work/controller-state/github-credential.log" ] || fail "$work/controller-state/github-credential.log does not exist"
+note "the operator-launched controller's gh: pull request state $state, viewer $viewer; GH_CONFIG_DIR=/nonexistent failed; controller.stderr names the review App; github-credential.log exists"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` carries as
 # LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go) and
@@ -3666,7 +3693,8 @@ begin daemon-controller-liveness
 # first, so no session of it holds the controller role. Then the daemon restarts three times:
 # 1. up, the negative control: `controller: daemon`, the controller's pod sized to run. The
 #    controller the daemon launches registers and holds the role, and the driver reads the log after
-#    two boot timeouts and more.
+#    two boot timeouts and more; phase 1 also checks this controller's gh, from its pod's
+#    /var/run/legion/gh, against tree 1's pull request and the review App's viewer.
 # 2. down: the same with the pod's CPU request past any node's. The daemon re-adopts the running
 #    controller, the driver deletes its pod, and the verdict waits through the relaunch's failed
 #    launches.
@@ -3722,6 +3750,28 @@ pod=$(jq -r .locator.sandbox.name <<<"$claim")
 mkdir -p "$evidence/transcripts/daemon-controller"
 op exec "$pod" -c "$(jq -r .locator.sandbox.container <<<"$claim")" -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
   tar -C "$evidence/transcripts/daemon-controller" -xf - 2>/dev/null || note "the session of the controller the daemon launched could not be copied from $pod"
+if [ -n "$skip_controller" ]; then
+  note "STAGE4B_SKIP_CONTROLLER: the daemon-launched controller's GitHub credential is not checked"
+else
+# The controller the daemon launched: its gh, from the pod's /var/run/legion/gh, answers tree 1's
+# pull request's state and the review App's viewer, the directory holds exactly the two gh files,
+# and GH_CONFIG_DIR=/nonexistent answers neither.
+[ -n "$pr_number" ] || fail "the controller's GitHub credential check needs tree 1's pull request, but pr_number is empty"
+container=$(jq -r .locator.sandbox.container <<<"$claim")
+state=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state 2>&1") || fail "the daemon-launched controller's gh in $pod/$container could not read $repo#$pr_number: $(scrub <<<"$state")"
+case "$state" in
+  OPEN | MERGED | CLOSED) ;;
+  *) fail "the daemon-launched controller's gh answered pull request state '$state' for $repo#$pr_number, want OPEN, MERGED or CLOSED" ;;
+esac
+viewer=$(pod_viewer "$pod" "$container") || fail "the daemon-launched controller's gh in $pod/$container answered no viewer"
+[ "$viewer" = "legion-reviewer[bot]" ] || fail "the daemon-launched controller's gh answered viewer $viewer, want legion-reviewer[bot]"
+files=$(pod_exec "$pod" "$container" sh -c "ls -A $gh_config_dir | sort | tr '\n' ' '")
+[ "$files" = "config.yml hosts.yml " ] || fail "$gh_config_dir in $pod/$container holds '$files', want config.yml hosts.yml "
+if out=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state" 2>&1); then
+  fail "gh with GH_CONFIG_DIR=/nonexistent in $pod/$container unexpectedly answered pull request state: $(scrub <<<"$out")"
+fi
+note "the daemon-launched controller's gh in $pod/$container: pull request state $state, viewer $viewer, $gh_config_dir holds '$files'; GH_CONFIG_DIR=/nonexistent failed"
+fi
 # 2. The controller cannot come back.
 controller_cpu=100000
 restart_daemon

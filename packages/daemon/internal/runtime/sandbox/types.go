@@ -146,12 +146,13 @@ type Options struct {
 	// AdoptTimeout bounds a working-copy adoption (slow_command_timeout_seconds).
 	AdoptTimeout time.Duration
 	Tokens       ProvisionTokens
-	// GitHubCredential is the daemon's function for a tree role's gh files
+	// GitHubCredential is the daemon's function for a role's gh files
 	// (runtime.GitHubCredential): hosts.yml and config.yml rendered from the role's App token. It
-	// is called for every role of an issue pod when the pod's role Secrets are written
-	// (writeLauncherSecrets), and again for every role of every live issue pod by the refresher
-	// (refreshGitHubCredentials), which rewrites the Secret when the render changed; never for the
-	// controller, which has no App. Required: configure refuses nil as it refuses a nil Tokens.
+	// is called for every launcher role when the pod's role Secrets are written
+	// (writeLauncherSecrets), and again for each by the refresher (refreshGitHubCredentials), which
+	// rewrites the Secret when the render changed: every workflow role of an issue pod and the
+	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
+	// nil Tokens.
 	GitHubCredential runtime.GitHubCredential
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.

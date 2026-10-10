@@ -30,11 +30,12 @@
 // to its launcher's default path, $XDG_RUNTIME_DIR/agent-secrets and the helper socket inside it,
 // and a default counts only when its file is there (identity.go). AGENT_SECRETS_ENROLL_WAIT (a
 // duration, default 20s) bounds how long a call waits while a box's launcher is still enrolling
-// it. AGENT_SECRETS_APPROVE_URL (Dispatch's origin) makes `launcher login` and a pending exec form
-// print the Dispatch page where a person decides. The exec form's child keeps AGENT_SECRETS_URL,
-// AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same session
-// (buildChildEnv). A host session enrolls (kind host) automatically through the helper's own
-// enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
+// it. AGENT_SECRETS_APPROVE_URL (Dispatch's origin) makes `launcher login` print the Dispatch page
+// where a person decides, and a pending request (request, status, the exec form's wait) name its
+// record's page beside the approver the broker names. The exec form's child keeps
+// AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
+// session (buildChildEnv). A host session enrolls (kind host) automatically through the helper's
+// own enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
 // enrollment path for either; only a box enrolls through it, and only via --helper (the shared
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
@@ -60,6 +61,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
@@ -105,9 +107,9 @@ var commands = []command{
 	{"renew", "agent-secrets renew",
 		"Keep an agent box's enrollment lease alive, renewing it until interrupted."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
-		"Request secrets and print the request's id and state; exit 75 while it waits for approval\nand 77 when it is denied."},
+		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied."},
 	{"status", "agent-secrets status <request_id> [--json]",
-		"Print a request's state, its grant once granted, and who decided it."},
+		"Print a request's state, who approves it and where while it waits, its grant once\ngranted, and who decided it."},
 	{"cancel", "agent-secrets cancel <request_id>",
 		"Cancel one of this session's pending requests."},
 	{"revoke", "agent-secrets revoke <grant_id>",
@@ -133,8 +135,8 @@ environment:
   AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
                              (default 20s)
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; launcher login names the page under it where the
-                             operator types the code, and the exec form the page where a person
-                             approves its waiting request
+                             operator types the code, and a waiting request names the page where
+                             its approver decides it
   OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
                              expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
                              so a harness that sets one of those instead still names its session
@@ -684,6 +686,9 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		writeVerbatim(stdout, raw)
 	} else {
 		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\n", result.RequestID, result.State)
+		if result.State == "pending" {
+			fmt.Fprintln(stdout, waitingOn(result.Approver, *result.RecordID))
+		}
 	}
 	switch result.State {
 	case "pending":
@@ -725,6 +730,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "state: %s\n", result.State)
+	if result.State == "pending" {
+		fmt.Fprintln(stdout, waitingOn(result.Approver, *result.RecordID))
+	}
 	if result.GrantID != nil {
 		fmt.Fprintf(stdout, "grant_id: %s\n", *result.GrantID)
 	}
@@ -883,7 +891,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
 	if state == "pending" {
-		reportPending(stderr, requestID, *result.RecordID, *wait)
+		reportPending(stderr, requestID, *result.RecordID, result.Approver, *wait)
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
 		for state == "pending" {
@@ -949,16 +957,35 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	return 0 // unreachable: syscall.Exec replaces this process on success
 }
 
-// reportPending says, once, before the exec form's wait, that a person must decide the request
-// and where: the Dispatch page of its credential record (the broker names one for every pending
-// request) under approveURL when that is set, else the Inbox's Credential requests section.
-func reportPending(stderr io.Writer, requestID, recordID string, wait time.Duration) {
+// reportPending says, once, before the exec form's wait, that a person must decide the request,
+// who, and where (waitingOn).
+func reportPending(stderr io.Writer, requestID, recordID string, approver *string, wait time.Duration) {
 	fmt.Fprintf(stderr, "agent-secrets: request %s is waiting for approval; waiting up to %s\n", requestID, wait)
-	if base := approveURL(); base != "" {
-		fmt.Fprintf(stderr, "agent-secrets: approve or deny it at %s/credentials/%s\n", base, recordID)
-		return
+	fmt.Fprintf(stderr, "agent-secrets: %s\n", waitingOn(approver, recordID))
+}
+
+// waitingOn is the sentence that says whom a pending request waits on and where they decide it:
+// the approver its credential record names (a person's login, or anyone signed in to Dispatch for
+// a shared secret), and the record's Dispatch page under approveURL when that is set, else the
+// Inbox's Credential requests section. The broker names an approver for every pending request; one
+// from before it did names none, and the sentence says so rather than guessing.
+func waitingOn(approver *string, recordID string) string {
+	base := approveURL()
+	page := base + "/credentials/" + recordID
+	switch {
+	case approver == nil && base == "":
+		return "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose"
+	case approver == nil:
+		return "waiting for approval in Dispatch: " + page + "; the broker does not say whose"
+	case *approver == record.AnyoneApprover && base == "":
+		return "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox"
+	case *approver == record.AnyoneApprover:
+		return "waiting for anyone signed in to Dispatch to approve it: " + page
+	case base == "":
+		return "waiting for " + *approver + " to approve it under Credential requests in their Dispatch Inbox"
+	default:
+		return "waiting for " + *approver + " to approve it in Dispatch: " + page
 	}
-	fmt.Fprintln(stderr, "agent-secrets: approve or deny it under Credential requests in the Dispatch Inbox")
 }
 
 // sessionIdentityVars are the AGENT_SECRETS_* variables the exec form's child keeps: the broker's

@@ -278,9 +278,9 @@ func TestSpawnWritesTheClaimsGhFilesAndNamesTheDirectoryOnThePane(t *testing.T) 
 // The refresher brings every tracked pane's hosts.yml to the current render of its role's
 // credential and touches nothing else: a stale file is replaced whole, by rename, and logged with
 // the claim, role, App and expiry; a file already at the render is not rewritten; a directory
-// that is gone is made again; the controller's claim, which has no App, and a token that names no
-// role are skipped. A mint that fails is logged and leaves the pane's last token in place until
-// the next tick.
+// that is gone is made again, including the controller's, whose render is the review App's
+// (appauth.AppRoleFor); only a token that names no role is skipped. A mint that fails is logged
+// and leaves the pane's last token in place until the next tick.
 func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 	ctx := context.Background()
 	var logs strings.Builder
@@ -307,11 +307,11 @@ func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 		}, "")
 	}
 	dir := func(token claim.Token) string { return runtime.GHConfigDir(r.stateDir, token) }
-	if _, err := WriteGHConfig(dir(stale), ghconfig.Render("ghs_stale_lease", string(appauth.Review), staticCredentialExpiry)); err != nil {
+	if _, err := ghconfig.Write(dir(stale), ghconfig.Render("ghs_stale_lease", string(appauth.Review), staticCredentialExpiry)); err != nil {
 		t.Fatal(err)
 	}
 	rendered, _ := staticCredential(ctx, claim.RoleImplementer)
-	if _, err := WriteGHConfig(dir(current), rendered); err != nil {
+	if _, err := ghconfig.Write(dir(current), rendered); err != nil {
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-time.Hour)
@@ -336,27 +336,34 @@ func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 	if info, err := os.Stat(dir(gone)); err != nil || info.Mode().Perm() != 0o700 {
 		t.Errorf("the recreated directory stat = %v, %v; want mode 0700", info, err)
 	}
-	for _, token := range []claim.Token{controller, nameless} {
-		if _, err := os.Stat(dir(token)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("the refresher made a gh directory for %s (%v)", token, err)
-		}
+	if got := readHostsToken(t, dir(controller)); got != staticCredentialToken(claim.RoleController) {
+		t.Errorf("the controller's hosts.yml holds %q, want the review App's %q", got, staticCredentialToken(claim.RoleController))
 	}
-	for _, token := range []claim.Token{stale, current, gone} {
+	if info, err := os.Stat(dir(controller)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("the controller's gh directory stat = %v, %v; want mode 0700", info, err)
+	}
+	if _, err := os.Stat(dir(nameless)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refresher made a gh directory for %s (%v)", nameless, err)
+	}
+	for _, token := range []claim.Token{stale, current, gone, controller} {
 		if entries := ghDirEntries(t, dir(token)); !slices.Equal(entries, []string{ghconfig.ConfigFile, ghconfig.HostsFile}) {
 			t.Errorf("%s's gh directory holds %v, want the two files alone", token, entries)
 		}
 	}
 	refreshed := logLines(logs.String(), "github credential refreshed")
-	if len(refreshed) != 2 {
-		t.Fatalf("the runtime logged %d refreshed credentials %q, want the stale and the recreated panes'", len(refreshed), refreshed)
+	if len(refreshed) != 3 {
+		t.Fatalf("the runtime logged %d refreshed credentials %q, want the controller, the stale and the recreated panes'", len(refreshed), refreshed)
+	}
+	if !strings.Contains(refreshed[0], "claim="+string(controller)) {
+		t.Errorf("the runtime logged %q, want the controller's claim in it", refreshed[0])
 	}
 	for _, want := range []string{"claim=" + string(stale), "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00"} {
-		if !strings.Contains(refreshed[0], want) {
-			t.Errorf("the runtime logged %q, want %q in it", refreshed[0], want)
+		if !strings.Contains(refreshed[1], want) {
+			t.Errorf("the runtime logged %q, want %q in it", refreshed[1], want)
 		}
 	}
-	if !strings.Contains(refreshed[1], "claim="+string(gone)) {
-		t.Errorf("the runtime logged %q, want the recreated pane's claim in it", refreshed[1])
+	if !strings.Contains(refreshed[2], "claim="+string(gone)) {
+		t.Errorf("the runtime logged %q, want the recreated pane's claim in it", refreshed[2])
 	}
 	if failed := logLines(logs.String(), "refresh failed"); len(failed) != 0 {
 		t.Errorf("the runtime logged failures %q while every render succeeded", failed)

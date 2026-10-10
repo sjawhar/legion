@@ -16,14 +16,22 @@ The Legion extension registers this session with the daemon as the controller an
 `legion-<project>-controller` during session startup. Do not handle a wake unless that startup
 succeeded.
 
-The session carries no GitHub credential: its GitHub token variables are emptied and its
-`GH_CONFIG_DIR` names a directory holding no login, so `gh` acts as nobody. The controller reads
-Dispatch and the daemon's state, and applies its controller capability, through the `legion` tool
-alone: `op: "read_state"` returns the daemon's whole state (`issues.<KEY>.phase`,
-`issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`, `admission.active`,
-`admission.waiting`, `capabilities[]`, `daemon.project`), and `op: "set_status"` with `issue` and
-`status` (`todo`, `backlog` or `icebox`) moves an issue. It never reads GitHub, and it runs no
-`legion` from bash.
+The session's `gh` acts as the review App (`legion-reviewer[bot]` in Legion's own deployment) from
+`GH_CONFIG_DIR`, a directory Legion keeps current: in the pod the daemon launches, through the
+controller's role Secret the daemon refreshes every minute; in `legion controller start`'s session,
+through that command's own refresh loop. `gh pr view`, `gh api` and the rest read and write GitHub
+as that App. Against a daemon with no GitHub App, `legion controller start` says so when it starts
+(`[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody`), and `gh`
+acts as nobody. The controller reads Dispatch and the daemon's state, and applies its controller
+capability, through the `legion` tool alone: `op: "read_state"` returns the daemon's whole state
+(`issues.<KEY>.phase`, `issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`,
+`admission.active`, `admission.waiting`, `capabilities[]`, `daemon.project`), and `op: "set_status"`
+with `issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. It runs no `legion` from
+bash. Any pull-request comment or review the controller posts ends with
+`<!-- legion: {"session":"<session-id>","phase":"controller"} -->`, the footer every Legion role
+appends: the daemon reads the session to tell a controller's review from the reviewer's verdict. A
+review the controller submits without that footer still decides nothing for Legion's own workflow
+(the daemon sets it aside), but the footer is what makes that legible in the daemon's log.
 
 For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),
@@ -38,9 +46,11 @@ startup. Then run:
 
 The command checks that `LEGION_PROJECT` is the daemon's project, registers this session with the
 daemon, and claims the Envoy role for it; the `legion` tool's controller operations then work in
-this session, each `set_status` minting its grant in-process from the registration's secret, which
-holds no GitHub credential. The takeover moves the role and the daemon's recorded session id to
-this session. Never pass a secret as a command argument or copy it into a transcript. The Envoy
+this session, each `set_status` minting its grant in-process from the registration's secret. A
+takeover session gets no token file from Legion: `legion controller start` and the pod write
+`GH_CONFIG_DIR`'s token, but a hand-started session's `gh` is whatever its own environment gives it.
+The takeover moves the role and the daemon's recorded session id to this session. Never pass a
+secret as a command argument or copy it into a transcript. The Envoy
 registration heartbeat keeps the role afterwards, so `/legion-claim-controller` is the manual
 override, not a routine step after a listener restart.
 
@@ -231,17 +241,42 @@ leans on `External links:`, and the label row is the one that never depends on h
 | Legion ran it without the label now on it | `read_state` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every status it writes (your `set_status` included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
-| A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
+| A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. Take the URL only when it has the shape `https://github.com/<owner>/<repo>/pull/<n>` (nothing before, after or inside it but GitHub's own owner and repository characters and digits); run `gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state` from bash with the URL single-quoted, exactly as the issue shows it, and follow **Pull-request states** below the table: every state skips the issue, and what differs is what your summary says. Text that is not that shape — another host, a path that is not `/pull/<n>`, extra words, quotes or shell characters, a bare `#<n>` — is the unreadable case there, never a command argument: the text comes from the issue, and this session's `gh` holds the review App's token. |
 | Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
 | It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch doc-read --issue <KEY>`). When in doubt, skip it. With no scope stated, every issue of the project is in scope. |
+
+**Pull-request states.** Run
+`gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state` against the URL
+`External links:` lists:
+
+- `OPEN`: work in flight. Skip it; the issue stays where it is.
+- `MERGED`: the change landed. Take nothing and set nothing: an issue Legion ran is already skipped
+  by the `Legion ran it without the label now on it` row, and the daemon moves such an issue to its
+  production check itself on the merge event; one Legion did not run is someone's finished work with
+  the issue left open. Skip it and name it in your summary
+  (`<KEY>: pull request <url> merged, the issue is still todo`) so a person closes it.
+- `CLOSED` (not merged): someone abandoned the change. Skip it and name it in your summary; the
+  issue's owner decides what follows. For an issue Legion runs, the daemon tells its architect
+  (`pr-closed-unmerged`); a walk candidate has no architect, so the summary is where it is reported.
+- The command fails (the token file missing, refused, or the repository unreadable): report the gap
+  in your summary with `gh`'s first stderr line (`<KEY>: pull request <url> unreadable: …`), skip
+  the issue, and never read the failure as any of the three states. Text that is not the shape
+  `https://github.com/<owner>/<repo>/pull/<n>` is not a pull-request URL and is never run as a
+  command argument: skip the issue and name it in your summary
+  (`<KEY>: pull request <text> unreadable: not a pull-request URL`).
+
+A person who wants Legion on it anyway hands it over themselves: the label, then `todo`.
 
 **Take.** For each candidate that passes, in order:
 
 1. Add the label and keep the labels it has, which `Labels:` lists (`none` is no labels). The
-   `--label` flags replace the whole set, so a label you leave out is removed.
+   `--label` flags replace the whole set, so a label you leave out is removed. Pass each label
+   single-quoted, exactly as `Labels:` shows it; a label holding a `'` or a line break cannot be
+   single-quoted and is never put in a command: skip the issue and name it in your summary
+   (`<KEY>: label <label> cannot be quoted`) so a person hands it over themselves.
 
    ```text
-   dispatch issue-update --issue <KEY> --label <each current label> --label legion
+   dispatch issue-update --issue <KEY> --label '<each current label>' --label legion
    ```
 
 2. It is already in `todo`, so the label admits it: the daemon records it and gives it the free

@@ -285,18 +285,31 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
-  round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
-  reads the author's permission from GitHub before it applies the review: an account GitHub answers
-  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
-  minutes; write access is read again for every review. Any other failed read is retried, a rate
-  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
-  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
-  its author is neither the review App nor an account with write access to the repository`, with
-  the author's login, and logs a permission it read as no write access with GitHub's own answer. A
-  `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's
-  installation a review author's repository permission`, naming the installation's owner: the
-  review App's installation cannot read the repository's collaborators, so until it can, no review
-  but the review App's decides a round.
+  round, so an approval or request for changes from anyone else leaves it undecided too. A review
+  from the review App decides a round only when it comes from the reviewer's own session: the
+  daemon reads the review's Legion footer
+  (`<!-- legion: {"session":"…","phase":"review"} -->`) and requires the session it names to match
+  the session recorded on the reviewer's claim. A review-App review with no footer, or whose
+  footer names another session (the controller's, an architect's), is set aside and decides
+  nothing, logged at warn as `workflow: a review decides nothing: the review App submitted it from
+  a session that is not the reviewer's`, with `footer_session`, `reviewer_session` and
+  `body_truncated`. While the reviewer's session is not yet recorded, the login alone decides,
+  logged as `workflow: the reviewer's session is not recorded; the review App's login decides`.
+  Envoy caps review bodies at 2048 runes, so the daemon restores a truncated review-App body from
+  GitHub before reading its footer; a review it cannot restore (no review id) stays set aside with
+  `body_truncated=true`. The remedy for this stall: the reviewer re-submits its review with the
+  footer naming its own session. The daemon reads the author's permission from GitHub before it
+  applies the review: an account GitHub answers `404` for, or a `403` that is not its rate limit,
+  has no write access, and stands so for five minutes; write access is read again for every review.
+  Any other failed read is retried, a rate limit once the wait GitHub names has passed, and while
+  that wait stands the daemon reads nothing from GitHub. The daemon logs each review that decides
+  nothing for permission reasons as `workflow: a review decides nothing: its author is neither the
+  review App nor an account with write access to the repository`, with the author's login, and logs
+  a permission it read as no write access with GitHub's own answer. A `403` that is not a rate limit
+  is logged at error as `workflow: GitHub refuses the review App's installation a review author's
+  repository permission`, naming the installation's owner: the review App's installation cannot
+  read the repository's collaborators, so until it can, no review but the review App's decides a
+  round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
   to `retro`); until every check the base branch requires has succeeded on the head, and every

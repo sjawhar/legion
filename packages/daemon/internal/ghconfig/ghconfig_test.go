@@ -90,6 +90,90 @@ func TestRenderCarriesTheLeaseThrough(t *testing.T) {
 	}
 }
 
+// Write brings a role's GH_CONFIG_DIR to a render: a fresh directory is made and chmod'ed 0700 with
+// both files written and changed reported true, a second call with the same render writes nothing
+// and reports changed false, a different token rewrites hosts.yml alone and reports changed true,
+// and a directory that already exists 0755 is chmod'ed to 0700 regardless of whether hosts.yml
+// changes.
+func TestWriteBringsTheDirectoryToTheRender(t *testing.T) {
+	assertMode := func(t *testing.T, dir string) {
+		t.Helper()
+		info, err := os.Stat(dir)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("Stat(%q) = %v, %v; want mode 0700", dir, info, err)
+		}
+	}
+	assertNoStrayTemp := func(t *testing.T, dir string) {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "."+HostsFile+"-") {
+				t.Errorf("ReadDir(%q) left a stray temp file %q", dir, entry.Name())
+			}
+		}
+	}
+
+	dir := t.TempDir()
+	rendered := Render("ghs_first_token", "implement", time.Time{})
+	changed, err := Write(dir, rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("Write on a fresh directory: changed = false, want true")
+	}
+	assertMode(t, dir)
+	assertNoStrayTemp(t, dir)
+	hostsPath, configPath := filepath.Join(dir, HostsFile), filepath.Join(dir, ConfigFile)
+	hosts, err := os.ReadFile(hostsPath)
+	if err != nil || string(hosts) != rendered.Hosts {
+		t.Fatalf("ReadFile(hosts.yml) = %q, %v; want %q, nil", hosts, err, rendered.Hosts)
+	}
+	config, err := os.ReadFile(configPath)
+	if err != nil || string(config) != rendered.Config {
+		t.Fatalf("ReadFile(config.yml) = %q, %v; want %q, nil", config, err, rendered.Config)
+	}
+
+	changed, err = Write(dir, rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("Write with an unchanged render: changed = true, want false")
+	}
+	assertNoStrayTemp(t, dir)
+	if hosts, err := os.ReadFile(hostsPath); err != nil || string(hosts) != rendered.Hosts {
+		t.Fatalf("ReadFile(hosts.yml) after an unchanged Write = %q, %v; want %q, nil", hosts, err, rendered.Hosts)
+	}
+
+	other := Render("ghs_second_token", "implement", time.Time{})
+	changed, err = Write(dir, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("Write with a different token: changed = false, want true")
+	}
+	if hosts, err := os.ReadFile(hostsPath); err != nil || string(hosts) != other.Hosts {
+		t.Fatalf("ReadFile(hosts.yml) after a changed Write = %q, %v; want %q, nil", hosts, err, other.Hosts)
+	}
+	if config, err := os.ReadFile(configPath); err != nil || string(config) != rendered.Config {
+		t.Fatalf("ReadFile(config.yml) after a hosts.yml-only change = %q, %v; want unchanged %q, nil", config, err, rendered.Config)
+	}
+
+	looseDir := filepath.Join(t.TempDir(), "loose")
+	if err := os.Mkdir(looseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(looseDir, rendered); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, looseDir)
+}
+
 // ghBinary is the real GitHub CLI to prove the rendered files against: the `gh` on PATH, unless
 // it is a Legion worker pane's shim (`<state_dir>/worker-bin/gh`, which runs `legion gh`), in
 // which case the CLI it stands in front of at /usr/local/bin/gh. A machine with neither skips.

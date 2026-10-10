@@ -763,7 +763,9 @@ carries over (below), so the upgrade drains the deployment while it still runs t
      `legion controller start` refuses a `pi-legion` speaking another contract (`probeAndMint` in
      `cmd/legion/controller.go`), and the daemon refuses a `legion` or `pi-legion` of another
      contract with 409 (`internal/api/controller.go`). That `pi-legion` release must be published
-     before the rollout.
+     before the rollout. Contract 19 adds the controller's credential route
+     (`POST /legion/v1/controller/github-credential`) and the controller pod's `GH_*` environment
+     variables (LEGION-668).
 
 **Why deleting a live tree's Sandboxes loses its work.** On the earlier release the tree volume is
 the root Sandbox's `volumeClaimTemplates` entry, so Agent Sandbox creates the volume's claim with
@@ -2174,9 +2176,9 @@ and neither while it runs ([`scripts/e2e/README.md`](../scripts/e2e/README.md#st
 
 Under `controller: daemon` the daemon launches the project's controller at boot and keeps it
 running, as it does a root architect. Nobody runs `legion controller start`, and
-`POST /legion/v1/controller/secret` answers 409 (`this daemon launches the project's controller
-itself (controller: daemon), so legion controller start has none to start`): one controller runs per
-project.
+`POST /legion/v1/controller/secret` and `POST /legion/v1/controller/github-credential` both answer
+409 (`this daemon launches the project's controller itself (controller: daemon), so legion
+controller start has none to start`): one controller runs per project.
 
 **The claim.** The controller is one claim, `legion-<project>-controller`, on the role
 `controller` with no issue and no tree. It is supervised like any claim: a pod that dies is
@@ -2214,14 +2216,18 @@ its own launcher token and starts and stops the controller's `legion worker-shim
 the pod baseline (`--pod-safety`: the turn-scoping overlay first in `PI_CONFIG_FILES` and the two
 session-placing variables, [Settings order](#operator-configuration)), on the daemon's command, as
 an issue pod's role containers do theirs, so a relaunch in a healthy pod is a new generation of that
-child rather than a new pod. Its role Secret, `legion-<project>-controller-controller-boot`, holds
-that launcher's token alone, bound to the pod's uid, and is the only Secret its launch writes: there
-is no provisioning `-boot` Secret.
+child rather than a new pod. Its role Secret,
+`legion-<project>-controller-controller-boot`, holds the launcher's token and its two gh keys
+(`github-hosts` and `github-config`, the review App's `hosts.yml` and `config.yml`), refreshed every
+minute as every role's are, and is the only Secret its launch writes: there is no provisioning
+`-boot` Secret.
 Its Sandbox owns a volume of its own (`tree-legion-<project>-controller`, of
 `runtime.kubernetes.tree_volume` and `storage_class`), mounted at `/legion` with its `sessions`
 directory at Oh My Pi's sessions directory, so a relaunch resumes the session. It provisions no
-workspace and holds no repository credential: no `workspace-fetch`, no provisioning token, no gh
-shim. Its one init container, `legion workspace-init controller --root /legion`, makes the
+workspace: no `workspace-fetch`, no provisioning token. Its `gh`, projected read-only at
+`/var/run/legion/gh` by a `gh-controller` volume, acts as the review App, refreshed every minute as
+every role's is; a failed review-App mint fails the launch naming the role, and the keeper
+relaunches it. Its one init container, `legion workspace-init controller --root /legion`, makes the
 sessions directory; in a pod created to resume a session whose file is gone it exits 3, which the
 daemon reads as a lost volume and answers with a fresh controller. The pod carries
 `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no tree pod's
@@ -2232,8 +2238,10 @@ and like every Legion pod it is annotated `karpenter.sh/do-not-disrupt: "true"`:
 consolidates or replaces for drift the node it runs on while it runs, which is as long as the
 daemon keeps it, though tree pods can still be scheduled onto that node. Its agent is told
 `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy,
-NATS and Dispatch settings and the launch secrets' `<NAME>_FILE` pointers, and nothing of a tree,
-an issue or a checkout. Its system prompt is the controller's role prompt, a part saying it runs
+NATS and Dispatch settings, the launch secrets' `<NAME>_FILE` pointers, and the four `GH_*`
+variables exactly as an issue pod's role container is told them
+(`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
+a tree, an issue or a checkout. Its system prompt is the controller's role prompt, a part saying it runs
 headless in a pod, the daemon's `Design gate policy:` line and the deployment instructions. Both
 its containers, the init container and the launcher, carry `runtime.kubernetes.resources.controller`,
 the key a workflow role's pod is sized by; with none set the pod is BestEffort, the class the
@@ -2374,7 +2382,24 @@ keeping nothing until the daemon has answered, the command:
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `legion` launcher and the
    deployment instructions;
-5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
+5. asks `POST /legion/v1/controller/github-credential` with the capability step 3 minted
+   (`{"secret": <capability>}`). The daemon compares the capability's hash in constant time under
+   its controller lock and answers the review App's two rendered gh files (`hosts`, `config`, `app`,
+   `expiresAt`), which the command writes under `<state_dir>/gh` (0700; `hosts.yml` 0600 through a
+   temp file and rename), printing `[legion] the controller's gh acts as the review App from <dir>;
+   this process refreshes the token before it expires (<expiresAt>)`. While Oh My Pi runs, a
+   goroutine re-fetches every minute and rewrites `hosts.yml` only when it changed, logging each
+   change, failure and stop to `<state_dir>/github-credential.log` (never to the terminal, never
+   the token); a 403 `INVALID_CONTROLLER_CAPABILITY` (a later start replaced the capability) or 409
+   `CONTROLLER_LAUNCHED` ends the loop, and the files last until the token's expiry — the loop's
+   lifetime is Oh My Pi's, not the command's signal context. Against a daemon with no GitHub App or
+   no project owner (500 `GITHUB_TOKEN_SOURCE_UNAVAILABLE` / `GITHUB_OWNER_UNCONFIGURED`), the
+   command creates the empty 0700 `gh` directory, prints `[legion] the daemon has no GitHub App to
+   act as; the controller's gh acts as nobody`, and runs no loop. Any other failure of this fetch
+   (unreachable, 403, 409, 502) exits 1 naming the route and the daemon's sentence, and Oh My Pi
+   never starts: the mint in step 3 has already replaced the incumbent, as every post-mint failure
+   does;
+6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
    and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
@@ -2382,7 +2407,9 @@ keeping nothing until the daemon has answered, the command:
    extension sends it as the session's first turn right after its role claim succeeds and before
    it opens the live wake subscription, so the controller's first turn runs its start procedure
    deterministically, with nothing typed, rather than racing a wake for the session's one
-   first-turn slot — LEGION-392), its grant and secret files, a `GH_CONFIG_DIR` holding no login with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied (the controller has no App), the Envoy and Dispatch
+   first-turn slot — LEGION-392), its grant and secret files, `GH_CONFIG_DIR` naming `<state_dir>/gh`
+   (the directory step 5 wrote) with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, so nothing
+   inherited outranks the file, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
    (the controller is pane-side, and never gets the daemon's seed) and less `LEGION_BOOT_TOKEN` and

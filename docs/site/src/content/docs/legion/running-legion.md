@@ -313,7 +313,9 @@ the complete shape (rendered in the [configuration reference](/legion/legion/ref
    ```
 
 The command checks the file and the plugins, fetches a fresh controller credential from the daemon
-with your operator token, and starts Oh My Pi in the foreground; its first turn runs the
+with your operator token, then fetches the review App's token for the controller's `gh` and keeps
+it refreshed while the session runs (against a daemon with no GitHub App, it says so and the
+controller's `gh` acts as nobody), and starts Oh My Pi in the foreground; its first turn runs the
 controller's start procedure with nothing typed. Running it again replaces the previous controller.
 Closing the terminal leaves the project without one, and the daemon logs
 `controller not registered; run legion controller start` until someone starts it.

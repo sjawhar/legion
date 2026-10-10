@@ -2,13 +2,17 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -105,6 +109,31 @@ func (h *harness) registeredController(capability, session string) ControllerReg
 func (h *harness) controllerSessionGrant(session, secret string) *httptest.ResponseRecorder {
 	h.t.Helper()
 	return h.request(http.MethodPost, "/legion/v1/grants", GrantRequest{SessionID: session, Secret: secret}, nil)
+}
+
+// newControllerCredentialHarness is newCredentialHarness with control over whether the daemon
+// launches the project's controller itself.
+func newControllerCredentialHarness(t *testing.T, tokens appauth.Tokens, launched bool) *harness {
+	t.Helper()
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: launched,
+		Tokens: tokens, GitHubOwner: "acme",
+	}).Handler
+	return h
+}
+
+func (h *harness) controllerGitHubCredential(secret string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	return h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret}, nil)
+}
+
+// failingTokens is a Tokens whose every mint fails, for the credential routes' 502.
+type failingTokens struct{}
+
+func (failingTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	return appauth.Lease{}, errors.New("github is down")
 }
 
 // The route that mints a controller capability answers only the operator's bearer, and a refusal
@@ -372,6 +401,7 @@ func TestCredentialAndWorkflowRoutesRefuseAMissingFieldWithACode(t *testing.T) {
 		{"/legion/v1/handoff/complete", `{"grantId":"g"}`, "summary"},
 		{"/legion/v1/issues/status", `{"grantId":"g","issue":"LEGION-208"}`, "status"},
 		{"/legion/v1/signoff", `{"grantId":"g"}`, "issue"},
+		{"/legion/v1/controller/github-credential", "{}", "secret"},
 		{"/legion/v1/children/park", `{"grantId":"g"}`, "issue"},
 		{"/legion/v1/children/rerun", `{"grantId":"g"}`, "issue"},
 	} {
@@ -387,4 +417,56 @@ func TestCredentialAndWorkflowRoutesRefuseAMissingFieldWithACode(t *testing.T) {
 	}
 	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/claims/ready", `{"claimToken":"c","sessionId":"s","generation":1}`, nil),
 		http.StatusBadRequest, "secret is required")
+}
+
+// legion controller start's refresh call answers the review App's token, rendered as the two
+// files gh reads, for the current controller capability alone: a wrong secret, or one a later
+// legion controller start superseded, is refused the same way.
+func TestControllerGitHubCredential(t *testing.T) {
+	h := newControllerCredentialHarness(t, tokenSource{}, false)
+	secret := h.mintedSecret()
+
+	recorder := h.controllerGitHubCredential(secret)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("controller github credential = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var answer ControllerCredentialResponse
+	decodeInto(t, recorder, &answer)
+	if answer.Hosts != ghconfig.Hosts("installation-token") || answer.Config != ghconfig.Config || answer.App != "review" {
+		t.Fatalf("controller github credential = %+v, want the review App's rendered files", answer)
+	}
+	if _, err := time.Parse(timeFormat, answer.ExpiresAt); err != nil {
+		t.Fatalf("expiresAt %q does not parse: %v", answer.ExpiresAt, err)
+	}
+
+	wantFailure(t, h.controllerGitHubCredential("not-the-capability"), http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY")
+
+	superseded := secret
+	h.mintedSecret()
+	wantFailure(t, h.controllerGitHubCredential(superseded), http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY")
+}
+
+// A daemon that launches its own controller (`controller: daemon`) refuses the credential route
+// outright, naming no secret: there is no `legion controller start` to answer.
+func TestControllerGitHubCredentialRefusesADaemonThatLaunchesItsOwnController(t *testing.T) {
+	h := newControllerCredentialHarness(t, tokenSource{}, false)
+	secret := h.mintedSecret()
+	h.serve(true)
+	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusConflict, "CONTROLLER_LAUNCHED")
+}
+
+// A daemon with no GitHub token source configured answers the credential route's usual failure,
+// as every other credential route does.
+func TestControllerGitHubCredentialWithoutATokenSource(t *testing.T) {
+	h := newControllerCredentialHarness(t, nil, false)
+	secret := h.mintedSecret()
+	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE")
+}
+
+// A failed GitHub App token mint answers the credential route's usual GITHUB_TOKEN_FAILED, never
+// the minted token (there is none).
+func TestControllerGitHubCredentialWhenTheMintFails(t *testing.T) {
+	h := newControllerCredentialHarness(t, failingTokens{}, false)
+	secret := h.mintedSecret()
+	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusBadGateway, "GITHUB_TOKEN_FAILED")
 }

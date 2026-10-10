@@ -115,24 +115,25 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 }
 
-// The controller's one Secret holds its launcher token alone: it has no GitHub App, so its launch
-// never asks for a credential and its pod has no gh volume to project one into.
-func TestTheControllersSecretHoldsTheLauncherTokenAlone(t *testing.T) {
-	g := newRig(t, nil, withOptions(func(o *Options) {
-		o.GitHubCredential = func(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
-			return ghconfig.Rendered{}, fmt.Errorf("the controller's launch asked for %s's github credential", role)
-		}
-	}))
+// The controller's one Secret holds the review App's gh files beside its launcher token: the
+// controller acts as the review App (appauth.AppRoleFor), so its launch mints a credential and its
+// pod projects it at a gh volume like a workflow role's.
+func TestTheControllersSecretHoldsTheReviewAppsGhFilesBesideTheLauncherToken(t *testing.T) {
+	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))
 	name := SandboxName(controllerToken)
 	secret := g.secret(roleSecretName(name, claim.RoleController))
-	if secret == nil || len(secret.Data) != 1 || len(secret.Data[LauncherTokenFile]) == 0 {
-		t.Fatalf("the controller's Secret holds %v, want the launcher token alone", secret)
+	if secret == nil || len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 || len(secret.Data[GitHubHostsKey]) == 0 || len(secret.Data[GitHubConfigKey]) == 0 {
+		t.Fatalf("the controller's Secret holds %v, want the launcher token and the review App's two gh files", secret)
 	}
+	found := false
 	for _, volume := range g.pod(name).Spec.Volumes {
 		if strings.HasPrefix(volume.Name, "gh-") {
-			t.Errorf("the controller's pod has the %s volume", volume.Name)
+			found = true
 		}
+	}
+	if !found {
+		t.Error("the controller's pod has no gh volume, want the review App's")
 	}
 }
 

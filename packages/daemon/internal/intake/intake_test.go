@@ -1044,6 +1044,20 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
 		}
 	}
+	// A capped review's body is marked (`body_truncated: "true"`), so a truncated review-App review
+	// can be told apart from one whose full body simply carries no Legion footer.
+	decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"body_truncated": "true"})
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.BodyTruncated {
+		t.Fatalf("review with body_truncated true = %#v, %v; want BodyTruncated set", decoded.Fact, err)
+	}
+	decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"body_truncated": "false"})
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.BodyTruncated {
+		t.Fatalf("review with body_truncated false = %#v, %v; want BodyTruncated clear", decoded.Fact, err)
+	}
+	decoded, err = withPayload(t, "review.json", reviewSubject, nil)
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.BodyTruncated {
+		t.Fatalf("review with no body_truncated field = %#v, %v; want BodyTruncated clear", decoded.Fact, err)
+	}
 }
 
 // The workflow decides a review round inside a transaction and performs no I/O, so whether the
@@ -1106,6 +1120,83 @@ func TestADecidingReviewCarriesItsAuthorsWriteAccessBeforeItIsApplied(t *testing
 	}
 	other := PullRequestChecks{Repo: "acme/widgets", Number: 42}
 	if got, err := resolveReviewPermission(context.Background(), answering(true, nil), other); err != nil || !reflect.DeepEqual(got, Fact(other)) {
+		t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
+	}
+}
+
+// resolveReviewBody restores a truncated review-App review's body from GitHub
+// (ConsumerSpec.ReviewBody) before resolveReviewPermission reads its author's permission, since a
+// restored body carries the Legion footer the workflow needs. It is read only for a review the
+// normalizer capped, with an id and an author; a review with no id keeps its capped body and
+// BodyTruncated true, and a failed read naks the delivery the same way a failed permission read
+// does.
+func TestResolveReviewBodyRestoresATruncatedReviewsBody(t *testing.T) {
+	truncated := PullRequestReview{Repo: "acme/widgets", Number: 42, ID: 7, State: "approved", Author: "legion-reviewer[bot]",
+		Body: "a capped body", BodyTruncated: true}
+	var asked []PullRequestReview
+	answering := func(body string, err error) ConsumerSpec {
+		return ConsumerSpec{AckWait: time.Second, ReviewBody: func(_ context.Context, review PullRequestReview) (string, error) {
+			asked = append(asked, review)
+			return body, err
+		}}
+	}
+	t.Run("a truncated review is replaced with the answer and BodyTruncated is cleared", func(t *testing.T) {
+		asked = nil
+		got, err := resolveReviewBody(context.Background(), answering("the full body with a footer", nil), truncated)
+		if err != nil {
+			t.Fatalf("resolve the review's body: %v", err)
+		}
+		resolved, ok := got.(PullRequestReview)
+		if !ok || resolved.Body != "the full body with a footer" || resolved.BodyTruncated {
+			t.Fatalf("the review = %#v, want the restored body with BodyTruncated cleared", got)
+		}
+		if len(asked) != 1 {
+			t.Fatalf("GitHub was asked %d times, want once", len(asked))
+		}
+	})
+	t.Run("a review with no id is not looked up", func(t *testing.T) {
+		asked = nil
+		noID := truncated
+		noID.ID = 0
+		got, err := resolveReviewBody(context.Background(), answering("ignored", nil), noID)
+		if err != nil {
+			t.Fatalf("resolve the review's body: %v", err)
+		}
+		resolved, ok := got.(PullRequestReview)
+		if !ok || resolved.Body != "a capped body" || !resolved.BodyTruncated || len(asked) != 0 {
+			t.Fatalf("a review with no id = %#v, asked %v; want its capped body kept and no call made", got, asked)
+		}
+	})
+	t.Run("a review that was not truncated is not looked up", func(t *testing.T) {
+		asked = nil
+		full := truncated
+		full.BodyTruncated = false
+		got, err := resolveReviewBody(context.Background(), answering("ignored", nil), full)
+		if err != nil {
+			t.Fatalf("resolve the review's body: %v", err)
+		}
+		resolved, ok := got.(PullRequestReview)
+		if !ok || resolved.Body != "a capped body" || len(asked) != 0 {
+			t.Fatalf("an untruncated review = %#v, asked %v; want it unchanged and no call made", got, asked)
+		}
+	})
+	t.Run("a daemon with no reader leaves the capped body", func(t *testing.T) {
+		got, err := resolveReviewBody(context.Background(), ConsumerSpec{}, truncated)
+		if err != nil {
+			t.Fatalf("resolve the review's body: %v", err)
+		}
+		resolved, ok := got.(PullRequestReview)
+		if !ok || resolved.Body != "a capped body" || !resolved.BodyTruncated {
+			t.Fatalf("with no reader = %#v, want the capped body kept", got)
+		}
+	})
+	t.Run("a failed read naks the delivery", func(t *testing.T) {
+		if _, err := resolveReviewBody(context.Background(), answering("", errors.New("GitHub answered 502")), truncated); err == nil {
+			t.Fatal("a failed body read resolved; want the error, so the delivery is retried")
+		}
+	})
+	other := PullRequestChecks{Repo: "acme/widgets", Number: 42}
+	if got, err := resolveReviewBody(context.Background(), answering("ignored", nil), other); err != nil || !reflect.DeepEqual(got, Fact(other)) {
 		t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
 	}
 }

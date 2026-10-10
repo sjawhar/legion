@@ -54,7 +54,7 @@ sequenceDiagram
     alt granted at once
         Broker-->>CLI: granted
     else a person must approve
-        Broker-->>CLI: pending
+        Broker-->>CLI: pending, and the approver its record names
         Dispatch->>Broker: pending requests for the person signed in
         Person->>Dispatch: Approve
         Dispatch->>Broker: approve, as that person's login

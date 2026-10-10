@@ -99,10 +99,11 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
-	// Decision is the review round's decision, on the reviewer's row: the newest review the review
-	// App or an account with write access to the repository submitted for the round that carried one
-	// (workflow's decidesRound), kept until the round ends, since the reviewer's completion can come
-	// after the review it posted. Nil until a review decides.
+	// Decision is the review round's decision, on the reviewer's row: the newest review the
+	// reviewer's own review-App session (told from any other review-App session's by its Legion
+	// footer) or an account with write access to the repository submitted for the round that carried
+	// one (workflow's decidesRound), kept until the round ends, since the reviewer's completion can
+	// come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
@@ -295,6 +296,11 @@ type Store interface {
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
+	// ClaimSession is the session claims records for token, "" and no error when the token holds
+	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
+	// reviewer's own review from another review-App session's by the Legion footer each carries
+	// (PullRequestReview.LegionSession).
+	ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
 	// request, the fix-attempt counts and planned mark of a still-open one (the next generation runs on the same
 	// branch and pull request), its design gate, each role's handoff, review rounds, verdict and

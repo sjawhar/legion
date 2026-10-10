@@ -45,7 +45,8 @@ default), and on its first turn of each UTC day the controller posts a report on
 finished, closed and is running.
 
 The only statuses the controller sets are `todo`, `backlog` and `icebox` (`triage` is set by
-whoever files an issue). It never reads GitHub and never touches a tree's work.
+whoever files an issue). It reads pull requests as the review App, so its walk can say whether a
+linked pull request is open, merged or closed, and never touches a tree's work.
 
 ## Trees and the architect
 
